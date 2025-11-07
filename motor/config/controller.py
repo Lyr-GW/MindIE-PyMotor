@@ -3,7 +3,7 @@ import json
 
 from dataclasses import dataclass, field
 from motor.utils.logger import get_logger
-from typing import Dict, Any, Optional
+from typing import Any
 from pathlib import Path
 
 logger = get_logger(__name__)
@@ -33,8 +33,8 @@ class ControllerConfig:
     strategy_center_check_internal: int = 1  # 1 second
     
     # internal fields
-    config_path: Optional[str] = field(default=None, init=False)
-    last_modified: Optional[float] = field(default=None, init=False)
+    config_path: str | None = field(default=None, init=False)
+    last_modified: float | None = field(default=None, init=False)
 
     def __post_init__(self):
         """Validate configuration after initialization"""
@@ -44,23 +44,22 @@ class ControllerConfig:
     def from_json(cls, json_path: str) -> 'ControllerConfig':
         """Load configuration from JSON file"""
         config_path = Path(json_path)
-        logger.info("Loading configuration file: %s", config_path)
+        logger.info(f"Loading configuration file: {config_path}")
         
         cfg = {}
         if config_path.exists():
             try:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     cfg = json.load(f)
-                logger.info("Successfully loaded configuration file: %s", config_path)
+                logger.info(f"Successfully loaded configuration file: {config_path}")
             except json.JSONDecodeError as e:
-                logger.error("JSON parsing error: %s", e)
-                raise ValueError("Configuration file %s format error: %s", json_path, e) from e
+                logger.error(f"JSON parsing error: {e}")
+                raise ValueError(f"Configuration file {json_path} format error: {e}") from e
             except Exception as e:
-                logger.error("Failed to read configuration file: %s", e)
-                raise ValueError("Unable to read configuration file %s: %s", json_path, e) from e
+                logger.error(f"Failed to read configuration file: {e}")
+                raise ValueError(f"Unable to read configuration file {json_path}: {e}") from e
         else:
-            logger.warning("Configuration file does not exist, using default configuration: %s",
-                           config_path)
+            logger.warning(f"Configuration file does not exist, using default configuration: {config_path}")
         
         # Create configuration instance
         try:
@@ -96,9 +95,9 @@ class ControllerConfig:
             return config
             
         except Exception as e:
-            logger.error("Failed to create configuration instance: %s", e)
+            logger.error(f"Failed to create configuration instance: {e}")
             raise
-   
+
     def validate_config(self) -> None:
         """Validate the validity of configuration values"""
         errors = []
@@ -169,7 +168,7 @@ class ControllerConfig:
             logger.error(f"Configuration reload failed: {e}")
             return False
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary"""
         result = {}
         for field_name in self.__dataclass_fields__.keys():
@@ -177,7 +176,7 @@ class ControllerConfig:
                 result[field_name] = getattr(self, field_name)
         return result
 
-    def save_to_json(self, json_path: Optional[str] = None) -> bool:
+    def save_to_json(self, json_path: str | None = None) -> bool:
         """Save configuration to JSON file"""
         save_path = json_path or self.config_path
         if not save_path:
@@ -243,36 +242,3 @@ def find_config_file():
 def get_config_path():
     """Get the current configuration file path"""
     return find_config_file()
-
-def reload_global_config():
-    """Reload the global configuration with current path"""
-    global controller_config
-    try:
-        config_path = find_config_file()
-        new_config = ControllerConfig.from_json(config_path)
-        
-        # Update the global controller_config instance
-        for field_name in controller_config.__dataclass_fields__:
-            if not field_name.startswith('_'):
-                setattr(controller_config, field_name, getattr(new_config, field_name))
-        
-        # Update internal fields
-        controller_config.config_path = new_config.config_path
-        controller_config.last_modified = new_config.last_modified
-        
-        logger.info("Global configuration reloaded successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Global configuration reload failed: {e}")
-        return False
-
-CONFIG_JSON_PATH = find_config_file()
-
-try:
-    controller_config = ControllerConfig.from_json(CONFIG_JSON_PATH)
-    logger.info("Global configuration initialization successful")
-except Exception as exception:
-    logger.error(f"Global configuration initialization failed: {exception}")
-    # Use default configuration as fallback
-    controller_config = ControllerConfig()
-    logger.warning("Using default configuration as fallback")
