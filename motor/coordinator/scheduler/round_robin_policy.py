@@ -1,0 +1,76 @@
+# -*- coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
+from motor.resources.instance import Instance, PDRole
+from motor.resources.endpoint import Endpoint
+from motor.utils.singleton import ThreadSafeSingleton
+from motor.coordinator.scheduler.base_scheduling_policy import BaseSchedulingPolicy
+from motor.coordinator.core.instance_manager import InstanceManager
+from motor.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class RoundRobinPolicy(BaseSchedulingPolicy, ThreadSafeSingleton):
+    """
+    Round Robin Scheduler Policy implementation.
+    Selects instances and endpoints in a round-robin fashion.
+    """
+
+    def __init__(self):
+        # If the round-robin policy is already initialized, return.
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        super().__init__()
+        self._instance_rr_counter = 0
+        self._endpoint_rr_counters: dict[str, int] = {}
+        logger.info("RoundRobinPolicy started.")
+
+    def _select_instance(self, role: PDRole = None) -> Instance | None:
+        """
+        Select an instance using round-robin algorithm.
+        
+        Args:
+            role: Optional PDRole to filter instances by role
+            
+        Returns:
+            Selected Instance or None if no instance available
+        """
+        active_instances = list(InstanceManager().get_available_instances(role).values())
+        if not active_instances:
+            logger.warning("No active instances available for scheduling")
+            return None
+
+        # Round-robin selection
+        selected_instance = active_instances[self._instance_rr_counter % len(active_instances)]
+        self._instance_rr_counter = (self._instance_rr_counter + 1) % len(active_instances)
+        return selected_instance
+
+    def _select_endpoint(self, instance: Instance) -> Endpoint | None:
+        """
+        Select an endpoint from the given instance using round-robin algorithm.
+        
+        Args:
+            instance: The instance to select an endpoint from
+            
+        Returns:
+            Selected Endpoint or None if no endpoint available
+        """
+        if not instance:
+            logger.warning("No instance provided for endpoint selection")
+            return None
+
+        all_endpoints = instance.get_all_endpoints()
+        if not all_endpoints:
+            logger.warning(f"No endpoints available in instance {instance.id}")
+            return None
+
+        # Counter for each instance
+        if instance.id not in self._endpoint_rr_counters:
+            self._endpoint_rr_counters[instance.id] = 0
+
+        # Round-robin selection among endpoints
+        endpoint_counter = self._endpoint_rr_counters[instance.id]
+        selected_endpoint = all_endpoints[endpoint_counter % len(all_endpoints)]
+        self._endpoint_rr_counters[instance.id] = (endpoint_counter + 1) % len(all_endpoints)
+        return selected_endpoint
