@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
+
+import time
+import threading
+from typing import Dict, Any, Optional
+from motor.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class TokenBucket:    
+    def __init__(self, capacity: int, refill_rate: float):
+        """
+        
+        Args:
+            capacity: Bucket capacity (maximum number of tokens)
+            refill_rate: Token refill rate (tokens per second)
+        """
+        self.capacity = capacity
+        self.refill_rate = refill_rate
+        self.tokens = capacity
+        self.last_refill = time.time()
+        self._lock = threading.Lock()
+    
+    def try_consume(self, tokens: int = 1) -> bool:
+        """
+        
+        Args:
+            tokens: Number of tokens to consume
+            
+        Returns:
+            bool: Whether successfully consumed tokens
+        """
+        with self._lock:
+            now = time.time()
+            elapsed = now - self.last_refill
+            tokens_to_add = elapsed * self.refill_rate
+            self.tokens = min(self.capacity, self.tokens + tokens_to_add)
+            self.last_refill = now
+            
+            # Check if there are enough tokens
+            if self.tokens >= tokens:
+                self.tokens -= tokens
+                return True
+            return False
+    
+    def get_available_tokens(self) -> int:
+        """Get current available token count"""
+        with self._lock:
+            now = time.time()
+            elapsed = now - self.last_refill
+            tokens_to_add = elapsed * self.refill_rate
+            available = min(self.capacity, self.tokens + tokens_to_add)
+            return int(available)
+
+
+class SimpleRateLimiter:
+    
+    def __init__(self, 
+                 max_requests: int = 100,
+                 window_size: int = 60):
+        """
+        
+        Args:
+            max_requests: Maximum number of requests in time window
+            window_size: Time window size (seconds)
+        """
+        self.max_requests = max_requests
+        self.window_size = window_size
+        
+        # Calculate token bucket parameters
+        self.capacity = max_requests  # Bucket capacity equals maximum requests
+        self.refill_rate = max_requests / window_size  # Tokens added per second
+        
+        # Use single global token bucket
+        self._bucket = TokenBucket(
+            capacity=self.capacity,
+            refill_rate=self.refill_rate
+        )
+        
+        logger.info(f"Initialized global rate limiter: max_requests={max_requests}, window_size={window_size}s")
+    
+    
+    def is_allowed(self, request_data: Optional[Dict[str, Any]] = None) -> tuple[bool, Dict[str, Any]]:
+        """
+        
+        Args:
+            request_data: Request data (optional)
+            
+        Returns:
+            tuple: (whether allowed, rate limiting info)
+        """
+        try:
+            # Try to consume one token
+            allowed = self._bucket.try_consume()
+            available = self._bucket.get_available_tokens()
+            
+            # Build rate limiting info
+            limit_info = {
+                "allowed": allowed,
+                "available": available,
+                "limit": self.max_requests,
+                "window_size": self.window_size,
+                "scope": "global",
+                "timestamp": time.time()
+            }
+            
+            if not allowed:
+                logger.warning(f"Request globally rate limited: available: {available}/{self.max_requests}")
+            
+            return allowed, limit_info
+            
+        except Exception as e:
+            logger.error(f"Rate limiting check failed: {e}")
+            # Allow request by default when error occurs
+            return True, {
+                "error": str(e),
+                "allowed": True,
+                "timestamp": time.time()
+            }
+    
