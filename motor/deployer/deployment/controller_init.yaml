@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindie-ms-controller
+  labels:
+    app: mindie-ms-controller
+  namespace: mindie
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mindie-ms-controller
+  template:
+    metadata:
+      labels:
+        app: mindie-ms-controller
+        deploy-name: mindie-ms-controller
+    spec:
+      terminationGracePeriodSeconds: 0
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - image: mindie:1.0.0-aarch64-800I-A2
+          imagePullPolicy: IfNotPresent
+          name: mindie-ms-controller
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: "RuntimeDefault"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CONFIG_FROM_CONFIGMAP_PATH
+              value: /mnt/configmap
+          command: ["/bin/bash", "-c", "
+              /mnt/configmap/boot.sh; \n
+          "]
+          resources:
+            requests:
+              memory: "2Gi"
+              cpu: "4"
+            limits:
+              memory: "4Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: boot-bash-script
+              mountPath: /mnt/configmap/boot.sh
+              subPath: boot.sh
+            - name: update-config-script
+              mountPath: /mnt/configmap/update_config_from_user_config.py
+              subPath: update_config_from_user_config.py
+            - name: user-config
+              mountPath: /mnt/configmap/user_config.json
+              subPath: user_config.json
+            - name: coredump
+              mountPath: /var/coredump
+      volumes:
+        - name: boot-bash-script
+          configMap:
+            name: boot-bash-script
+            defaultMode: 0550
+        - name: update-config-script
+          configMap:
+            name: update-config-script
+            defaultMode: 0640
+        - name: user-config
+          configMap:
+            name: user-config
+            defaultMode: 0640
+        - name: coredump
+          hostPath:
+            path: /var/coredump
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: mindie-ms-controller
+  name: mindie-ms-controller-service
+  namespace: mindie
+spec:
+  ports:
+  - nodePort: 31025
+    port: 1025
+    protocol: TCP
+    targetPort: 1025
+  selector:
+    app: mindie-ms-controller
+  sessionAffinity: None
+  type: NodePort
+status:
+  loadBalancer: {}
