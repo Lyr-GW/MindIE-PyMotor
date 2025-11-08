@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mindie-server
+  labels:
+    app: mindie-server
+    ring-controller.atlas: ascend-910b
+    job-name: xxxx
+  namespace: mindie
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mindie-server
+  template:
+    metadata:
+      labels:
+        app: mindie-server
+        ring-controller.atlas: ascend-910b
+    spec:
+      schedulerName: volcano
+      nodeSelector:
+        accelerator: huawei-Ascend910
+        accelerator-type: module-910b-8
+      terminationGracePeriodSeconds: 10
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - image: mindie:1.0.0-aarch64-800I-A2
+          imagePullPolicy: IfNotPresent
+          name: mindie-server
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: "RuntimeDefault"
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: CONFIG_FROM_CONFIGMAP_PATH
+              value: /mnt/configmap
+          command: ["/bin/bash", "-c", "
+              /mnt/configmap/boot.sh; \n
+          "]
+          resources:
+            requests:
+              memory: "64Gi"
+              cpu: "16"
+              huawei.com/Ascend910: 1                         # Number of required NPUs. The maximum value is 16. You can add lines below to configure resources such as memory and CPU.
+            limits:
+              memory: "256Gi"
+              cpu: "64"
+              huawei.com/Ascend910: 1                         # The value must be consistent with that in requests.
+          volumeMounts:
+          - name: data
+            mountPath: /data
+            readOnly: true
+          - name: boot-bash-script
+            mountPath: /mnt/configmap/boot.sh
+            subPath: boot.sh
+          - name: hccl-tools-script
+            mountPath: /mnt/configmap/hccl_tools.py
+            subPath: hccl_tools.py
+          - name: update-config-script
+            mountPath: /mnt/configmap/update_config_from_user_config.py
+            subPath: update_config_from_user_config.py
+          - name: user-config
+            mountPath: /mnt/configmap/user_config.json
+            subPath: user_config.json
+          - name: queue-schedule
+            mountPath: /var/queue_schedule
+          - name: dshm
+            mountPath: /dev/shm
+          - name: coredump
+            mountPath: /var/coredump
+      volumes:
+      - name: data
+        hostPath:
+          path: /data
+      - name: boot-bash-script
+        configMap:
+          name: boot-bash-script
+          defaultMode: 0550
+      - name: hccl-tools-script
+        configMap:
+          name: hccl-tools-script
+          defaultMode: 0640
+      - name: update-config-script
+        configMap:
+          name: update-config-script
+          defaultMode: 0640
+      - name: user-config
+        configMap:
+          name: user-config
+          defaultMode: 0640
+      - name: queue-schedule
+        hostPath:
+          path: /var/queue_schedule
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 4Gi
+      - name: coredump
+        hostPath:
+          path: /var/coredump
+          type: DirectoryOrCreate
