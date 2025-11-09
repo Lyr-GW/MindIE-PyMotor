@@ -1,3 +1,6 @@
+# coding=utf-8
+# Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
+
 from motor.utils.logger import get_logger
 from motor.resources.instance import Instance
 from motor.resources.endpoint import Endpoint, DeviceInfo

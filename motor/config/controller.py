@@ -1,3 +1,5 @@
+# coding=utf-8
+# Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 import os
 import json
 
@@ -14,8 +16,8 @@ class ControllerConfig:
     
     # instance assembler relative config
     instance_assemble_timeout: int = 600  # 600 seconds
-    instance_assembler_check_internal: int = 1  # 1 second
-    instance_assembler_cmd_send_internal: int = 1  # 1 second
+    instance_assembler_check_internal: int = 1 # 1 second
+    instance_assembler_cmd_send_internal: int = 1 # 1 second
     max_link_number: int = 768
     send_cmd_retry_times: int = 3
 
@@ -27,6 +29,9 @@ class ControllerConfig:
     # controller api relative config
     controller_api_host: str = '127.0.0.1'
     controller_api_port: int = 8000
+    enable_tls: bool = False
+    cert_path: str = 'security/controller/cert/server.crt'
+    key_path: str = 'security/controller/keys/server.key'
 
     # fault tolerance feature
     enable_fault_tolerance: bool = True
@@ -66,6 +71,9 @@ class ControllerConfig:
             config = cls(
                 controller_api_host=cfg.get('controller_api_host', cls.controller_api_host),
                 controller_api_port=cfg.get('controller_api_port', cls.controller_api_port),
+                enable_tls=cfg.get('enable_tls', cls.enable_tls),
+                cert_path=cfg.get('cert_path', cls.cert_path),
+                key_path=cfg.get('key_path', cls.key_path),
                 instance_assemble_timeout=cfg.get('instance_assemble_timeout', 
                                                   cls.instance_assemble_timeout),
                 instance_assembler_check_internal=cfg.get('instance_assembler_check_internal', 
@@ -197,13 +205,13 @@ class ControllerConfig:
         """Get configuration summary information"""
         return f"""
                 Controller Configuration Summary:
-                API Service: {self.controller_api_host}:{self.controller_api_port}
-                Instance Assembly Timeout: {self.instance_assemble_timeout} seconds
-                Instance Heartbeat Timeout: {self.instance_heartbeat_timeout} seconds
-                Instance Expired Timeout: {self.instance_expired_timeout} seconds
-                Max Link Number: {self.max_link_number}
-                Fault Tolerance: {'Enabled' if self.enable_fault_tolerance else 'Disabled'}
-                Configuration Path: {self.config_path or 'Not set'}
+                  API Service: {self.controller_api_host}:{self.controller_api_port}
+                  Instance Assembly Timeout: {self.instance_assemble_timeout} seconds
+                  Instance Heartbeat Timeout: {self.instance_heartbeat_timeout} seconds
+                  Instance Expired Timeout: {self.instance_expired_timeout} seconds
+                  Max Link Number: {self.max_link_number}
+                  Fault Tolerance: {'Enabled' if self.enable_fault_tolerance else 'Disabled'}
+                  Configuration Path: {self.config_path or 'Not set'}
                 """
 
 

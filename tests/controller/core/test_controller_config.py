@@ -59,6 +59,9 @@ def test_default_config_initialization():
     assert config.instance_expired_timeout == 300
     assert config.controller_api_host == '127.0.0.1'
     assert config.controller_api_port == 8000
+    assert config.enable_tls is False
+    assert config.cert_path == 'security/controller/cert/server.crt'
+    assert config.key_path == 'security/controller/keys/server.key'
     assert config.enable_fault_tolerance is True
     assert config.strategy_center_check_internal == 1
 
@@ -370,6 +373,9 @@ def test_config_partial_json_loading():
         # Other fields should be default values
         assert config.controller_api_host == '127.0.0.1'
         assert config.max_link_number == 768
+        assert config.enable_tls is False
+        assert config.cert_path == 'security/controller/cert/server.crt'
+        assert config.key_path == 'security/controller/keys/server.key'
     finally:
         os.unlink(temp_path)
 
@@ -508,3 +514,161 @@ def test_find_config_file_fallback_behavior(reset_config_path):
     assert result is not None
     assert isinstance(result, str)
     assert len(result) > 0
+
+
+def test_tls_config_default_values():
+    """Test TLS configuration default values"""
+    config = ControllerConfig()
+    
+    assert config.enable_tls is False
+    assert config.cert_path == 'security/controller/cert/server.crt'
+    assert config.key_path == 'security/controller/keys/server.key'
+
+
+def test_tls_config_from_json(temp_json_file):
+    """Test loading TLS configuration from JSON file"""
+    test_config = {
+        "enable_tls": True,
+        "cert_path": "/custom/path/cert.pem",
+        "key_path": "/custom/path/key.pem",
+        "controller_api_port": 8443
+    }
+
+    with open(temp_json_file, 'w') as f:
+        json.dump(test_config, f)
+
+    config = ControllerConfig.from_json(temp_json_file)
+    assert config.enable_tls is True
+    assert config.cert_path == "/custom/path/cert.pem"
+    assert config.key_path == "/custom/path/key.pem"
+    assert config.controller_api_port == 8443
+
+
+def test_tls_config_partial_loading(temp_json_file):
+    """Test partial TLS configuration loading (only enable_tls)"""
+    test_config = {
+        "enable_tls": True
+        # cert_path and key_path should use default values
+    }
+
+    with open(temp_json_file, 'w') as f:
+        json.dump(test_config, f)
+
+    config = ControllerConfig.from_json(temp_json_file)
+    assert config.enable_tls is True
+    assert config.cert_path == 'security/controller/cert/server.crt'
+    assert config.key_path == 'security/controller/keys/server.key'
+
+
+def test_tls_config_to_dict():
+    """Test TLS configuration in to_dict output"""
+    config = ControllerConfig(
+        enable_tls=True,
+        cert_path="/custom/cert.pem",
+        key_path="/custom/key.pem"
+    )
+
+    config_dict = config.to_dict()
+    
+    assert config_dict["enable_tls"] is True
+    assert config_dict["cert_path"] == "/custom/cert.pem"
+    assert config_dict["key_path"] == "/custom/key.pem"
+
+
+def test_tls_config_save_to_json(temp_json_file):
+    """Test saving TLS configuration to JSON file"""
+    config = ControllerConfig(
+        enable_tls=True,
+        cert_path="/custom/cert.pem",
+        key_path="/custom/key.pem"
+    )
+
+    result = config.save_to_json(temp_json_file)
+    assert result is True
+
+    # Verify file content
+    with open(temp_json_file, 'r') as f:
+        saved_config = json.load(f)
+    
+    assert saved_config["enable_tls"] is True
+    assert saved_config["cert_path"] == "/custom/cert.pem"
+    assert saved_config["key_path"] == "/custom/key.pem"
+
+
+def test_tls_config_reload(temp_json_file):
+    """Test reloading TLS configuration"""
+    initial_config = {
+        "enable_tls": False,
+        "cert_path": "/initial/cert.pem",
+        "key_path": "/initial/key.pem"
+    }
+    modified_config = {
+        "enable_tls": True,
+        "cert_path": "/modified/cert.pem",
+        "key_path": "/modified/key.pem"
+    }
+
+    with open(temp_json_file, 'w') as f:
+        json.dump(initial_config, f)
+
+    config = ControllerConfig.from_json(temp_json_file)
+    assert config.enable_tls is False
+    assert config.cert_path == "/initial/cert.pem"
+    assert config.key_path == "/initial/key.pem"
+
+    # Wait a short time to ensure different file modification time
+    time.sleep(0.1)
+
+    # Modify file
+    with open(temp_json_file, 'w') as f:
+        json.dump(modified_config, f)
+
+    # Reload configuration
+    assert config.reload() is True
+    assert config.enable_tls is True
+    assert config.cert_path == "/modified/cert.pem"
+    assert config.key_path == "/modified/key.pem"
+
+
+def test_tls_config_boolean_values(temp_json_file):
+    """Test TLS enable_tls with different boolean representations"""
+    # Test with true (lowercase)
+    test_config = {"enable_tls": True}
+    with open(temp_json_file, 'w') as f:
+        json.dump(test_config, f)
+    config = ControllerConfig.from_json(temp_json_file)
+    assert config.enable_tls is True
+
+    # Test with false (lowercase)
+    test_config = {"enable_tls": False}
+    with open(temp_json_file, 'w') as f:
+        json.dump(test_config, f)
+    config = ControllerConfig.from_json(temp_json_file)
+    assert config.enable_tls is False
+
+
+def test_tls_config_path_strings():
+    """Test TLS certificate and key path configurations with various string values"""
+    # Test with absolute paths
+    config = ControllerConfig(
+        cert_path="/absolute/path/to/cert.crt",
+        key_path="/absolute/path/to/key.key"
+    )
+    assert config.cert_path == "/absolute/path/to/cert.crt"
+    assert config.key_path == "/absolute/path/to/key.key"
+
+    # Test with relative paths
+    config = ControllerConfig(
+        cert_path="relative/cert.crt",
+        key_path="relative/key.key"
+    )
+    assert config.cert_path == "relative/cert.crt"
+    assert config.key_path == "relative/key.key"
+
+    # Test with empty strings (should be allowed, validation happens at usage)
+    config = ControllerConfig(
+        cert_path="",
+        key_path=""
+    )
+    assert config.cert_path == ""
+    assert config.key_path == ""
