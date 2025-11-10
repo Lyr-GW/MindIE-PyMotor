@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+import time
+import uuid
+import threading
+import logging
+from motor.utils.singleton import ThreadSafeSingleton
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class RequestManager(ThreadSafeSingleton):
+
+    def __init__(self):
+        if hasattr(self, '_initialized'):
+            return
+            
+        # Thread-safe counter state
+        self._counter = 0
+        self._last_timestamp = 0
+        self._lock = threading.Lock()  # Protects counter state
+        
+        self._initialized = True
+        logger.info("RequestManager initialized")
+
+    def generate_request_id(self) -> str:
+        """
+        Generate globally unique request ID
+        
+        Returns:
+            Pure ID string in format: timestamp(16 digits) + counter(4 digits) + random(8 chars)
+        """
+        try:
+            # Microsecond precision timestamp
+            current_timestamp = int(time.time() * 1000000)
+            random_suffix = uuid.uuid4().hex[:8]
+            
+            with self._lock:
+                if current_timestamp == self._last_timestamp:
+                    self._counter += 1
+                else:
+                    self._counter = 0
+                    self._last_timestamp = current_timestamp
+                
+                # Format: timestamp + counter(4 digits) + random(8 chars)
+                counter_part = f"{self._counter:04d}"
+                request_id = f"{current_timestamp}{counter_part}{random_suffix}"
+            
+            logger.info(f"Generated request ID: {request_id}")
+            return request_id
+            
+        except Exception as e:
+            logger.error(f"Failed to generate request ID: {e}")
+            # Emergency fallback
+            return uuid.uuid4().hex
