@@ -260,7 +260,7 @@ class InstanceHealthChecker(ThreadSafeSingleton):
             logger.error(f"Failed to get instance info for {instance_id}: {e}")
             raise
 
-    def _terminate_via_controller(self, instance_id: int, instance_info: Dict[str, Any]) -> bool:
+    def _terminate_via_controller(self, instance_id: int, instance_info: dict[str, Any]) -> bool:
         """Terminate instance via controller with proper error handling."""
         try:
             reason = (
