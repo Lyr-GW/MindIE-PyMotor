@@ -1,3 +1,122 @@
 #!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+import pytest
+
+from motor.engine_server.utils.ip import ip_valid_check, port_valid_check
+
+
+class TestIpUtils:
+    """Tests for IP utility functions"""
+
+    def test_ip_valid_check_valid_ipv4(self):
+        """Test ip_valid_check with valid IPv4 addresses"""
+        # These should not raise any exceptions
+        valid_ips = [
+            "127.0.0.1",  # Loopback
+            "192.168.1.1",  # Private IP
+            "8.8.8.8",  # Public IP
+            "10.0.0.1",  # Private IP
+            "172.16.0.1"  # Private IP
+        ]
+
+        for ip in valid_ips:
+            ip_valid_check(ip)  # Should not raise exception
+
+    def test_ip_valid_check_valid_ipv6(self):
+        """Test ip_valid_check with valid IPv6 addresses"""
+        # These should not raise any exceptions
+        valid_ipv6s = [
+            "::1",  # Loopback
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334",  # Public IP
+            "fe80::1",  # Link-local
+            "fd00::1"  # Unique local
+        ]
+
+        for ipv6 in valid_ipv6s:
+            ip_valid_check(ipv6)  # Should not raise exception
+
+    def test_ip_valid_check_invalid_format(self):
+        """Test ip_valid_check with invalid IP formats"""
+        invalid_ips = [
+            "not_an_ip",
+            "256.0.0.1",  # Invalid octet
+            "192.168.1.256",  # Invalid octet
+            "192.168.1",  # Missing octet
+            "192.168.1.1.1",  # Extra octet
+            "::g::",  # Invalid IPv6 character
+            "2001:::3"  # Invalid IPv6 format
+        ]
+
+        for ip in invalid_ips:
+            with pytest.raises(ValueError) as excinfo:
+                ip_valid_check(ip)
+            assert "parse to ip failed" in str(excinfo.value)
+
+    def test_ip_valid_check_all_zeros_ip(self):
+        """Test ip_valid_check with all zeros IP addresses"""
+        all_zeros_ips = [
+            "0.0.0.0",  # IPv4 all zeros
+            "::",  # IPv6 all zeros
+            "0000:0000:0000:0000:0000:0000:0000:0000"  # IPv6 all zeros (expanded)
+        ]
+
+        for ip in all_zeros_ips:
+            with pytest.raises(ValueError) as excinfo:
+                ip_valid_check(ip)
+            assert "is all zeros ip" in str(excinfo.value)
+
+    def test_ip_valid_check_multicast_ip(self):
+        """Test ip_valid_check with multicast IP addresses"""
+        multicast_ips = [
+            "224.0.0.1",  # IPv4 multicast (local network)
+            "239.255.255.255",  # IPv4 multicast (administrative scope)
+            "ff02::1",  # IPv6 link-local multicast
+            "ff05::1:3"  # IPv6 site-local multicast
+        ]
+
+        for ip in multicast_ips:
+            with pytest.raises(ValueError) as excinfo:
+                ip_valid_check(ip)
+            assert "is multicast ip" in str(excinfo.value)
+
+    def test_port_valid_check_valid_ports(self):
+        """Test port_valid_check with valid port numbers"""
+        valid_ports = [
+            1024,  # Minimum valid port
+            8080,  # Common HTTP alternative
+            9001,  # Example from test_vllm_config.py
+            65535  # Maximum valid port
+        ]
+
+        for port in valid_ports:
+            port_valid_check(port)  # Should not raise exception
+
+    def test_port_valid_check_invalid_ports_below_range(self):
+        """Test port_valid_check with ports below 1024"""
+        invalid_ports = [
+            0,  # Reserved port
+            1,  # System port
+            80,  # HTTP
+            443,  # HTTPS
+            1023  # Maximum system port
+        ]
+
+        for port in invalid_ports:
+            with pytest.raises(ValueError) as excinfo:
+                port_valid_check(port)
+            assert "port must be between 1024 and 65535" in str(excinfo.value)
+
+    def test_port_valid_check_invalid_ports_above_range(self):
+        """Test port_valid_check with ports above 65535"""
+        invalid_ports = [
+            65536,  # One above maximum
+            100000,  # Much higher than maximum
+            2 ** 16  # 65536
+        ]
+
+        for port in invalid_ports:
+            with pytest.raises(ValueError) as excinfo:
+                port_valid_check(port)
+            assert "port must be between 1024 and 65535" in str(excinfo.value)
