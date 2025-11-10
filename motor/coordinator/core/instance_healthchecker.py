@@ -251,9 +251,9 @@ class InstanceHealthChecker(ThreadSafeSingleton):
                     return None
                 
                 instance_data = self._monitored_instances[instance_id]
-                instance_type = instance_data["instance"].type.value
+                instance_role = instance_data["instance"].role
                 return {
-                    "type": instance_type,
+                    "role": instance_role,
                     "data": instance_data
                 }
         except Exception as e:
@@ -264,7 +264,7 @@ class InstanceHealthChecker(ThreadSafeSingleton):
         """Terminate instance via controller with proper error handling."""
         try:
             reason = (
-                f"Coordinator: detect {instance_info['type']} instance {instance_id} "
+                f"Coordinator: detect {instance_info['role']} instance {instance_id} "
                 f"is abnormal after {self.config.max_consecutive_failures} consecutive failures"
             )
             
