@@ -32,6 +32,9 @@ APP = "app"
 VALUE = "value"
 RESOURCES = "resources"
 DEPLOYMENT = "deployment"
+HARDWARE_TYPE = 'hardware_type'
+ANNOTATIONS = "annotations"
+SP_BLOCK = "sp-block"
 NAME_FLAG = " -n "
 g_controller_service = "mindie-ms-controller-service"
 BOOT_SHELL_PATH = "./boot_helper/boot.sh"
@@ -179,6 +182,23 @@ def modify_controller_or_coordinator_yaml(data, json_config):
         })
 
 
+def modify_sp_block_num(data, pd_flag, config):
+    if HARDWARE_TYPE not in config or config[HARDWARE_TYPE] == "800I_A2":
+        if ANNOTATIONS in data[METADATA]:
+            del data[METADATA][ANNOTATIONS]
+        return
+    if pd_flag == "d":
+        single_d_instance_pod_num = int(config[SINGER_D_INSTANCES_NUM])
+        d_pod_npu_num = int(config[D_POD_NPU_NUM])
+        sp_block_num = single_d_instance_pod_num * d_pod_npu_num
+        data[METADATA][ANNOTATIONS][SP_BLOCK] = f"{sp_block_num}"
+    elif pd_flag == "p":
+        single_p_instance_pod_num = int(config[SINGER_P_INSTANCES_NUM])
+        p_pod_npu_num = int(config[P_POD_NPU_NUM])
+        sp_block_num = single_p_instance_pod_num * p_pod_npu_num
+        data[METADATA][ANNOTATIONS][SP_BLOCK] = f"{sp_block_num}"
+
+
 def modify_server_yaml(deployment_data, json_config, index, node_type):
     deploy_config = json_config["motor_deploy_config"]
 
@@ -226,6 +246,13 @@ def modify_server_yaml(deployment_data, json_config, index, node_type):
         npu_num = int(deploy_config[D_POD_NPU_NUM])
         container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
         container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
+
+    hardware_type = deploy_config[HARDWARE_TYPE]
+    modify_sp_block_num(deployment_data, node_type, deploy_config)
+    if hardware_type == "800I_A2":
+        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-910b-8"
+    elif hardware_type == "800I_A3":
+        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-a3-16"
 
 
 def obtain_server_instance_total(deploy_config):
