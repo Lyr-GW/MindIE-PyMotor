@@ -323,8 +323,8 @@ def test_process_cluster_fault_message_basic(
     )
 
     # Mock update_instances_status to verify it's called
-    with patch.object(fault_manager, 'update_instances_status') as mock_update_status:
-        fault_manager.process_cluster_fault_message(fault_msg)
+    with patch.object(fault_manager, '_update_instances_status') as mock_update_status:
+        fault_manager._process_cluster_fault_message(fault_msg)
 
         # Verify _update_instances_status was called for fault messages
         if should_update_instances:
@@ -351,22 +351,22 @@ def test_process_cluster_fault_message_edge_cases(fault_manager, test_case, expe
             node_ip=TEST_IPS[2],  # Unknown server IP
             fault_level="healthy"
         )
-        fault_manager.process_cluster_fault_message(fault_msg)
+        fault_manager._process_cluster_fault_message(fault_msg)
         assert TEST_IPS[2] not in fault_manager.servers
 
     elif test_case == "none_input":
-        fault_manager.process_cluster_fault_message(None)
+        fault_manager._process_cluster_fault_message(None)
 
     elif test_case == "missing_signalType":
         fault_msg = cluster_fault_pb2.FaultMsgSignal()
         # Don't set signalType
-        fault_manager.process_cluster_fault_message(fault_msg)
+        fault_manager._process_cluster_fault_message(fault_msg)
 
     elif test_case == "missing_nodeFaultInfo":
         fault_msg = cluster_fault_pb2.FaultMsgSignal()
         fault_msg.signalType = "fault"
         # Don't set nodeFaultInfo
-        fault_manager.process_cluster_fault_message(fault_msg)
+        fault_manager._process_cluster_fault_message(fault_msg)
 
 def test_process_cluster_fault_message_large_device_faults(fault_manager):
     """Test processing fault message with large number of device faults - should truncate"""
@@ -394,7 +394,7 @@ def test_process_cluster_fault_message_large_device_faults(fault_manager):
         device_fault.faultType.append("HARDWARE")
         device_fault.faultReason.append(f"Fault reason {i}")
 
-    fault_manager.process_cluster_fault_message(fault_msg)
+    fault_manager._process_cluster_fault_message(fault_msg)
 
     # Verify device faults were truncated to 1000
     assert len(fault_manager.servers[TEST_IPS[0]].device_fault_infos) == 1000
@@ -411,7 +411,7 @@ def test_process_cluster_fault_message_invalid_nodeinfo(fault_manager):
     # Should handle invalid node info gracefully without raising exceptions
     # The method should log warnings and skip processing invalid entries
     # This tests defensive programming - method should be robust against malformed input
-    fault_manager.process_cluster_fault_message(fault_msg)  # Should not raise any exception
+    fault_manager._process_cluster_fault_message(fault_msg)  # Should not raise any exception
 
 def test_process_cluster_fault_message_external_call_failure(fault_manager, mock_instance_manager):
     """Test processing fault message when external calls fail - should handle gracefully"""
@@ -425,7 +425,7 @@ def test_process_cluster_fault_message_external_call_failure(fault_manager, mock
     mock_instance_manager.get_instance_by_podip.side_effect = Exception("Database connection failed")
 
     # Should handle external call failure gracefully
-    fault_manager.process_cluster_fault_message(fault_msg)
+    fault_manager._process_cluster_fault_message(fault_msg)
 
     # Verify server status was still updated despite external call failure
     assert fault_manager.servers[TEST_IPS[0]].status == Status.UNHEALTHY
@@ -446,7 +446,7 @@ def test_eval_server_status(fault_manager, server_status, device_faults, expecte
         device_fault_infos=device_faults
     )
 
-    result = fault_manager.eval_server_status(TEST_IPS[0])
+    result = fault_manager._eval_server_status(TEST_IPS[0])
 
     if expected_result is None:
         assert result is None
@@ -458,7 +458,7 @@ def test_eval_server_status(fault_manager, server_status, device_faults, expecte
 def test_eval_server_status_unknown_server(fault_manager):
     """Test _eval_server_status with unknown server"""
     with pytest.raises(ValueError, match=f"Server {TEST_IPS[2]} not found"):
-        fault_manager.eval_server_status(TEST_IPS[2])
+        fault_manager._eval_server_status(TEST_IPS[2])
 
 @pytest.mark.parametrize("test_case,server_configs,expected_fault_level,expected_fault_code", [
     ("healthy_instance", [
@@ -503,7 +503,7 @@ def test_update_instances_status(fault_manager, test_case, server_configs, expec
     )
     fault_manager.instances[1] = instance_metadata
 
-    fault_manager.update_instances_status()
+    fault_manager._update_instances_status()
 
     # Verify instance metadata updated correctly
     assert instance_metadata.fault_level == expected_fault_level
@@ -614,7 +614,7 @@ def test_ft_strategy_center_basic(
 
     # Update instance statuses to reflect server faults
     if server_setup:
-        manager.update_instances_status()
+        manager._update_instances_status()
 
     # Mock time.sleep to control the loop execution
     def mock_sleep(seconds):
@@ -623,7 +623,7 @@ def test_ft_strategy_center_basic(
     with patch('motor.controller.ft.fault_manager.time') as mock_time:
         mock_time.sleep.side_effect = mock_sleep
         try:
-            manager.ft_strategy_center()
+            manager._ft_strategy_center()
         except StopIteration:
             pass
 
@@ -659,7 +659,7 @@ def test_ft_strategy_center_strategy_levels(fault_manager_with_instances):
     ]
 
     # First update instance status to reflect the server fault
-    manager.update_instances_status()
+    manager._update_instances_status()
 
     # Mock time.sleep to control the loop execution
     def mock_sleep(seconds):
@@ -668,7 +668,7 @@ def test_ft_strategy_center_strategy_levels(fault_manager_with_instances):
     with patch('motor.controller.ft.fault_manager.time') as mock_time:
         mock_time.sleep.side_effect = mock_sleep
         try:
-            manager.ft_strategy_center()
+            manager._ft_strategy_center()
         except StopIteration:
             pass
 
@@ -691,7 +691,7 @@ def test_ft_strategy_center_strategy_finished(fault_manager_with_instances):
     with patch('motor.controller.ft.fault_manager.time') as mock_time:
         mock_time.sleep.side_effect = mock_sleep
         try:
-            manager.ft_strategy_center()
+            manager._ft_strategy_center()
         except StopIteration:
             pass
 
@@ -728,7 +728,7 @@ def test_ft_strategy_center_fault_transitions(fault_manager_with_instances, test
     ]
 
     # Update instance status to reflect the server fault
-    manager.update_instances_status()
+    manager._update_instances_status()
 
     # For same level same code test, mock strategy factory to return None
     if test_case == "same_level_same_code":
@@ -747,7 +747,7 @@ def test_ft_strategy_center_fault_transitions(fault_manager_with_instances, test
     with patch('motor.controller.ft.fault_manager.time') as mock_time:
         mock_time.sleep.side_effect = mock_sleep
         try:
-            manager.ft_strategy_center()
+            manager._ft_strategy_center()
         except StopIteration:
             pass
 
@@ -846,7 +846,7 @@ def test_triggered_update_workflow(fault_manager):
     ]
 
     # Call _update_instances_status to simulate triggered update
-    fault_manager.update_instances_status()
+    fault_manager._update_instances_status()
 
     # Verify instance metadata was updated
     assert fault_manager.instances[100].fault_level == "L3"
@@ -859,7 +859,7 @@ def test_triggered_update_workflow(fault_manager):
 
         mock_time.sleep.side_effect = mock_sleep
         try:
-            fault_manager.ft_strategy_center()
+            fault_manager._ft_strategy_center()
         except StopIteration:
             pass
 

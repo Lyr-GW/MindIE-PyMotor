@@ -89,12 +89,12 @@ def build_endpoints(msg: RegisterMsg, id_offset: int = 0) -> dict[int, Endpoint]
     devices_per_endpoint = msg.parallel_config.tp_size * msg.parallel_config.pp_size
     
     # Calculate the total number of devices needed
-    total_devices_needed = len(msg.bussiness_port) * devices_per_endpoint
+    total_devices_needed = len(msg.business_port) * devices_per_endpoint
     total_devices_available = len(devices)
     
     logger.debug("Building endpoints: %d ports, %d devices per endpoint, \
                  total needed: %d, available: %d",
-                 len(msg.bussiness_port), devices_per_endpoint, 
+                 len(msg.business_port), devices_per_endpoint, 
                  total_devices_needed, total_devices_available)
     
     # Check if the number of devices is enough
@@ -104,11 +104,11 @@ def build_endpoints(msg: RegisterMsg, id_offset: int = 0) -> dict[int, Endpoint]
                        total_devices_needed, total_devices_available)
         # Calculate the actual number of endpoints that can be created
         max_endpoints = total_devices_available // devices_per_endpoint
-        actual_ports = msg.bussiness_port[:max_endpoints]
+        actual_ports = msg.business_port[:max_endpoints]
         logger.info("Will create %d endpoints instead of %d",
-                    max_endpoints, len(msg.bussiness_port))
+                    max_endpoints, len(msg.business_port))
     else:
-        actual_ports = msg.bussiness_port
+        actual_ports = msg.business_port
 
     pod_endpoints: dict[int, Endpoint] = {}
     for i, port in enumerate(actual_ports):
@@ -121,9 +121,10 @@ def build_endpoints(msg: RegisterMsg, id_offset: int = 0) -> dict[int, Endpoint]
             break
             
         pod_endpoints[i] = Endpoint(
-            id=id_offset + i, 
-            ip=msg.pod_ip, 
-            port=port,
+            id=id_offset + i,
+            ip=msg.pod_ip,
+            business_port=port,
+            mgmt_port=msg.mgmt_port[i],
             device_infos=devices[start_idx:end_idx]
         )
 

@@ -69,7 +69,8 @@ def scheduler_setup(prefill_instances, decode_instances, mix_instances):
             endpoint = Endpoint(
                 id=instance.id * 10 + j,
                 ip=f"192.168.1.{instance.id}",
-                port=f"800{j}",
+                business_port=f"800{j}",
+                mgmt_port=f"900{j}",
                 status=EndpointStatus.NORMAL,
                 workload=Workload(active_tokens=0, active_kv_cache=0)
             )

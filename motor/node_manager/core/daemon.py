@@ -31,12 +31,12 @@ class Daemon(ThreadSafeSingleton):
     @staticmethod
     def _check_params(params: Endpoint) -> bool:
         try:
-            port = int(params.port)
+            port = int(params.business_port)
             if not (MIN_PORT <= port <= MAX_PORT):
                 logger.error(f"Port {port} is out of valid range")
                 return False
         except ValueError:
-            logger.error(f"Invalid port value: {params.port}")
+            logger.error(f"Invalid port value: {params.business_port}")
             return False
         try:
             ipaddress.ip_address(params.ip)
@@ -74,7 +74,7 @@ class Daemon(ThreadSafeSingleton):
                 --engine_id {instance_id} \
                 --role {pd_role_info.value} \
                 --host {endpoint.ip} \
-                --port {int(endpoint.port)}"
+                --port {int(endpoint.business_port)}"
                 logger.info(cmd)
         except Exception as e:
             raise RuntimeError(f"Failed to pull engine: {e}") from e

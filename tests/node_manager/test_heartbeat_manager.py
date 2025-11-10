@@ -85,8 +85,8 @@ class TestHeartBeatManager:
     def sample_endpoints(self):
         """return sample endpoints"""
         return [
-            Endpoint(id=1, ip="192.168.1.1", port="8080", status=EndpointStatus.NORMAL),
-            Endpoint(id=2, ip="192.168.1.2", port="8080", status=EndpointStatus.NORMAL)
+            Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL),
+            Endpoint(id=2, ip="192.168.1.2", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
         ]
 
     @pytest.fixture
@@ -197,7 +197,7 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", port="8080", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
             ]
 
         mock_sleep.side_effect = mock_stop_sleep
@@ -234,7 +234,7 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", port="8080", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
             ]
         
         mock_sleep.side_effect = mock_stop_sleep

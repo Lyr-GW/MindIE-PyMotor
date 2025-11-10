@@ -78,8 +78,9 @@ def test_register_succeed(instance_assembler: InstanceAssembler, test_config) ->
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9090",
+            business_port=["8080", "8084"],
+            mgmt_port=["9090", "9094"],
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
         )
@@ -94,8 +95,9 @@ def test_register_succeed(instance_assembler: InstanceAssembler, test_config) ->
             role=test_config['role'],
             pod_ip=test_config['pod_ip2'],
             host_ip=test_config['pod_ip2'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9090",
+            business_port=["8080", "8084"],
+            mgmt_port=["9090", "9094"],
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(
                 pod_ip=test_config['pod_ip2'],
@@ -125,8 +127,9 @@ def test_register_timeout(instance_assembler: InstanceAssembler, test_config) ->
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            bussiness_port=["8080"],
-            mgmt_port="9090",
+            business_port=["8080"],
+            mgmt_port=["9090"],
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
         )
@@ -152,8 +155,9 @@ def test_reregister_succeed(instance_assembler: InstanceAssembler, test_config) 
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9090",
+            business_port=["8080", "8084"],
+            mgmt_port=["9090", "9094"],
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
         ),
@@ -165,8 +169,9 @@ def test_reregister_succeed(instance_assembler: InstanceAssembler, test_config) 
             role=test_config['role'],
             pod_ip=test_config['pod_ip2'],
             host_ip=test_config['pod_ip2'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9090",
+            business_port=["8080", "8084"],
+            mgmt_port=["9090", "9094"],
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(
                 pod_ip=test_config['pod_ip2'],
@@ -185,7 +190,7 @@ def test_reregister_succeed(instance_assembler: InstanceAssembler, test_config) 
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            mgmt_port="9090",
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             endpoints=[endpoint for endpoint in ep1.values()]
         )
@@ -201,7 +206,7 @@ def test_reregister_succeed(instance_assembler: InstanceAssembler, test_config) 
             role=test_config['role'],
             pod_ip=test_config['pod_ip2'],
             host_ip=test_config['pod_ip2'],
-            mgmt_port="9090",
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             endpoints=[endpoint for endpoint in ep2.values()]
         )
@@ -224,8 +229,9 @@ def test_send_start_cmd(instance_assembler: InstanceAssembler, test_config, setu
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9090",
+            business_port=["8080", "8084"],
+            mgmt_port=["9090", "9094"],
+            nm_port="8088",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
         )
@@ -249,8 +255,9 @@ def test_send_start_cmd_fail_retry(instance_assembler: InstanceAssembler, test_c
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9091",
+            business_port=["8080", "8084"],
+            mgmt_port=["9091", "9095"],
+            nm_port="8089",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
         )
@@ -286,8 +293,9 @@ def test_send_start_cmd_fail_abort(instance_assembler: InstanceAssembler, test_c
             role=test_config['role'],
             pod_ip=test_config['pod_ip1'],
             host_ip=test_config['pod_ip1'],
-            bussiness_port=["8080", "8084"],
-            mgmt_port="9091",
+            business_port=["8080", "8084"],
+            mgmt_port=["9091", "9095"],
+            nm_port="8089",
             parallel_config=test_config['parallel_config'],
             ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
         )
@@ -457,8 +465,9 @@ def test_performance(instance_assembler: InstanceAssembler, test_config) -> None
                 role=test_config['role'],
                 pod_ip=f"127.0.0.{i % 5}",
                 host_ip=f"127.0.0.{i % 5}",
-                bussiness_port=["8080", "8084"],
-                mgmt_port="9090",
+                business_port=["8080", "8084"],
+                mgmt_port=["9090", "9094"],
+                nm_port="8088",
                 parallel_config=test_config['parallel_config'],
                 ranktable=build_pod_ranktable(
                     pod_ip=f"127.0.0.{i % 5}",
@@ -488,8 +497,9 @@ def test_concurrent_registration(instance_assembler: InstanceAssembler, test_con
                 role=test_config['role'],
                 pod_ip=f"127.0.0.{i}",
                 host_ip=f"127.0.0.{i}",
-                bussiness_port=["8080", "8084"],
-                mgmt_port="9090",
+                business_port=["8080", "8084"],
+                mgmt_port=["9090", "9094"],
+                nm_port="8088",
                 parallel_config=test_config['parallel_config'],
                 ranktable=build_pod_ranktable(
                     pod_ip=f"127.0.0.{i}",

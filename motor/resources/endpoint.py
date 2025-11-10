@@ -72,9 +72,10 @@ class EndpointStatus(str, Enum):
         return str.__repr__(self.value)
 
 class Endpoint(BaseModel):
-    id: int = Field(..., description="Endpoint ID") 
-    ip: str = Field(..., description="IP address") 
-    port: str = Field(..., description="Port") 
+    id: int = Field(..., description="Endpoint ID, it associated with data parallel rank id")
+    ip: str = Field(..., description="IP address")
+    business_port: str = Field(..., description="Business port")
+    mgmt_port: str = Field(..., description="Management port") 
     status: EndpointStatus = Field(default=EndpointStatus.INITIAL, description="Endpoint status")
     device_infos: list[DeviceInfo] = Field(default_factory=list, description="List of DeviceInfo") 
     hb_timestamp: float = Field(default=0, description="Last heartbeat timestamp")
@@ -84,7 +85,8 @@ class Endpoint(BaseModel):
         self,
         id: int,
         ip: str,
-        port: str,
+        business_port: str,
+        mgmt_port: str,
         status: EndpointStatus|None = None,
         device_infos: list[DeviceInfo]|None = None,
         hb_timestamp: float|None = None,
@@ -93,13 +95,14 @@ class Endpoint(BaseModel):
         super().__init__(
             id=id,
             ip=ip,
-            port=port,
+            business_port=business_port,
+            mgmt_port=mgmt_port,
             status=status if status is not None else EndpointStatus.INITIAL,
             device_infos=device_infos if device_infos is not None else [],
             hb_timestamp=hb_timestamp if hb_timestamp is not None else time.time(),
             workload=workload if workload is not None else Workload()
         )
-        logger.debug("Init endpoint with id:%s ip:%s port:%s", id, ip, port)
+        logger.debug("Init endpoint with id:%s ip:%s business_port:%s mgmt_port:%s", id, ip, business_port, mgmt_port)
 
     def add_device(self, device_info: DeviceInfo) -> None:
         if device_info not in self.device_infos:

@@ -12,7 +12,7 @@ from motor.utils.data_builder import build_ins_ranktable, build_endpoints
 from motor.utils.http_client import SafeHTTPSClient
 from motor.utils.singleton import ThreadSafeSingleton
 from motor.resources.http_msg_spec import RegisterMsg, StartCmdMsg, ReregisterMsg
-from motor.resources.instance import Instance
+from motor.resources.instance import Instance, ReadOnlyInstance
 from motor.resources.endpoint import Endpoint
 from motor.controller.core.instance_manager import InstanceManager
 from motor.controller.core.observer import Observer, ObserverEvent
@@ -103,25 +103,25 @@ class InstanceAssembler(ThreadSafeSingleton, Observer):
             self.start_command_thread.join()
         logger.info("InstanceAssembler stopped.")
 
-    def update(self, ins: Instance, event: ObserverEvent) -> None:
+    def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
         # We only update instance group's metadata when instance is removed.
         if event == ObserverEvent.INSTANCE_REMOVED:
             with self.lock:
-                group_info = self.instances_group.get(ins.get_group_id(), None)
+                group_info = self.instances_group.get(instance.get_group_id(), None)
                 if group_info is None:
                     return
 
-                if ins.job_name in group_info.p_job_names:
-                    group_info.p_job_names.remove(ins.job_name)
-                elif ins.job_name in group_info.d_job_names:
-                    group_info.d_job_names.remove(ins.job_name)
+                if instance.job_name in group_info.p_job_names:
+                    group_info.p_job_names.remove(instance.job_name)
+                elif instance.job_name in group_info.d_job_names:
+                    group_info.d_job_names.remove(instance.job_name)
                 else:
                     logger.warning("Instance %s is not in instance group %d!",
-                                   ins.job_name, ins.group_id)
+                                   instance.job_name, instance.group_id)
                     return
-                group_info.current_group_member -= ins.parallel_config.world_size
+                group_info.current_group_member -= instance.parallel_config.world_size
             logger.info("Instance removed: %s, group %d's current group member is %d",
-                        ins.job_name, ins.group_id, group_info.current_group_member)
+                        instance.job_name, instance.group_id, group_info.current_group_member)
 
     def register(self, msg: RegisterMsg) -> int:
         """
@@ -163,7 +163,7 @@ class InstanceAssembler(ThreadSafeSingleton, Observer):
 
         pod_endpoints = build_endpoints(msg, instance.get_endpoints_num())
         instance.add_endpoints(msg.pod_ip, pod_endpoints)
-        instance.add_node_mgr(msg.pod_ip, msg.host_ip, msg.mgmt_port)
+        instance.add_node_mgr(msg.pod_ip, msg.host_ip, msg.nm_port)
         logger.info("Endpoints added for instance %s from pod %s.", msg.job_name, msg.host_ip)
         return 0
 
@@ -206,7 +206,7 @@ class InstanceAssembler(ThreadSafeSingleton, Observer):
             self.ins_id_cnt = max(self.ins_id_cnt, msg.instance_id + 1)
 
         instance.add_endpoints(msg.pod_ip, {endpoint.id: endpoint for endpoint in msg.endpoints})
-        instance.add_node_mgr(msg.pod_ip, msg.host_ip, msg.mgmt_port)
+        instance.add_node_mgr(msg.pod_ip, msg.host_ip, msg.nm_port)
         logger.info("Recovery instance assembler's info, current ins_id_idx is %d.", self.ins_id_cnt)
         return 0
 
@@ -238,8 +238,8 @@ class InstanceAssembler(ThreadSafeSingleton, Observer):
         is_succeed = True
         for node_mgr in instance.get_node_managers():
             base_url = f"http://{node_mgr.pod_ip}:{node_mgr.port}"
-            endpoints: dict[int, Endpoint] = instance.get_endpoints(node_mgr.pod_ip)
-            if endpoints is None:
+            endpoints = instance.get_endpoints(node_mgr.pod_ip)
+            if not endpoints:
                 continue
             
             start_cmd_msg = StartCmdMsg(

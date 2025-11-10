@@ -4,6 +4,7 @@
 import time
 import threading
 from enum import Enum
+from types import MappingProxyType
 from pydantic import BaseModel, Field
 from motor.utils.logger import get_logger
 from motor.resources.endpoint import Endpoint, EndpointStatus, Workload
@@ -251,7 +252,7 @@ class Instance(BaseModel):
         with self._lock:
             self.group_id = group_id
 
-    def get_group_id(self) -> None:
+    def get_group_id(self) -> int:
         with self._lock:
             return self.group_id
 
@@ -261,18 +262,18 @@ class Instance(BaseModel):
                 return sum([len(pod_endpoints) for pod_endpoints in self.endpoints.values()])
             return 0
 
-    def get_endpoints(self, ip: str) -> dict[int, Endpoint]:
-        """ Get endpoints by server ip """
+    def get_endpoints(self, ip: str) -> MappingProxyType[int, Endpoint]:
+        """ Get endpoints by pod(server) ip """
         with self._lock:
-            return self.endpoints[ip] if ip in self.endpoints else None
+            return MappingProxyType(self.endpoints.get(ip, {}))
 
-    def get_all_endpoints(self) -> list[Endpoint]:
+    def get_all_endpoints(self) -> tuple[Endpoint, ...]:
         with self._lock:
             eps = []
             for pod_endpoints in self.endpoints.values():
                 for endpoint in pod_endpoints.values():
                     eps.append(endpoint)
-            return eps
+            return tuple(eps)
 
     def get_node_managers_num(self) -> int:
         with self._lock:
@@ -286,3 +287,62 @@ class Instance(BaseModel):
         with self._lock:
             self.status = status
         logger.info(f"Instance {self.job_name}(id:{self.id}) status updated to {status}")
+
+
+class ReadOnlyInstance:
+    """
+    A read-only wrapper for Instance that prevents modifications.
+    Observers can safely access instance data without risking accidental modifications.
+    The wrapper can be deep copied if observers need their own mutable copy.
+    """
+
+    def __init__(self, instance: Instance) -> None:
+        if not isinstance(instance, Instance):
+            raise TypeError("ReadOnlyInstance can only wrap Instance objects")
+        self._instance = instance
+
+    def __getattr__(self, name: str):
+        """Delegate attribute access to the wrapped instance for read-only properties."""
+        # Block modification methods
+        modification_methods = {
+            'add_node_mgr', 'del_node_mgr', 'add_endpoints', 'del_endpoints',
+            'update_heartbeat', 'set_group_id', 'update_instance_status'
+        }
+
+        if name in modification_methods:
+            raise AttributeError(f"'{self.__class__.__name__}' object does not allow modification method '{name}'")
+
+        # For other attributes/methods, delegate to the wrapped instance
+        return getattr(self._instance, name)
+
+    def __repr__(self) -> str:
+        return f"ReadOnlyInstance({self._instance!r})"
+
+    def __str__(self) -> str:
+        return f"ReadOnlyInstance wrapping {self._instance}"
+
+    def __deepcopy__(self, memo):
+        """Support deep copying by creating a new instance with copied data."""
+        import copy
+        # Create a new Instance with the same data, excluding the lock
+        copied_instance = Instance(
+            job_name=self._instance.job_name,
+            model_name=self._instance.model_name,
+            id=self._instance.id,
+            role=self._instance.role
+        )
+        # Copy status and other attributes
+        copied_instance.status = self._instance.status
+        copied_instance.group_id = self._instance.group_id
+        copied_instance.parallel_config = copy.deepcopy(self._instance.parallel_config, memo)
+
+        # Deep copy node managers
+        copied_instance.node_managers = copy.deepcopy(self._instance.node_managers, memo)
+
+        # Deep copy endpoints (this is the most complex part)
+        copied_instance.endpoints = copy.deepcopy(self._instance.endpoints, memo)
+
+        # Copy gathered workload
+        copied_instance.gathered_workload = copy.deepcopy(self._instance.gathered_workload, memo)
+
+        return ReadOnlyInstance(copied_instance)

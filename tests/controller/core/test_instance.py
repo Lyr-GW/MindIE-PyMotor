@@ -6,8 +6,8 @@ def test_instance_active() -> None:
     parallel_config = ParallelConfig(dp=2, tp=2)
     pod_ip = "127.0.0.1"
     endpoints = {
-        1: Endpoint(id=1, ip=pod_ip, port="1001"),
-        2: Endpoint(id=2, ip=pod_ip, port="1002")
+        1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip=pod_ip, business_port="1002", mgmt_port="9002")
     }
     instance = Instance(
         job_name="test_active",
@@ -24,8 +24,8 @@ def test_add_endpoints() -> None:
     parallel_config = ParallelConfig(dp=4, tp=2)
     pod_ip1 = "127.0.0.1"
     endpoints1 = {
-        1: Endpoint(id=1, ip=pod_ip1, port="1001"),
-        2: Endpoint(id=2, ip=pod_ip1, port="1002")
+        1: Endpoint(id=1, ip=pod_ip1, business_port="1001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip=pod_ip1, business_port="1002", mgmt_port="9002")
     }
     instance = Instance(
         job_name="test_add_endpoints",
@@ -41,8 +41,8 @@ def test_del_endpoints() -> None:
     parallel_config = ParallelConfig(dp=2, tp=2)
     pod_ip = "127.0.0.1"
     endpoints = {
-        1: Endpoint(id=1, ip=pod_ip, port="1001"),
-        2: Endpoint(id=2, ip=pod_ip, port="1002")
+        1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip=pod_ip, business_port="1002", mgmt_port="9002")
     }
     instance = Instance(
         job_name="test_del_endpoints",

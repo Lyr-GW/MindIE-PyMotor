@@ -6,6 +6,7 @@ from motor.controller.core.instance_manager import InstanceManager
 from motor.resources.endpoint import Endpoint, EndpointStatus
 from motor.resources.http_msg_spec import HeartbeatMsg
 from motor.resources.instance import ParallelConfig, Instance, NodeManagerInfo, InsStatus
+from motor.utils.singleton import ThreadSafeSingleton
 
 
 @pytest.fixture
@@ -15,14 +16,9 @@ def test_config():
     tp = 2
     p_role = "prefill"
     d_role = "decode"
-    pod_ip1 = "127.0.0.1"
-    pod_ip2 = "127.0.0.2"
-    pod_ip3 = "127.0.0.3"
-    pod_ip4 = "127.0.0.4"
-    pod_ip5 = "127.0.0.5"
-    pod_ip6 = "127.0.0.6"
-    pod_ip7 = "127.0.0.7"
-    pod_ip8 = "127.0.0.8"
+
+    # Generate pod IPs using list comprehension
+    pod_ips = [f"127.0.0.{i}" for i in range(1, 9)]
 
     p_parallel_config = ParallelConfig(dp=dp, tp=tp)
     d_parallel_config = ParallelConfig(dp=dp * 4, tp=tp / 2)
@@ -32,14 +28,7 @@ def test_config():
         'tp': tp,
         'p_role': p_role,
         'd_role': d_role,
-        'pod_ip1': pod_ip1,
-        'pod_ip2': pod_ip2,
-        'pod_ip3': pod_ip3,
-        'pod_ip4': pod_ip4,
-        'pod_ip5': pod_ip5,
-        'pod_ip6': pod_ip6,
-        'pod_ip7': pod_ip7,
-        'pod_ip8': pod_ip8,
+        'pod_ips': pod_ips,
         'p_parallel_config': p_parallel_config,
         'd_parallel_config': d_parallel_config
     }
@@ -49,24 +38,35 @@ def test_config():
 def setup_test_environment():
     """Setup and teardown for each test"""
     # Clear singleton instance before each test
-    if hasattr(InstanceManager, '_instances') and InstanceManager in InstanceManager._instances:
+    if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
         try:
-            InstanceManager._instances[InstanceManager].stop()
+            ThreadSafeSingleton._instances[InstanceManager].stop()
         except:
             pass
-        if InstanceManager in InstanceManager._instances:
-            del InstanceManager._instances[InstanceManager]
+        del ThreadSafeSingleton._instances[InstanceManager]
 
 
 def _cleanup_singleton():
     """Clean up singleton instances"""
-    if hasattr(InstanceManager, '_instances') and InstanceManager in InstanceManager._instances:
+    if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
         try:
-            InstanceManager._instances[InstanceManager].stop()
+            ThreadSafeSingleton._instances[InstanceManager].stop()
         except:
             pass
-        if InstanceManager in InstanceManager._instances:
-            del InstanceManager._instances[InstanceManager]
+        del ThreadSafeSingleton._instances[InstanceManager]
+
+
+def _create_endpoint(id: int, ip: str, business_port: str = "9090", mgmt_port: str = "8080") -> Endpoint:
+    """Helper function to create an Endpoint with default values"""
+    return Endpoint(
+        id=id,
+        ip=ip,
+        business_port=business_port,
+        mgmt_port=mgmt_port,
+        status=EndpointStatus.INITIAL,
+        device_infos=[],
+        hb_timestamp=time.time()
+    )
 
 
 @pytest.fixture
@@ -76,22 +76,25 @@ def instance_manager(test_config):
     config = ControllerConfig()
     # add instance, 2P1D
     instance_manager = InstanceManager(config)
+
+    # Extract pod_ips for cleaner code
+    pod_ips = test_config['pod_ips']
     # p0
-    instance_manager.add_instance(Instance(
-        job_name="prefill-0",
-        model_name="test_model",
-        id=0,
-        role=test_config['p_role'],
-        parallel_config=test_config['p_parallel_config'],
-        node_mgrs=[NodeManagerInfo(pod_ip=test_config['pod_ip1'], host_ip=test_config['pod_ip1'], port="8080"),
-                   NodeManagerInfo(pod_ip=test_config['pod_ip2'], host_ip=test_config['pod_ip2'], port="8080")],
-        endpoints={test_config['pod_ip1']: {
-            0: Endpoint(0, test_config['pod_ip1'], port="9090", status=EndpointStatus.INITIAL, device_infos=list(),
-                        hb_timestamp=time.time())},
-            test_config['pod_ip2']: {
-                0: Endpoint(0, test_config['pod_ip2'], port="9090", status=EndpointStatus.INITIAL, device_infos=list(),
-                            hb_timestamp=time.time())}}
-    ))
+    instance_manager.add_instance(
+        Instance(
+            job_name="prefill-0",
+            model_name="test_model",
+            id=0,
+            role=test_config['p_role'],
+            parallel_config=test_config['p_parallel_config'],
+            node_mgrs=[NodeManagerInfo(pod_ip=pod_ips[0], host_ip=pod_ips[0], port="8080"),
+                       NodeManagerInfo(pod_ip=pod_ips[1], host_ip=pod_ips[1], port="8080")],
+            endpoints={
+                pod_ips[0]: {0: _create_endpoint(0, pod_ips[0])},
+                pod_ips[1]: {0: _create_endpoint(0, pod_ips[1])},
+            },
+        )
+    )
     # p1
     instance_manager.add_instance(Instance(
         job_name="prefill-1",
@@ -99,15 +102,13 @@ def instance_manager(test_config):
         id=1,
         role=test_config['p_role'],
         parallel_config=test_config['p_parallel_config'],
-        node_mgrs=[NodeManagerInfo(pod_ip=test_config['pod_ip3'], host_ip=test_config['pod_ip3'], port="8080"),
-                   NodeManagerInfo(pod_ip=test_config['pod_ip4'], host_ip=test_config['pod_ip4'], port="8080")],
-        endpoints={test_config['pod_ip3']: {
-            0: Endpoint(0, test_config['pod_ip3'], port="9090", status=EndpointStatus.INITIAL, device_infos=list(),
-                        hb_timestamp=time.time())},
-            test_config['pod_ip4']: {
-                0: Endpoint(0, test_config['pod_ip4'], port="9090", status=EndpointStatus.INITIAL, device_infos=list(),
-                            hb_timestamp=time.time())}}
-    ))
+        node_mgrs=[NodeManagerInfo(pod_ip=pod_ips[2], host_ip=pod_ips[2], port="8080"),
+                   NodeManagerInfo(pod_ip=pod_ips[3], host_ip=pod_ips[3], port="8080")],
+            endpoints={
+                pod_ips[2]: {0: _create_endpoint(0, pod_ips[2])},
+                pod_ips[3]: {0: _create_endpoint(0, pod_ips[3])}
+            }
+        ))
     # d0
     d_instance = Instance(
         job_name="decode-0",
@@ -115,26 +116,24 @@ def instance_manager(test_config):
         id=2,
         role=test_config['d_role'],
         parallel_config=test_config['d_parallel_config'],
-        node_mgrs=[NodeManagerInfo(pod_ip=test_config['pod_ip5'], host_ip=test_config['pod_ip5'], port="8080"),
-                   NodeManagerInfo(pod_ip=test_config['pod_ip6'], host_ip=test_config['pod_ip6'], port="8080"),
-                   NodeManagerInfo(pod_ip=test_config['pod_ip7'], host_ip=test_config['pod_ip7'], port="8080"),
-                   NodeManagerInfo(pod_ip=test_config['pod_ip8'], host_ip=test_config['pod_ip8'], port="8080"),
+        node_mgrs=[NodeManagerInfo(pod_ip=pod_ips[4], host_ip=pod_ips[4], port="8080"),
+                   NodeManagerInfo(pod_ip=pod_ips[5], host_ip=pod_ips[5], port="8080"),
+                   NodeManagerInfo(pod_ip=pod_ips[6], host_ip=pod_ips[6], port="8080"),
+                   NodeManagerInfo(pod_ip=pod_ips[7], host_ip=pod_ips[7], port="8080"),
                    ],
         endpoints={}
     )
     # construct endpoints
     endpoints = {}
-    for pod_ip in [test_config['pod_ip5'], test_config['pod_ip6'], test_config['pod_ip7'], test_config['pod_ip8']]:
+    for pod_ip in pod_ips[4:8]:
         port_temp = 8080
         endpoints[pod_ip] = {}
         for i in range(0, 8):
-            endpoints[pod_ip][i] = Endpoint(
+            endpoints[pod_ip][i] = _create_endpoint(
                 id=i,
                 ip=pod_ip,
-                port=str(port_temp),
-                status=EndpointStatus.INITIAL,
-                device_infos=[],
-                hb_timestamp=time.time()
+                business_port=str(port_temp),
+                mgmt_port=str(port_temp + 1000)
             )
             port_temp += 1
 
@@ -209,11 +208,12 @@ def test_get_initial_instances(instance_manager) -> None:
 
 def test_handle_heartbeat(instance_manager, test_config) -> None:
     """Test handling heartbeat"""
+    pod_ips = test_config['pod_ips']
     # P0 ready
     mock_heartbeat_msg1 = get_mock_heartbeat_msg_for_pinstance_normal(
         "prefill-0",
         0,
-        test_config['pod_ip1']
+        pod_ips[0]
     )
     instance_manager.handle_heartbeat(mock_heartbeat_msg1)
     instance = instance_manager.get_instance(0)
@@ -222,7 +222,7 @@ def test_handle_heartbeat(instance_manager, test_config) -> None:
     mock_heartbeat_msg2 = get_mock_heartbeat_msg_for_pinstance_normal(
         "prefill-0",
         0,
-        test_config['pod_ip2']
+        pod_ips[1]
     )
     instance_manager.handle_heartbeat(mock_heartbeat_msg2)
     instance = instance_manager.get_instance(0)
@@ -231,7 +231,7 @@ def test_handle_heartbeat(instance_manager, test_config) -> None:
     mock_heartbeat_msg3 = get_mock_heartbeat_msg_for_pinstance_normal(
         "prefill-0",
         0,
-        test_config['pod_ip2']
+        pod_ips[1]
     )
     mock_heartbeat_msg3.status[0] = EndpointStatus.ABNORMAL
     instance_manager.handle_heartbeat(mock_heartbeat_msg3)
@@ -241,7 +241,7 @@ def test_handle_heartbeat(instance_manager, test_config) -> None:
     mock_heartbeat_msg4 = get_mock_heartbeat_msg_for_pinstance_normal(
         "prefill-1",
         1,
-        test_config['pod_ip3']
+        pod_ips[2]
     )
     mock_heartbeat_msg4.status[0] = EndpointStatus.ABNORMAL
     instance_manager.handle_heartbeat(mock_heartbeat_msg4)

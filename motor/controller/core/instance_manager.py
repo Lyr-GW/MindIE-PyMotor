@@ -8,7 +8,7 @@ from fastapi import HTTPException
 
 from motor.resources.http_msg_spec import HeartbeatMsg
 from motor.utils.logger import get_logger
-from motor.resources.instance import Instance, InsStatus, InsConditionEvent
+from motor.resources.instance import Instance, InsStatus, InsConditionEvent, ReadOnlyInstance
 from motor.controller.core.observer import Observer, ObserverEvent
 from motor.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
@@ -265,10 +265,11 @@ class InstanceManager(ThreadSafeSingleton):
         if observer not in self.observers:
             self.observers.append(observer)
 
-    # notify all observers
+    # notify all observers with read-only instance
     def notify(self, instance: Instance, event: ObserverEvent) -> None:
+        readonly_instance = ReadOnlyInstance(instance)
         for observer in self.observers:
-            observer.update(instance, event)
+            observer.update(readonly_instance, event)
 
     def _heartbeat_timeout_manager(self) -> None:
         """Instance heartbeat timeout management"""

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from motor.utils.logger import get_logger
 from motor.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
-from motor.resources.instance import Instance, NodeManagerInfo
+from motor.resources.instance import Instance, ReadOnlyInstance, NodeManagerInfo
 from motor.controller.core.observer import Observer, ObserverEvent
 from motor.controller.core.instance_manager import InstanceManager, InsStatus
 from motor.controller.ft.cluster_grpc import cluster_fault_pb2
@@ -115,12 +115,12 @@ class FaultManager(ThreadSafeSingleton, Observer):
         self.strategies = generate_strategy_map()
 
         self.server_status_subscriber_thread = threading.Thread(
-            target=self.server_status_subscriber,
+            target=self._server_status_subscriber,
             daemon=True,
             name="ServerStatusSubscriber"
         )
         self.ft_strategy_center_thread = threading.Thread(
-            target=self.ft_strategy_center,
+            target=self._ft_strategy_center,
             daemon=True,
             name="FaultToleranceStrategyCenter"
         )
@@ -140,22 +140,24 @@ class FaultManager(ThreadSafeSingleton, Observer):
             self.ft_strategy_center_thread.join()
         logger.info("FaultManager stopped.")
 
-    def update(self, ins: Instance, event: ObserverEvent) -> None:
-        logger.info("FaultManager update instance %s with event: %s.", ins.job_name, event)
+    def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
+        logger.info("FaultManager update instance %s with event: %s.",
+                    instance.job_name, event)
 
+        # Duck typing for instance
         if event == ObserverEvent.INSTANCE_ADDED:
-            self.handle_instance_added(ins)
+            self._handle_instance_added(instance)
         elif event == ObserverEvent.INSTANCE_SEPERATED:
-            self.handle_instance_separated(ins)
+            self._handle_instance_separated(instance)
         elif event == ObserverEvent.INSTANCE_REMOVED:
-            self.handle_instance_removed(ins)
+            self._handle_instance_removed(instance)
         else:
             raise ValueError(f"Invalid event: {event}.")
 
-    def handle_instance_added(self, ins: Instance) -> None:
+    def _handle_instance_added(self, instance: Instance) -> None:
         ins_metadata = InstanceMetadata(
-            instance_id=ins.id,
-            node_managers=ins.get_node_managers()
+            instance_id=instance.id,
+            node_managers=instance.get_node_managers()
         )
         
         server_metadatas = {}
@@ -166,34 +168,34 @@ class FaultManager(ThreadSafeSingleton, Observer):
             )
 
         with self.lock:
-            self.instances[ins.id] = ins_metadata
+            self.instances[instance.id] = ins_metadata
             self.servers.update(server_metadatas)
 
-            if ins.group_id not in self.groups:
-                group = InstanceGroupMetadata(id=ins.group_id)
-                self.groups[ins.group_id] = group
+            if instance.group_id not in self.groups:
+                group = InstanceGroupMetadata(id=instance.group_id)
+                self.groups[instance.group_id] = group
             else:
-                group = self.groups[ins.group_id]
+                group = self.groups[instance.group_id]
             
-            if ins.role == "prefill":
-                group.p_ids.append(ins.id)
+            if instance.role == "prefill":
+                group.p_ids.append(instance.id)
             else:
-                group.d_ids.append(ins.id)
+                group.d_ids.append(instance.id)
 
-    def handle_instance_separated(self, ins: Instance) -> None:
+    def _handle_instance_separated(self, instance: Instance) -> None:
         with self.lock:
-            if ins.id in self.instances:
-                ins_metadata = self.instances[ins.id]
+            if instance.id in self.instances:
+                ins_metadata = self.instances[instance.id]
         
         if ins_metadata is not None:
             with ins_metadata.lock:
                 ins_metadata.status = Status.UNHEALTHY
 
-    def handle_instance_removed(self, ins: Instance) -> None:
+    def _handle_instance_removed(self, instance: Instance) -> None:
         node_managers = []
         with self.lock:
-            if ins.id in self.instances:
-                ins_metadata = self.instances[ins.id]
+            if instance.id in self.instances:
+                ins_metadata = self.instances[instance.id]
                 node_managers = ins_metadata.node_managers.copy()
             else:
                 return
@@ -202,18 +204,18 @@ class FaultManager(ThreadSafeSingleton, Observer):
             for node_mgr in node_managers:
                 self.servers.pop(node_mgr.pod_ip, None)
 
-            if ins.group_id in self.groups:
-                group = self.groups[ins.group_id]
-                if ins.role == "prefill" and ins.id in group.p_ids:
-                    group.p_ids.remove(ins.id)
-                elif ins.role == "decode" and ins.id in group.d_ids:
-                    group.d_ids.remove(ins.id)
+            if instance.group_id in self.groups:
+                group = self.groups[instance.group_id]
+                if instance.role == "prefill" and instance.id in group.p_ids:
+                    group.p_ids.remove(instance.id)
+                elif instance.role == "decode" and instance.id in group.d_ids:
+                    group.d_ids.remove(instance.id)
                 if len(group.p_ids) == 0 and len(group.d_ids) == 0:
-                    self.groups.pop(ins.group_id)
+                    self.groups.pop(instance.group_id)
 
-            self.instances.pop(ins.id, None)
+            self.instances.pop(instance.id, None)
 
-    def server_status_subscriber(self) -> None:
+    def _server_status_subscriber(self) -> None:
         reconnect_attempts, max_reconnect_attempts = 0, 10
         base_wait_time, max_wait_time = 5, 300
 
@@ -241,7 +243,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
 
                 # Once registered, start subscription (this will block until connection is lost)
                 logger.info("starting fault message subscription...")
-                self.client.subscribe_fault_messages(self.process_cluster_fault_message)
+                self.client.subscribe_fault_messages(self._process_cluster_fault_message)
 
                 # If we reach here, the subscription ended (likely due to connection loss)
                 logger.warning("fault message subscription ended, will retry...")
@@ -262,7 +264,9 @@ class FaultManager(ThreadSafeSingleton, Observer):
                     time.sleep(max_wait_time)
                     reconnect_attempts = 0  # reset counter, avoid infinite waiting
 
-    def process_cluster_fault_message(self, fault_msg: cluster_fault_pb2.FaultMsgSignal):
+    def _process_cluster_fault_message(self, fault_msg: cluster_fault_pb2.FaultMsgSignal):
+        # Handle MindCluster's Server fault message. Only care about the servers
+        # that we deploy inference service and managed by this motor.
         try:
             # check if the fault message is valid
             if fault_msg is None:
@@ -325,14 +329,14 @@ class FaultManager(ThreadSafeSingleton, Observer):
                         logger.error("Error processing node_info: %s", e)
                         continue
 
-            self.separate_unhealthy_instances(unhealthy_node_ips)
+            self._separate_unhealthy_instances(unhealthy_node_ips)
             # update instances status by server status and device fault info
-            self.update_instances_status() 
+            self._update_instances_status() 
                     
         except Exception as e:
             logger.error("Critical error in process_cluster_fault_message: %s", e)
     
-    def separate_unhealthy_instances(self, unhealthy_node_ips: list[str]) -> None:
+    def _separate_unhealthy_instances(self, unhealthy_node_ips: list[str]) -> None:
         # Notify instance manager to separate the unhealthy instances
         for node_ip in unhealthy_node_ips:
             try:
@@ -346,7 +350,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
             except Exception as e:
                 logger.error("Error updating instance status for node %s: %s", node_ip, e)
 
-    def update_instances_status(self) -> None:
+    def _update_instances_status(self) -> None:
         with self.lock:
             instance_ids = list(self.instances.keys())
 
@@ -360,7 +364,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
                 # the fault level will be L0, and the fault code will be 0x0.
                 final_level, fault_code = "L0", 0x0
                 for node_mgr in ins_metadata.node_managers:
-                    device_fault_info = self.eval_server_status(node_mgr.pod_ip)
+                    device_fault_info = self._eval_server_status(node_mgr.pod_ip)
                     if device_fault_info is not None:
                         final_level = max(final_level, device_fault_info.fault_level)
                         fault_code = max(fault_code, device_fault_info.fault_code)
@@ -368,7 +372,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
                 ins_metadata.fault_level = final_level
                 ins_metadata.fault_code = fault_code
 
-    def eval_server_status(self, pod_ip: str) -> DeviceFaultInfo | None:
+    def _eval_server_status(self, pod_ip: str) -> DeviceFaultInfo | None:
         server_metadata = None
         with self.lock:
             server_metadata = self.servers.get(pod_ip)
@@ -392,18 +396,18 @@ class FaultManager(ThreadSafeSingleton, Observer):
 
         return target_fault_info
 
-    def ft_strategy_center(self) -> None:
+    def _ft_strategy_center(self) -> None:
         while not self.stop_event.is_set():
             instance_ids = []
             with self.lock:
                 instance_ids = list(self.instances.keys())
             
             for instance_id in instance_ids:
-                self.process_instance_strategy(instance_id)
+                self._process_instance_strategy(instance_id)
 
             time.sleep(self.config.strategy_center_check_internal)
 
-    def process_instance_strategy(self, ins_id: int) -> None:
+    def _process_instance_strategy(self, ins_id: int) -> None:
         """
         This function will generate the instance's strategy base on the instance's
         fault level and fault code. If the current strategy is not None, it will 

@@ -29,12 +29,16 @@ class HeartbeatManager(ThreadSafeSingleton):
         self._role = "prefill"
         self._instance_id = -1
         self._endpoints: list[Endpoint] = []
-        self._heartbeat_report_thread = threading.Thread(target=self._report_heartbeat_loop,
-                                                         daemon=True,
-                                                         name="heartbeat_report")
-        self._engine_server_status_thread = threading.Thread(target=self._refresh_endpoints_status_loop,
-                                               daemon=True,
-                                               name="endpoint_status_fetch")
+        self._heartbeat_report_thread = threading.Thread(
+            target=self._report_heartbeat_loop,
+            daemon=True,
+            name="heartbeat_report"
+        )
+        self._engine_server_status_thread = threading.Thread(
+            target=self._refresh_endpoints_status_loop,
+            daemon=True,
+            name="endpoint_status_fetch"
+        )
         self._thread_started = False
         self._reregistering = False
         self._initialized = True
@@ -74,7 +78,7 @@ class HeartbeatManager(ThreadSafeSingleton):
         updated_endpoints = []
 
         for item in endpoints_snapshot:
-            engine_server_base_url = f"http://{item.ip}:{item.port}"
+            engine_server_base_url = f"http://{item.ip}:{item.mgmt_port}"
             try:
                 client = SafeHTTPSClient(
                     base_url=engine_server_base_url,
@@ -83,6 +87,7 @@ class HeartbeatManager(ThreadSafeSingleton):
                 response = client.get("/v1/status")
                 item.status = EndpointStatus(response.get("status"))
             except Exception:
+                logger.error("Failed to get engine server status from %s", engine_server_base_url)
                 item.status = EndpointStatus("abnormal")
             finally:
                 client.close()

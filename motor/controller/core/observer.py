@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum
 
-from motor.resources.instance import Instance
+from motor.resources.instance import ReadOnlyInstance
 
 
 class ObserverEvent(Enum):
@@ -19,5 +19,5 @@ class Observer(ABC):
         pass
 
     @abstractmethod
-    def update(self, instance: Instance, event: ObserverEvent) -> None:
+    def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
         pass

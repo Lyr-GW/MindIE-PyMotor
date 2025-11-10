@@ -25,7 +25,7 @@ def daemon():
 @pytest.fixture
 def endpoints():
     return [
-        Endpoint(id=i, ip=f"192.168.1.{100+i}", port=str(8000+i*2)) 
+        Endpoint(id=i, ip=f"192.168.1.{100+i}", business_port=str(8000+i*2), mgmt_port=str(9000+i*2))
         for i in range(3)
     ]
 
@@ -53,8 +53,8 @@ class TestDaemon:
         assert True  # Method executed successfully
 
     @pytest.mark.parametrize("invalid_endpoint,error_msg", [
-        (Endpoint(id=0, ip="invalid_ip", port="8000"), "Failed to pull engine"),
-        (Endpoint(id=0, ip="192.168.1.1", port="999999"), "Failed to pull engine"),
+        (Endpoint(id=0, ip="invalid_ip", business_port="8000", mgmt_port="9090"), "Failed to pull engine"),
+        (Endpoint(id=0, ip="192.168.1.1", business_port="999999", mgmt_port="9090"), "Failed to pull engine"),
     ])
     def test_pull_engine_invalid_params(self, daemon, invalid_endpoint, error_msg):
         with pytest.raises(RuntimeError, match=error_msg):
@@ -85,7 +85,7 @@ class TestDaemon:
         ("192.168.1.100", "65535", True),
     ])
     def test_check_params(self, daemon, ip, port, expected):
-        endpoint = Endpoint(id=1, ip=ip, port=port)
+        endpoint = Endpoint(id=1, ip=ip, business_port=port, mgmt_port="9090")
         assert daemon._check_params(endpoint) == expected
     
     @patch('subprocess.Popen')
@@ -93,7 +93,7 @@ class TestDaemon:
     def test_command_format(self, mock_logger, mock_popen, daemon):
         mock_popen.return_value = MagicMock(pid=12345)
         
-        endpoint = Endpoint(id=5, ip="10.0.0.1", port="9000")
+        endpoint = Endpoint(id=5, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
         instance_id = 1
         daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id)
         

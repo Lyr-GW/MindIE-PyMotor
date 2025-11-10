@@ -84,8 +84,8 @@ def engine_manager(config_data, hccl_data):
 def sample_endpoints():
     """Create sample endpoints"""
     return [
-        Endpoint(id=0, ip="192.168.1.100", port="8080"),
-        Endpoint(id=1, ip="192.168.1.100", port="8081")
+        Endpoint(id=0, ip="192.168.1.100", business_port="8080", mgmt_port="9090"),
+        Endpoint(id=1, ip="192.168.1.100", business_port="8081", mgmt_port="9091")
     ]
 
 

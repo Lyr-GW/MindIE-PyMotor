@@ -36,8 +36,9 @@ class RegisterMsg(BaseModel):
     role: str = Field(..., description="Instance role")
     pod_ip: str = Field(..., description="Pod IP address")
     host_ip: str = Field(..., description="Host IP address")
-    bussiness_port: list[str] = Field(..., description="Business port for all endpoints managed by this nm")
-    mgmt_port: str = Field(..., description="Node manager api port, mostly used for management and health check")
+    business_port: list[str] = Field(..., description="Business port for all endpoints managed by this nm")
+    mgmt_port: list[str] = Field(..., description="Management port for all endpoints managed by this nm")
+    nm_port: str = Field(..., description="Node manager communication port")
     parallel_config: ParallelConfig = Field(..., description="Parallel configuration")
     ranktable: Ranktable = Field(..., description="Ranktable managed by this nm")
 
@@ -67,7 +68,7 @@ class ReregisterMsg(BaseModel):
     role: str = Field(..., description="Instance role")
     pod_ip: str = Field(..., description="Pod IP address")
     host_ip: str = Field(..., description="Host IP address")
-    mgmt_port: str = Field(..., description="Management port")
+    nm_port: str = Field(..., description="Node manager communication port")
     parallel_config: ParallelConfig = Field(..., description="Parallel configuration")
     endpoints: list[Endpoint] = Field(..., description="endpoints that managed by nm")
 
@@ -100,7 +101,7 @@ class EventType(str, Enum):
     SET = "set"
 
     def __repr__(self) -> str:
-        return str.__repr__(self.value)  # 序列化时返回值的表示
+        return str.__repr__(self.value)  # return the value of the enum
 
 
 class InsEventMsg(BaseModel):
