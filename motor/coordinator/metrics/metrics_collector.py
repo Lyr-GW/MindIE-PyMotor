@@ -167,7 +167,7 @@ class MetricsCollector(ThreadSafeSingleton):
 
         for ens_info in ins_info.endpoints.values():
             for en_info in ens_info.values():
-                metrics_str = self._get_server_metrics_single(en_info.ip, en_info.port)
+                metrics_str = self._get_server_metrics_single(en_info.ip, en_info.mgmt_port)
                 if not metrics_str:
                     return {}
                 collect["endpoints"][en_info.id] = {
