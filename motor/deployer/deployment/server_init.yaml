@@ -6,6 +6,8 @@ metadata:
     app: mindie-server
     ring-controller.atlas: ascend-910b
     job-name: xxxx
+  annotations:
+    sp-block: "xxxx"
   namespace: mindie
 spec:
   replicas: 2
