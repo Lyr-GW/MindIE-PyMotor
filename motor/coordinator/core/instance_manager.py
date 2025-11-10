@@ -7,7 +7,7 @@ from enum import Enum
 from motor.utils.logger import get_logger
 from motor.resources.instance import Instance, PDRole, Workload, Endpoint
 from motor.resources.http_msg_spec import EventType
-from motor.resources.singleton import ThreadSafeSingleton
+from motor.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
 
 logger = get_logger(__name__)
