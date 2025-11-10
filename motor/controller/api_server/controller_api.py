@@ -9,11 +9,14 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request
 
+from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.utils.logger import get_logger
 from motor.config.controller import ControllerConfig
-from motor.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg
+from motor.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
 from motor.controller.core.instance_assembler import InstanceAssembler
 from motor.controller.core.instance_manager import InstanceManager
+from motor.controller.api_server import probe_api
+from motor.controller.api_server import om_api
 
 
 logger = get_logger(__name__)
@@ -108,6 +111,11 @@ class ControllerAPI:
             "/controller/heartbeat": logging.ERROR,
             "/controller/register": logging.INFO,
             "/controller/reregister": logging.INFO,
+            "/controller/terminate-instance": logging.INFO,
+            "/v1/alarm/coordinator": logging.ERROR,
+            "/startup": logging.INFO,
+            "/readiness": logging.INFO,
+            "/liveness": logging.ERROR
         }
         logging.getLogger("uvicorn.access").addFilter(ApiAccessFilter(api_filters))
 
@@ -116,6 +124,10 @@ class ControllerAPI:
         app.add_api_route("/controller/heartbeat", self._heartbeat, methods=POST_METHODS)
         app.add_api_route("/controller/register", self._register, methods=POST_METHODS)
         app.add_api_route("/controller/reregister", self._reregister, methods=POST_METHODS)
+        app.add_api_route("/controller/terminate-instance", self._terminate_instance, methods=["POST"])
+
+        app.include_router(probe_api.router)
+        app.include_router(om_api.router)
 
         return app
 
@@ -160,8 +172,8 @@ class ControllerAPI:
             enable_tls = os.environ.get("ENABLE_TLS", "0").lower() in ("1", "true", "yes")
             logger.info("Starting API server on %s:%d TLS=%s", self.host, self.port, enable_tls)
             if enable_tls:
-                cert_path = os.environ.get("CERT_PATH", self.config.controller_api_cert_path)
-                key_path = os.environ.get("KEY_PATH", self.config.controller_api_key_path)
+                cert_path = os.environ.get("CERT_PATH", self.config.cert_path)
+                key_path = os.environ.get("KEY_PATH", self.config.key_path)
                 server_config = uvicorn.Config(
                     self.app,
                     host=self.host, 
@@ -181,3 +193,17 @@ class ControllerAPI:
         finally:
             if self.loop and not self.loop.is_closed():
                 self.loop.close()
+
+    async def _terminate_instance(self, request: Request) -> dict:
+        body = await request.json()
+        try:
+            terminate_instance_msg = TerminateInstanceMsg(**body)
+        except Exception as e:
+            logger.error("Failed to parse TerminateInstanceMsg: %s, body: %s", e, body)
+            return {"error": "Invalid TerminateInstanceMsg format"}
+        logger.warning("Terminate instance, reason: %s", terminate_instance_msg.reason)
+        instance = InstanceManager.get_instance(terminate_instance_msg.instance_id)
+        for node_mgr in instance.get_node_managers():
+            api_client = NodeManagerApiClient()
+            api_client.stop(node_mgr)
+        return {"result": "Terminate instance succeed!"}
