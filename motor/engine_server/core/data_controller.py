@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+import threading
+import time
+from typing import Dict, Any
+from motor.engine_server.config.base import IConfig
+from motor.engine_server.utils.logger import run_log
+from motor.engine_server.factory.collector_factory import CollectorFactory
+from motor.engine_server.utils.reader_writer_lock import ReadPriorityRWLock
+
+
+class DataController:
+    def __init__(self, config: IConfig):
+        self.collect_interval = 3
+        collector_factory = CollectorFactory()
+        self.vllm_collector = collector_factory.create_collector(config)
+        self._data_map: Dict[str, Dict[str, Any]] = {
+            "metrics": {},
+            "health": {}
+        }
+        self._data_map_lock = ReadPriorityRWLock()
+        self._server_core = None
+        self._core_status = "init"
+        self._stop_event = threading.Event()
+        self._collect_thread = threading.Thread(
+            target=self._collect_loop,
+            name="data_controller_collect_thread",
+            daemon=True
+        )
+
+    def run(self):
+        if not self._collect_thread or not self._collect_thread.is_alive():
+            self._collect_thread.start()
+            run_log.info(f"DataController started, collect interval: {self.collect_interval}s")
+
+    def shutdown(self):
+        self._stop_event.set()
+        if self._collect_thread and self._collect_thread.is_alive():
+            self._collect_thread.join()
+        run_log.info("DataController stopped")
+
+    def set_server_core(self, server_core):
+        self._server_core = server_core
+
+    def get_metrics_data(self) -> Dict[str, Any]:
+        with self._data_map_lock.gen_rlock():
+            return {
+                "latest_metrics": self._data_map["metrics"].copy(),
+                "collector_name": self.vllm_collector.name
+            }
+
+    def get_health_data(self) -> Dict[str, Any]:
+        with self._data_map_lock.gen_rlock():
+            return {
+                "latest_health": self._data_map["health"].copy(),
+                "collector_name": self.vllm_collector.name
+            }
+
+    def _collect_loop(self):
+        while not self._stop_event.is_set() and self._core_status == "init":
+            try:
+                self._core_status = self._server_core.status() if self._server_core else "init"
+            except Exception as e:
+                run_log.error(f"Failed to get core status: {str(e)}", exc_info=True)
+            time.sleep(1)
+
+        while not self._stop_event.is_set():
+            self._do_collect()
+            time.sleep(self.collect_interval)
+
+    def _do_collect(self):
+        try:
+            latest_collect_result = self.vllm_collector.collect()
+            raw_latest_metrics = latest_collect_result.get("metrics", {})
+            raw_latest_health = latest_collect_result.get("health", {})
+
+            with self._data_map_lock.gen_wlock():
+                self._data_map["metrics"] = self._modify_data(raw_latest_metrics)
+                self._data_map["health"] = self._modify_data(raw_latest_health)
+
+        except Exception as e:
+            run_log.error(f"DataController collect failed: {str(e)}", exc_info=True)
+
+    def _modify_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
+        updated_data = raw_data.copy()
+        updated_data["core_status"] = self._core_status
+        return updated_data

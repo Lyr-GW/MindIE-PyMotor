@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+import argparse
+import sys
+import json
+from typing import Dict, Any, Optional, List
+from dataclasses import dataclass, field
+
+from vllm.utils import FlexibleArgumentParser
+from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+
+from motor.engine_server.config.base import BaseConfig, ServerConfig
+from motor.engine_server.utils.logger import run_log
+from motor.engine_server.utils.ranktable import get_data_parallel_address
+from motor.engine_server.constants import constants
+
+
+def _add_argument_to_list(arg_list: list, key: str, value: Any):
+    if isinstance(value, bool):
+        if value:
+            arg_list.append(f"--{key}")
+    elif isinstance(value, list):
+        if value:
+            arg_list.append(f"--{key}")
+            for item in value:
+                arg_list.append(str(item))
+    else:
+        arg_list.append(f"--{key}")
+        arg_list.append(str(value))
+
+
+def _get_default_mapping() -> Dict[str, str]:
+    return {
+        'model_path': 'model',
+        'npu_mem_utils': 'gpu_memory_utilization',
+        'dp_rank': 'data_parallel_rank',
+        'dp_size': 'data_parallel_size',
+        'tp_size': 'tensor_parallel_size',
+        'enable_ep': 'enable_expert_parallel',
+    }
+
+
+@dataclass
+class VLLMConfig(BaseConfig):
+    args: Optional[argparse.Namespace] = None
+    data_parallel_address: Optional[str] = None
+    data_parallel_rpc_port: Optional[int] = None
+    kv_transfer_config: Optional[str] = None
+    mapping: Optional[Dict[str, str]] = field(default_factory=_get_default_mapping)
+
+    def initialize(self):
+        super().initialize()
+        if self.server_config.deploy_config.get_parallel_config(self.server_config.role).dp_size > 1:
+            self.data_parallel_address = get_data_parallel_address()
+            self.data_parallel_rpc_port = self.server_config.deploy_config. \
+                get_parallel_config(self.server_config.role).dp_rpc_port
+        if self.server_config.role == constants.PREFILL_ROLE or self.server_config.role == constants.DECODE_ROLE:
+            self._process_kv_transfer_config()
+
+    def validate(self):
+        super().validate()
+        if self.args is not None:
+            validate_parsed_serve_args(self.args)
+
+    def convert(self):
+        super().convert()
+        arg_list = self._get_param_list()
+        run_log.info(f'engine server parsed arg_list: {arg_list}')
+
+        sys.argv = ["serve"] + arg_list
+
+        parser = FlexibleArgumentParser(description="vLLM parser")
+        parser = make_arg_parser(parser)
+        self.args = parser.parse_args()
+
+    def get_args(self) -> argparse.Namespace:
+        return self.args
+
+    def get_server_config(self) -> ServerConfig:
+        return self.server_config
+
+    def _process_kv_transfer_config(self):
+        role = self.server_config.role
+        if role == constants.UNION_ROLE:
+            return
+
+        kv_transfer_config_str = self.server_config.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG)
+        if kv_transfer_config_str is None:
+            raise ValueError(f"{constants.KV_TRANSFER_CONFIG} is None in engine_config")
+
+        try:
+            kv_config = json.loads(kv_transfer_config_str)
+
+            if role == constants.PREFILL_ROLE:
+                kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
+            elif role == constants.DECODE_ROLE:
+                kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
+
+            kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
+
+            prefill_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
+            decode_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_DECODE)
+
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
+                constants.DP_SIZE] = prefill_parallel.dp_size
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
+                constants.TP_SIZE] = prefill_parallel.tp_size
+
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
+                constants.DP_SIZE] = decode_parallel.dp_size
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
+                constants.TP_SIZE] = decode_parallel.tp_size
+
+            self.kv_transfer_config = json.dumps(kv_config)
+        except Exception as e:
+            run_log.error(f"Failed to process kv_transfer_config: {e}")
+            raise ValueError(f"Failed to process kv_transfer_config: {e}") from e
+
+    def _flatten_config(self) -> Dict[str, Any]:
+        """
+        Flatten deploy_config into a simple key-value dictionary with the following rules:
+        1. Include all key-value pairs from engine_config
+        2. For other fields, only include those defined in self.mapping
+        3. Use the value from mapping as the final key name
+        4. If there's a conflict between engine_config and model_config, model_config takes precedence
+        """
+        flattened = {}
+
+        deploy_config = self.server_config.deploy_config
+
+        flattened.update(deploy_config.engine_config.configs)
+
+        model_config = deploy_config.model_config
+        for server_key, vllm_key in self.mapping.items():
+            if hasattr(model_config, server_key):
+                value = getattr(model_config, server_key)
+                if value is not None:
+                    flattened[vllm_key] = value
+
+        parallel_config = deploy_config.get_parallel_config(self.server_config.role)
+        for server_key, vllm_key in self.mapping.items():
+            if hasattr(parallel_config, server_key):
+                value = getattr(parallel_config, server_key)
+                if value is not None:
+                    flattened[vllm_key] = value
+
+        flattened.update({"host": self.server_config.server_host, "port": self.server_config.engine_port})
+        if self.data_parallel_address is not None:
+            flattened["data_parallel_address"] = self.data_parallel_address
+            flattened["data_parallel_rpc_port"] = self.data_parallel_rpc_port
+            flattened["data_parallel_rank"] = self.server_config.dp_rank
+        if self.kv_transfer_config is not None:
+            flattened["kv_transfer_config"] = self.kv_transfer_config
+
+        return flattened
+
+    def _get_param_list(self) -> List[str]:
+        processed_args = []
+
+        flattened_config = self._flatten_config()
+
+        for key, value in flattened_config.items():
+            formatted_key = key.replace('_', '-')
+            _add_argument_to_list(processed_args, formatted_key, value)
+
+        return processed_args

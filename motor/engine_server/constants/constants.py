@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+# log dir permission
+LOG_PRIVILEGE = 0o640
+MUSK_PRIVILEGE = 0o777
+LOG_DIR_PRIVILEGE = 0o750
+LOG_BAK_PRIVILEGE = 0o440
+
+# log level for flush into log file
+ENGINE_SERVER_FILE_LOG_LEVEL = "ENGINE_SERVER_FILE_LOG_LEVEL"
+# log level for print to screen
+ENGINE_SERVER_STD_LOG_LEVEL = "ENGINE_SERVER_STD_LOG_LEVEL"
+# to determine whether to print log into screen
+ENGINE_SERVER_LOG_STDOUT = 'ENGINE_SERVER_LOG_STDOUT'
+# log path to save
+ENGINE_SERVER_LOG_PATH = 'TASKD_LOG_PATH'
+
+# logger default config
+LOG_MAX_LINE_LENGTH = 1023
+LOG_SIMPLE_FORMAT = '[%(levelname)s]     %(asctime)s.%(msecs)06d %(process)d   %(filename)s:%(lineno)d     %(message)s'
+LOG_DATE_FORMAT = '%Y/%m/%d %H:%M:%S'
+LOG_BACKUP_FORMAT = '%Y-%m-%dT%H-%M-%S.%f'
+LOG_BACKUP_PATTERN = '\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}\\.\\d{3}'
+LOG_DEFAULT_FILE = "./engine_server_log/engine_server.log"
+LOG_DEFAULT_FILE_PATH = "./engine_server_log/"
+LOG_DEFAULT_FILE_NAME = "engine_server.log"
+LOG_DEFAULT_BACKUP_COUNT = 30
+LOG_DEFAULT_MAX_BYTES = 1024 * 1024 * 20
+
+# valid boundary value
+MIN_RANK_SIZE = 0
+MAX_RANK_SIZE = 4095
+MAX_FILE_NUMS = 4096
+MIN_DEVICE_NUM = 1
+MAX_DEVICE_NUM = 4096
+MAX_SIZE = 1024 * 1024
+MIN_SIZE = 0
+
+# PD role
+PREFILL_ROLE = "prefill"
+DECODE_ROLE = "decode"
+UNION_ROLE = "union"
+
+# kv transfer config keys
+KV_TRANSFER_CONFIG = "kv_transfer_config"
+KV_ROLE = "kv_role"
+KV_PRODUCER = "kv_producer"
+KV_CONSUMER = "kv_consumer"
+KV_CONNECTOR_EXTRA_CONFIG = "kv_connector_extra_config"
+KV_PREFILL = "prefill"
+KV_DECODE = "decode"
+
+# parallel config keys
+DP_SIZE = "dp_size"
+TP_SIZE = "tp_size"
+
+# engine config
+ENGINE_ID = "engine_id"
+
+# server status
+INIT_STATUS = "init"
+ABNORMAL_STATUS = "abnormal"
+NORMAL_STATUS = "normal"
+FAILED_STATUS = "failed"
+SUCCESS_STATUS = "success"
+
+# response keys
+STATUS_KEY = "status"
+LATEST_HEALTH = "latest_health"
+LATEST_METRICS = "latest_metrics"
+CORE_STATUS = "core_status"
+DATA_KEY = "data"
+
+# content type
+TEXT_PLAIN = "text/plain"
+APPLICATION_JSON = "application/json"
+TEXT_EVENT_STREAM = "text/event-stream"
+
+# http headers
+CONTENT_TYPE = "content-type"
+CONTENT_LENGTH = "content-length"
+TRANSFER_ENCODING = "transfer-encoding"
+CHUNKED_ENCODING = "chunked"
+
+# json field names
+JSON_ID_FIELD = "id"
+
+# vllm related constants
+CHAT_COMPLETION_PREFIX = "chatcmpl-"
+COMPLETION_PREFIX = "cmpl-"
+
+# vllm api paths
+COMPLETIONS_PATH = "/v1/completions"
+CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+
+# vllm stream data format
+DATA_PREFIX = "data: "
+DATA_DONE = "data: [DONE]"
+
+# mgmt interface name
+METRICS_INTERFACE = "/metrics"
+STATUS_INTERFACE = "/status"
