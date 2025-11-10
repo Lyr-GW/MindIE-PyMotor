@@ -52,7 +52,8 @@ class TestInstanceManager:
         self.endpoint = Endpoint(
             id=1,
             ip="127.0.0.1",
-            port="8080"
+            business_port="8080",
+            mgmt_port="8080"
         )
 
     def test_init(self):
@@ -619,7 +620,8 @@ class TestInstanceManagerThreadSafety:
         self.endpoint = Endpoint(
             id=1,
             ip="127.0.0.1",
-            port="8080"
+            business_port="8080",
+            mgmt_port="8080"
         )
 
     def test_concurrent_add_and_delete_instances(self):

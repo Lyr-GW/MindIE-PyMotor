@@ -60,6 +60,12 @@ def mix_instances():
 @pytest.fixture
 def scheduler_setup(prefill_instances, decode_instances, mix_instances):
     """Setup scheduler with instances and endpoints."""
+    # Clear all existing instances first
+    available_pool, unavailable_pool = InstanceManager().get_all_instances()
+    all_existing_instances = list(available_pool.values()) + list(unavailable_pool.values())
+    if all_existing_instances:
+        InstanceManager().refresh_instances(EventType.DEL, all_existing_instances)
+
     # Add endpoints to all instances
     all_instances = prefill_instances + decode_instances + mix_instances
     InstanceManager().refresh_instances(EventType.DEL, all_instances)
