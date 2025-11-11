@@ -4,11 +4,20 @@
 
 import time
 from enum import Enum
+from typing import Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
 
 from motor.resources.endpoint import Endpoint
 from motor.resources.instance import Instance
+
+
+class RequestType(Enum):
+    OPENAI = "openai"
+    TRITON = "triton"
+    TGI = "tgi"
+    VLLM = "vllm"
+    MINDIE = "mindie"
 
 
 class ReqState(Enum):
@@ -59,3 +68,10 @@ class ScheduledResource(BaseModel):
     """Represents a scheduled resource with an instance and endpoint"""
     instance: Instance = None
     endpoint: Endpoint = None
+
+
+class RequestResponse(BaseModel):
+    request_id: str
+    status: str
+    message: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None

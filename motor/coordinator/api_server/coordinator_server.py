@@ -34,9 +34,7 @@ from motor.coordinator.middleware.fastapi_middleware import (
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
 
 from motor.coordinator.models.request import (
-    RequestType, DeploymentMode,
-    OpenAICompletionRequest, OpenAIChatCompletionRequest,
-    RequestResponse, StreamResponse
+    RequestType, RequestResponse
 )
 
 from motor.coordinator.router.router import handle_request, handle_metaserver_request
