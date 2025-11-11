@@ -195,37 +195,51 @@ show_test_summary() {
         
         # Extract counts for various test states from the summary line
         if [ -n "$summary_line" ]; then
-            passed=$(echo "$summary_line" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1 || echo "0")
-            failed=$(echo "$summary_line" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+" | head -1 || echo "0")
-            errors=$(echo "$summary_line" | grep -oE "[0-9]+ error" | grep -oE "[0-9]+" | head -1 || echo "0")
-            skipped=$(echo "$summary_line" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1 || echo "0")
+            passed=$(echo "$summary_line" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1)
+            failed=$(echo "$summary_line" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+" | head -1)
+            errors=$(echo "$summary_line" | grep -oE "[0-9]+ error" | grep -oE "[0-9]+" | head -1)
+            skipped=$(echo "$summary_line" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1)
             # Extract warnings (supports both "warning" and "warnings")
-            warnings=$(echo "$summary_line" | grep -oE "[0-9]+ warnings?" | grep -oE "[0-9]+" | head -1 || echo "0")
+            warnings=$(echo "$summary_line" | grep -oE "[0-9]+ warnings?" | grep -oE "[0-9]+" | head -1)
         else
             # Fallback: try to extract from last lines without summary line format
-            passed=$(echo "$last_lines" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1 || echo "0")
-            failed=$(echo "$last_lines" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+" | head -1 || echo "0")
-            errors=$(echo "$last_lines" | grep -oE "[0-9]+ error" | grep -oE "[0-9]+" | head -1 || echo "0")
-            skipped=$(echo "$last_lines" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1 || echo "0")
-            warnings=$(echo "$last_lines" | grep -oE "[0-9]+ warnings?" | grep -oE "[0-9]+" | head -1 || echo "0")
+            passed=$(echo "$last_lines" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+" | head -1)
+            failed=$(echo "$last_lines" | grep -oE "[0-9]+ failed" | grep -oE "[0-9]+" | head -1)
+            errors=$(echo "$last_lines" | grep -oE "[0-9]+ error" | grep -oE "[0-9]+" | head -1)
+            skipped=$(echo "$last_lines" | grep -oE "[0-9]+ skipped" | grep -oE "[0-9]+" | head -1)
+            warnings=$(echo "$last_lines" | grep -oE "[0-9]+ warnings?" | grep -oE "[0-9]+" | head -1)
         fi
+
+        # Ensure variables are set to "0" if empty (no matches found)
+        passed=${passed:-0}
+        failed=${failed:-0}
+        errors=${errors:-0}
+        skipped=${skipped:-0}
+        warnings=${warnings:-0}
         
         # If still not found, try searching the entire file
         if [ -z "$passed" ] || [ "$passed" = "0" ]; then
-            passed=$(grep -oE "[0-9]+ passed" "$output_file" | grep -oE "[0-9]+" | head -1 || echo "0")
-            failed=$(grep -oE "[0-9]+ failed" "$output_file" | grep -oE "[0-9]+" | head -1 || echo "0")
-            errors=$(grep -oE "[0-9]+ error" "$output_file" | grep -oE "[0-9]+" | head -1 || echo "0")
-            skipped=$(grep -oE "[0-9]+ skipped" "$output_file" | grep -oE "[0-9]+" | head -1 || echo "0")
+            passed=$(grep -oE "[0-9]+ passed" "$output_file" | grep -oE "[0-9]+" | head -1)
+            failed=$(grep -oE "[0-9]+ failed" "$output_file" | grep -oE "[0-9]+" | head -1)
+            errors=$(grep -oE "[0-9]+ error" "$output_file" | grep -oE "[0-9]+" | head -1)
+            skipped=$(grep -oE "[0-9]+ skipped" "$output_file" | grep -oE "[0-9]+" | head -1)
             # Also search for warnings in the entire file
             if [ -z "$warnings" ] || [ "$warnings" = "0" ]; then
-                warnings=$(grep -oE "[0-9]+ warnings?" "$output_file" | grep -oE "[0-9]+" | head -1 || echo "0")
+                warnings=$(grep -oE "[0-9]+ warnings?" "$output_file" | grep -oE "[0-9]+" | head -1)
             fi
+
+            # Ensure variables are set to "0" if empty
+            passed=${passed:-0}
+            failed=${failed:-0}
+            errors=${errors:-0}
+            skipped=${skipped:-0}
+            warnings=${warnings:-0}
         fi
         
         # Check if there are warnings (from summary line)
-        local has_warnings=false
+        HAS_WARNINGS=false
         if [ -n "$warnings" ] && [ "$warnings" != "0" ]; then
-            has_warnings=true
+            HAS_WARNINGS=true
         fi
         
         # Display statistics
@@ -248,7 +262,7 @@ show_test_summary() {
             echo "  ⊘ Skipped: $skipped"
             has_stats=true
         fi
-        if [ "$has_warnings" = true ]; then
+        if [ "$HAS_WARNINGS" = true ]; then
             echo "  ⚠ Warnings: $warnings"
             has_stats=true
         fi
@@ -262,7 +276,7 @@ show_test_summary() {
         echo ""
         echo "Overall Status:"
         if [ $exit_code -eq 0 ]; then
-            if [ "$has_warnings" = true ]; then
+            if [ "$HAS_WARNINGS" = true ]; then
                 echo "  ⚠ All tests passed, but with warnings"
             else
                 echo "  ✓ All tests passed"
@@ -297,7 +311,7 @@ show_test_summary() {
         fi
         
         # If there are warnings, show hint for warning details
-        if [ "$has_warnings" = true ]; then
+        if [ "$HAS_WARNINGS" = true ]; then
             echo ""
             echo "Hint: Check the output above for detailed warning information"
         fi
@@ -334,10 +348,18 @@ TEST_EXIT_CODE=${PIPESTATUS[0]}
 # Display test result summary
 show_test_summary $TEST_EXIT_CODE "$OUTPUT_FILE"
 
+# Check for warnings and adjust exit code
+# If tests passed but there are warnings, treat as failure (exit code 1)
+if [ $TEST_EXIT_CODE -eq 0 ] && [ "$HAS_WARNINGS" = true ]; then
+    echo ""
+    echo "⚠ Detected warnings - treating as failure"
+    TEST_EXIT_CODE=1
+fi
+
 # Clean up temporary files
 if [ -f ".coveragerc.tmp" ]; then
     rm -f ".coveragerc.tmp"
 fi
 
-# Exit based on test results
+# Exit based on test results (0 only if all tests pass AND no warnings)
 exit $TEST_EXIT_CODE

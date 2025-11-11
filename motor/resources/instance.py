@@ -3,6 +3,7 @@
 
 import time
 import threading
+import copy
 from enum import Enum
 from types import MappingProxyType
 from pydantic import BaseModel, Field
@@ -323,7 +324,6 @@ class ReadOnlyInstance:
 
     def __deepcopy__(self, memo):
         """Support deep copying by creating a new instance with copied data."""
-        import copy
         # Create a new Instance with the same data, excluding the lock
         copied_instance = Instance(
             job_name=self._instance.job_name,
@@ -346,3 +346,42 @@ class ReadOnlyInstance:
         copied_instance.gathered_workload = copy.deepcopy(self._instance.gathered_workload, memo)
 
         return ReadOnlyInstance(copied_instance)
+
+    def get_instance(self) -> Instance:
+        """Get the underlying Instance object.
+
+        This method provides controlled access to the internal Instance
+        for scenarios where the raw Instance is needed (e.g., serialization).
+        The returned Instance should not be modified directly.
+        """
+        return self._instance
+
+    def to_instance(self) -> Instance:
+        """Create a deep copy of the underlying Instance.
+
+        This method creates a new Instance object with the same data as the
+        wrapped instance, ensuring that modifications to the returned Instance
+        do not affect the original data.
+        """
+        # Create a new Instance with the same data, excluding the lock
+        copied_instance = Instance(
+            job_name=self._instance.job_name,
+            model_name=self._instance.model_name,
+            id=self._instance.id,
+            role=self._instance.role
+        )
+        # Copy status and other attributes
+        copied_instance.status = self._instance.status
+        copied_instance.group_id = self._instance.group_id
+        copied_instance.parallel_config = copy.deepcopy(self._instance.parallel_config)
+
+        # Deep copy node managers
+        copied_instance.node_managers = copy.deepcopy(self._instance.node_managers)
+
+        # Deep copy endpoints (this is the most complex part)
+        copied_instance.endpoints = copy.deepcopy(self._instance.endpoints)
+
+        # Copy gathered workload
+        copied_instance.gathered_workload = copy.deepcopy(self._instance.gathered_workload)
+
+        return copied_instance

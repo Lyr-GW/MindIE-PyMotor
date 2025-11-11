@@ -1,4 +1,4 @@
-from motor.resources.instance import Instance, ParallelConfig
+from motor.resources.instance import Instance, ReadOnlyInstance, ParallelConfig
 from motor.resources.endpoint import Endpoint
 
 
@@ -55,3 +55,103 @@ def test_del_endpoints() -> None:
     assert instance.get_endpoints_num() == len(endpoints)
     instance.del_endpoints(pod_ip)
     assert instance.get_endpoints_num() == 0
+
+
+def test_readonly_instance_get_instance() -> None:
+    """Test ReadOnlyInstance get_instance method"""
+    # Create an instance
+    instance = Instance(
+        job_name="test_readonly",
+        model_name="test_model",
+        id=1,
+        role="prefill"
+    )
+
+    # Wrap it in ReadOnlyInstance
+    readonly_instance = ReadOnlyInstance(instance)
+
+    # Test get_instance method
+    retrieved_instance = readonly_instance.get_instance()
+    assert retrieved_instance is instance
+    assert retrieved_instance.job_name == "test_readonly"
+    assert retrieved_instance.model_name == "test_model"
+    assert retrieved_instance.id == 1
+    assert retrieved_instance.role == "prefill"
+
+
+def test_readonly_instance_delegation() -> None:
+    """Test ReadOnlyInstance attribute delegation"""
+    # Create an instance with some data
+    instance = Instance(
+        job_name="test_delegation",
+        model_name="test_model",
+        id=1,
+        role="prefill"
+    )
+
+    # Wrap it in ReadOnlyInstance
+    readonly_instance = ReadOnlyInstance(instance)
+
+    # Test attribute access delegation
+    assert readonly_instance.job_name == "test_delegation"
+    assert readonly_instance.model_name == "test_model"
+    assert readonly_instance.id == 1
+    assert readonly_instance.role == "prefill"
+
+    # Test method delegation
+    assert readonly_instance.get_endpoints_num() == 0
+
+
+def test_readonly_instance_modification_blocking() -> None:
+    """Test ReadOnlyInstance blocks modification methods"""
+    # Create an instance
+    instance = Instance(
+        job_name="test_blocking",
+        model_name="test_model",
+        id=1,
+        role="prefill"
+    )
+
+    # Wrap it in ReadOnlyInstance
+    readonly_instance = ReadOnlyInstance(instance)
+
+    # Test that modification methods are blocked
+    try:
+        readonly_instance.update_instance_status("inactive")
+        assert False, "Should have raised AttributeError"
+    except AttributeError as e:
+        assert "does not allow modification method 'update_instance_status'" in str(e)
+
+
+def test_readonly_instance_to_instance() -> None:
+    """Test ReadOnlyInstance to_instance method"""
+    # Create an instance with some data
+    instance = Instance(
+        job_name="test_to_instance",
+        model_name="test_model",
+        id=1,
+        role="prefill"
+    )
+    instance.status = "active"
+
+    # Wrap it in ReadOnlyInstance
+    readonly_instance = ReadOnlyInstance(instance)
+
+    # Test to_instance method creates a deep copy
+    copied_instance = readonly_instance.to_instance()
+
+    # Verify it's a different object
+    assert copied_instance is not instance
+    assert copied_instance is not readonly_instance.get_instance()
+
+    # Verify data is copied correctly
+    assert copied_instance.job_name == "test_to_instance"
+    assert copied_instance.model_name == "test_model"
+    assert copied_instance.id == 1
+    assert copied_instance.role == "prefill"
+    assert copied_instance.status == "active"
+
+    # Verify that modifying the copy doesn't affect the original
+    copied_instance.job_name = "modified_job"
+    assert instance.job_name == "test_to_instance"
+    assert readonly_instance.job_name == "test_to_instance"

@@ -15,10 +15,11 @@
 import time
 import queue
 import threading
+import copy
 from dataclasses import dataclass
 
 from motor.config.controller import ControllerConfig
-from motor.resources.instance import Instance
+from motor.resources.instance import Instance, ReadOnlyInstance
 from motor.resources.http_msg_spec import InsEventMsg, EventType
 from motor.utils.http_client import SafeHTTPSClient
 from motor.utils.logger import get_logger
@@ -30,7 +31,7 @@ logger = get_logger(__name__)
 @dataclass
 class Event:
     event_type: EventType
-    instance: Instance
+    instance: Instance | None
 
 
 class EventPusher(Observer):
@@ -42,6 +43,7 @@ class EventPusher(Observer):
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
         self.base_url = f"{config.coordinator_api_dns}:{config.coordinator_api_port}"
+        logger.info("Coordinator API URL: %s", self.base_url)
 
         self.heart_client = SafeHTTPSClient(
             base_url=self.base_url,
@@ -63,17 +65,21 @@ class EventPusher(Observer):
 
         logger.info("EventPusher initialized.")
 
-    def update(self, instance: Instance, event: ObserverEvent) -> None:
+    def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
+        # Event pusher will interact with coordinator and send instances.
+        # So it should just use Instance instead of ReadOnlyInstance.
         if event == ObserverEvent.INSTANCE_ADDED:
             with self.lock:
                 self.instances[instance.job_name] = instance
-            event = Event(EventType.ADD, instance)
+            # Deep copy the instance to ensure data consistency during async HTTP sending
+            event = Event(EventType.ADD, instance.to_instance())
             logger.info("Instance added: %s", instance.job_name)
         elif event == ObserverEvent.INSTANCE_SEPERATED:
             with self.lock:
                 if instance.job_name in self.instances:
                     del self.instances[instance.job_name]
-            event = Event(EventType.DEL, instance)
+            # Deep copy the instance to ensure data consistency during async HTTP sending
+            event = Event(EventType.DEL, instance.to_instance())
             logger.info("Instance removed: %s", instance.job_name)
         elif event == ObserverEvent.INSTANCE_REMOVED:
             # Separated event is already notified coordinator
@@ -121,7 +127,7 @@ class EventPusher(Observer):
                         with self.lock:
                             event_msg = InsEventMsg(
                                 event=event_type,
-                                instances=list(self.instances.values())
+                                instances=[instance.to_instance() for instance in self.instances.values()]
                             )
                     else:
                         logger.error("Unknown event type: %s", event_type)

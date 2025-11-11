@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch, MagicMock
 
 from motor.config.controller import ControllerConfig
 from motor.controller.core.event_pusher import EventPusher, Event
-from motor.resources.instance import Instance
+from motor.resources.instance import Instance, ReadOnlyInstance
 from motor.controller.core.observer import ObserverEvent
 from motor.resources.http_msg_spec import EventType
 
@@ -77,11 +77,12 @@ def test_event_consumer_add_event(event_pusher, mock_http_client):
 
     # add instances
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
-    event_pusher.instances["test_job"] = test_instance
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances["test_job"] = readonly_instance
 
     test_event = Event(
         event_type=EventType.ADD,
-        instance=test_instance
+        instance=readonly_instance.to_instance()
     )
     event_pusher.event_queue.put(test_event)
     # send stop single
@@ -113,11 +114,12 @@ def test_event_consumer_del_event(event_pusher, mock_http_client):
 
     # add instances
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
-    event_pusher.instances["test_job"] = test_instance
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances["test_job"] = readonly_instance
 
     test_event = Event(
         event_type=EventType.DEL,
-        instance=test_instance
+        instance=readonly_instance.to_instance()
     )
     event_pusher.event_queue.put(test_event)
     # send stop single
@@ -151,7 +153,8 @@ def test_event_consumer_set_event(event_pusher, mock_http_client):
     for i in range(3):
         job_name = "test_job" + str(i)
         test_instance = Instance(job_name=job_name, model_name="test_model", id=i, role="prefill")
-        event_pusher.instances[job_name] = test_instance
+        readonly_instance = ReadOnlyInstance(test_instance)
+        event_pusher.instances[job_name] = readonly_instance
 
     test_event = Event(
         event_type=EventType.SET,
@@ -187,11 +190,12 @@ def test_event_consumer_exception_handling(event_pusher, mock_http_client):
 
     # add instances
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
-    event_pusher.instances["test_job"] = test_instance
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances["test_job"] = readonly_instance
 
     test_event = Event(
         event_type=EventType.ADD,
-        instance=test_instance
+        instance=readonly_instance.to_instance()
     )
 
     event_pusher.event_queue.put(test_event)
@@ -285,24 +289,26 @@ def test_heartbeat_detector_failure(event_pusher, mock_http_client):
 def test_update_add_instance(event_pusher):
     """test update add instance"""
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
-    event_pusher.update(test_instance, ObserverEvent.INSTANCE_ADDED)
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_ADDED)
 
     # Verify that the instance was added to the dictionary
-    assert test_instance.job_name in event_pusher.instances
-    assert event_pusher.instances[test_instance.job_name] == test_instance
+    assert readonly_instance.job_name in event_pusher.instances
+    assert event_pusher.instances[readonly_instance.job_name] == readonly_instance
 
     # Verify that the event has been placed in the queue
     assert not event_pusher.event_queue.empty()
     event = event_pusher.event_queue.get()
     assert event.event_type == EventType.ADD
-    assert event.instance.job_name == test_instance.job_name
+    assert event.instance.job_name == readonly_instance.job_name
 
 def test_update_remove_instance(event_pusher):
     """test update remove instance"""
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
-    event_pusher.instances[test_instance.job_name] = test_instance
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances[readonly_instance.job_name] = readonly_instance
 
-    event_pusher.update(test_instance, ObserverEvent.INSTANCE_REMOVED)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_REMOVED)
 
     # INSTANCE_REMOVED 分支不再推送事件
     assert event_pusher.event_queue.empty()
@@ -310,33 +316,123 @@ def test_update_remove_instance(event_pusher):
 def test_update_seperated_instance(event_pusher):
     """test update seperated instance"""
     test_instance = Instance(job_name="test_job_seperated", model_name="test_model", id=1, role="prefill")
-    event_pusher.instances[test_instance.job_name] = test_instance
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances[readonly_instance.job_name] = readonly_instance
 
-    event_pusher.update(test_instance, ObserverEvent.INSTANCE_SEPERATED)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_SEPERATED)
 
     # Verify that the event has been placed in the queue
     assert not event_pusher.event_queue.empty()
     event = event_pusher.event_queue.get()
     # INSTANCE_SEPERATED 应作为 DEL 事件通知
     assert event.event_type == EventType.DEL
-    assert event.instance.job_name == test_instance.job_name
+    assert event.instance.job_name == readonly_instance.job_name
 
 def test_update_seperated_instance_recovery(event_pusher):
     """test update seperated instance recovery"""
     test_instance = Instance(job_name="test_job_recovery", model_name="test_model", id=1, role="prefill")
-    event_pusher.instances[test_instance.job_name] = test_instance
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances[readonly_instance.job_name] = readonly_instance
 
     # First separate the instance
-    event_pusher.update(test_instance, ObserverEvent.INSTANCE_SEPERATED)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_SEPERATED)
     # Clear the queue
     while not event_pusher.event_queue.empty():
         event_pusher.event_queue.get()
 
     # Then recover the instance
-    event_pusher.update(test_instance, ObserverEvent.INSTANCE_ADDED)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_ADDED)
 
     # Verify that the recovery event has been placed in the queue
     assert not event_pusher.event_queue.empty()
     event = event_pusher.event_queue.get()
     assert event.event_type == EventType.ADD
-    assert event.instance.job_name == test_instance.job_name
+    assert event.instance.job_name == readonly_instance.job_name
+
+
+def test_update_deep_copy_instance(event_pusher):
+    """test that update method performs deep copy of instance for data consistency"""
+    # Create a test instance with some data
+    original_job_name = "original_job"
+    original_model_name = "original_model"
+    test_instance = Instance(
+        job_name=original_job_name,
+        model_name=original_model_name,
+        id=1,
+        role="prefill"
+    )
+
+    # Add some test data
+    from motor.resources.instance import NodeManagerInfo
+    test_instance.node_managers.append(NodeManagerInfo(
+        pod_ip="192.168.1.1",
+        host_ip="10.0.0.1",
+        port="8080"
+    ))
+
+    # Wrap in ReadOnlyInstance
+    readonly_instance = ReadOnlyInstance(test_instance)
+
+    # Call update method (this should perform deep copy)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_ADDED)
+
+    # Get the event from queue
+    assert not event_pusher.event_queue.empty()
+    event = event_pusher.event_queue.get()
+    assert event.event_type == EventType.ADD
+
+    # Verify the event instance is a deep copy by checking it's not the same object
+    assert event.instance is not readonly_instance
+    assert event.instance.job_name == original_job_name
+    assert event.instance.model_name == original_model_name
+
+    # Verify nested objects are also deep copied
+    assert event.instance.node_managers is not test_instance.node_managers
+    assert len(event.instance.node_managers) == len(test_instance.node_managers)
+    assert event.instance.node_managers[0].pod_ip == test_instance.node_managers[0].pod_ip
+
+    # Modify the original instance after the event was created (through the underlying instance)
+    test_instance.job_name = "modified_job"
+    test_instance.model_name = "modified_model"
+    test_instance.node_managers[0].pod_ip = "192.168.1.2"
+
+    # Verify that the event instance is unaffected by the modifications
+    assert event.instance.job_name == original_job_name
+    assert event.instance.model_name == original_model_name
+    assert event.instance.node_managers[0].pod_ip == "192.168.1.1"
+
+    # Verify that the instance in the internal dictionary is still the original reference
+    assert event_pusher.instances[original_job_name] is readonly_instance
+
+
+def test_update_deep_copy_seperated_instance(event_pusher):
+    """test that update method performs deep copy for seperated instance events"""
+
+    # Create and add a test instance
+    original_job_name = "seperated_job"
+    test_instance = Instance(
+        job_name=original_job_name,
+        model_name="test_model",
+        id=1,
+        role="prefill"
+    )
+    readonly_instance = ReadOnlyInstance(test_instance)
+    event_pusher.instances[readonly_instance.job_name] = readonly_instance
+
+    # Call update method for seperated event (this should perform deep copy)
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_SEPERATED)
+
+    # Get the event from queue
+    assert not event_pusher.event_queue.empty()
+    event = event_pusher.event_queue.get()
+    assert event.event_type == EventType.DEL
+
+    # Verify the event instance is a deep copy
+    assert event.instance is not readonly_instance
+    assert event.instance.job_name == original_job_name
+
+    # Modify the original instance after the event was created
+    test_instance.job_name = "modified_seperated_job"
+
+    # Verify that the event instance is unaffected
+    assert event.instance.job_name == original_job_name
