@@ -73,9 +73,9 @@ class InstanceAssembler(ThreadSafeSingleton, Observer):
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
         self.assemble_instance_thread = threading.Thread(
-            target=self._instances_assembler,
+            target=self._instances_assembler_loop,
             daemon=True,
-            name="InstanceAssembler"
+            name="InstanceAssemblerLoop"
         )
         self.start_command_thread = threading.Thread(
             target=self._start_commmand_sender,
@@ -268,7 +268,7 @@ class InstanceAssembler(ThreadSafeSingleton, Observer):
             
         return is_succeed
 
-    def _instances_assembler(self) -> None:
+    def _instances_assembler_loop(self) -> None:
         # Check all instances in assembling, if one instance is ready,
         # notify relative node manager to start inference engine and 
         # handle this instance to instance manager.

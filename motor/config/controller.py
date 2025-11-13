@@ -30,7 +30,7 @@ class ControllerConfig:
     controller_api_host: str = '127.0.0.1'
     controller_api_port: int = 8000
     coordinator_api_dns: str = '127.0.0.1'
-    coordinator_api_port: int = 8000
+    coordinator_api_port: int = 9999
     enable_tls: bool = False
     cert_path: str = 'security/controller/cert/server.crt'
     key_path: str = 'security/controller/keys/server.key'
@@ -52,7 +52,7 @@ class ControllerConfig:
         """Load configuration from JSON file"""
         config_path = Path(json_path)
         logger.info(f"Loading configuration file: {config_path}")
-        
+
         cfg = {}
         if config_path.exists():
             try:
@@ -67,7 +67,7 @@ class ControllerConfig:
                 raise ValueError(f"Unable to read configuration file {json_path}: {e}") from e
         else:
             logger.warning(f"Configuration file does not exist, using default configuration: {config_path}")
-        
+
         # Create configuration instance
         try:
             config = cls(
@@ -97,15 +97,15 @@ class ControllerConfig:
                 strategy_center_check_internal=cfg.get('strategy_center_check_internal', 
                                                        cls.strategy_center_check_internal),
             )
-            
+
             # Set internal fields
             config.config_path = str(config_path)
             if config_path.exists():
                 config.last_modified = config_path.stat().st_mtime
-            
+
             logger.info("Configuration loading completed")
             return config
-            
+
         except Exception as e:
             logger.error(f"Failed to create configuration instance: {e}")
             raise

@@ -50,7 +50,9 @@ def data_controller():
         dc = DataController(config=mock_config)
         dc._mock_vllm_collector = mock_vllm_collector
         yield dc
-        dc.shutdown()
+        # Mock sleep during shutdown to avoid waiting
+        with patch("motor.engine_server.core.data_controller.time.sleep"):
+            dc.shutdown()
 
 
 def test_initialization(data_controller):
@@ -69,6 +71,11 @@ def test_initialization(data_controller):
 @patch("motor.engine_server.core.data_controller.time.sleep")
 def test_run_starts_thread(mock_sleep, data_controller):
     """test DataController.run() should start the collect thread when called"""
+    # Set server core to avoid thread getting stuck in init loop
+    mock_server_core = Mock()
+    mock_server_core.status.return_value = "normal"
+    data_controller.set_server_core(mock_server_core)
+
     assert data_controller._collect_thread.is_alive() is False
     data_controller.run()
     mock_sleep.assert_called()
@@ -81,7 +88,9 @@ def test_shutdown_stops_thread(mock_sleep, data_controller):
     data_controller.run()
     assert data_controller._collect_thread.is_alive() is True
 
-    data_controller.shutdown()
+    # Mock sleep in shutdown to avoid waiting for thread join
+    with patch("motor.engine_server.core.data_controller.time.sleep"):
+        data_controller.shutdown()
     assert data_controller._collect_thread.is_alive() is False
     assert data_controller._stop_event.is_set() is True
 

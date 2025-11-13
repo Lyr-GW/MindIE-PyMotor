@@ -42,7 +42,7 @@ class EventPusher(Observer):
         self.instances: dict[str, Instance] = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        self.base_url = f"{config.coordinator_api_dns}:{config.coordinator_api_port}"
+        self.base_url = f"http://{config.coordinator_api_dns}:{config.coordinator_api_port}"
         logger.info("Coordinator API URL: %s", self.base_url)
 
         self.heart_client = SafeHTTPSClient(
