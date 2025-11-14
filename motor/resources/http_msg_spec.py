@@ -12,8 +12,8 @@ logger = get_logger(__name__)
 
 
 class ServerInfo(BaseModel):
-    server_id: str = Field(..., description="Server ID")
-    host_ip: str = Field(..., description="Host IP address")
+    server_id: str = Field(..., description="Host IP address")
+    container_ip: str = Field(..., description="Container IP address")
     device: list[DeviceInfo] = Field(..., description="List of DeviceInfo")
 
 

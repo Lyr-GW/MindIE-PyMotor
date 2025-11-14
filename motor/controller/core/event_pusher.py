@@ -153,7 +153,7 @@ class EventPusher(Observer):
         hb_loss_cnt = 0
         while not self.stop_event.is_set():
             try:
-                response = self.heart_client.get("/coordinator/heartbeat", params={"status": "normal"})
+                response = self.heart_client.get("/health", params={"status": "normal"})
                 if self.is_coordinator_reset:
                     # SET event means push all instances to coordinator,
                     # so job_name is not a instance job_name, it is "coordinator_restart".

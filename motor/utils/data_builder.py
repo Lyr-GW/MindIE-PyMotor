@@ -20,7 +20,7 @@ def build_ins_ranktable(ins: Instance) -> Ranktable:
         server_list=[
             ServerInfo(
                 server_id=str(nm.pod_ip),
-                host_ip=nm.host_ip,
+                container_ip=nm.host_ip,
                 device=[
                     d 
                     for endpoint in ins.get_endpoints(nm.pod_ip).values()
@@ -52,7 +52,7 @@ def build_pod_ranktable(
         server_list=[
             ServerInfo(
                 server_id=pod_ip,
-                host_ip=pod_ip,
+                container_ip=pod_ip,
                 device=[
                     DeviceInfo(
                         device_ip=pod_ip,

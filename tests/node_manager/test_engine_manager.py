@@ -93,7 +93,7 @@ def sample_endpoints():
 def sample_ranktable():
     """Create sample ranktable"""
     device_info = DeviceInfo(device_id="0", device_ip="192.168.0.1", rank_id="0")
-    server_info = ServerInfo(server_id="1", host_ip="192.168.1.200", device=[device_info])
+    server_info = ServerInfo(server_id="1", container_ip="192.168.1.200", device=[device_info])
     return Ranktable(version="1.0", status="normal", server_count="1", server_list=[server_info])
 
 
@@ -173,7 +173,7 @@ class TestEngineManager:
         engine_manager.config.parallel_config = ParallelConfig(tp=2, pp=1)
         
         device_info = DeviceInfo(device_id="0", device_ip="192.168.0.1", rank_id="0")
-        server_info = ServerInfo(server_id="1", host_ip="192.168.1.200", device=[device_info])
+        server_info = ServerInfo(server_id="1", container_ip="192.168.1.200", device=[device_info])
         ranktable = Ranktable(version="1.0", status="normal", server_count="1", server_list=[server_info])
         engine_manager.config.ranktable = ranktable
         
@@ -252,7 +252,7 @@ class TestEngineManager:
         engine_manager.config.parallel_config = ParallelConfig(tp=2, pp=1)
         
         device_info = DeviceInfo(device_id="0", device_ip="192.168.0.1", rank_id="0")
-        server_info = ServerInfo(server_id="1", host_ip="192.168.1.200", device=[device_info])
+        server_info = ServerInfo(server_id="1", container_ip="192.168.1.200", device=[device_info])
         ranktable = Ranktable(version="1.0", status="normal", server_count="1", server_list=[server_info])
         engine_manager.config.ranktable = ranktable
         
@@ -281,7 +281,7 @@ class TestEngineManager:
         engine_manager.config.parallel_config = ParallelConfig(tp=2, pp=1)
         
         device_info = DeviceInfo(device_id="0", device_ip="192.168.0.1", rank_id="0")
-        server_info = ServerInfo(server_id="1", host_ip="192.168.1.200", device=[device_info])
+        server_info = ServerInfo(server_id="1", container_ip="192.168.1.200", device=[device_info])
         ranktable = Ranktable(version="1.0", status="normal", server_count="1", server_list=[server_info])
         engine_manager.config.ranktable = ranktable
         

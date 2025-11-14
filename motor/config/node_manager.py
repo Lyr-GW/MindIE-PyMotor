@@ -147,7 +147,7 @@ class NodeManagerConfig(ThreadSafeSingleton):
         server = (data.get("server_list") or [None])[0]
 
         cls.pod_ip = server.get("container_ip") if server else None
-        cls.host_ip = server.get("host_ip") if server else None
+        cls.host_ip = server.get("host_ip") or server.get("server_id") if server else None
 
         devices = server.get("device") if server else []
         for d in devices or []:

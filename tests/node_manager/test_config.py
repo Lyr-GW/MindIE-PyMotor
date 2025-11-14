@@ -33,7 +33,6 @@ def hccl_data():
         "version": "1.2",
         "server_list": [{
             "server_id": "90.90.97.30",
-            "host_ip": "90.90.97.30",
             "container_ip": "127.0.0.1",  # Used by NodeManagerConfig, not Ranktable
             "hardware_type": "Ascend910",  # Used by NodeManagerConfig, not Ranktable
             "device": [
@@ -130,8 +129,8 @@ class TestNodeManagerConfig:
         # Empty server_list is allowed (server will be None)
         ({"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}, None),
         # Empty device list is allowed (no devices will be added)
-        ({"status": "completed", "server_count": "1", "version": "1.0", 
-          "server_list": [{"server_id": "1", "host_ip": "192.168.1.100", "container_ip": "127.0.0.1", "device": []}]}, None),
+        ({"status": "completed", "server_count": "1", "version": "1.0",
+          "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, None),
     ])
     @patch.dict('os.environ')
     @patch('motor.config.node_manager.safe_open')
@@ -205,7 +204,7 @@ class TestNodeManagerConfig:
         assert config.ranktable.server_count == "1"
         assert len(config.ranktable.server_list) == 1
         assert config.ranktable.server_list[0].server_id == "90.90.97.30"
-        assert config.ranktable.server_list[0].host_ip == "90.90.97.30"
+        assert config.ranktable.server_list[0].container_ip == "127.0.0.1"
     
     @patch.dict('os.environ')
     @patch('motor.config.node_manager.safe_open')
@@ -220,7 +219,6 @@ class TestNodeManagerConfig:
             "version": "1.0",
             "server_list": [{
                 "server_id": "1",
-                "host_ip": "192.168.1.100",
                 "container_ip": "192.168.1.100",
                 "device": [
                     {"device_id": "0", "device_ip": "192.168.1.1", "rank_id": "0", "super_device_id": "12345"},

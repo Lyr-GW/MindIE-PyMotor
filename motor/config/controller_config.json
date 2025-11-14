@@ -4,6 +4,7 @@
   "coordinator_api_dns": "127.0.0.1",
   "coordinator_api_port": 9999,
   "enable_tls": false,
+  "ca_cert_path": "security/controller/cert/ca.crt",
   "cert_path": "security/controller/cert/server.crt",
   "key_path": "security/controller/keys/server.key",
   "instance_assemble_timeout": 600,

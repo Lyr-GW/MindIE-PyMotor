@@ -93,7 +93,7 @@ class TestHeartBeatManager:
     def sample_start_cmd_msg(self, sample_endpoints):
         """return start command message"""
         device_info = DeviceInfo( device_id="0", device_ip="192.168.0.1",super_device_id="0",rank_id="0",cluster_id="0")
-        sever_info = ServerInfo(server_id="1", host_ip="192.168.1.100", device=[device_info])
+        sever_info = ServerInfo(server_id="1", container_ip="192.168.1.100", device=[device_info])
         test_rank_table = Ranktable(version="1.0", status="normal", server_count="1",server_list=[sever_info])
         return StartCmdMsg(
             job_name="test_job",
