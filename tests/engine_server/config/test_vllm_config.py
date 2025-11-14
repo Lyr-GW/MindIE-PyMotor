@@ -409,39 +409,42 @@ class TestVLLMConfig:
         VLLMConfig = imports['VLLMConfig']
         vllm_config = VLLMConfig(server_config=prefill_server_config)
 
-        # Set kv_transfer_config
-        kv_config_str = json.dumps({
+        # Set kv_transfer_config as JSON object (no longer needs json.dumps)
+        kv_config = {
             "kv_connector_extra_config": {
                 "prefill": {},
                 "decode": {}
             }
-        })
+        }
 
-        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config_str):
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config):
             vllm_config._process_kv_transfer_config()
 
             assert vllm_config.kv_transfer_config is not None
-            kv_config = json.loads(vllm_config.kv_transfer_config)
-            assert kv_config["kv_role"] == "kv_producer"
-            assert kv_config["engine_id"] == "test-instance"
+            # Need to parse the JSON string to access the config
+            parsed_kv_config = json.loads(vllm_config.kv_transfer_config)
+            assert parsed_kv_config["kv_role"] == "kv_producer"
+            assert parsed_kv_config["engine_id"] == "test-instance"
 
     def test_process_kv_transfer_config_decode(self, imports, decode_server_config, mock_vllm_module):
         VLLMConfig = imports['VLLMConfig']
         vllm_config = VLLMConfig(server_config=decode_server_config)
 
-        kv_config_str = json.dumps({
+        kv_config = {
             "kv_connector_extra_config": {
                 "prefill": {},
                 "decode": {}
             }
-        })
+        }
 
-        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config_str):
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config):
             vllm_config._process_kv_transfer_config()
 
             assert vllm_config.kv_transfer_config is not None
-            kv_config = json.loads(vllm_config.kv_transfer_config)
-            assert kv_config["kv_role"] == "kv_consumer"
+            # Need to parse the JSON string to access the config
+            parsed_kv_config = json.loads(vllm_config.kv_transfer_config)
+            assert parsed_kv_config["kv_role"] == "kv_consumer"
+            assert parsed_kv_config["engine_id"] == "test-instance"
 
     def test_process_kv_transfer_config_union(self, imports, server_config, mock_vllm_module):
         VLLMConfig = imports['VLLMConfig']
@@ -465,8 +468,8 @@ class TestVLLMConfig:
         vllm_config = VLLMConfig(server_config=prefill_server_config)
         mock_run_log = mock_vllm_module['run_log']
 
-        # Set invalid JSON
-        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value="invalid-json"):
+        # Set invalid type (not a dictionary)
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value="invalid-type"):
             with pytest.raises(ValueError, match="Failed to process kv_transfer_config"):
                 vllm_config._process_kv_transfer_config()
 

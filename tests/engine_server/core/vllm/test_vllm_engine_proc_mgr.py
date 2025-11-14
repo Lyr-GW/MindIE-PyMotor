@@ -417,3 +417,62 @@ class TestProcManager:
         # Verify log messages
         mock_run_log.info.assert_any_call("shutting down...")
         mock_run_log.info.assert_any_call("shutdown complete.")
+        
+    def test_init_worker_manager_size_less_or_equal_1(self, proc_manager, mock_modules):
+        """Test _init_worker_manager method when size is less than or equal to 1"""
+        mock_get_child_processes = mock_modules['mock_get_child_processes']
+        mock_WorkerManager = mock_modules['mock_WorkerManager']
+        
+        # Reset mocks
+        mock_get_child_processes.reset_mock()
+        mock_WorkerManager.reset_mock()
+        
+        # Setup mock core_manager
+        proc_manager.core_manager = MagicMock()
+        proc_manager.core_manager.processes = [MagicMock()]
+        
+        # Call method with size=1
+        proc_manager._init_worker_manager(size=1)
+        
+        # Verify get_child_processes was not called
+        mock_get_child_processes.assert_not_called()
+        
+        # Verify WorkerManager was not initialized
+        mock_WorkerManager.assert_not_called()
+        
+        # Verify worker_manager remains None
+        assert proc_manager.worker_manager is None
+        
+    def test_init_worker_manager_size_greater_than_1(self, proc_manager, mock_modules):
+        """Test _init_worker_manager method when size is greater than 1"""
+        mock_get_child_processes = mock_modules['mock_get_child_processes']
+        mock_WorkerManager = mock_modules['mock_WorkerManager']
+        mock_run_log = mock_modules['mock_run_log']
+        
+        # Reset mocks
+        mock_get_child_processes.reset_mock()
+        mock_WorkerManager.reset_mock()
+        mock_run_log.reset_mock()
+        
+        # Setup mock core_manager
+        proc_manager.core_manager = MagicMock()
+        proc_manager.core_manager.processes = [MagicMock(), MagicMock()]
+        
+        # Mock return value for get_child_processes
+        child_processes = [1, 2, 3]
+        mock_get_child_processes.return_value = child_processes
+        
+        # Call method with size=2
+        proc_manager._init_worker_manager(size=2)
+        
+        # Verify get_child_processes was called
+        mock_get_child_processes.assert_called_once_with(proc_manager.core_manager.processes)
+        
+        # Verify log message was logged
+        mock_run_log.info.assert_called_once_with(f"worker processes is: {child_processes}")
+        
+        # Verify WorkerManager was initialized
+        mock_WorkerManager.assert_called_once_with(child_processes)
+        
+        # Verify worker_manager was set
+        assert proc_manager.worker_manager is not None

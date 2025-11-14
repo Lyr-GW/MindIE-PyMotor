@@ -97,13 +97,11 @@ class ProcManager:
         run_log.info("shutdown complete.")
 
     def _init_worker_manager(self, size: int):
+        if size <= 1:
+            return # when size == 1, enginecore and worker in same process
         child_processes = get_child_processes(self.core_manager.processes)
-
-        if 1 < size != len(child_processes):
-            raise RuntimeError(f"Expected {size} worker processes, got {len(child_processes)}")
-        if size > 1:
-            run_log.info(f"worker processes is: {child_processes}")
-            self.worker_manager = WorkerManager(child_processes)
+        run_log.info(f"worker processes is: {child_processes}")
+        self.worker_manager = WorkerManager(child_processes)
 
     def _run_multi_server(self):
         server_instance_count = self.args.api_server_count

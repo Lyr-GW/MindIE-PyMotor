@@ -17,17 +17,17 @@ class TestRankTable:
         rank_table_content = {
             "server_list": [
                 {
-                    "host_ip": "192.168.1.100",
+                    "container_ip": "192.168.1.100",
                     "device": [
-                        {"rank_id": 0},
-                        {"rank_id": 1}
+                        {"rank_id": "0"},
+                        {"rank_id": "1"}
                     ]
                 },
                 {
-                    "host_ip": "192.168.1.101",
+                    "container_ip": "192.168.1.101",
                     "device": [
-                        {"rank_id": 2},
-                        {"rank_id": 3}
+                        {"rank_id": "2"},
+                        {"rank_id": "3"}
                     ]
                 }
             ]
@@ -123,10 +123,10 @@ class TestRankTable:
         rank_table_content = {
             "server_list": [
                 {
-                    "host_ip": "192.168.1.100",
+                    "container_ip": "192.168.1.100",
                     "device": [
-                        {"rank_id": 1},
-                        {"rank_id": 2}
+                        {"rank_id": "1"},
+                        {"rank_id": "2"}
                     ]
                 }
             ]
@@ -173,17 +173,17 @@ class TestRankTable:
         rank_table_content = {
             "server_list": [
                 {
-                    "host_ip": "192.168.1.100",
+                    "container_ip": "192.168.1.100",
                     "device": [
-                        {"rank_id": 2},
-                        {"rank_id": 3}
+                        {"rank_id": "2"},
+                        {"rank_id": "3"}
                     ]
                 },
                 {
-                    "host_ip": "192.168.1.101",
+                    "container_ip": "192.168.1.101",
                     "device": [
-                        {"rank_id": 0},
-                        {"rank_id": 1}
+                        {"rank_id": "0"},
+                        {"rank_id": "1"}
                     ]
                 }
             ]
@@ -209,3 +209,4 @@ class TestRankTable:
 
             # Verify result
             assert result == "192.168.1.101"
+
