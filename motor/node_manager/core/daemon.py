@@ -5,17 +5,19 @@
 import os
 import signal
 import ipaddress
+import subprocess
 
 
 from motor.resources.instance import PDRole
 from motor.resources.endpoint import Endpoint
 from motor.utils.singleton import ThreadSafeSingleton
 from motor.utils.logger import get_logger
+from motor.utils.env import Env
 
 
 logger = get_logger(__name__)
 MAX_PORT = 65535
-MIN_PORT = 1
+MIN_PORT = 1024
 
 
 class Daemon(ThreadSafeSingleton):
@@ -24,7 +26,7 @@ class Daemon(ThreadSafeSingleton):
             return
 
         self.engine_pids: list[int] = []
-        self.base_port = 80
+        self.base_port = 10000
 
         self._initialized = True
 
@@ -64,18 +66,26 @@ class Daemon(ThreadSafeSingleton):
             --role  prefill | decode | both
             --host engine service ip
             --port engine service port
+            --mgmt-port endpoint management port
+            --config-path engine config file path
         """
         try:
             for i, endpoint in enumerate(endpoints_info):
                 if not self._check_params(endpoint):
                     raise ValueError(f"Invalid endpoint parameters")
-                cmd = f"engine_server \
-                --dp-rank {i} \
-                --engine_id {instance_id} \
-                --role {pd_role_info.value} \
-                --host {endpoint.ip} \
-                --port {int(endpoint.business_port)}"
-                logger.info(cmd)
+                cmd = [
+                    "engine_server",
+                    "--dp-rank", str(i),
+                    "--engine_id", str(instance_id),
+                    "--role", str(pd_role_info.value),
+                    "--host", str(endpoint.ip),
+                    "--port", str(int(endpoint.business_port)),
+                    "--mgmt-port", str(int(endpoint.mgmt_port)),
+                    "--config-path", str(Env.motor_engine_path)
+                ]
+                logger.info(" ".join(cmd))
+                process = subprocess.Popen(cmd, shell=False)
+                self.engine_pids.append(process.pid)
         except Exception as e:
             raise RuntimeError(f"Failed to pull engine: {e}") from e
 

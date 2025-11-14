@@ -15,8 +15,8 @@ from motor.utils.env import Env
 from motor.utils.patch_check import safe_open
 from motor.utils.logger import get_logger
 
-PP = "pp"
-TP = "tp"
+PP = "pp_size"
+TP = "tp_size"
 
 logger = get_logger(__name__)
 
@@ -114,7 +114,7 @@ class NodeManagerConfig(ThreadSafeSingleton):
         cls.parallel_config = ParallelConfig(**cfg["parallel_config"])
 
         try:
-            cls.role = PDRole(cfg.get("role"))
+            cls.role = PDRole(Env.role)
         except ValueError as e:
             raise ValueError(f"Invalid role value") from e
 

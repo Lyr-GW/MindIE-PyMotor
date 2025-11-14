@@ -32,7 +32,7 @@ def create_config_mock(config_data, hccl_data):
 @pytest.fixture
 def config_data():
     return {
-        "parallel_config": {"tp": 2, "pp": 1},
+        "parallel_config": {"tp_size": 2, "pp_size": 1},
         "role": "both",
         "controller_api_dns": "localhost",
         "controller_api_port": 8080,
@@ -65,7 +65,8 @@ class TestHeartBeatManager:
     def heart_beat_manager(self, config_data, hccl_data):
         """return HeartBeatManager instance"""
         with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
-             patch('threading.Thread') as mock_thread_class:
+             patch('threading.Thread') as mock_thread_class, \
+             patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'}):
             mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
             mock_thread = MagicMock()
             mock_thread_class.return_value = mock_thread
@@ -112,6 +113,7 @@ class TestHeartBeatManager:
             yield mock_client
 
     @patch('motor.config.node_manager.safe_open')
+    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'})
     def test_singleton_pattern(self, mock_safe_open, config_data, hccl_data):
         """test singleton pattern"""
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
@@ -280,6 +282,7 @@ class TestHeartBeatManager:
         assert mock_client_instance.post.called
 
     @patch('motor.config.node_manager.safe_open')
+    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'})
     def test_thread_safety(self, mock_safe_open, sample_start_cmd_msg, config_data, hccl_data):
         """test thread safety"""
         import threading

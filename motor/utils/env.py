@@ -8,19 +8,27 @@ import os
 class Env:
     @property
     def job_name(self):
-        return os.getenv("JOB_NAME", "test_job")
+        return os.getenv("JOB_NAME", None)
 
     @property
     def config_path(self):
-        return os.getenv("CONFIG_PATH", "motor/")
+        return os.getenv("CONFIG_PATH", None)
 
     @property
     def home_hccl_path(self):
-        return os.getenv("HOME_HCCL_PATH", "motor/config")
+        return os.getenv("HOME_HCCL_PATH", None)
 
     @property
     def ranktable_path(self):
         return os.getenv("RANKTABLE_PATH", None)
+
+    @property
+    def motor_engine_path(self):
+        return os.getenv("MOTOR_ENGINE_PATH", None)
+    
+    @property
+    def role(self):
+        return os.getenv("ROLE", None)
 
     @property
     def pod_ip(self):

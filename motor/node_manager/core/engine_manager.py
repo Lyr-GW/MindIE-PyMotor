@@ -15,6 +15,7 @@ from motor.resources.endpoint import Endpoint, DeviceInfo
 from motor.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
 from motor.utils.logger import get_logger
+from motor.utils.env import Env
 
 
 logger = get_logger(__name__)
@@ -101,13 +102,7 @@ class EngineManager(ThreadSafeSingleton):
         """
 
         # Determine output directory and filename
-        output_dir = os.path.join(os.getcwd(), "ranktables")
-        os.makedirs(output_dir, exist_ok=True)
-        if hasattr(self, "instance_id"):
-            fname = f"ranktable_{self.instance_id}.json"
-        else:
-            fname = "ranktable_unknown.json"
-        output_path = os.path.join(output_dir, fname)
+        output_path = os.path.join(Env.ranktable_path)
 
         try:
             # If ranktable has model_dump (pydantic), use it; otherwise, use as dict

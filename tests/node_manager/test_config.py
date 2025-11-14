@@ -16,7 +16,7 @@ from motor.resources.instance import ParallelConfig, PDRole
 @pytest.fixture
 def config_data():
     return {
-        "parallel_config": {"tp": 2, "pp": 1},
+        "parallel_config": {"tp_size": 2, "pp_size": 1},
         "role": "both",
         "controller_api_dns": "localhost", 
         "controller_api_port": 8080,
@@ -80,7 +80,7 @@ def clear_node_manager_config():
 
 class TestNodeManagerConfig:
     
-    @patch.dict('os.environ')  
+    @patch.dict('os.environ', {'ROLE': 'both'})  
     @patch('motor.config.node_manager.safe_open')
     def test_init_success(self, mock_safe_open, config_data, hccl_data):
         clear_node_manager_config()
@@ -98,21 +98,27 @@ class TestNodeManagerConfig:
         assert config.ranktable.status == "completed"
         assert config.ranktable.version == "1.2"
     
-    @pytest.mark.parametrize("invalid_config,expected_error", [
-        ({"role": "both"}, "Invalid config json"),  
-        ({"parallel_config": {"tp": 1, "pp": 1}, "role": "invalid"}, "Invalid role value"),  # 无效role
+    @pytest.mark.parametrize("invalid_config,expected_error,role_env", [
+        ({"role": "both"}, "Invalid config json", "both"),  
+        ({"parallel_config": {"tp_size": 1, "pp_size": 1}, "role": "invalid", "controller_api_dns": "localhost", "controller_api_port": 8080, "node_manager_port": 8080, "model_name": "vllm"}, "Invalid role value", "invalid"),  # 无效role
     ])
     @patch.dict('os.environ')
     @patch('motor.config.node_manager.safe_open')
-    def test_config_validation_errors(self, mock_safe_open, invalid_config, expected_error):
+    def test_config_validation_errors(self, mock_safe_open, invalid_config, expected_error, role_env):
         clear_node_manager_config()
         
-        invalid_config.update({
-            "controller_api_dns": "localhost", 
-            "controller_api_port": 8080,
-            "node_manager_port": 8080,
-            "model_name": "vllm"
-        })
+        # Only update if parallel_config is missing (first test case)
+        if "parallel_config" not in invalid_config:
+            invalid_config.update({
+                "controller_api_dns": "localhost", 
+                "controller_api_port": 8080,
+                "node_manager_port": 8080,
+                "model_name": "vllm"
+            })
+        
+        # Set ROLE environment variable
+        import os
+        os.environ['ROLE'] = role_env
         
         mock_safe_open.side_effect = create_config_mock(
             invalid_config, 
@@ -132,7 +138,7 @@ class TestNodeManagerConfig:
         ({"status": "completed", "server_count": "1", "version": "1.0",
           "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, None),
     ])
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_validation_errors(self, mock_safe_open, invalid_hccl, expected_error, config_data):
         clear_node_manager_config()
@@ -151,7 +157,7 @@ class TestNodeManagerConfig:
             elif invalid_hccl.get("server_list", [{}])[0].get("device") == []:
                 assert len(config.device_info) == 0
     
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_calculate_endpoint_num(self, mock_safe_open, config_data, hccl_data):
         clear_node_manager_config()
@@ -164,7 +170,7 @@ class TestNodeManagerConfig:
         assert len(config.mgmt_ports) == config.endpoint_num
         assert len(config.service_ports) == config.endpoint_num
     
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_singleton_behavior(self, mock_safe_open, config_data, hccl_data):
         clear_node_manager_config()
@@ -189,7 +195,7 @@ class TestNodeManagerConfig:
                 data = json.load(f)
                 assert data["status"] == "completed"
     
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_ranktable_creation(self, mock_safe_open, config_data, hccl_data):
         """Test that ranktable is properly created from HCCL data"""
@@ -206,7 +212,7 @@ class TestNodeManagerConfig:
         assert config.ranktable.server_list[0].server_id == "90.90.97.30"
         assert config.ranktable.server_list[0].container_ip == "127.0.0.1"
     
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_with_super_device_id(self, mock_safe_open, config_data):
         """Test parsing HCCL with super_device_id"""
@@ -234,7 +240,7 @@ class TestNodeManagerConfig:
         assert config.device_info[0].super_device_id == "12345"
         assert config.device_info[1].super_device_id == "67890"
     
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_empty_server_list(self, mock_safe_open, config_data):
         """Test parsing HCCL with empty server_list (should handle None gracefully)"""
@@ -256,7 +262,7 @@ class TestNodeManagerConfig:
         assert len(config.device_info) == 0
         assert config.ranktable is not None  # Ranktable should still be created
     
-    @patch.dict('os.environ')
+    @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_empty_device_list(self, mock_safe_open, config_data):
         """Test parsing HCCL with empty device list"""

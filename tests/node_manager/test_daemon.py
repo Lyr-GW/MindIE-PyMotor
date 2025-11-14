@@ -34,8 +34,8 @@ class TestDaemon:
     
     @pytest.mark.parametrize("port_num,expected_service,expected_mgmt", [
         (0, [], []),
-        (3, ['80', '82', '84'], ['81', '83', '85']),
-        (1, ['80'], ['81'])
+        (3, ['10000', '10002', '10004'], ['10001', '10003', '10005']),
+        (1, ['10000'], ['10001'])
     ])
     def test_gen_engine_ports(self, daemon, port_num, expected_service, expected_mgmt):
         result = daemon.gen_engine_ports(port_num)
@@ -81,7 +81,7 @@ class TestDaemon:
         ("192.168.1.100", "not_number", False),
         ("192.168.1.100", "0", False),
         ("192.168.1.100", "99999", False),
-        ("192.168.1.100", "1", True),
+        ("192.168.1.100", "1", False),
         ("192.168.1.100", "65535", True),
     ])
     def test_check_params(self, daemon, ip, port, expected):

@@ -22,7 +22,7 @@ from motor.resources.instance import ParallelConfig, PDRole
 @pytest.fixture
 def config_data():
     return {
-        "parallel_config": {"tp": 2, "pp": 1},
+        "parallel_config": {"tp_size": 2, "pp_size": 1},
         "role": "both",
         "controller_api_dns": "localhost",
         "controller_api_port": 8080,
@@ -65,7 +65,7 @@ def engine_manager(config_data, hccl_data):
     """Create EngineManager instance with mocked config"""
     with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
          patch('threading.Thread') as mock_thread_class, \
-         patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons'}):
+         patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'}):
         
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
         mock_thread = MagicMock()
@@ -113,7 +113,7 @@ class TestEngineManager:
     
     @patch('motor.config.node_manager.safe_open')
     @patch('threading.Thread')
-    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons'})
+    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'})
     def test_init_success(self, mock_thread_class, mock_safe_open, config_data, hccl_data):
         """Test EngineManager initialization"""
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
@@ -135,7 +135,7 @@ class TestEngineManager:
     
     @patch('motor.config.node_manager.safe_open')
     @patch('threading.Thread')
-    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons'})
+    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'})
     def test_singleton_pattern(self, mock_thread_class, mock_safe_open, config_data, hccl_data):
         """Test singleton pattern"""
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
@@ -404,16 +404,19 @@ class TestEngineManager:
         """Test _write_ranktable_to_file"""
         temp_dir = tempfile.mkdtemp()
         try:
-            with patch('os.getcwd', return_value=temp_dir):
+            ranktable_dir = os.path.join(temp_dir, "ranktables")
+            os.makedirs(ranktable_dir, exist_ok=True)
+            ranktable_path = os.path.join(ranktable_dir, "ranktable_1.json")
+            
+            with patch.dict('os.environ', {'RANKTABLE_PATH': ranktable_path}):
                 engine_manager.instance_id = 1
                 engine_manager.instance_ranktable = sample_ranktable
                 
                 engine_manager._write_ranktable_to_file()
                 
-                expected_file = os.path.join(temp_dir, "ranktables", "ranktable_1.json")
-                assert os.path.exists(expected_file)
+                assert os.path.exists(ranktable_path)
                 
-                with open(expected_file, 'r') as f:
+                with open(ranktable_path, 'r') as f:
                     data = json.load(f)
                     assert data["version"] == "1.0"
                     assert data["status"] == "normal"
@@ -424,7 +427,11 @@ class TestEngineManager:
         """Test _write_ranktable_to_file without instance_id"""
         temp_dir = tempfile.mkdtemp()
         try:
-            with patch('os.getcwd', return_value=temp_dir):
+            ranktable_dir = os.path.join(temp_dir, "ranktables")
+            os.makedirs(ranktable_dir, exist_ok=True)
+            ranktable_path = os.path.join(ranktable_dir, "ranktable_unknown.json")
+            
+            with patch.dict('os.environ', {'RANKTABLE_PATH': ranktable_path}):
                 # Remove instance_id attribute
                 if hasattr(engine_manager, 'instance_id'):
                     delattr(engine_manager, 'instance_id')
@@ -432,8 +439,7 @@ class TestEngineManager:
                 
                 engine_manager._write_ranktable_to_file()
                 
-                expected_file = os.path.join(temp_dir, "ranktables", "ranktable_unknown.json")
-                assert os.path.exists(expected_file)
+                assert os.path.exists(ranktable_path)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
     
