@@ -28,7 +28,7 @@ def get_data_parallel_address() -> Optional[str]:
 
     for server in json_data.get("server_list", []):
         for device in server.get("device", []):
-            if device.get("rank_id") == 0:
-                return server.get("host_ip")
+            if device.get("rank_id") == "0":
+                return server.get("container_ip")
 
     raise ValueError("No device with rank_id=0 found")

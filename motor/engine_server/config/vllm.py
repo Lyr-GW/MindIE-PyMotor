@@ -38,6 +38,7 @@ def _get_default_mapping() -> Dict[str, str]:
         'dp_rank': 'data_parallel_rank',
         'dp_size': 'data_parallel_size',
         'tp_size': 'tensor_parallel_size',
+        'pp_size': 'pipeline_parallel_size',
         'enable_ep': 'enable_expert_parallel',
     }
 
@@ -86,13 +87,11 @@ class VLLMConfig(BaseConfig):
         if role == constants.UNION_ROLE:
             return
 
-        kv_transfer_config_str = self.server_config.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG)
-        if kv_transfer_config_str is None:
+        kv_config = self.server_config.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG)
+        if kv_config is None:
             raise ValueError(f"{constants.KV_TRANSFER_CONFIG} is None in engine_config")
 
         try:
-            kv_config = json.loads(kv_transfer_config_str)
-
             if role == constants.PREFILL_ROLE:
                 kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
             elif role == constants.DECODE_ROLE:
