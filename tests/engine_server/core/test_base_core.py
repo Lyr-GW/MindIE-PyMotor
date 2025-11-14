@@ -7,6 +7,7 @@ from abc import ABC
 from unittest.mock import Mock, patch
 from motor.engine_server.core.base_core import IServerCore, BaseServerCore
 from motor.engine_server.config.base import IConfig
+from motor.engine_server.core.endpoint import METRICS_SERVICE, HEALTH_SERVICE
 
 
 @pytest.fixture
@@ -67,7 +68,6 @@ def test_is_server_core_is_abstract():
         IServerCore(config=Mock(spec=IConfig))
 
 
-
 def test_base_server_core_initialization(base_server_core, mock_config, mock_dependencies):
     """test BaseServerCore should initialize all dependencies correctly when created"""
     deps = mock_dependencies
@@ -81,17 +81,22 @@ def test_base_server_core_initialization(base_server_core, mock_config, mock_dep
 
     # Verify MetricsService is initialized with DataController
     deps["mock_metrics_cls"].assert_called_once_with(deps["mock_dc"])
-    assert base_server_core.metrics_service == deps["mock_metrics"]
+    assert base_server_core.services[METRICS_SERVICE] == deps["mock_metrics"]
 
     # Verify HealthService is initialized with DataController
     deps["mock_health_cls"].assert_called_once_with(deps["mock_dc"])
-    assert base_server_core.health_service == deps["mock_health"]
+    assert base_server_core.services[HEALTH_SERVICE] == deps["mock_health"]
 
     # Verify Endpoint is initialized with server config and services
-    expected_services = [deps["mock_metrics"], deps["mock_health"]]
-    deps["mock_endpoint_cls"].assert_called_once_with(mock_config.get_server_config.return_value, expected_services)
+    expected_services = {
+        METRICS_SERVICE: deps["mock_metrics"],
+        HEALTH_SERVICE: deps["mock_health"]
+    }
+    deps["mock_endpoint_cls"].assert_called_once_with(
+        mock_config.get_server_config.return_value,
+        expected_services
+    )
     assert base_server_core.endpoint == deps["mock_endpoint"]
-
 
 
 def test_initialize_method(base_server_core):
@@ -134,7 +139,6 @@ def test_status_method(base_server_core):
     """test BaseServerCore.status() should return None (no-op implementation)"""
     result = base_server_core.status()
     assert result is None
-
 
 
 def test_base_server_core_with_empty_config():

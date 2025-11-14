@@ -22,18 +22,23 @@ from motor.engine_server.constants.constants import (
     LATEST_METRICS,
     CORE_STATUS,
     TEXT_PLAIN,
-    DATA_KEY
+    DATA_KEY,
+    METRICS_SERVICE,
+    HEALTH_SERVICE
 )
 from motor.engine_server.core.service import Service
 from motor.engine_server.utils.logger import run_log
 
 
 class Endpoint:
-    def __init__(self, server_config: ServerConfig, services: List[Service] = None):
+    def __init__(self, server_config: ServerConfig, services: dict[str, Service]):
         self.host = server_config.server_host
         self.port = server_config.server_port
-        self.metrics_service = services[0]
-        self.health_service = services[1]
+        for service_key in [METRICS_SERVICE, HEALTH_SERVICE]:
+            if service_key not in services:
+                raise ValueError(f"services must contain key: {service_key}")
+        self.metrics_service = services[METRICS_SERVICE]
+        self.health_service = services[HEALTH_SERVICE]
         self.app = FastAPI(title="EngineServer Endpoint")
         self._stop_event = threading.Event()
         self._server: Optional[uvicorn.Server] = None

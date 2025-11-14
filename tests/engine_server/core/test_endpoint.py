@@ -64,6 +64,7 @@ def mock_modules():
 from motor.engine_server.config.base import ServerConfig
 from motor.engine_server.core.service import Service
 from motor.engine_server.core.endpoint import Endpoint
+from motor.engine_server.core.endpoint import METRICS_SERVICE, HEALTH_SERVICE
 
 
 @pytest.fixture(scope="function")
@@ -73,7 +74,10 @@ def endpoint():
     mock_server_config.server_port = 8000
     mock_metrics_service = Mock(spec=Service)
     mock_health_service = Mock(spec=Service)
-    mock_services = [mock_metrics_service, mock_health_service]
+    mock_services = {
+        METRICS_SERVICE: mock_metrics_service,
+        HEALTH_SERVICE: mock_health_service
+    }
 
     ep = Endpoint(
         server_config=mock_server_config,

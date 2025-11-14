@@ -102,3 +102,7 @@ DATA_DONE = "data: [DONE]"
 # mgmt interface name
 METRICS_INTERFACE = "/metrics"
 STATUS_INTERFACE = "/status"
+
+# service type
+METRICS_SERVICE = "metrics_service"
+HEALTH_SERVICE = "health_service"

@@ -8,6 +8,7 @@ from motor.engine_server.config.base import IConfig
 from motor.engine_server.core.data_controller import DataController
 from motor.engine_server.core.endpoint import Endpoint
 from motor.engine_server.core.service import MetricsService, HealthService
+from motor.engine_server.constants.constants import METRICS_SERVICE, HEALTH_SERVICE
 
 
 class IServerCore(ABC):
@@ -41,9 +42,11 @@ class BaseServerCore(IServerCore):
         super().__init__(config)
         self.config = config
         self.data_controller = DataController(self.config)
-        self.metrics_service = MetricsService(self.data_controller)
-        self.health_service = HealthService(self.data_controller)
-        self.endpoint = Endpoint(self.config.get_server_config(), [self.metrics_service, self.health_service])
+        self.services = {
+            METRICS_SERVICE: MetricsService(self.data_controller),
+            HEALTH_SERVICE: HealthService(self.data_controller),
+        }
+        self.endpoint = Endpoint(self.config.get_server_config(), self.services)
 
     def initialize(self) -> None:
         pass
