@@ -3,10 +3,10 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from motor.controller.core.instance_manager import InstanceManager
-from motor.resources.endpoint import Endpoint, EndpointStatus
-from motor.resources.http_msg_spec import HeartbeatMsg
-from motor.resources.instance import ParallelConfig, Instance, NodeManagerInfo, InsStatus
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.resources.endpoint import Endpoint, EndpointStatus
+from motor.common.resources.http_msg_spec import HeartbeatMsg
+from motor.common.resources.instance import ParallelConfig, Instance, NodeManagerInfo, InsStatus
+from motor.common.utils.singleton import ThreadSafeSingleton
 
 
 @pytest.fixture

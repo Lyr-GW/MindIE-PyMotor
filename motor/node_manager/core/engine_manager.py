@@ -9,13 +9,13 @@ import os
 import json
 import signal
 
-from motor.resources.http_msg_spec import Ranktable, RegisterMsg, StartCmdMsg, ReregisterMsg
-from motor.utils.http_client import SafeHTTPSClient
-from motor.resources.endpoint import Endpoint, DeviceInfo
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.resources.http_msg_spec import Ranktable, RegisterMsg, StartCmdMsg, ReregisterMsg
+from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.resources.endpoint import Endpoint, DeviceInfo
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
-from motor.utils.logger import get_logger
-from motor.utils.env import Env
+from motor.common.utils.logger import get_logger
+from motor.common.utils.env import Env
 
 
 logger = get_logger(__name__)

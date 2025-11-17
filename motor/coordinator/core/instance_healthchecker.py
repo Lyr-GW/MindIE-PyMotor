@@ -6,13 +6,13 @@ import time
 from typing import Any, Optional
 import threading
 import requests
-from motor.utils.logger import get_logger
-from motor.resources.instance import Instance
-from motor.resources.endpoint import Endpoint
+from motor.common.utils.logger import get_logger
+from motor.common.resources.instance import Instance
+from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.core.instance_manager import InstanceManager, UpdateInstanceMode
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
-from motor.utils.dummy_request import DummyRequestUtil
+from motor.common.utils.dummy_request import DummyRequestUtil
 
 logger = get_logger(__name__)
 

@@ -26,7 +26,6 @@ def mock_vllm_module():
 
     # Save other modules that might be mocked
     other_modules = [
-        'motor.engine_server.utils.logger',
         'motor.engine_server.utils.ranktable'
     ]
 
@@ -44,9 +43,10 @@ def mock_vllm_module():
     mock_vllm.entrypoints.openai.cli_args.make_arg_parser = MagicMock(return_value=argparse.ArgumentParser())
     mock_vllm.entrypoints.openai.cli_args.validate_parsed_serve_args = MagicMock()
 
-    # Mock logger.run_log
-    mock_logger = Mock()
-    mock_logger.run_log = MagicMock()
+    # Mock logger - now mock the get_logger function instead of run_log
+    mock_logger_module = Mock()
+    mock_run_log = MagicMock()
+    mock_logger_module.get_logger = MagicMock(return_value=mock_run_log)
 
     # Mock ranktable.get_data_parallel_address
     mock_ranktable = Mock()
@@ -58,7 +58,7 @@ def mock_vllm_module():
     sys.modules['vllm.entrypoints'] = mock_vllm.entrypoints
     sys.modules['vllm.entrypoints.openai'] = mock_vllm.entrypoints.openai
     sys.modules['vllm.entrypoints.openai.cli_args'] = mock_vllm.entrypoints.openai.cli_args
-    sys.modules['motor.engine_server.utils.logger'] = mock_logger
+    sys.modules['motor.common.utils.logger'] = mock_logger_module
     sys.modules['motor.engine_server.utils.ranktable'] = mock_ranktable
 
     # Build dictionary of mock objects to return
@@ -67,7 +67,7 @@ def mock_vllm_module():
         'flexible_parser': mock_vllm.utils.FlexibleArgumentParser,
         'make_arg_parser': mock_vllm.entrypoints.openai.cli_args.make_arg_parser,
         'validate_args': mock_vllm.entrypoints.openai.cli_args.validate_parsed_serve_args,
-        'run_log': mock_logger.run_log,
+        'run_log': mock_run_log,
         'get_data_parallel_address': mock_ranktable.get_data_parallel_address
     }
 

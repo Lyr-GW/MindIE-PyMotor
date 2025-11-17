@@ -4,8 +4,8 @@
 
 import requests
 from requests.exceptions import RequestException, Timeout
-from motor.utils.logger import get_logger
-from motor.resources.endpoint import Endpoint
+from motor.common.utils.logger import get_logger
+from motor.common.resources.endpoint import Endpoint
 from motor.config.coordinator import CoordinatorConfig
 
 logger = get_logger(__name__)

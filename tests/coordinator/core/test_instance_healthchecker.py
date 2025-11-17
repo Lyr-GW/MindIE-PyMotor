@@ -2,11 +2,11 @@ import pytest
 import time
 import threading
 from unittest.mock import Mock, patch
-from motor.resources.instance import Instance, PDRole
-from motor.resources.endpoint import Endpoint
+from motor.common.resources.instance import Instance, PDRole
+from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.core.instance_manager import InstanceManager, UpdateInstanceMode
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
-from motor.utils.dummy_request import DummyRequestUtil
+from motor.common.utils.dummy_request import DummyRequestUtil
 
 
 class TestInstanceHealthChecker:

@@ -9,8 +9,8 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from motor.node_manager.core.daemon import Daemon
-from motor.resources.endpoint import Endpoint
-from motor.resources.instance import PDRole
+from motor.common.resources.endpoint import Endpoint
+from motor.common.resources.instance import PDRole
 
 
 @pytest.fixture

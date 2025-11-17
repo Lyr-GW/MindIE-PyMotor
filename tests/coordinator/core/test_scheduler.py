@@ -1,9 +1,9 @@
 import pytest
 from motor.coordinator.scheduler.scheduler import Scheduler, SchedulingPolicyType
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
-from motor.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction
-from motor.resources.http_msg_spec import EventType
+from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
+from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction
+from motor.common.resources.http_msg_spec import EventType
 
 
 @pytest.fixture

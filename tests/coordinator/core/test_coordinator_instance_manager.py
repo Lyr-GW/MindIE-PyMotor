@@ -6,9 +6,9 @@ from unittest.mock import patch, MagicMock
 from motor.coordinator.core.instance_manager import (
     InstanceManager, UpdateInstanceMode
 )
-from motor.resources.instance import Instance, PDRole, Workload
-from motor.resources.endpoint import Endpoint
-from motor.resources.http_msg_spec import EventType
+from motor.common.resources.instance import Instance, PDRole, Workload
+from motor.common.resources.endpoint import Endpoint
+from motor.common.resources.http_msg_spec import EventType
 from motor.config.coordinator import CoordinatorConfig
 
 

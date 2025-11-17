@@ -155,7 +155,7 @@
             "/liveness",
             "/health",
             "/metrics",
-            "/v1/instances/refresh",
+            "/instances/refresh",
             "/docs",
             "/redoc",
             "/openapi.json",

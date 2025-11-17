@@ -2,9 +2,9 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch
 
-from motor.utils.data_builder import build_pod_ranktable, build_endpoints
-from motor.resources.instance import Instance, ParallelConfig
-from motor.resources.http_msg_spec import RegisterMsg, ReregisterMsg
+from motor.common.utils.data_builder import build_pod_ranktable, build_endpoints
+from motor.common.resources.instance import Instance, ParallelConfig
+from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg
 from motor.controller.core.observer import ObserverEvent
 from motor.controller.core.instance_assembler import InstanceAssembler
 
@@ -30,7 +30,7 @@ def test_config():
 
 def _cleanup_singleton():
     """Clean up singleton instances"""
-    from motor.utils.singleton import ThreadSafeSingleton
+    from motor.common.utils.singleton import ThreadSafeSingleton
     if InstanceAssembler in ThreadSafeSingleton._instances:
         assembler = ThreadSafeSingleton._instances[InstanceAssembler]
         try:

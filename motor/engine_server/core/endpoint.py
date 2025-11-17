@@ -27,7 +27,9 @@ from motor.engine_server.constants.constants import (
     HEALTH_SERVICE
 )
 from motor.engine_server.core.service import Service
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
+
+logger = get_logger("engine_server")
 
 
 class Endpoint:
@@ -53,18 +55,18 @@ class Endpoint:
     def run(self):
         if not self._server_thread or not self._server_thread.is_alive():
             self._server_thread.start()
-            run_log.info(f"Endpoint server started: http://{self.host}:{self.port}")
+            logger.info(f"Endpoint server started: http://{self.host}:{self.port}")
 
     def shutdown(self):
         if self._server:
             self._server.should_exit = True
-            run_log.info("Endpoint: Uvicorn server exit triggered")
+            logger.info("Endpoint: Uvicorn server exit triggered")
         self._stop_event.set()
         if self._server_thread and self._server_thread.is_alive():
             self._server_thread.join(timeout=5)
             log_msg = "exited" if not self._server_thread.is_alive() else "timeout"
-            run_log.info(f"Endpoint server thread {log_msg}")
-        run_log.info("Endpoint server stopped completely")
+            logger.info(f"Endpoint server thread {log_msg}")
+        logger.info("Endpoint server stopped completely")
 
     def _register_routes(self):
         @self.app.get(STATUS_INTERFACE)
@@ -77,7 +79,7 @@ class Endpoint:
                 server_core_status = health_data.get(LATEST_HEALTH, {}).get(CORE_STATUS, INIT_STATUS)
                 collect_status = health_data.get(LATEST_HEALTH, {}).get(STATUS_KEY, INIT_STATUS)
             if server_core_status == INIT_STATUS:
-                run_log.info("Server core is initializing.")
+                logger.info("Server core is initializing.")
                 return {
                     STATUS_KEY: INIT_STATUS
                 }
@@ -100,7 +102,7 @@ class Endpoint:
                 collect_status = metrics_data.get(LATEST_METRICS, {}).get(STATUS_KEY, INIT_STATUS)
 
             if server_core_status == INIT_STATUS:
-                run_log.info("Server core is initializing.")
+                logger.info("Server core is initializing.")
                 return Response(
                     content="",
                     media_type=TEXT_PLAIN,

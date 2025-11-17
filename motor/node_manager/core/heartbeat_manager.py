@@ -7,11 +7,11 @@ import time
 
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.engine_manager import EngineManager
-from motor.utils.logger import get_logger
-from motor.utils.singleton import ThreadSafeSingleton
-from motor.resources.endpoint import Endpoint, EndpointStatus
-from motor.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
-from motor.utils.http_client import SafeHTTPSClient
+from motor.common.utils.logger import get_logger
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.resources.endpoint import Endpoint, EndpointStatus
+from motor.common.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
+from motor.common.utils.http_client import SafeHTTPSClient
 
 logger = get_logger(__name__)
 

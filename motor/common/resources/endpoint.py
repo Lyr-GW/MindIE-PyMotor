@@ -4,7 +4,7 @@
 import time
 from enum import Enum
 from pydantic import BaseModel, Field
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 HEARTBEAT_TIMEOUT = 5 # 5 second
 
@@ -51,13 +51,13 @@ class Workload(BaseModel):
 class WorkloadAction(Enum):
     ALLOCATION = 'Allocation'
     RELEASE_KV = 'Release_KV'
-    RELEASE_TOKENS ='Release_Tokens'
+    RELEASE_TOKENS = 'Release_Tokens'
 
 
 class DeviceInfo(BaseModel):
     device_id: str = Field(..., description="Local rank id")
     device_ip: str = Field(..., description="Device IP address")
-    super_device_id: str|None = Field(None, description="Super device id, default is None")
+    super_device_id: str | None = Field(None, description="Super device id, default is None")
     rank_id: str = Field(..., description="Global rank id")
 
 
@@ -70,6 +70,7 @@ class EndpointStatus(str, Enum):
 
     def __repr__(self) -> str:
         return str.__repr__(self.value)
+
 
 class Endpoint(BaseModel):
     id: int = Field(..., description="Endpoint ID, it associated with data parallel rank id")
@@ -87,10 +88,10 @@ class Endpoint(BaseModel):
         ip: str,
         business_port: str,
         mgmt_port: str,
-        status: EndpointStatus|None = None,
-        device_infos: list[DeviceInfo]|None = None,
-        hb_timestamp: float|None = None,
-        workload: Workload|None = None
+        status: EndpointStatus | None = None,
+        device_infos: list[DeviceInfo] | None = None,
+        hb_timestamp: float | None = None,
+        workload: Workload | None = None
     ) -> None:
         super().__init__(
             id=id,

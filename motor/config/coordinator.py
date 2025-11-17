@@ -7,7 +7,7 @@ import json
 import logging
 from typing import Dict, Any, Optional
 from enum import Enum
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.singleton import ThreadSafeSingleton
 
 
 class DeployMode(Enum):
@@ -135,7 +135,7 @@ class APIKeyConfig:
         self.header_name = "Authorization"
         self.key_prefix = "Bearer "
         self.skip_paths = set(["/", "/startup", "/readiness", "/liveness", "/health", "/metrics", 
-                               "/v1/instances/refresh",
+                               "/instances/refresh",
                                "/docs", "/redoc", "/openapi.json", "/favicon.ico"])
 
 

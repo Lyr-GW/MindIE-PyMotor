@@ -7,7 +7,9 @@ import signal
 from motor.engine_server.config.base import IConfig
 from motor.engine_server.core.base_core import BaseServerCore
 from motor.engine_server.core.vllm.vllm_engine_proc_mgr import ProcManager
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
+
+logger = get_logger("engine_server")
 
 
 class VLLMServerCore(BaseServerCore):
@@ -31,13 +33,13 @@ class VLLMServerCore(BaseServerCore):
     def shutdown(self) -> None:
         super().shutdown()
         self.engine_proc_manager.shutdown()
-        run_log.info(f"[VLLMServerCore] vLLM shutdown completed")
+        logger.info(f"[VLLMServerCore] vLLM shutdown completed")
 
     def status(self) -> str:
         return self.engine_proc_manager.status
 
     def _signal_handler(self, sig: int, frame) -> None:
-        run_log.info(f"[VLLMServerCore] Received signal {sig} (SIGINT/SIGTERM), initiating shutdown")
+        logger.info(f"[VLLMServerCore] Received signal {sig} (SIGINT/SIGTERM), initiating shutdown")
         self.shutdown()
 
     def _register_signal_handlers(self) -> None:

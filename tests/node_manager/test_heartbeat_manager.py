@@ -14,8 +14,8 @@ os.environ['JOB_NAME'] = 'test_job'
 os.environ['POD_IP'] = '192.168.1.100'
 os.environ['CONFIG_PATH'] = './'
 
-from motor.resources.endpoint import Endpoint, EndpointStatus, DeviceInfo
-from motor.resources.http_msg_spec import StartCmdMsg, Ranktable, ServerInfo
+from motor.common.resources.endpoint import Endpoint, EndpointStatus, DeviceInfo
+from motor.common.resources.http_msg_spec import StartCmdMsg, Ranktable, ServerInfo
 from motor.node_manager.core.heartbeat_manager import HeartbeatManager
 
 

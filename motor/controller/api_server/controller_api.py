@@ -10,9 +10,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.config.controller import ControllerConfig
-from motor.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
+from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
 from motor.controller.core.instance_assembler import InstanceAssembler
 from motor.controller.core.instance_manager import InstanceManager
 from motor.controller.api_server import probe_api
@@ -30,30 +30,6 @@ def validate_cert_and_key(cert_path: str, key_path: str):
             first_line = f.readline().strip()
             if not first_line.startswith('-----BEGIN'):
                 raise ValueError(f"{desc} file format is nor correct: {path}")
-
-
-class ApiAccessFilter(logging.Filter):
-    """Suppress uvicorn access logs for specified APIs unless level >= configured level."""
-
-    def __init__(self, api_filters: dict[str, int] = None):
-        """
-        Args:
-            api_filters: dict mapping API paths to minimum log levels.
-                        e.g., {"/heartbeat": logging.ERROR, "/register": logging.WARNING}
-        """
-        super().__init__()
-        self.api_filters = api_filters or {}
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-        except Exception:
-            return True
-        if record.name == "uvicorn.access":
-            for path, min_level in self.api_filters.items():
-                if path in message:
-                    return record.levelno >= min_level
-        return True
 
 
 class ControllerAPI:

@@ -9,7 +9,7 @@ from fastapi import Request
 import httpx
 
 from motor.coordinator.models.request import RequestInfo, ReqState
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

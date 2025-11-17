@@ -4,7 +4,7 @@ import json
 import os
 from unittest.mock import patch, mock_open
 from motor.config.coordinator import CoordinatorConfig
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.singleton import ThreadSafeSingleton
 import logging
 
 # Configure logging

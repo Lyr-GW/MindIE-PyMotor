@@ -18,9 +18,9 @@ from unittest.mock import Mock, patch, MagicMock
 
 from motor.config.controller import ControllerConfig
 from motor.controller.core.event_pusher import EventPusher, Event
-from motor.resources.instance import Instance, ReadOnlyInstance
+from motor.common.resources.instance import Instance, ReadOnlyInstance
 from motor.controller.core.observer import ObserverEvent
-from motor.resources.http_msg_spec import EventType
+from motor.common.resources.http_msg_spec import EventType
 
 
 @pytest.fixture
@@ -363,7 +363,7 @@ def test_update_deep_copy_instance(event_pusher):
     )
 
     # Add some test data
-    from motor.resources.instance import NodeManagerInfo
+    from motor.common.resources.instance import NodeManagerInfo
     test_instance.node_managers.append(NodeManagerInfo(
         pod_ip="192.168.1.1",
         host_ip="10.0.0.1",

@@ -5,7 +5,7 @@ import signal
 import argparse
 from typing import Any
 
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 from motor.controller.api_server.controller_api import ControllerAPI
 from motor.config.controller import ControllerConfig, set_config_path, find_config_file
 from motor.controller.core.instance_assembler import InstanceAssembler

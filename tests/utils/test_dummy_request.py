@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import Mock, patch
 from requests.exceptions import Timeout, RequestException
-from motor.resources.endpoint import Endpoint
-from motor.utils.dummy_request import DummyRequestUtil
+from motor.common.resources.endpoint import Endpoint
+from motor.common.utils.dummy_request import DummyRequestUtil
 
 
 class TestDummyRequestUtil:

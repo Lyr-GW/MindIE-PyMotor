@@ -7,8 +7,8 @@ from fastapi.responses import StreamingResponse
 from motor.coordinator.models.request import ReqState
 from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.models.request import ScheduledResource
-from motor.resources.instance import PDRole
-from motor.utils.logger import get_logger
+from motor.common.resources.instance import PDRole
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

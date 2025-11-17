@@ -18,10 +18,10 @@ def mock_modules():
         'uvicorn.Config': sys.modules.get('uvicorn.Config')
     }
 
-    mock_run_log = MagicMock()
+    mock_logger = MagicMock()
     mock_logger_module = MagicMock()
-    mock_logger_module.run_log = mock_run_log
-    sys.modules['motor.engine_server.utils.logger'] = mock_logger_module
+    mock_logger_module.get_logger = MagicMock(return_value=mock_logger)
+    sys.modules['motor.common.utils.logger'] = mock_logger_module
 
     mock_fastapi = Mock()
     mock_fastapi.routes = []
@@ -49,7 +49,7 @@ def mock_modules():
     sys.modules['uvicorn.Server'] = lambda config: mock_uvicorn_server
     sys.modules['uvicorn.Config'] = Mock()
 
-    with patch('motor.engine_server.core.endpoint.run_log', mock_run_log):
+    with patch('motor.engine_server.core.endpoint.logger', mock_logger):
         try:
             yield
         finally:

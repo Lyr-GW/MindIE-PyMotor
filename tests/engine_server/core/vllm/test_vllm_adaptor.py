@@ -32,7 +32,7 @@ def mock_logger_module():
     
     # Create mock logger module
     mock_logger = Mock()
-    mock_logger.run_log = MagicMock()
+    mock_logger.get_logger = MagicMock(return_value=Mock())
     mock_logger.LogConfig = MockLogConfig
     
     # Replace module in sys.modules
@@ -40,7 +40,7 @@ def mock_logger_module():
     
     # Build dictionary of mock objects to return
     mock_objects = {
-        'run_log': mock_logger.run_log
+        'run_log': mock_logger.get_logger.return_value
     }
     
     # Provide mock objects to tests

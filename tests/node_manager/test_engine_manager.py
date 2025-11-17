@@ -14,9 +14,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from motor.node_manager.core.engine_manager import EngineManager
-from motor.resources.http_msg_spec import StartCmdMsg, Ranktable, ServerInfo, RegisterMsg, ReregisterMsg
-from motor.resources.endpoint import Endpoint, DeviceInfo, EndpointStatus
-from motor.resources.instance import ParallelConfig, PDRole
+from motor.common.resources.http_msg_spec import StartCmdMsg, Ranktable, ServerInfo, RegisterMsg, ReregisterMsg
+from motor.common.resources.endpoint import Endpoint, DeviceInfo, EndpointStatus
+from motor.common.resources.instance import ParallelConfig, PDRole
 
 
 @pytest.fixture

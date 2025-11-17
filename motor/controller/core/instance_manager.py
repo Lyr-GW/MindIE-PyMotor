@@ -6,11 +6,11 @@ import threading
 from collections.abc import Callable
 from fastapi import HTTPException
 
-from motor.resources.http_msg_spec import HeartbeatMsg
-from motor.utils.logger import get_logger
-from motor.resources.instance import Instance, InsStatus, InsConditionEvent, ReadOnlyInstance
+from motor.common.resources.http_msg_spec import HeartbeatMsg
+from motor.common.utils.logger import get_logger
+from motor.common.resources.instance import Instance, InsStatus, InsConditionEvent, ReadOnlyInstance
 from motor.controller.core.observer import Observer, ObserverEvent
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
 
 logger = get_logger(__name__)

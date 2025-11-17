@@ -7,13 +7,13 @@ import queue
 from enum import Enum
 from dataclasses import dataclass
 
-from motor.utils.logger import get_logger
-from motor.utils.data_builder import build_ins_ranktable, build_endpoints
-from motor.utils.http_client import SafeHTTPSClient
-from motor.utils.singleton import ThreadSafeSingleton
-from motor.resources.http_msg_spec import RegisterMsg, StartCmdMsg, ReregisterMsg
-from motor.resources.instance import Instance, ReadOnlyInstance
-from motor.resources.endpoint import Endpoint
+from motor.common.utils.logger import get_logger
+from motor.common.utils.data_builder import build_ins_ranktable, build_endpoints
+from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.resources.http_msg_spec import RegisterMsg, StartCmdMsg, ReregisterMsg
+from motor.common.resources.instance import Instance, ReadOnlyInstance
+from motor.common.resources.endpoint import Endpoint
 from motor.controller.core.instance_manager import InstanceManager
 from motor.controller.core.observer import Observer, ObserverEvent
 from motor.config.controller import ControllerConfig

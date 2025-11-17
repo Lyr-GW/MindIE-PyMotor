@@ -1,12 +1,12 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-from pydantic import BaseModel, Field
 from enum import Enum
+from pydantic import BaseModel, Field
 
-from motor.utils.logger import get_logger
-from motor.resources.instance import Instance, ParallelConfig
-from motor.resources.endpoint import Endpoint, DeviceInfo, EndpointStatus
+from motor.common.utils.logger import get_logger
+from motor.common.resources.instance import Instance, ParallelConfig
+from motor.common.resources.endpoint import Endpoint, DeviceInfo, EndpointStatus
 
 logger = get_logger(__name__)
 

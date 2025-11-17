@@ -13,7 +13,7 @@ from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

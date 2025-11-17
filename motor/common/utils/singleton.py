@@ -3,6 +3,7 @@
 
 import threading
 
+
 class ThreadSafeSingleton:
     _instances = {}
     _lock = threading.Lock()

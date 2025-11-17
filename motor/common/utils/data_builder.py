@@ -1,10 +1,10 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-from motor.utils.logger import get_logger
-from motor.resources.instance import Instance
-from motor.resources.endpoint import Endpoint, DeviceInfo
-from motor.resources.http_msg_spec import Ranktable, ServerInfo, RegisterMsg
+from motor.common.utils.logger import get_logger
+from motor.common.resources.instance import Instance
+from motor.common.resources.endpoint import Endpoint, DeviceInfo
+from motor.common.resources.http_msg_spec import Ranktable, ServerInfo, RegisterMsg
 
 logger = get_logger(__name__)
 
@@ -37,7 +37,7 @@ def build_ins_ranktable(ins: Instance) -> Ranktable:
     
 def build_pod_ranktable(
     pod_ip: str, 
-    pod_device_num:int, 
+    pod_device_num: int, 
     rank_offset: int = 0, 
     is_supperpod: bool = True,
 ) -> Ranktable:

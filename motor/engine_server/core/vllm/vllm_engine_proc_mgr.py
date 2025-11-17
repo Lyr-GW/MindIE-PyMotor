@@ -8,22 +8,22 @@ from multiprocessing import connection
 from typing import Optional, Any
 
 import vllm
-import vllm.envs as envs
 from vllm.entrypoints.cli.serve import run_api_server_worker_proc
 from vllm.entrypoints.openai.api_server import setup_server
 from vllm.entrypoints.utils import cli_env_setup
-from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.utils import APIServerProcessManager
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.utils import CoreEngineProcManager
 from vllm.v1.engine.utils import launch_core_engines
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_tcp_uri
 
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
 from motor.engine_server.core.worker import WorkerManager
 from motor.engine_server.utils.proc import get_child_processes
+
+
+logger = get_logger("engine_server")
 
 
 class ProcManager:
@@ -75,17 +75,17 @@ class ProcManager:
                     raise RuntimeError(f"some worker process exited, {exited_processes}")
 
         except KeyboardInterrupt:
-            run_log.warning("Received KeyboardInterrupt, shutting down all processes...")
+            logger.warning("Received KeyboardInterrupt, shutting down all processes...")
         except Exception as e:
-            run_log.warning("Exception occurred while engine server: %s", str(e))
+            logger.warning("Exception occurred while engine server: %s", str(e))
             raise
         finally:
             self.status = "abnormal"
-            run_log.info("Terminating remaining processes ...")
+            logger.info("Terminating remaining processes ...")
             self.shutdown()
 
     def shutdown(self):
-        run_log.info("shutting down...")
+        logger.info("shutting down...")
         if self.api_server_manager:
             self.api_server_manager.close()
         if self.coordinator:
@@ -94,13 +94,13 @@ class ProcManager:
             self.core_manager.close()
         if self.worker_manager:
             self.worker_manager.close()
-        run_log.info("shutdown complete.")
+        logger.info("shutdown complete.")
 
     def _init_worker_manager(self, size: int):
         if size <= 1:
             return # when size == 1, enginecore and worker in same process
         child_processes = get_child_processes(self.core_manager.processes)
-        run_log.info(f"worker processes is: {child_processes}")
+        logger.info(f"worker processes is: {child_processes}")
         self.worker_manager = WorkerManager(child_processes)
 
     def _run_multi_server(self):
