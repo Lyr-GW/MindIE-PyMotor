@@ -103,7 +103,7 @@ def test_remove_exited_processes(worker_manager, mock_processes):
     assert worker_manager.processes[0] == proc3
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_processes_graceful(mock_run_log, worker_manager, mock_processes):
     """test close should terminate processes gracefully and log success when termination completes within timeout"""
     # Mock successful process wait
@@ -131,7 +131,7 @@ def test_close_processes_graceful(mock_run_log, worker_manager, mock_processes):
     assert len(worker_manager.processes) == 0
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_processes_timeout(mock_run_log, worker_manager, mock_processes):
     """test close should force kill processes and log accordingly when termination exceeds timeout"""
     proc1, proc2, proc3 = mock_processes
@@ -155,7 +155,7 @@ def test_close_processes_timeout(mock_run_log, worker_manager, mock_processes):
     assert mock_run_log.info.call_count >= 4  # Timeout logs + 2 normal termination logs
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_processes_no_such_process(mock_run_log, worker_manager, mock_processes):
     """test close should log appropriate message when trying to terminate a non-existent process"""
     proc1, proc2, proc3 = mock_processes
@@ -174,7 +174,7 @@ def test_close_processes_no_such_process(mock_run_log, worker_manager, mock_proc
     proc3.terminate.assert_called_once()
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_processes_access_denied(mock_run_log, worker_manager, mock_processes):
     """test close should log appropriate message when permission is denied to terminate a process"""
     proc1, proc2, proc3 = mock_processes
@@ -193,7 +193,7 @@ def test_close_processes_access_denied(mock_run_log, worker_manager, mock_proces
     proc2.terminate.assert_called_once()
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_processes_generic_exception(mock_run_log, worker_manager, mock_processes):
     """test close should log error message when unexpected exception occurs during termination"""
     proc1, proc2, proc3 = mock_processes
@@ -212,7 +212,7 @@ def test_close_processes_generic_exception(mock_run_log, worker_manager, mock_pr
     proc3.terminate.assert_called_once()
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_empty_processes(mock_run_log):
     """test close should do nothing and log nothing when process list is empty"""
     manager = WorkerManager(process=[])
@@ -223,7 +223,7 @@ def test_close_empty_processes(mock_run_log):
     assert len(manager.processes) == 0
 
 
-@patch("motor.engine_server.core.worker.run_log")
+@patch("motor.engine_server.core.worker.logger")
 def test_close_with_exited_processes(mock_run_log, worker_manager, mock_processes):
     """test close should remove exited processes first before attempting termination when some processes have exited"""
     proc1, proc2, proc3 = mock_processes

@@ -5,10 +5,14 @@
 import threading
 import time
 from typing import Dict, Any
+
 from motor.engine_server.config.base import IConfig
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
 from motor.engine_server.factory.collector_factory import CollectorFactory
 from motor.engine_server.utils.reader_writer_lock import ReadPriorityRWLock
+
+
+logger = get_logger("engine_server")
 
 
 class DataController:
@@ -33,13 +37,13 @@ class DataController:
     def run(self):
         if not self._collect_thread or not self._collect_thread.is_alive():
             self._collect_thread.start()
-            run_log.info(f"DataController started, collect interval: {self.collect_interval}s")
+            logger.info(f"DataController started, collect interval: {self.collect_interval}s")
 
     def shutdown(self):
         self._stop_event.set()
         if self._collect_thread and self._collect_thread.is_alive():
             self._collect_thread.join()
-        run_log.info("DataController stopped")
+        logger.info("DataController stopped")
 
     def set_server_core(self, server_core):
         self._server_core = server_core
@@ -63,7 +67,7 @@ class DataController:
             try:
                 self._core_status = self._server_core.status() if self._server_core else "init"
             except Exception as e:
-                run_log.error(f"Failed to get core status: {str(e)}", exc_info=True)
+                logger.error(f"Failed to get core status: {str(e)}", exc_info=True)
             time.sleep(1)
 
         while not self._stop_event.is_set():
@@ -81,7 +85,7 @@ class DataController:
                 self._data_map["health"] = self._modify_data(raw_latest_health)
 
         except Exception as e:
-            run_log.error(f"DataController collect failed: {str(e)}", exc_info=True)
+            logger.error(f"DataController collect failed: {str(e)}", exc_info=True)
 
     def _modify_data(self, raw_data: Dict[str, Any]) -> Dict[str, Any]:
         updated_data = raw_data.copy()

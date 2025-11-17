@@ -8,11 +8,11 @@ import ipaddress
 import subprocess
 
 
-from motor.resources.instance import PDRole
-from motor.resources.endpoint import Endpoint
-from motor.utils.singleton import ThreadSafeSingleton
-from motor.utils.logger import get_logger
-from motor.utils.env import Env
+from motor.common.resources.instance import PDRole
+from motor.common.resources.endpoint import Endpoint
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.logger import get_logger
+from motor.common.utils.env import Env
 
 
 logger = get_logger(__name__)

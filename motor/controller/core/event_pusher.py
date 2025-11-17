@@ -19,10 +19,10 @@ import copy
 from dataclasses import dataclass
 
 from motor.config.controller import ControllerConfig
-from motor.resources.instance import Instance, ReadOnlyInstance
-from motor.resources.http_msg_spec import InsEventMsg, EventType
-from motor.utils.http_client import SafeHTTPSClient
-from motor.utils.logger import get_logger
+from motor.common.resources.instance import Instance, ReadOnlyInstance
+from motor.common.resources.http_msg_spec import InsEventMsg, EventType
+from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.utils.logger import get_logger
 from motor.controller.core.observer import Observer, ObserverEvent
 
 logger = get_logger(__name__)
@@ -133,7 +133,7 @@ class EventPusher(Observer):
                         logger.error("Unknown event type: %s", event_type)
                         continue
 
-                    response = client.post("/coordinator/active", data=event_msg.model_dump())
+                    response = client.post("/instances/refresh", data=event_msg.model_dump())
                     response_text = response.get("text")
                     if event.instance is not None:
                         logger.info("Event pushed type: %s, job name: %s, response: %s",

@@ -10,7 +10,7 @@ from unittest.mock import patch, mock_open
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from motor.config.node_manager import NodeManagerConfig
-from motor.resources.instance import ParallelConfig, PDRole
+from motor.common.resources.instance import ParallelConfig, PDRole
 
 
 @pytest.fixture

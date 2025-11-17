@@ -10,15 +10,15 @@ from requests.exceptions import ConnectionError, Timeout, HTTPError, RequestExce
 
 @pytest.fixture(autouse=True)
 def mock_logger_module():
-    module_name = 'motor.engine_server.utils.logger'
+    module_name = 'motor.common.utils.logger'
     original_logger = sys.modules.get(module_name)
 
-    mock_run_log = MagicMock()
+    mock_logger = MagicMock()
     mock_logger_module = MagicMock()
-    mock_logger_module.run_log = mock_run_log
+    mock_logger_module.get_logger = MagicMock(return_value=mock_logger)
     sys.modules[module_name] = mock_logger_module
 
-    with patch('motor.engine_server.core.vllm.vllm_collector.run_log', mock_run_log):
+    with patch('motor.engine_server.core.vllm.vllm_collector.logger', mock_logger):
         try:
             yield
         finally:
@@ -35,7 +35,7 @@ from motor.engine_server.config.base import IConfig
 
 @pytest.fixture(scope="function")
 def vllm_collector():
-    with patch("motor.engine_server.core.vllm.vllm_collector.run_log") as mock_logger:
+    with patch("motor.engine_server.core.vllm.vllm_collector.logger") as mock_logger:
         mock_config = Mock(spec=IConfig)
         mock_server_config = Mock()
         mock_server_config.engine_type = "vllm"

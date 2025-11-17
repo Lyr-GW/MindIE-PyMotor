@@ -24,7 +24,7 @@ def mock_dependencies():
 
     # Create mock objects
     mock_logger = mock.MagicMock()
-    mock_logger.run_log = mock.MagicMock()
+    mock_logger.get_logger = mock.MagicMock(return_value=mock.MagicMock())
     mock_vllm_config_class = mock.MagicMock()
 
     # Set up the mock module structure

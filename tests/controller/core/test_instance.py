@@ -1,5 +1,5 @@
-from motor.resources.instance import Instance, ReadOnlyInstance, ParallelConfig
-from motor.resources.endpoint import Endpoint
+from motor.common.resources.instance import Instance, ReadOnlyInstance, ParallelConfig
+from motor.common.resources.endpoint import Endpoint
 
 
 def test_instance_active() -> None:

@@ -1,45 +1,35 @@
-#!/usr/bin/env python3
 # coding=utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
 import asyncio
 import json
-import os
 import ssl
-import threading
-from typing import Dict, List, Optional, Any
+import logging
+from typing import Optional, Any
 from datetime import datetime, timezone
 from functools import wraps
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 import uvicorn
 
-from motor.resources.http_msg_spec import InsEventMsg, EventType
-from motor.resources.instance import Instance
-from motor.utils.logger import get_logger
-from motor.utils.cert_util import CoordinatorCertUtil
+from motor.common.resources.http_msg_spec import InsEventMsg
+from motor.common.utils.logger import get_logger, ApiAccessFilter
+from motor.common.utils.cert_util import CoordinatorCertUtil
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.coordinator.metrics.metrics_collector import MetricsCollector
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
-
 from motor.coordinator.middleware.fastapi_middleware import (
     SimpleRateLimitMiddleware, 
     create_simple_rate_limit_middleware, 
-    SimpleRateLimitConfig
 )
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
-
-from motor.coordinator.models.request import (
-    RequestType, RequestResponse
-)
-
+from motor.coordinator.models.request import RequestType, RequestResponse
 from motor.coordinator.router.router import handle_request, handle_metaserver_request
 
+
 logger = get_logger(__name__)
+
 
 # Constants for OpenAI request fields
 FIELD_MESSAGES = "messages"
@@ -113,7 +103,7 @@ class CoordinatorServer:
         self._register_routes()
     
     @staticmethod
-    def _openai_is_stream(body_json: Dict[str, Any]) -> bool:
+    def _openai_is_stream(body_json: dict[str, Any]) -> bool:
         if FIELD_STREAM in body_json:
             stream_value = body_json[FIELD_STREAM]
             if isinstance(stream_value, str):
@@ -122,7 +112,7 @@ class CoordinatorServer:
         return False
     
     @staticmethod
-    def _validate_openai_request(body_json: Dict[str, Any], request_type: RequestType):
+    def _validate_openai_request(body_json: dict[str, Any], request_type: RequestType):
         if FIELD_MODEL not in body_json:
             raise HTTPException(
                 status_code=HTTP_STATUS_BAD_REQUEST,
@@ -168,7 +158,7 @@ class CoordinatorServer:
                 )
     
     @staticmethod
-    def _copy_routes(src_app: FastAPI, dst_app: FastAPI, skip_paths: Optional[List[str]] = None):
+    def _copy_routes(src_app: FastAPI, dst_app: FastAPI, skip_paths: Optional[list[str]] = None):
         if skip_paths is None:
             skip_paths = []
         reserved_paths = set(["/docs", "/redoc", "/openapi.json", "/favicon.ico"]) | set(skip_paths)
@@ -188,7 +178,7 @@ class CoordinatorServer:
                 continue
 
     @staticmethod
-    def _normalize_instance_endpoints(body: Dict[str, Any]) -> None:
+    def _normalize_instance_endpoints(body: dict[str, Any]) -> None:
         """normalize instance endpoints, convert endpoint_id from string to int"""
         if not isinstance(body, dict) or JSON_FIELD_INSTANCES not in body:
             return
@@ -204,7 +194,7 @@ class CoordinatorServer:
                     instance[JSON_FIELD_ENDPOINTS] = CoordinatorServer._convert_endpoints(endpoints)
     
     @staticmethod
-    def _convert_endpoints(endpoints: Dict[str, Any]) -> Dict[str, Any]:
+    def _convert_endpoints(endpoints: dict[str, Any]) -> dict[str, Any]:
         """convert endpoints dictionary, convert endpoint_id from string to int"""
         converted_endpoints = {}
         for pod_ip, endpoint_dict in endpoints.items():
@@ -215,7 +205,7 @@ class CoordinatorServer:
         return converted_endpoints
     
     @staticmethod
-    def _convert_endpoint_dict(endpoint_dict: Dict[str, Any]) -> Dict[Any, Any]:
+    def _convert_endpoint_dict(endpoint_dict: dict[str, Any]) -> dict[Any, Any]:
         """convert single endpoint_dict, convert endpoint_id from string to int"""
         converted = {}
         for endpoint_id_str, endpoint_data in endpoint_dict.items():
@@ -236,7 +226,14 @@ class CoordinatorServer:
             return endpoint_id_str
     
     @staticmethod
-    def _create_base_uvicorn_config(app: FastAPI, host: str, port: int) -> Dict[str, Any]:
+    def _create_base_uvicorn_config(app: FastAPI, host: str, port: int) -> dict[str, Any]:
+        # Create ApiAccessFilter for health endpoint
+        api_filter = ApiAccessFilter({"/health": logging.ERROR})
+
+        # Configure uvicorn access logger with filter
+        uvicorn_access_logger = logging.getLogger("uvicorn.access")
+        uvicorn_access_logger.addFilter(api_filter)
+
         return {
             UVICORN_KEY_APP: app,
             UVICORN_KEY_HOST: host,
@@ -481,12 +478,12 @@ class CoordinatorServer:
         self.management_app.add_middleware(CORSMiddleware, **cors_config)
         self.inference_app.add_middleware(CORSMiddleware, **cors_config)
     
-    def _apply_timeout_to_config(self, config_kwargs: Dict[str, Any]):
+    def _apply_timeout_to_config(self, config_kwargs: dict[str, Any]):
         if self.timeout_config:
             config_kwargs[UVICORN_KEY_TIMEOUT_KEEP_ALIVE] = self.timeout_config.keep_alive_timeout
             config_kwargs[UVICORN_KEY_TIMEOUT_GRACEFUL_SHUTDOWN] = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
     
-    def _apply_ssl_to_unified_config(self, config_kwargs: Dict[str, Any]):
+    def _apply_ssl_to_unified_config(self, config_kwargs: dict[str, Any]):
         if not (self.ssl_config and self.ssl_config.enabled):
             return
         
@@ -506,8 +503,8 @@ class CoordinatorServer:
     
     def _apply_ssl_to_separate_configs(
         self,
-        mgmt_config_kwargs: Dict[str, Any],
-        inference_config_kwargs: Dict[str, Any]
+        mgmt_config_kwargs: dict[str, Any],
+        inference_config_kwargs: dict[str, Any]
     ):
         if not (self.ssl_config and self.ssl_config.enabled):
             return
@@ -689,7 +686,7 @@ class CoordinatorServer:
                 }
             }
         
-        @self.management_app.post("/v1/instances/refresh", response_model=RequestResponse)
+        @self.management_app.post("/instances/refresh", response_model=RequestResponse)
         @self._timeout_handler()
         async def refresh_instances(request: Request) -> RequestResponse:
             return await self._handle_refresh_instances(request)
@@ -718,7 +715,7 @@ class CoordinatorServer:
                         "GET /metrics": "get metrics"
                     },
                     "# instance refresh": {
-                        "POST /v1/instances/refresh": "refresh instances"
+                        "POST /instances/refresh": "refresh instances"
                     }
                 }
             }

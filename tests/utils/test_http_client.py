@@ -18,7 +18,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
-from motor.utils.http_client import SafeHTTPSClient
+from motor.common.utils.http_client import SafeHTTPSClient
 
 
 @pytest.fixture

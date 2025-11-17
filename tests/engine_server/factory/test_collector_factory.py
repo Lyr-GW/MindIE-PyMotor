@@ -9,12 +9,12 @@ import sys
 
 @pytest.fixture(autouse=True)
 def mock_logger_module():
-    module_name = 'motor.engine_server.utils.logger'
+    module_name = 'motor.common.utils.logger'
     original_logger = sys.modules.get(module_name)
 
-    mock_run_log = MagicMock()
+    mock_logger = MagicMock()
     mock_logger_module = MagicMock()
-    mock_logger_module.run_log = mock_run_log
+    mock_logger_module.get_logger = MagicMock(return_value=mock_logger)
     sys.modules[module_name] = mock_logger_module
 
     try:

@@ -6,11 +6,11 @@ import time
 import threading
 from enum import Enum
 import requests
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
-from motor.resources.instance import Instance
+from motor.common.resources.instance import Instance
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

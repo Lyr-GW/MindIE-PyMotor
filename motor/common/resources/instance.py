@@ -7,8 +7,8 @@ import copy
 from enum import Enum
 from types import MappingProxyType
 from pydantic import BaseModel, Field
-from motor.utils.logger import get_logger
-from motor.resources.endpoint import Endpoint, EndpointStatus, Workload
+from motor.common.utils.logger import get_logger
+from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
 
 logger = get_logger(__name__)
 
@@ -25,12 +25,15 @@ class InsStatus(str, Enum):
     def __repr__(self) -> str:
         return str.__repr__(self.value)  # 序列化时返回值的表示
 
+
 class PDRole(str, Enum):
     ROLE_P = "prefill"
     ROLE_D = "decode"
     ROLE_U = "both"
+
     def __repr__(self) -> str:
         return str.__repr__(self.value)
+
 
 # Instance condition event
 class InsConditionEvent(str, Enum):

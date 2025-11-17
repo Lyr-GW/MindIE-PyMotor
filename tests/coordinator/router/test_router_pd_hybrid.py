@@ -13,11 +13,11 @@ from motor.config.coordinator import DeployMode
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.models.request import ScheduledResource
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
-from motor.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
+from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.models.request import RequestInfo, ReqState
 import motor.coordinator.router.router as router
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -12,7 +12,7 @@ import httpx
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

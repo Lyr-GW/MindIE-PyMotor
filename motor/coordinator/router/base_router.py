@@ -12,9 +12,9 @@ from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.request import RequestInfo, ReqState, ScheduledResource
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.router.request_error_handler import handle_request_errors
-from motor.resources.endpoint import WorkloadAction
-from motor.resources.instance import PDRole
-from motor.utils.logger import get_logger
+from motor.common.resources.endpoint import WorkloadAction
+from motor.common.resources.instance import PDRole
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

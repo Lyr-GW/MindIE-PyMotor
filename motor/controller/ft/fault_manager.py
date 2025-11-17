@@ -7,10 +7,10 @@ import concurrent.futures
 from enum import Enum
 from dataclasses import dataclass, field
 
-from motor.utils.logger import get_logger
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.logger import get_logger
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
-from motor.resources.instance import Instance, ReadOnlyInstance, NodeManagerInfo
+from motor.common.resources.instance import Instance, ReadOnlyInstance, NodeManagerInfo
 from motor.controller.core.observer import Observer, ObserverEvent
 from motor.controller.core.instance_manager import InstanceManager, InsStatus
 from motor.controller.ft.cluster_grpc import cluster_fault_pb2

@@ -8,8 +8,8 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
 
-from motor.resources.endpoint import Endpoint
-from motor.resources.instance import Instance
+from motor.common.resources.endpoint import Endpoint
+from motor.common.resources.instance import Instance
 
 
 class RequestType(Enum):

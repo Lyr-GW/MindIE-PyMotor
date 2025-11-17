@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from enum import Enum
 
-from motor.resources.instance import ReadOnlyInstance
+from motor.common.resources.instance import ReadOnlyInstance
 
 
 class ObserverEvent(Enum):

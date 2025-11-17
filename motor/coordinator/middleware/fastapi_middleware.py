@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 from .rate_limiter import SimpleRateLimiter
 

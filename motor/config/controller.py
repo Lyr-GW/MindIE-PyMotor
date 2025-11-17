@@ -4,7 +4,7 @@ import os
 import json
 
 from dataclasses import dataclass, field
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 from typing import Any
 from pathlib import Path
 

@@ -890,7 +890,7 @@ class TestCoordinatorServerAdvanced:
         }
         
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json=valid_body
         )
         
@@ -903,7 +903,7 @@ class TestCoordinatorServerAdvanced:
     def test_refresh_instances_empty_body(self):
         """Test refresh_instances with empty body"""
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json={}
         )
         
@@ -913,7 +913,7 @@ class TestCoordinatorServerAdvanced:
     def test_refresh_instances_invalid_json(self):
         """Test refresh_instances with invalid JSON"""
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             content="invalid json",
             headers={"Content-Type": "application/json"}
         )
@@ -952,7 +952,7 @@ class TestCoordinatorServerAdvanced:
         }
         
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json=valid_body
         )
         
@@ -968,7 +968,7 @@ class TestCoordinatorServerAdvanced:
         }
         
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json=invalid_body
         )
         
@@ -978,7 +978,7 @@ class TestCoordinatorServerAdvanced:
     def test_refresh_instances_no_body(self):
         """Test refresh_instances with no body"""
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             content=None
         )
         
@@ -1301,7 +1301,7 @@ class TestCoordinatorServerAdvanced:
         }
         
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json=complex_body
         )
         
@@ -1325,7 +1325,7 @@ class TestCoordinatorServerAdvanced:
         }
         
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json=invalid_body
         )
         
@@ -1350,7 +1350,7 @@ class TestCoordinatorServerAdvanced:
         }
         
         response = self.mgmt_client.post(
-            "/v1/instances/refresh",
+            "/instances/refresh",
             json=invalid_body
         )
         

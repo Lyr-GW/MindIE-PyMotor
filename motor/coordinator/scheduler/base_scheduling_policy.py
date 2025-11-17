@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
 from abc import ABC, abstractmethod
-from motor.resources.instance import Instance, PDRole
-from motor.resources.endpoint import Endpoint
-from motor.utils.logger import get_logger
+from motor.common.resources.instance import Instance, PDRole
+from motor.common.resources.endpoint import Endpoint
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

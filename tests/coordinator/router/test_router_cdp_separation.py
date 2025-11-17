@@ -14,13 +14,13 @@ from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
-from motor.resources.endpoint import WorkloadAction
-from motor.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
+from motor.common.resources.endpoint import WorkloadAction
+from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from motor.coordinator.scheduler.scheduler import Scheduler
 from tests.coordinator.router.mock_openai_request import MockStreamResponse, create_mock_request_info
 import motor.coordinator.router.router as router
 from motor.coordinator.scheduler.scheduler import Scheduler
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

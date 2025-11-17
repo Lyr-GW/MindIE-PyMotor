@@ -14,8 +14,8 @@ sys.modules['cluster_fault_pb2_grpc'] = mock_pb2_grpc
 
 from motor.controller.ft.cluster_grpc import cluster_fault_pb2
 from motor.controller.core.observer import ObserverEvent
-from motor.resources.instance import Instance, NodeManagerInfo
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.resources.instance import Instance, NodeManagerInfo
+from motor.common.utils.singleton import ThreadSafeSingleton
 
 # Import FaultManager and related classes after mocking
 from motor.controller.ft.fault_manager import (
@@ -38,7 +38,7 @@ TEST_FAULT_CODES = [0x1234, 0x2000, 0x3000, 0x3001, 0x4000, 0x00f1fef5]
 @pytest.fixture(autouse=True)
 def setup_test_environment():
     """Setup and teardown for each test"""
-    from motor.utils.singleton import ThreadSafeSingleton
+    from motor.common.utils.singleton import ThreadSafeSingleton
     # Clear singleton instances before each test
     if FaultManager in ThreadSafeSingleton._instances:
         fault_manager = ThreadSafeSingleton._instances[FaultManager]

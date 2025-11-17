@@ -1,12 +1,12 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
 from enum import Enum
-from motor.resources.instance import Instance, PDRole
-from motor.resources.endpoint import Endpoint, WorkloadAction
+from motor.common.resources.instance import Instance, PDRole
+from motor.common.resources.endpoint import Endpoint, WorkloadAction
 from motor.coordinator.scheduler.base_scheduling_policy import BaseSchedulingPolicy
 from motor.coordinator.scheduler.round_robin_policy import RoundRobinPolicy
 from motor.coordinator.scheduler.load_balance_policy import LoadBalancePolicy
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

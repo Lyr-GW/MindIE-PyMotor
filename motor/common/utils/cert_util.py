@@ -15,7 +15,7 @@ from OpenSSL import crypto
 from cryptography import x509 as crypt_x509
 from cryptography.x509.oid import ExtensionOID
 
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 CryptoX509 = crypto.X509
 

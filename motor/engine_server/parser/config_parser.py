@@ -6,7 +6,9 @@ from typing import Dict, Type, Optional
 import importlib
 
 from motor.engine_server.config.base import IConfig, ServerConfig
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
+
+logger = get_logger("engine_server")
 
 
 class ConfigParser:
@@ -24,7 +26,7 @@ class ConfigParser:
             config_classes["vllm"] = vllm_config
         except (ImportError, AttributeError) as e:
             config_classes["vllm"] = None
-            run_log.warning(f"Failed to load VLLMConfig: {e}")
+            logger.warning(f"Failed to load VLLMConfig: {e}")
         
         return config_classes
 

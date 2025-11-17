@@ -29,7 +29,7 @@ def mock_dependencies():
 
     # Create mock objects
     mock_logger = mock.MagicMock()
-    mock_logger.run_log = mock.MagicMock()
+    mock_logger.get_logger = mock.MagicMock(return_value=mock.MagicMock())
     mock_data_controller_class = mock.MagicMock()
     mock_endpoint_class = mock.MagicMock()
     mock_metrics_service_class = mock.MagicMock()

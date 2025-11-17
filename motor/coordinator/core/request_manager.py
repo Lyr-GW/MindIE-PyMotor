@@ -6,7 +6,7 @@ import time
 import uuid
 import threading
 import logging
-from motor.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.coordinator.models.request import RequestInfo
 
 logging.basicConfig(level=logging.INFO)

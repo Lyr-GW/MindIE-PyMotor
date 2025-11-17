@@ -6,14 +6,14 @@ import os
 import json
 from typing import Any, Optional
 
-from motor.resources.http_msg_spec import Ranktable
-from motor.resources.instance import ParallelConfig, PDRole
-from motor.resources.endpoint import DeviceInfo
+from motor.common.resources.http_msg_spec import Ranktable
+from motor.common.resources.instance import ParallelConfig, PDRole
+from motor.common.resources.endpoint import DeviceInfo
 from motor.node_manager.core.daemon import Daemon
-from motor.utils.singleton import ThreadSafeSingleton
-from motor.utils.env import Env
-from motor.utils.patch_check import safe_open
-from motor.utils.logger import get_logger
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.env import Env
+from motor.common.utils.patch_check import safe_open
+from motor.common.utils.logger import get_logger
 
 PP = "pp_size"
 TP = "tp_size"

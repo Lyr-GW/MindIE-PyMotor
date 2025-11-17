@@ -4,10 +4,10 @@ import requests
 import copy
 from urllib.parse import urlparse
 
-from motor.resources.instance import Instance, PDRole, Endpoint
+from motor.common.resources.instance import Instance, PDRole, Endpoint
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.metrics.metrics_collector import MetricsCollector, MetricType, SingleMetric
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

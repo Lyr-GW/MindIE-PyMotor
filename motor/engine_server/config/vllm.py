@@ -1,20 +1,22 @@
-#!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
 import argparse
 import sys
 import json
-from typing import Dict, Any, Optional, List
+from typing import Any, Optional
 from dataclasses import dataclass, field
 
 from vllm.utils import FlexibleArgumentParser
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 
 from motor.engine_server.config.base import BaseConfig, ServerConfig
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
 from motor.engine_server.utils.ranktable import get_data_parallel_address
 from motor.engine_server.constants import constants
+
+
+logger = get_logger("engine_server")
 
 
 def _add_argument_to_list(arg_list: list, key: str, value: Any):
@@ -31,7 +33,7 @@ def _add_argument_to_list(arg_list: list, key: str, value: Any):
         arg_list.append(str(value))
 
 
-def _get_default_mapping() -> Dict[str, str]:
+def _get_default_mapping() -> dict[str, str]:
     return {
         'model_path': 'model',
         'npu_mem_utils': 'gpu_memory_utilization',
@@ -49,7 +51,7 @@ class VLLMConfig(BaseConfig):
     data_parallel_address: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     kv_transfer_config: Optional[str] = None
-    mapping: Optional[Dict[str, str]] = field(default_factory=_get_default_mapping)
+    mapping: Optional[dict[str, str]] = field(default_factory=_get_default_mapping)
 
     def initialize(self):
         super().initialize()
@@ -68,7 +70,7 @@ class VLLMConfig(BaseConfig):
     def convert(self):
         super().convert()
         arg_list = self._get_param_list()
-        run_log.info(f'engine server parsed arg_list: {arg_list}')
+        logger.info(f'engine server parsed arg_list: {arg_list}')
 
         sys.argv = ["serve"] + arg_list
 
@@ -114,10 +116,10 @@ class VLLMConfig(BaseConfig):
 
             self.kv_transfer_config = json.dumps(kv_config)
         except Exception as e:
-            run_log.error(f"Failed to process kv_transfer_config: {e}")
+            logger.error(f"Failed to process kv_transfer_config: {e}")
             raise ValueError(f"Failed to process kv_transfer_config: {e}") from e
 
-    def _flatten_config(self) -> Dict[str, Any]:
+    def _flatten_config(self) -> dict[str, Any]:
         """
         Flatten deploy_config into a simple key-value dictionary with the following rules:
         1. Include all key-value pairs from engine_config
@@ -155,7 +157,7 @@ class VLLMConfig(BaseConfig):
 
         return flattened
 
-    def _get_param_list(self) -> List[str]:
+    def _get_param_list(self) -> list[str]:
         processed_args = []
 
         flattened_config = self._flatten_config()

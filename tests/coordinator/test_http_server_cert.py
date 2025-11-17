@@ -15,8 +15,8 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from motor.coordinator.api_server.coordinator_server import SSLConfig
-from motor.utils.cert_util import CoordinatorCertUtil, CertUtil
-from motor.utils.logger import get_logger
+from motor.common.utils.cert_util import CoordinatorCertUtil, CertUtil
+from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 

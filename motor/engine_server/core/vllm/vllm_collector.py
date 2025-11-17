@@ -9,7 +9,9 @@ import requests
 
 from motor.engine_server.config.base import IConfig
 from motor.engine_server.core.base_collector import BaseCollector
-from motor.engine_server.utils.logger import run_log
+from motor.common.utils.logger import get_logger
+
+logger = get_logger("engine_server")
 
 
 class VLLMCollector(BaseCollector):
@@ -21,7 +23,7 @@ class VLLMCollector(BaseCollector):
         self.timeout = 2
         self._metrics_url = f"http://{self.host}:{self.port}/metrics"
         self._health_url = f"http://{self.host}:{self.port}/health"
-        run_log.info(
+        logger.info(
             f"VLLMCollector initialized: metrics_url={self._metrics_url}, "
             f"health_url={self._health_url}, collect_interval={self.collect_interval}s"
         )
@@ -49,11 +51,11 @@ class VLLMCollector(BaseCollector):
         }
 
     def _do_collect_metrics(self) -> Dict[str, Any]:
-        run_log.debug(f"Start collecting vLLM metrics from {self._metrics_url}")
+        logger.debug(f"Start collecting vLLM metrics from {self._metrics_url}")
         try:
             response = requests.get(self._metrics_url, timeout=self.timeout)
             response.raise_for_status()
-            run_log.debug(f"Successfully collected vLLM metrics")
+            logger.debug(f"Successfully collected vLLM metrics")
             return {
                 "api_url": self._metrics_url,
                 "status": "success",
@@ -63,22 +65,22 @@ class VLLMCollector(BaseCollector):
             }
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             error_msg = f"Connect failed: {str(e)}"
-            run_log.error(f"Metrics collect failed: {error_msg}")
+            logger.error(f"Metrics collect failed: {error_msg}")
             return self._build_error_result(error_msg, self._metrics_url, None)
 
         except requests.exceptions.HTTPError as e:
             http_status_code = e.response.status_code if e.response else None
             error_msg = f"HTTP request failed: {str(e)} (status code: {http_status_code})"
-            run_log.error(f"Metrics collect failed: {error_msg}")
+            logger.error(f"Metrics collect failed: {error_msg}")
             return self._build_error_result(error_msg, self._metrics_url, http_status_code)
 
         except requests.exceptions.RequestException as e:
             error_msg = f"Request failed: {str(e)}"
-            run_log.error(f"Metrics collect failed: {error_msg}")
+            logger.error(f"Metrics collect failed: {error_msg}")
             return self._build_error_result(error_msg, self._metrics_url, None)
 
     def _do_collect_health(self) -> Dict[str, Any]:
-        run_log.debug(f"Start collecting vLLM health from {self._health_url}")
+        logger.debug(f"Start collecting vLLM health from {self._health_url}")
         try:
             response = requests.get(self._health_url, timeout=self.timeout)
             if response.status_code == 200:
@@ -91,15 +93,15 @@ class VLLMCollector(BaseCollector):
                 }
             else:
                 error_msg = f"Health check failed with HTTP status code: {response.status_code}"
-                run_log.error(f"Health collect failed: {error_msg}")
+                logger.error(f"Health collect failed: {error_msg}")
                 return self._build_error_result(error_msg, self._health_url, response.status_code)
 
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             error_msg = f"Connect failed: {str(e)}"
-            run_log.error(f"Health collect failed: {error_msg}")
+            logger.error(f"Health collect failed: {error_msg}")
             return self._build_error_result(error_msg, self._health_url, None)
 
         except requests.exceptions.RequestException as e:
             error_msg = f"Request failed: {str(e)}"
-            run_log.error(f"Health collect failed: {error_msg}")
+            logger.error(f"Health collect failed: {error_msg}")
             return self._build_error_result(error_msg, self._health_url, None)

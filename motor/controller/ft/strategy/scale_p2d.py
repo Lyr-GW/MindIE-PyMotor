@@ -2,7 +2,7 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 import time
 
-from motor.utils.logger import get_logger
+from motor.common.utils.logger import get_logger
 from motor.controller.ft.strategy.strategy import StrategyBase
 from motor.controller.ft.fault_manager import FaultManager
 

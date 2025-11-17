@@ -2,9 +2,9 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-from motor.resources.instance import Instance, NodeManagerInfo
-from motor.utils.http_client import SafeHTTPSClient
-from motor.utils.logger import get_logger
+from motor.common.resources.instance import Instance, NodeManagerInfo
+from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.utils.logger import get_logger
 
 
 logger = get_logger(__name__)

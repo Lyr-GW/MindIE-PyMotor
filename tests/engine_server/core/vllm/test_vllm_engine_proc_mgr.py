@@ -30,7 +30,6 @@ def mock_modules():
         'vllm.usage.usage_lib',
         'vllm.utils',
         # motor related modules
-        'motor.engine_server.utils.logger',
         'motor.engine_server.core.worker',
         'motor.engine_server.utils.proc'
     ]
@@ -105,9 +104,10 @@ def mock_modules():
     mock_vllm_utils = Mock()
     mock_vllm_utils.get_tcp_uri = MagicMock(return_value="tcp://localhost:8000")
     
-    # motor.engine_server.utils.logger
-    mock_logger = Mock()
-    mock_logger.run_log = MagicMock()
+    # motor.utils.logger
+    mock_logger_module = Mock()
+    mock_run_log = MagicMock()
+    mock_logger_module.get_logger = MagicMock(return_value=mock_run_log)
     
     # motor.engine_server.core.worker
     mock_worker = Mock()
@@ -130,7 +130,7 @@ def mock_modules():
     sys.modules['vllm.v1.engine.utils'] = mock_engine_utils
     sys.modules['vllm.usage.usage_lib'] = mock_usage_lib
     sys.modules['vllm.utils'] = mock_vllm_utils
-    sys.modules['motor.engine_server.utils.logger'] = mock_logger
+    sys.modules['motor.common.utils.logger'] = mock_logger_module
     sys.modules['motor.engine_server.core.worker'] = mock_worker
     sys.modules['motor.engine_server.utils.proc'] = mock_proc
     
@@ -143,7 +143,7 @@ def mock_modules():
         'mock_launch_core_engines': mock_launch_core_engines,
         'mock_APIServerProcessManager': mock_v1_utils.APIServerProcessManager,
         'mock_get_class': mock_executor_abstract.Executor.get_class,
-        'mock_run_log': mock_logger.run_log,
+        'mock_run_log': mock_run_log,
         'mock_WorkerManager': mock_worker.WorkerManager,
         'mock_get_child_processes': mock_proc.get_child_processes
     }
