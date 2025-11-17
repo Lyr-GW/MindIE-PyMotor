@@ -5,12 +5,40 @@ import json
 import os
 import sys
 import logging
+from enum import Enum
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Constants
 ENCODING_UTF8 = 'utf-8'
+COORDINATOR_API_PORT = 'coordinator_api_port'
+CONTROLLER_API_PORT = 'controller_api_port'
+CONTROLLER_API_HOST = 'controller_api_host'
+COORDINATOR_API_DNS = 'coordinator_api_dns'
+COORDINATOR_API_HOST = 'coordinator_api_host'
+CONTROLLER_API_DNS = 'controller_api_dns'
+PARALLEL_CONFIG = 'parallel_config'
+PREFILL_PARALLEL_CONFIG = 'prefill_parallel_config'
+DECODE_PARALLEL_CONFIG = 'decode_parallel_config'
+MODEL_CONFIG = 'model_config'
+PREFILL = 'prefill'
+DECODE = 'decode'
+
+class ConfigKey(Enum):
+    MOTOR_CONTROLLER = "motor_controller_config"
+    MOTOR_COORDINATOR = "motor_coordinator_config"
+    MOTOR_ENGINE_PREFILL = "motor_engine_prefill_config"
+    MOTOR_ENGINE_DECODE = "motor_engine_decode_config"
+    MOTOR_NODEMANAGER = "motor_nodemanger_config"
+
+    @staticmethod
+    def is_valid(config_key: str) -> bool:
+        return config_key in [key.value for key in ConfigKey]
+    
+    @staticmethod
+    def get_supported_keys() -> str:
+        return ", ".join([key.value for key in ConfigKey])
 
 
 def update_dict(original, modified):
@@ -79,7 +107,42 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
         
         # Update the configuration
         updated_config = update_dict(config_data, update_data)
-        
+
+        try:
+            if config_key == ConfigKey.MOTOR_CONTROLLER.value:
+                updated_config[CONTROLLER_API_HOST] = os.getenv('POD_IP')
+                updated_config[COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
+                if COORDINATOR_API_PORT in user_config_data[ConfigKey.MOTOR_COORDINATOR.value]:
+                    updated_config[COORDINATOR_API_PORT] = \
+                        user_config_data[ConfigKey.MOTOR_COORDINATOR.value][COORDINATOR_API_PORT]
+            elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
+                updated_config[COORDINATOR_API_HOST] = os.getenv('POD_IP')
+                updated_config[CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
+                if CONTROLLER_API_PORT in user_config_data[ConfigKey.MOTOR_CONTROLLER.value]:
+                    updated_config[CONTROLLER_API_PORT] = \
+                        user_config_data[ConfigKey.MOTOR_CONTROLLER.value][CONTROLLER_API_PORT]
+            elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:
+                updated_config[CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
+                if CONTROLLER_API_PORT in user_config_data[ConfigKey.MOTOR_CONTROLLER.value]:
+                    updated_config[CONTROLLER_API_PORT] = \
+                        user_config_data[ConfigKey.MOTOR_CONTROLLER.value][CONTROLLER_API_PORT]
+                role = os.getenv('ROLE')
+                if role == PREFILL:
+                    updated_config[PARALLEL_CONFIG] = \
+                        user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value]\
+                            [MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
+                elif role == DECODE:
+                    updated_config[PARALLEL_CONFIG] = \
+                        user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value][MODEL_CONFIG][DECODE_PARALLEL_CONFIG]
+            elif config_key == ConfigKey.MOTOR_ENGINE_PREFILL.value:
+                updated_config[MODEL_CONFIG][DECODE_PARALLEL_CONFIG] = \
+                    user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value][MODEL_CONFIG][DECODE_PARALLEL_CONFIG]
+            elif config_key == ConfigKey.MOTOR_ENGINE_DECODE.value:
+                updated_config[MODEL_CONFIG][PREFILL_PARALLEL_CONFIG] = \
+                    user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value][MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
+        except KeyError as e:
+            logging.warning(f"Failed to update {config_key} due to missing key: {str(e)}")
+
         # Write the updated configuration back to the file
         with open(config_file, 'w', encoding=ENCODING_UTF8) as file:
             json.dump(updated_config, file, indent=4, ensure_ascii=False)
@@ -111,17 +174,8 @@ def main():
         logging.error(f"user_config.json file does not exist: {user_config_file}")
         sys.exit(1)
     
-    # Validate config_key
-    valid_keys = [
-        "motor_controller_config",
-        "motor_coordinator_config", 
-        "motor_engine_prefill_config",
-        "motor_engine_decode_config",
-        "motor_nodemanger_config"
-    ]
-    
-    if config_key not in valid_keys:
-        logging.error(f"Unsupported config_key: {config_key}. Supported config_key: {', '.join(valid_keys)}")
+    if not ConfigKey.is_valid(config_key):
+        logging.error(f"Unsupported config_key: {config_key}. Supported config_key: {ConfigKey.get_supported_keys()}")
         sys.exit(1)
     
     success = update_config_from_user_config(config_file, user_config_file, config_key)

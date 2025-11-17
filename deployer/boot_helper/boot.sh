@@ -1,7 +1,7 @@
 #!/bin/bash
+set -x
 set_common_env
 
-# Read environment variable role to determine node type
 echo "Current node role: ROLE=$ROLE"
 
 # Search for libjemalloc.so.2 in /usr directory
@@ -16,16 +16,7 @@ else
 fi
 
 # Define configuration file paths
-CONFIG_DIR="$INSTALL_PATH/conf"
-RANKTABLE_DIR="$INSTALL_PATH/conf"
-USER_CONFIG_FILE="$CONFIG_FROM_CONFIGMAP_PATH/user_config.json"
-
-# Load environment variables
-source $INSTALL_PATH/set_env.sh
-
-# Set library and python paths
-export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$INSTALL_PATH/lib"
-export PYTHONPATH="$INSTALL_PATH/bin:$PYTHONPATH"
+USER_CONFIG_FILE="$CONFIGMAP_PATH/user_config.json"
 
 # Core dump settings
 if [ "$SAVE_CORE_DUMP_FILE_ENABLE" = "1" ]; then
@@ -37,39 +28,39 @@ else
     ulimit -c 0
 fi
 
-cd "$INSTALL_PATH"
+mkdir $CONFIG_PATH -p
+chmod 640 $CONFIG_PATH
 
 if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
     # Update configuration files based on user configuration
     echo "Updating nodemanager configuration file..."
-    python3 "$CONFIG_FROM_CONFIGMAP_PATH/update_config_from_user_config.py" "$CONFIG_DIR/motor_nodemanger.json" "$USER_CONFIG_FILE" "motor_nodemanger_config"
+    export MOTOR_NODE_MANAGER_CONFIG_PATH=$CONFIG_PATH/node_manager_config.json
+    python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_NODE_MANAGER_CONFIG_PATH" "$USER_CONFIG_FILE" "motor_nodemanger_config"
+    export MOTOR_ENGINE_PATH=$CONFIG_PATH/motor_engine.json
     if [ "$ROLE" == "prefill" ]; then
         echo "Updating prefill server configuration file..."
-        python3 "$CONFIG_FROM_CONFIGMAP_PATH/update_config_from_user_config.py" "$CONFIG_DIR/motor_engine_prefill.json" "$USER_CONFIG_FILE" "motor_engine_prefill_config"
+        python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_ENGINE_PATH" "$USER_CONFIG_FILE" "motor_engine_prefill_config"
     elif [ "$ROLE" == "decode" ]; then
         echo "Updating decode server configuration file..."
-        python3 "$CONFIG_FROM_CONFIGMAP_PATH/update_config_from_user_config.py" "$CONFIG_DIR/motor_engine_decode.json" "$USER_CONFIG_FILE" "motor_engine_decode_config"
+        python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_ENGINE_PATH" "$USER_CONFIG_FILE" "motor_engine_decode_config"
     fi
 
     # Use hccl_tools.py to generate ranktable.json
-    if [ -f "$CONFIG_FROM_CONFIGMAP_PATH/hccl_tools.py" ]; then
+    if [ -f "$CONFIGMAP_PATH/hccl_tools.py" ]; then
         echo "Using hccl_tools.py to generate ranktable.json..."
-        export RANKTABLE_PATH="$RANKTABLE_DIR/ranktable.json"
-        PYTHONUNBUFFERED=1 python3 "$CONFIG_FROM_CONFIGMAP_PATH/hccl_tools.py" \
-            --rank_table_path "$RANKTABLE_PATH"
-        echo "Ranktable generated successfully: $RANKTABLE_PATH"
+        export HCCL_PATH="$CONFIG_PATH/hccl.json"
+        PYTHONUNBUFFERED=1 python3 "$CONFIGMAP_PATH/hccl_tools.py" --hccl_path "$HCCL_PATH"
+        echo "Ranktable generated successfully: $HCCL_PATH"
     else
         echo "hccl_tools.py does not exist, skip ranktable generation"
     fi
+
+    export RANK_TABLE_PATH="$CONFIG_PATH/ranktable.json"
 
     # Set environment variables for CANN
     export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common"
     source "$CANN_INSTALL_PATH/ascend-toolkit/set_env.sh"
     source "$CANN_INSTALL_PATH/nnal/atb/set_env.sh"
-
-    # Set Common environment variables for PD
-    export MIES_CONTAINER_IP="$POD_IP"
-    export MIES_CONTAINER_MANAGEMENT_IP="$POD_IP"
 
     # Set log and work paths
     if [ -n "$MINDIE_LOG_CONFIG_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$MODEL_ID" ]; then
@@ -102,7 +93,6 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
     python3 -m motor.node_manager.main &
     pid=$!
     echo "pull up $ROLE instance"
-    
     wait $pid
     exit_code=$?
     if [ $exit_code -ne 0 ]; then
@@ -115,7 +105,8 @@ fi
 
 if [ "$ROLE" = "controller" ]; then
     echo "Updating controller configuration file..."
-    python3 "$CONFIG_FROM_CONFIGMAP_PATH/update_config_from_user_config.py" "$CONFIG_DIR/motor_controller.json" "$USER_CONFIG_FILE" "motor_controller_config"
+    export MOTOR_CONTROLLER_CONFIG_PATH=$CONFIG_PATH/controller_config.json
+    python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_CONTROLLER_CONFIG_PATH" "$USER_CONFIG_FILE" "motor_controller_config"
     
     if [ -n "$CONTROLLER_LOG_CONFIG_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$MODEL_ID" ]; then
         chmod 750 "$CONTROLLER_LOG_CONFIG_PATH"
@@ -127,12 +118,13 @@ if [ "$ROLE" = "controller" ]; then
     set_controller_env
 
     # Controller start command
-    python3 -m motor.controller.main
+    python3 -m motor.controller.main --config $MOTOR_CONTROLLER_CONFIG_PATH
 fi
 
 if [ "$ROLE" == "coordinator" ]; then
     echo "Updating coordinator configuration file..."
-    python3 "$CONFIG_FROM_CONFIGMAP_PATH/update_config_from_user_config.py" "$CONFIG_DIR/motor_coordinator.json" "$USER_CONFIG_FILE" "motor_coordinator_config"
+    export MOTOR_COORDINATOR_CONFIG_PATH=$CONFIG_PATH/coordinator_config.json
+    python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_COORDINATOR_CONFIG_PATH" "$USER_CONFIG_FILE" "motor_coordinator_config"
     
     if [ -n "$COORDINATOR_LOG_CONFIG_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$MODEL_ID" ]; then
         chmod 750 "$COORDINATOR_LOG_CONFIG_PATH"
