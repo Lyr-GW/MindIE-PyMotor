@@ -117,7 +117,7 @@ async def __create_request_info(raw_request: Request) -> RequestInfo:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Empty request json"
         )
-        
+    logger.debug("Got request headers: %s, body: %s", raw_request.headers, request_json)
     req_id = RequestManager().generate_request_id()
     req_len = len(request_body)
     api = raw_request.url.path.lstrip('/')

@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+# coding=utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
+
+# vllm request_id prefix
+# /v1/chat/completions: chatcmpl-xxx
+CHAT_COMPLETION_PREFIX = "chatcmpl-"
+# /v1/completions: cmpl-xxx-0
+COMPLETION_PREFIX = "cmpl-"
+COMPLETION_SUFFIX = "-0"

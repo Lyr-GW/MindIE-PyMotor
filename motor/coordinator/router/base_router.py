@@ -94,15 +94,17 @@ class BaseRouter(ABC):
         Yields:
             Bytes of the response stream
         """
-        logger.debug("Forward stream request: %s", req_data)
         endpoint = resource.endpoint
         headers = {
-            'Content-Type': 'text/event-stream',
+            'Content-Type': 'application/json',
             'X-Request-Id': self.req_info.req_id
         }
+        base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
+        logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s", 
+                     base_url, self.req_info.api, headers, req_data)
         
         async with httpx.AsyncClient(timeout=CoordinatorConfig().exception_config.first_token_timeout,
-                                    base_url=f"http://{endpoint.ip}:{endpoint.business_port}",
+                                    base_url=base_url,
                                     verify=False) as client:
             self.first_chunk_sent = False
             async with client.stream("POST",

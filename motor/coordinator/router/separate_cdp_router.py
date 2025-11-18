@@ -13,6 +13,7 @@ from motor.coordinator.router.base_router import BaseRouter
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import PDRole
 from motor.coordinator.core.request_manager import RequestManager
+from motor.coordinator.models.contants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX, COMPLETION_SUFFIX
 from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -127,7 +128,15 @@ class SeparateCDPRouter(BaseRouter):
     def __gen_p_request(self) -> dict:
         """Generate P request parameters"""
         kv_transfer_params = self.req_info.req_data.copy()
-        request_id = kv_transfer_params["request_id"]
+        
+        def trim_request_id_prefix(vllm_request_id: str) -> None:
+            original_id = vllm_request_id
+            if vllm_request_id.startswith(CHAT_COMPLETION_PREFIX):
+                original_id = vllm_request_id.removeprefix(CHAT_COMPLETION_PREFIX)
+            elif vllm_request_id.startswith(COMPLETION_PREFIX) and vllm_request_id.endswith(COMPLETION_SUFFIX):
+                original_id = vllm_request_id.removeprefix(COMPLETION_PREFIX).removesuffix(COMPLETION_SUFFIX)
+            return original_id
+        request_id = trim_request_id_prefix(kv_transfer_params["request_id"])
 
         req_info = RequestManager().get_req_info(request_id)
         if not req_info:
