@@ -125,4 +125,9 @@ setup(
         'build': BuildCommand,
         'build_py': BuildPyCommand,
     },
+    entry_points={
+        "console_scripts": [
+            "engine_server = motor.engine_server.cli.main:main",
+        ]
+    }
 )
