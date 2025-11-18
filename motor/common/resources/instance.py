@@ -146,7 +146,7 @@ class Instance(BaseModel):
         node_mgr_info = NodeManagerInfo(pod_ip=pod_ip, host_ip=host_ip, port=port)
         with self._lock:
             if node_mgr_info in self.node_managers:
-                self.node_mgrs.remove(node_mgr_info)
+                self.node_managers.remove(node_mgr_info)
                 logger.info(f"Del node manager {pod_ip}:{port} from instance:{self.job_name}")
             else:
                 logger.info(f"Node manager {pod_ip}:{port} not in instance:{self.job_name}")

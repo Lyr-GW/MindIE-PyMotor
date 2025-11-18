@@ -1,5 +1,4 @@
 import time
-from unittest.mock import patch, MagicMock
 import pytest
 
 from motor.controller.core.instance_manager import InstanceManager
@@ -7,6 +6,36 @@ from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import HeartbeatMsg
 from motor.common.resources.instance import ParallelConfig, Instance, NodeManagerInfo, InsStatus
 from motor.common.utils.singleton import ThreadSafeSingleton
+
+
+def create_test_instance(
+    instance_id: int,
+    job_name: str,
+    pod_ips: list[str],
+    role: str = "prefill"
+) -> Instance:
+    """Helper function to create test instances with endpoints"""
+    endpoints = {}
+    for i, pod_ip in enumerate(pod_ips):
+        endpoints[pod_ip] = {
+            0: Endpoint(
+                id=0,
+                ip=pod_ip,
+                business_port=f"80{0}{i}",
+                mgmt_port=f"80{1}{i}",
+                status=EndpointStatus.NORMAL,
+                hb_timestamp=time.time()
+            )
+        }
+
+    return Instance(
+        id=instance_id,
+        job_name=job_name,
+        model_name="test_model",
+        role=role,
+        group_id=1,
+        endpoints=endpoints
+    )
 
 
 @pytest.fixture
@@ -271,3 +300,92 @@ def test_empty_string_pod_ip(instance_manager):
     result = instance_manager.get_instance_by_podip(pod_ip)
 
     assert result is None
+
+
+def test_separate_instance_by_id(instance_manager, test_config):
+    """Test separating instance by ID"""
+    # Create instances with multiple endpoints
+    instance1 = create_test_instance(100, "test_job_1", ["192.168.1.1", "192.168.1.2"])
+    instance2 = create_test_instance(101, "test_job_2", ["192.168.1.3"], role="decode")
+
+    # Add instances
+    instance_manager.add_instance(instance1)
+    instance_manager.add_instance(instance2)
+
+    # Set instances to ACTIVE state
+    instance1.update_instance_status(InsStatus.ACTIVE)
+    instance2.update_instance_status(InsStatus.ACTIVE)
+
+    # Separate instances by ID
+    instance_manager.separate_instance(instance1.id)
+    instance_manager.separate_instance(instance2.id)
+
+    # Verify instances are separated
+    assert instance1.status == InsStatus.INACTIVE
+    assert instance2.status == InsStatus.INACTIVE
+    assert instance1.id in instance_manager.forced_separated_instances
+    assert instance2.id in instance_manager.forced_separated_instances
+
+
+def test_recover_instance_by_id(instance_manager, test_config):
+    """Test recovering instance by ID"""
+    # Create instance with forced separation
+    instance = create_test_instance(102, "test_job_recovery", ["192.168.1.4"])
+
+    # Add instance and force separate it
+    instance_manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.ACTIVE)
+    instance_manager.separate_instance(instance.id)
+
+    # Verify it's separated
+    assert instance.status == InsStatus.INACTIVE
+    assert instance.id in instance_manager.forced_separated_instances
+
+    # Recover instance by ID
+    instance_manager.recover_instance(instance.id)
+
+    # Verify it's recovered
+    assert instance.id not in instance_manager.forced_separated_instances
+
+
+def test_inactive_to_initial_state_transition(instance_manager, test_config):
+    """Test transition from INACTIVE to INITIAL state"""
+    # Create instance
+    instance = create_test_instance(103, "test_job_transition", ["192.168.1.5"])
+
+    # Add instance and set to INACTIVE
+    instance_manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.INACTIVE)
+
+    # Force separate it
+    instance_manager.separate_instance(instance.id)
+    assert instance.id in instance_manager.forced_separated_instances
+
+    # Trigger state transition with INSTANCE_INIT event
+    instance_manager._handle_state_transition(instance)
+
+    # Manually set the event to INSTANCE_INIT and call handle_initial
+    from motor.common.resources.instance import InsConditionEvent
+    instance_manager._handle_initial(InsStatus.INACTIVE, InsConditionEvent.INSTANCE_INIT, instance)
+
+    # Verify instance is removed from forced separated set
+    assert instance.id not in instance_manager.forced_separated_instances
+
+
+def test_forced_separated_instances_cleanup(instance_manager):
+    """Test that forced_separated_instances is cleaned up when instance is deleted"""
+    # Create instance
+    instance = create_test_instance(104, "test_job_cleanup", ["192.168.1.6"])
+
+    # Add instance and force separate it
+    instance_manager.add_instance(instance)
+    instance_manager.separate_instance(instance.id)
+
+    # Verify it's in forced separated set
+    assert instance.id in instance_manager.forced_separated_instances
+
+    # Delete instance
+    instance_manager.del_instance(instance.id)
+
+    # Verify it's removed from forced separated set
+    assert instance.id not in instance_manager.forced_separated_instances

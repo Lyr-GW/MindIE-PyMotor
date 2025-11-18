@@ -24,7 +24,8 @@ from motor.controller.ft.fault_manager import (
     InstanceGroupMetadata,
     InstanceMetadata,
     DeviceFaultInfo,
-    Status
+    Status,
+    FaultLevel
 )
 
 # Test constants
@@ -84,6 +85,8 @@ def mock_instance_manager(mock_instance):
         instance_manager.get_instance_by_podip = Mock(return_value=mock_instance)
         instance_manager.get_instance = Mock(return_value=mock_instance)
         instance_manager.notify = Mock()
+        instance_manager.separate_instance = Mock()
+        instance_manager.recover_instance = Mock()
         yield instance_manager
 
 
@@ -108,7 +111,7 @@ class FaultManagerTestHelper:
 
     @staticmethod
     def create_device_fault_info(device_type="npu", rank_id=0, fault_code=TEST_FAULT_CODES[0],
-                                fault_level="L3", fault_type="HARDWARE", fault_reason="Memory failure"):
+                                fault_level=FaultLevel.L3, fault_type="HARDWARE", fault_reason="Memory failure"):
         """Create a DeviceFaultInfo object"""
         return DeviceFaultInfo(
             device_type=device_type,
@@ -161,7 +164,7 @@ class FaultManagerTestHelper:
                 device_fault.deviceId = f"device_{node_ip.split('.')[-1]}"
                 device_fault.deviceType = device_type
                 device_fault.faultCodes.extend(fault_codes or ["ERR001"])
-                device_fault.faultLevel = "CRITICAL"
+                device_fault.faultLevel = "L5"
                 device_fault.faultType.extend(fault_types or ["HARDWARE"])
                 device_fault.faultReason.extend(fault_reasons or ["Memory failure"])
 
@@ -390,7 +393,7 @@ def test_process_cluster_fault_message_large_device_faults(fault_manager):
         device_fault.deviceId = f"device_{i}"
         device_fault.deviceType = "SERVER"
         device_fault.faultCodes.append(f"ERR{i:03d}")
-        device_fault.faultLevel = "CRITICAL"
+        device_fault.faultLevel = "L5"
         device_fault.faultType.append("HARDWARE")
         device_fault.faultReason.append(f"Fault reason {i}")
 
@@ -415,11 +418,14 @@ def test_process_cluster_fault_message_invalid_nodeinfo(fault_manager):
 
 def test_process_cluster_fault_message_external_call_failure(fault_manager, mock_instance_manager):
     """Test processing fault message when external calls fail - should handle gracefully"""
-    # Setup server metadata using helper
+    # Setup server metadata
     fault_manager.servers[TEST_IPS[0]] = FaultManagerTestHelper.create_server_metadata()
 
-    # Create fault message using helper
-    fault_msg = FaultManagerTestHelper.create_fault_message(fault_level="unhealthy")
+    # Create fault message with device faults to meet unhealthy condition
+    fault_msg = FaultManagerTestHelper.create_fault_message(
+        fault_level="unhealthy",
+        fault_codes=["ERR001"]
+    )
 
     # Mock instance manager to raise exception
     mock_instance_manager.get_instance_by_podip.side_effect = Exception("Database connection failed")
@@ -433,10 +439,10 @@ def test_process_cluster_fault_message_external_call_failure(fault_manager, mock
 @pytest.mark.parametrize("server_status,device_faults,expected_result", [
     (Status.HEALTHY, [], None),  # Healthy server returns None
     (Status.UNHEALTHY, [  # Unhealthy server with faults returns highest level fault
-        FaultManagerTestHelper.create_device_fault_info(fault_level="L2", fault_code=0x1000),
-        FaultManagerTestHelper.create_device_fault_info(fault_level="L4", fault_code=0x2000),
-        FaultManagerTestHelper.create_device_fault_info(fault_level="L3", fault_code=0x3000)
-    ], ("L4", 0x2000)),
+        FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L2, fault_code=0x1000),
+        FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L4, fault_code=0x2000),
+        FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L3, fault_code=0x3000)
+    ], (FaultLevel.L4, 0x2000)),
 ])
 def test_eval_server_status(fault_manager, server_status, device_faults, expected_result):
     """Test _eval_server_status with different server states"""
@@ -463,28 +469,28 @@ def test_eval_server_status_unknown_server(fault_manager):
 @pytest.mark.parametrize("test_case,server_configs,expected_fault_level,expected_fault_code", [
     ("healthy_instance", [
         {"ip": TEST_IPS[0], "status": Status.HEALTHY, "faults": []}
-    ], "L0", 0x0),
+    ], FaultLevel.L0, 0x0),
     ("unhealthy_instance", [
         {"ip": TEST_IPS[0], "status": Status.UNHEALTHY, "faults": [
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L2", fault_code=0x1000),
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L4", fault_code=0x2000),
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L3", fault_code=0x3000)
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L2, fault_code=0x1000),
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L4, fault_code=0x2000),
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L3, fault_code=0x3000)
         ]}
-    ], "L4", 0x2000),
+    ], FaultLevel.L4, 0x2000),
     ("multiple_servers", [
         {"ip": TEST_IPS[0], "status": Status.UNHEALTHY, "faults": [
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L2", fault_code=0x1000)
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L2, fault_code=0x1000)
         ]},
         {"ip": TEST_IPS[1], "status": Status.UNHEALTHY, "faults": [
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L5", fault_code=0x3000)
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L5, fault_code=0x3000)
         ]}
-    ], "L5", 0x3000),
+    ], FaultLevel.L5, 0x3000),
     ("mixed_servers", [
         {"ip": TEST_IPS[0], "status": Status.HEALTHY, "faults": []},
         {"ip": TEST_IPS[1], "status": Status.UNHEALTHY, "faults": [
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L3", fault_code=0x2000)
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L3, fault_code=0x2000)
         ]}
-    ], "L3", 0x2000),
+    ], FaultLevel.L3, 0x2000),
 ])
 def test_update_instances_status(fault_manager, test_case, server_configs, expected_fault_level, expected_fault_code):
     """Test _update_instances_status with different server configurations"""
@@ -589,17 +595,17 @@ def fault_manager_with_instances():
         manager.stop()
 
 @pytest.mark.parametrize("test_case,server_setup,expected_strategy_calls,expected_instance_states", [
-    ("healthy_instances", {}, 0, {"strategy": None, "fault_level": "L0", "fault_code": 0x0}),
+    ("healthy_instances", {}, 0, {"strategy": None, "fault_level": FaultLevel.L0, "fault_code": 0x0}),
     ("unhealthy_instances", {
         TEST_IPS[0]: {"status": Status.UNHEALTHY, "faults": [
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L3", fault_code=TEST_FAULT_CODES[0])
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L3, fault_code=TEST_FAULT_CODES[0])
         ]}
-    }, 1, {"strategy": "not_none", "fault_level": "L3", "fault_code": TEST_FAULT_CODES[0]}),
+    }, 1, {"strategy": "not_none", "fault_level": FaultLevel.L3, "fault_code": TEST_FAULT_CODES[0]}),
     ("multiple_instances", {
         TEST_IPS[0]: {"status": Status.UNHEALTHY, "faults": [
-            FaultManagerTestHelper.create_device_fault_info(fault_level="L3", fault_code=0x3000)
+            FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L3, fault_code=0x3000)
         ]}
-    }, 1, {"strategy": "not_none", "fault_level": "L3", "fault_code": 0x3000}),
+    }, 1, {"strategy": "not_none", "fault_level": FaultLevel.L3, "fault_code": 0x3000}),
 ])
 def test_ft_strategy_center_basic(
         fault_manager_with_instances, test_case, server_setup,
@@ -635,7 +641,7 @@ def test_ft_strategy_center_basic(
         # All instances should be healthy
         for ins_metadata in manager.instances.values():
             assert ins_metadata.strategy is None
-            assert ins_metadata.fault_level == "L0"
+            assert ins_metadata.fault_level == FaultLevel.L0
             assert ins_metadata.fault_code == 0x0
     else:
         # Only instance 1 should be affected in unhealthy cases
@@ -645,7 +651,7 @@ def test_ft_strategy_center_basic(
 
         # Instance 2 should remain healthy
         assert manager.instances[2].strategy is None
-        assert manager.instances[2].fault_level == "L0"
+        assert manager.instances[2].fault_level == FaultLevel.L0
         assert manager.instances[2].fault_code == 0x0
 
 def test_ft_strategy_center_strategy_levels(fault_manager_with_instances):
@@ -655,7 +661,7 @@ def test_ft_strategy_center_strategy_levels(fault_manager_with_instances):
     # Test L2 level error
     manager.servers[TEST_IPS[0]].status = Status.UNHEALTHY
     manager.servers[TEST_IPS[0]].device_fault_infos = [
-        FaultManagerTestHelper.create_device_fault_info(fault_level="L2", fault_code=TEST_FAULT_CODES[4])
+        FaultManagerTestHelper.create_device_fault_info(fault_level=FaultLevel.L2, fault_code=TEST_FAULT_CODES[4])
     ]
 
     # First update instance status to reflect the server fault
@@ -836,20 +842,20 @@ def test_triggered_update_workflow(fault_manager):
     # Verify initial state
     assert 100 in fault_manager.instances
     assert TEST_IPS[0] in fault_manager.servers
-    assert fault_manager.instances[100].fault_level == "L0"
+    assert fault_manager.instances[100].fault_level == FaultLevel.L0
     assert fault_manager.instances[100].fault_code == 0x0
 
     # Simulate fault message processing with _update_instances_status call
     fault_manager.servers[TEST_IPS[0]].status = Status.UNHEALTHY
     fault_manager.servers[TEST_IPS[0]].device_fault_infos = [
-        FaultManagerTestHelper.create_device_fault_info(fault_code=TEST_FAULT_CODES[0], fault_level="L3")
+        FaultManagerTestHelper.create_device_fault_info(fault_code=TEST_FAULT_CODES[0], fault_level=FaultLevel.L3)
     ]
 
     # Call _update_instances_status to simulate triggered update
     fault_manager._update_instances_status()
 
     # Verify instance metadata was updated
-    assert fault_manager.instances[100].fault_level == "L3"
+    assert fault_manager.instances[100].fault_level == FaultLevel.L3
     assert fault_manager.instances[100].fault_code == TEST_FAULT_CODES[0]
 
     # Now test strategy center with updated fault level
@@ -876,3 +882,148 @@ def test_triggered_update_workflow(fault_manager):
 
     # Verify L3 strategy was called with correct parameters
     fault_manager.strategies["L3"].assert_called_once_with(TEST_FAULT_CODES[0], 100)
+
+
+# @pytest.mark.parametrize("device_faults,fault_level,expected_status,expected_separate_called,expected_recover_called", [
+#     # Case 1: Has device faults AND fault_level is unhealthy -> unhealthy (separate)
+#     ([FaultManagerTestHelper.create_device_fault_info()], "unhealthy", Status.UNHEALTHY, True, False),
+#     # Case 2: Has device faults BUT fault_level is healthy -> healthy (recover)
+#     ([FaultManagerTestHelper.create_device_fault_info()], "healthy", Status.HEALTHY, False, True),
+#     # Case 3: No device faults AND fault_level is unhealthy -> healthy (recover)
+#     ([], "unhealthy", Status.HEALTHY, False, True),
+#     # Case 4: No device faults AND fault_level is healthy -> healthy (recover)
+#     ([], "healthy", Status.HEALTHY, False, True),
+# ])
+# def test_comprehensive_fault_determination_logic(fault_manager, mock_instance_manager, device_faults, fault_level, expected_status, expected_separate_called, expected_recover_called):
+#     """Test comprehensive fault determination logic combining device faults and fault level"""
+#     # Setup server metadata
+#     fault_manager.servers[TEST_IPS[0]] = FaultManagerTestHelper.create_server_metadata(
+#         device_fault_infos=device_faults
+#     )
+
+#     # Create fault message
+#     fault_codes = ["ERR001"] if device_faults else None
+#     fault_msg = FaultManagerTestHelper.create_fault_message(
+#         fault_level=fault_level,
+#         fault_codes=fault_codes
+#     )
+
+#     # Process fault message
+#     fault_manager._process_cluster_fault_message(fault_msg)
+
+#     # Verify server status
+#     assert fault_manager.servers[TEST_IPS[0]].status == expected_status
+
+#     # Verify instance manager calls
+#     if expected_separate_called:
+#         mock_instance_manager.separate_instances_by_pod_ips.assert_called_once_with([TEST_IPS[0]])
+#     else:
+#         mock_instance_manager.separate_instances_by_pod_ips.assert_not_called()
+
+#     if expected_recover_called:
+#         mock_instance_manager.recover_instances_by_pod_ips.assert_called_once_with([TEST_IPS[0]])
+#     else:
+#         mock_instance_manager.recover_instances_by_pod_ips.assert_not_called()
+
+
+def test_fault_manager_bidirectional_instance_management(fault_manager_with_instances, mock_instance_manager):
+    """Test that fault manager handles both isolation and recovery in a single message"""
+    # Use the fault_manager_with_instances which already has instances set up
+    manager = fault_manager_with_instances
+
+    # Setup instance 1 with two servers initially healthy (fault_level = L0)
+    manager.instances[1].fault_level = FaultLevel.L0
+    manager.instances[1].fault_code = 0x0
+
+    # Modify server configurations for this test - make server unhealthy
+    manager.servers[TEST_IPS[0]].device_fault_infos = [FaultManagerTestHelper.create_device_fault_info()]
+    manager.servers[TEST_IPS[0]].status = Status.UNHEALTHY
+
+    # Create fault message with unhealthy node
+    fault_msg = cluster_fault_pb2.FaultMsgSignal()
+    fault_msg.signalType = "fault"
+
+    # Add unhealthy node (with device faults and unhealthy fault_level)
+    unhealthy_node = fault_msg.nodeFaultInfo.add()
+    unhealthy_node.nodeIP = TEST_IPS[0]
+    unhealthy_node.nodeName = TEST_NODE_NAMES[0]
+    unhealthy_node.nodeSN = TEST_SERIAL_NUMBERS[0]
+    unhealthy_node.faultLevel = "unhealthy"
+    device_fault = unhealthy_node.faultDevice.add()
+    device_fault.deviceId = f"device_{TEST_IPS[0].split('.')[-1]}"
+    device_fault.deviceType = "SERVER"
+    device_fault.faultCodes.extend(["ERR001"])
+    device_fault.faultLevel = "L5"
+
+    # Process fault message
+    manager._process_cluster_fault_message(fault_msg)
+
+    # Verify server gets correct status
+    assert manager.servers[TEST_IPS[0]].status == Status.UNHEALTHY
+
+    # Verify instance manager calls - instance 1 should be isolated (became unhealthy)
+    mock_instance_manager.separate_instance.assert_called_once_with(1)  # instance_id 1
+
+
+def test_fault_manager_device_faults_with_healthy_fault_level(fault_manager, mock_instance_manager):
+    """Test server with device faults but healthy fault_level gets recovered"""
+    # Setup server with device faults but healthy fault_level
+    fault_manager.servers[TEST_IPS[0]] = FaultManagerTestHelper.create_server_metadata(
+        device_fault_infos=[FaultManagerTestHelper.create_device_fault_info()]
+    )
+
+    # Setup instance initially as unhealthy to test recovery
+    fault_manager.instances[100] = FaultManagerTestHelper.create_instance_metadata(
+        instance_id=100,
+        node_managers=[NodeManagerInfo(pod_ip=TEST_IPS[0], host_ip=TEST_IPS[0], port=TEST_PORT)]
+    )
+    # Set instance initially as unhealthy to test recovery
+    fault_manager.instances[100].fault_level = FaultLevel.L1
+
+    # Create fault message with healthy fault_level
+    fault_msg = FaultManagerTestHelper.create_fault_message(
+        fault_level="healthy",
+        fault_codes=["ERR001"]  # But has device faults
+    )
+
+    # Process fault message
+    fault_manager._process_cluster_fault_message(fault_msg)
+
+    # Verify server status is HEALTHY (despite having device faults)
+    assert fault_manager.servers[TEST_IPS[0]].status == Status.HEALTHY
+
+    # Verify recovery is called (instance became healthy)
+    mock_instance_manager.separate_instance.assert_not_called()
+    mock_instance_manager.recover_instance.assert_called_once_with(100)  # instance_id
+
+
+def test_fault_manager_unhealthy_fault_level_without_device_faults(fault_manager, mock_instance_manager):
+    """Test server with unhealthy fault_level but no device faults gets recovered"""
+    # Setup server without device faults
+    fault_manager.servers[TEST_IPS[0]] = FaultManagerTestHelper.create_server_metadata(
+        device_fault_infos=[]  # No device faults
+    )
+
+    # Setup instance initially as unhealthy to test recovery
+    fault_manager.instances[100] = FaultManagerTestHelper.create_instance_metadata(
+        instance_id=100,
+        node_managers=[NodeManagerInfo(pod_ip=TEST_IPS[0], host_ip=TEST_IPS[0], port=TEST_PORT)]
+    )
+    # Set instance initially as unhealthy to test recovery
+    fault_manager.instances[100].fault_level = FaultLevel.L1
+
+    # Create fault message with unhealthy fault_level but no device faults
+    fault_msg = FaultManagerTestHelper.create_fault_message(
+        fault_level="unhealthy"
+        # No fault_codes, so no device faults in message
+    )
+
+    # Process fault message
+    fault_manager._process_cluster_fault_message(fault_msg)
+
+    # Verify server status is HEALTHY (despite unhealthy fault_level)
+    assert fault_manager.servers[TEST_IPS[0]].status == Status.HEALTHY
+
+    # Verify recovery is called (instance became healthy)
+    mock_instance_manager.separate_instance.assert_not_called()
+    mock_instance_manager.recover_instance.assert_called_once_with(100)  # instance_id
