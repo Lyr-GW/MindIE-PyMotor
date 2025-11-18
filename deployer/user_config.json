@@ -3,18 +3,18 @@
   "motor_deploy_config": {
     "p_instances_num": 1,
     "d_instances_num": 1,
-    "single_p_instance_pod_num": 2,
-    "single_d_instance_pod_num": 8,
-    "p_pod_npu_num": 8,
-    "d_pod_npu_num": 8,
+    "single_p_instance_pod_num": 1,
+    "single_d_instance_pod_num": 1,
+    "p_pod_npu_num": 16,
+    "d_pod_npu_num": 16,
     "p_instances_scale_num": 0,
     "d_instances_scale_num": 0,
     "model_id": "",
     "prefill_distribute_enable": 0,
     "decode_distribute_enable": 1,
-    "image_name": "mindie:dev-2.0.RC1.B091-800I-A2-py311-ubuntu22.04-aarch64",
-    "job_id": "mindie",
-    "hardware_type": "800I_A2",
+    "image_name": "mindie-motor-vllm:dev-2.2.RC1.B153-800I-A3-py311-Ubuntu24.04-lts-aarch64",
+    "job_id": "mindie-pymotor",
+    "hardware_type": "800I_A3",
     "mindie_env_path": "./conf/mindie_env.json",
     "mindie_host_log_path": "/root/log/ascend_log",
     "mindie_container_log_path": "/root/mindie",
@@ -84,18 +84,7 @@
   "motor_controller_config": {},
   "motor_nodemanger_config": {},
   "motor_coordinator_config": {
-    "http_config": {
-      "predict_ip": "127.0.0.1",
-      "predict_port": "1025",
-      "manage_ip": "127.0.0.1",
-      "manage_port": "1026",
-      "alarm_port": "1027",
-      "server_thread_num": 10,
-      "client_thread_num": 10,
-      "http_timeout_seconds": 10,
-      "keep_alive_seconds": 180
-    },
-    "request_limit": {
+        "request_limit": {
       "single_node_max_requests": 4096,
       "max_requests": 10000
     },
@@ -108,33 +97,78 @@
   "motor_engine_prefill_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "dsv3_w8a8",
-      "model_path": "/mnt/deepseek_diff_level/deepseek_r1_w8a8",
+      "model_name": "qwen3-30B",
+      "model_path": "/mnt/weight/qwen3_14B",
       "npu_mem_utils": 0.9,
       "prefill_parallel_config": {
         "dp_size": 2,
         "tp_size": 2,
-        "pp_size": 2,
+        "pp_size": 1,
         "enable_ep": false,
         "dp_rpc_port": 9000
       }
     },
-    "engine_config": {}
+    "engine_config": {
+      "enforce-eager": true,
+      "max_model_len": 2048,
+      "kv_transfer_config": {
+        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_producer",
+        "kv_parallel_size": 1,
+        "kv_port": "20001",
+        "engine_id": "0",
+        "kv_rank": 0,
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 2
+          },
+          "decode": {
+            "dp_size": 2,
+            "tp_size": 2
+          }
+        }
+      }
+    }
   },
   "motor_engine_decode_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "dsv3_w8a8",
-      "model_path": "/mnt/deepseek_diff_level/deepseek_r1_w8a8",
+      "model_name": "qwen3-30B",
+      "model_path": "/mnt/weight/qwen3_14B",
       "npu_mem_utils": 0.9,
       "decode_parallel_config": {
         "dp_size": 2,
         "tp_size": 2,
-        "pp_size": 2,
+        "pp_size": 1,
         "enable_ep": false,
         "dp_rpc_port": 9000
       }
     },
-    "engine_config": {}
+    "engine_config": {
+      "max_model_len": 2048,
+      "kv_transfer_config": {
+        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_producer",
+        "kv_parallel_size": 1,
+        "kv_port": "20001",
+        "engine_id": "0",
+        "kv_rank": 0,
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 2
+          },
+          "decode": {
+            "dp_size": 2,
+            "tp_size": 2
+          }
+        }
+      }
+    }
   }
 }
