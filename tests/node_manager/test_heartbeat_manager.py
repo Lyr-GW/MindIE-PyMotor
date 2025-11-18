@@ -167,7 +167,7 @@ class TestHeartBeatManager:
         assert mock_client_class.call_count == 2
         # Verify that client.get was called for each endpoint with correct path
         assert mock_client.get.call_count == 2
-        mock_client.get.assert_any_call("/v1/status")
+        mock_client.get.assert_any_call("/status")
         # Verify that client.close was called for each endpoint
         assert mock_client.close.call_count == 2
         

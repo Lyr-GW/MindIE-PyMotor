@@ -5,11 +5,11 @@
 import os
 import json
 from typing import Any, Optional
+from enum import Enum
 
 from motor.common.resources.http_msg_spec import Ranktable
 from motor.common.resources.instance import ParallelConfig, PDRole
 from motor.common.resources.endpoint import DeviceInfo
-from motor.node_manager.core.daemon import Daemon
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
@@ -19,6 +19,14 @@ PP = "pp_size"
 TP = "tp_size"
 
 logger = get_logger(__name__)
+
+
+class HardwareType(str, Enum):
+    TYPE_800I_A2 = "800I-A2"
+    TYPE_800I_A3 = "800I-A3"
+    
+    def __repr__(self) -> str:
+        return str.__repr__(self.value)
 
 
 class NodeManagerConfig(ThreadSafeSingleton):
@@ -39,7 +47,6 @@ class NodeManagerConfig(ThreadSafeSingleton):
     job_name: str = Env.job_name
     role: Optional[PDRole] = None
     model_name: str = None
-    daemon: Daemon = Daemon()
     device_info: list[DeviceInfo] = []
     heartbeat_interval_seconds: int = 1
     tls_config: {} = None
@@ -48,6 +55,8 @@ class NodeManagerConfig(ThreadSafeSingleton):
     controller_api_port: Optional[int] = None
 
     ranktable: Ranktable = None
+    base_port: int = 10000
+    hardware_type: HardwareType = None
 
     def __init__(self) -> None:
         if hasattr(self, "_initialized"):
@@ -58,7 +67,7 @@ class NodeManagerConfig(ThreadSafeSingleton):
 
         NodeManagerConfig.parse_config_json(config_path)
         NodeManagerConfig.parse_hccl_json(hccl_path)
-        NodeManagerConfig.calculate_endpoint_num()
+        NodeManagerConfig.generate_endpoint_ports()
 
         self._initialized = True
 
@@ -126,6 +135,7 @@ class NodeManagerConfig(ThreadSafeSingleton):
         cls.heartbeat_interval_seconds = cfg.get("heartbeat_interval_seconds", 1)
 
         cls.tls_config = cfg.get("nodemanager_tls_config", {})
+        cls.base_port = cfg.get("base_port", 10000)
 
         logger.info(
             f"[NodeManagerConfig] Loaded: role={cls.role}, "
@@ -158,33 +168,35 @@ class NodeManagerConfig(ThreadSafeSingleton):
             )
             if d.get("super_device_id"):
                 dev_info.super_device_id = d["super_device_id"]
-
             cls.device_info.append(dev_info)
+        if len(cls.device_info) == 8:
+            cls.hardware_type = HardwareType.TYPE_800I_A2
+        elif len(cls.device_info) == 16:
+            cls.hardware_type = HardwareType.TYPE_800I_A3
+        else:
+            raise ValueError(f"Invalid device count: {len(cls.device_info)}")
 
     @classmethod
-    def calculate_endpoint_num(cls):
+    def generate_endpoint_ports(cls):
         """
         Calculate endpoint number based on tensor parallel & pipeline parallel config.
         Example: tp=2, pp=4 => 8 devices per pod
         """
-        tp, pp = cls.parallel_config.tp_size, cls.parallel_config.pp_size
-        devices_per_pod = tp * pp
+        dp = cls.parallel_config.dp_size
+        devices_per_dp = cls.parallel_config.tp_size * cls.parallel_config.pp_size
 
-        if len(cls.device_info) % devices_per_pod != 0:
+        if len(cls.device_info) < devices_per_dp or dp < 1:
             raise ValueError(
-                f"Device count ({len(cls.device_info)}) must be divisible "
-                f"by devices per pod ({devices_per_pod})"
+                f"Device count ({len(cls.device_info)}) must bigger than"
+                f"or equal to devices per dp ({devices_per_dp})"
+                f"and dp must be bigger than 0"
             )
 
-        cls.endpoint_num = max(1, len(cls.device_info) // devices_per_pod)
-
-        # Generate port mapping from daemon utility
-        ports = Daemon().gen_engine_ports(cls.endpoint_num)
-        cls.mgmt_ports = ports.get("mgmt_ports", [])
-        cls.service_ports = ports.get("service_ports", [])
+        cls.endpoint_num = min(dp, len(cls.device_info) // devices_per_dp)
+        cls.service_ports = [str(cls.base_port + i * 2) for i in range(cls.endpoint_num)]
+        cls.mgmt_ports = [str(cls.base_port + i * 2 + 1) for i in range(cls.endpoint_num)]
 
         logger.info(
-            f"endpoint_num: {cls.endpoint_num}, mgmt_ports: {cls.mgmt_ports}, "
-            f"service_ports: {cls.service_ports}"
+            f"Generate endpoint ports successfully: endpoint_num: {cls.endpoint_num},"
+            f"mgmt_ports: {cls.mgmt_ports}, service_ports: {cls.service_ports}."
         )
-

@@ -5,6 +5,7 @@
   "node_manager_port": 1027,
   "role": "prefill",
   "model_name": "vllm",
+  "base_port": 10000,
   "parallel_config": {
     "dp": 1,
     "cp": 1,

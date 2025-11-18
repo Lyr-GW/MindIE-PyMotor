@@ -13,6 +13,7 @@ from motor.common.utils.logger import get_logger
 from motor.common.resources.http_msg_spec import StartCmdMsg
 from motor.node_manager.core.engine_manager import EngineManager
 from motor.node_manager.core.daemon import Daemon
+from motor.common.resources.instance import PDRole
 
 
 logger = get_logger(__name__)
@@ -28,11 +29,7 @@ async def start_instance(request: Request):
     try:
         payload = await request.json()
         start_msg = StartCmdMsg(**payload)
-
         engine_manager = EngineManager()
-        if engine_manager is None:
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                detail="Engine manager not initialized")
 
         async with thread_semaphore:
             try:
@@ -48,7 +45,7 @@ async def start_instance(request: Request):
 
         try:
             await asyncio.to_thread(Daemon().pull_engine,
-                                    engine_manager.config.role,
+                                    PDRole(start_msg.role),
                                     start_msg.endpoints,
                                     start_msg.instance_id)
         except Exception as pull_err:
@@ -75,7 +72,7 @@ async def stop_instance(request: Request):
     Stop all engine processes by invoking Daemon.exit_daemon().
     """
     try:
-        await asyncio.to_thread(Daemon().exit_daemon)
+        await asyncio.to_thread(Daemon().stop)
 
         return Response(status_code=status.HTTP_200_OK, content="All engine processes stopped successfully.")
     except Exception as err:
@@ -105,6 +102,8 @@ class NodeManagerAPI:
             self.server.should_exit = True
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+            if self._thread.is_alive():
+                logger.warning("API server thread did not stop within timeout")
 
     def _serve_in_thread(self):
         loop = asyncio.new_event_loop()

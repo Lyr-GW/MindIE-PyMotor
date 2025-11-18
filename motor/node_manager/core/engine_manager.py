@@ -28,7 +28,7 @@ class EngineManager(ThreadSafeSingleton):
 
         self.endpoints: list[Endpoint] = []
         self.config = NodeManagerConfig()
-        self.instance_ranktable: list[DeviceInfo] = []
+        self.instance_ranktable: Ranktable = None
         self.instance_id: int = 0
         self.is_working = False
         self._register_thread = threading.Thread(
@@ -92,7 +92,7 @@ class EngineManager(ThreadSafeSingleton):
     def stop(self) -> None:
         try:
             if hasattr(self, "_register_thread") and self._register_thread.is_alive():
-                self._register_thread.join(timeout=0.1)
+                self._register_thread.join(timeout=2.0)
         except Exception as e:
             logger.error(f"Failed to stop engine manager: {e}")
 
@@ -105,8 +105,8 @@ class EngineManager(ThreadSafeSingleton):
         output_path = os.path.join(Env.ranktable_path)
 
         try:
-            # If ranktable has model_dump (pydantic), use it; otherwise, use as dict
-            if hasattr(self.instance_ranktable, "model_dump"):
+            # If ranktable is Ranktable type, use model_dump; otherwise, use as list[DeviceInfo]
+            if isinstance(self.instance_ranktable, Ranktable):
                 rk_dump = self.instance_ranktable.model_dump(exclude_none=True)
             else:
                 rk_dump = self.instance_ranktable
@@ -191,7 +191,7 @@ class EngineManager(ThreadSafeSingleton):
     def _gen_reregister_msg(self) -> ReregisterMsg | None:
         if not self._check_config_paras():
             return None
-        if len(self.endpoints) == 0 or self.instance_id is None:
+        if len(self.endpoints) == 0 or self.instance_id <= 0:
             logger.error(
                 f"para check fail for reregister, please check"
                 f"len[endpoints]:{len(self.endpoints)}, instance_id:{type(self.instance_id)}"

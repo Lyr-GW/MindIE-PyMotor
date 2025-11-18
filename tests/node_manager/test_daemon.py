@@ -3,8 +3,9 @@
 
 import os
 import sys
+import json
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
@@ -13,13 +14,59 @@ from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.instance import PDRole
 
 
+def create_config_mock(config_data, hccl_data):
+    def mock_side_effect(file_path, mode):
+        if "node_manager_config.json" in file_path:
+            return mock_open(read_data=json.dumps(config_data)).return_value
+        elif "hccl.json" in file_path:
+            return mock_open(read_data=json.dumps(hccl_data)).return_value
+        return mock_open().return_value
+    return mock_side_effect
+
+
 @pytest.fixture
-def daemon():
+def config_data():
+    return {
+        "parallel_config": {"tp_size": 2, "pp_size": 1},
+        "role": "both",
+        "controller_api_dns": "localhost",
+        "controller_api_port": 8080,
+        "node_manager_port": 8080,
+        "model_name": "vllm"
+    }
+
+
+@pytest.fixture
+def hccl_data():
+    return {
+        "status": "completed",
+        "server_count": "1",
+        "version": "1.0",
+        "server_list": [{
+            "server_id": "192.168.1.100",
+            "host_ip": "192.168.1.200",
+            "container_ip": "192.168.1.100",
+            "hardware_type": "Ascend910",
+            "device": [
+                {"device_id": str(i), "device_ip": f"192.168.1.{i+1}", "rank_id": str(i)}
+                for i in range(8)  # 8 devices for TYPE_800I_A2
+            ]
+        }]
+    }
+
+
+@pytest.fixture
+def daemon(config_data, hccl_data):
     # Clear singleton instance
     if hasattr(Daemon, '_instances') and Daemon in Daemon._instances:
         if Daemon in Daemon._instances:
             del Daemon._instances[Daemon]
-    return Daemon()
+    
+    with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
+         patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'}):
+        mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+        daemon_instance = Daemon()
+        yield daemon_instance
 
 
 @pytest.fixture
@@ -32,25 +79,19 @@ def endpoints():
 
 class TestDaemon:
     
-    @pytest.mark.parametrize("port_num,expected_service,expected_mgmt", [
-        (0, [], []),
-        (3, ['10000', '10002', '10004'], ['10001', '10003', '10005']),
-        (1, ['10000'], ['10001'])
-    ])
-    def test_gen_engine_ports(self, daemon, port_num, expected_service, expected_mgmt):
-        result = daemon.gen_engine_ports(port_num)
-        assert result["service_ports"] == expected_service
-        assert result["mgmt_ports"] == expected_mgmt
+    # Note: gen_engine_ports method doesn't exist in Daemon class
+    # This test is removed as the method doesn't exist in the implementation
     
     @patch('subprocess.Popen')
     def test_pull_engine_success(self, mock_popen, daemon, endpoints):
         mock_process = MagicMock(pid=12345)
+        mock_process.poll.return_value = None  # Process is still running
         mock_popen.return_value = mock_process
         instance_id = 1
         daemon.pull_engine(PDRole.ROLE_P, endpoints, instance_id)
-        # Note: The current implementation doesn't actually start processes (commented out)
-        # So we just verify the method doesn't raise an exception
-        assert True  # Method executed successfully
+        # Verify that process was added to engine_pids
+        assert len(daemon.engine_pids) > 0
+        assert 12345 in daemon.engine_pids
 
     @pytest.mark.parametrize("invalid_endpoint,error_msg", [
         (Endpoint(id=0, ip="invalid_ip", business_port="8000", mgmt_port="9090"), "Failed to pull engine"),
@@ -71,8 +112,8 @@ class TestDaemon:
         daemon.engine_pids = [1001, 1002]
         if exception:
             mock_kill.side_effect = exception
-        daemon.exit_daemon()
-        assert mock_kill.call_count == len(daemon.engine_pids)
+        daemon.stop()  # Method is called 'stop', not 'exit_daemon'
+        assert mock_kill.call_count == len([1001, 1002])
     
     @pytest.mark.parametrize("ip,port,expected", [
         ("192.168.1.100", "8080", True),
@@ -91,14 +132,16 @@ class TestDaemon:
     @patch('subprocess.Popen')
     @patch('motor.node_manager.core.daemon.logger')
     def test_command_format(self, mock_logger, mock_popen, daemon):
-        mock_popen.return_value = MagicMock(pid=12345)
+        mock_process = MagicMock(pid=12345)
+        mock_process.poll.return_value = None  # Process is still running
+        mock_popen.return_value = mock_process
         
         endpoint = Endpoint(id=5, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
         instance_id = 1
         daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id)
         
-        # Note: The current implementation logs the command but doesn't start the process
-        # Verify the command was logged (check for logger.infor call)
-        # The command format is: engine_server --dp-rank {i} --engine_id {instance_id} --role {role} --host {ip} --port {port}
-        # Since the actual process start is commented out, we verify the method executes
-        assert True  # Method executed successfully
+        # Verify that process was added to engine_pids
+        assert len(daemon.engine_pids) > 0
+        assert 12345 in daemon.engine_pids
+        # Verify Popen was called
+        mock_popen.assert_called_once()

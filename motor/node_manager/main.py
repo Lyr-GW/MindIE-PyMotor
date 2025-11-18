@@ -22,8 +22,11 @@ def stop_all_modules() -> None:
     while modules:
         module = modules.pop()
         if hasattr(module, 'stop'):
-            module.stop()
-    logger.info("All modules stoped.")
+            try:
+                module.stop()
+            except Exception as e:
+                logger.error(f"Failed to stop {type(module).__name__}: {e}")
+    logger.info("All modules stopped.")
 
 
 def signal_handler(sig, frame) -> None:
@@ -31,7 +34,7 @@ def signal_handler(sig, frame) -> None:
     if _should_exit:
         return
     _should_exit = True
-    logger.info(f"\nRecive signal {sig}，exit gracefully...")
+    logger.info(f"\nReceive signal {sig},exit gracefully...")
     stop_all_modules()
 
 
@@ -60,7 +63,7 @@ def main() -> None:
                 if user_input == 'stop':
                     _should_exit = True
                 elif user_input:
-                    logger.warning(f"Unknow command: {user_input}")
+                    logger.warning(f"Unknown command: {user_input}")
             except EOFError:
                 if not _should_exit:
                     time.sleep(1)

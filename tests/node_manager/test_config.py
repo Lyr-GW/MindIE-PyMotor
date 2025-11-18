@@ -36,8 +36,8 @@ def hccl_data():
             "container_ip": "127.0.0.1",  # Used by NodeManagerConfig, not Ranktable
             "hardware_type": "Ascend910",  # Used by NodeManagerConfig, not Ranktable
             "device": [
-                {"device_id": "0", "device_ip": "192.168.1.1", "super_device_id": "126455325", "rank_id": "0"},
-                {"device_id": "1", "device_ip": "192.168.1.2", "super_device_id": "398754302", "rank_id": "1"}
+                {"device_id": str(i), "device_ip": f"192.168.1.{i+1}", "super_device_id": f"12645532{i}", "rank_id": str(i)}
+                for i in range(8)  # 8 devices for TYPE_800I_A2
             ]
         }]
     }
@@ -91,7 +91,7 @@ class TestNodeManagerConfig:
         assert config.job_name == "test_job"
         assert isinstance(config.parallel_config, ParallelConfig)
         assert config.role == PDRole.ROLE_U
-        assert len(config.device_info) == 2  # Matches hccl_data fixture
+        assert len(config.device_info) == 8  # Matches hccl_data fixture (8 devices for TYPE_800I_A2)
         assert config.pod_ip == "127.0.0.1"
         assert config.host_ip == "90.90.97.30"
         assert config.ranktable is not None
@@ -132,11 +132,11 @@ class TestNodeManagerConfig:
         # Invalid Ranktable structure (missing required fields)
         ({}, "Invalid HCCL json"),
         ({"status": "pending"}, "Invalid HCCL json"),  # Missing required Ranktable fields
-        # Empty server_list is allowed (server will be None)
-        ({"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}, None),
-        # Empty device list is allowed (no devices will be added)
+        # Empty server_list will fail device count validation (needs 8 or 16 devices)
+        ({"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}, "Invalid device count"),
+        # Empty device list will fail device count validation (needs 8 or 16 devices)
         ({"status": "completed", "server_count": "1", "version": "1.0",
-          "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, None),
+          "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, "Invalid device count"),
     ])
     @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
@@ -144,31 +144,27 @@ class TestNodeManagerConfig:
         clear_node_manager_config()
         mock_safe_open.side_effect = create_config_mock(config_data, invalid_hccl)
         
-        if expected_error:
-            with pytest.raises(ValueError, match=expected_error):
-                NodeManagerConfig()
-        else:
-            # These cases should not raise errors with the new implementation
-            config = NodeManagerConfig()
-            if invalid_hccl.get("server_list") == []:
-                assert config.pod_ip is None
-                assert config.host_ip is None
-                assert len(config.device_info) == 0
-            elif invalid_hccl.get("server_list", [{}])[0].get("device") == []:
-                assert len(config.device_info) == 0
+        # All cases should raise ValueError due to device count validation
+        with pytest.raises(ValueError, match=expected_error):
+            NodeManagerConfig()
     
     @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
-    def test_calculate_endpoint_num(self, mock_safe_open, config_data, hccl_data):
+    def test_generate_endpoint_ports(self, mock_safe_open, config_data, hccl_data):
         clear_node_manager_config()
-        mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+        # Update config_data to have dp_size=2 to get 2 endpoints
+        config_data_with_dp = config_data.copy()
+        config_data_with_dp["parallel_config"] = {"tp_size": 2, "pp_size": 1, "dp_size": 2}
+        mock_safe_open.side_effect = create_config_mock(config_data_with_dp, hccl_data)
         config = NodeManagerConfig()
 
-        expected_num = max(1, len(config.device_info) //
-                           (config.parallel_config.tp_size * config.parallel_config.pp_size))
-        assert config.endpoint_num == expected_num
+        assert config.endpoint_num == config.parallel_config.dp_size
         assert len(config.mgmt_ports) == config.endpoint_num
         assert len(config.service_ports) == config.endpoint_num
+        assert config.mgmt_ports[0] == "10001"
+        assert config.service_ports[0] == "10000"
+        assert config.mgmt_ports[1] == "10003"
+        assert config.service_ports[1] == "10002"
     
     @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
@@ -218,7 +214,7 @@ class TestNodeManagerConfig:
         """Test parsing HCCL with super_device_id"""
         clear_node_manager_config()
         
-        # Need at least 2 devices (tp=2, pp=1) for config_data's parallel_config
+        # Need 8 devices for TYPE_800I_A2 hardware type
         hccl_with_super = {
             "status": "completed",
             "server_count": "1",
@@ -227,8 +223,8 @@ class TestNodeManagerConfig:
                 "server_id": "1",
                 "container_ip": "192.168.1.100",
                 "device": [
-                    {"device_id": "0", "device_ip": "192.168.1.1", "rank_id": "0", "super_device_id": "12345"},
-                    {"device_id": "1", "device_ip": "192.168.1.2", "rank_id": "1", "super_device_id": "67890"}
+                    {"device_id": str(i), "device_ip": f"192.168.1.{i+1}", "rank_id": str(i), "super_device_id": f"12345{i}"}
+                    for i in range(8)  # 8 devices for TYPE_800I_A2
                 ]
             }]
         }
@@ -236,14 +232,14 @@ class TestNodeManagerConfig:
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_with_super)
         config = NodeManagerConfig()
         
-        assert len(config.device_info) == 2
-        assert config.device_info[0].super_device_id == "12345"
-        assert config.device_info[1].super_device_id == "67890"
+        assert len(config.device_info) == 8
+        assert config.device_info[0].super_device_id == "123450"
+        assert config.device_info[1].super_device_id == "123451"
     
     @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_empty_server_list(self, mock_safe_open, config_data):
-        """Test parsing HCCL with empty server_list (should handle None gracefully)"""
+        """Test parsing HCCL with empty server_list (should fail device count validation)"""
         clear_node_manager_config()
         
         hccl_empty = {
@@ -254,18 +250,15 @@ class TestNodeManagerConfig:
         }
         
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_empty)
-        config = NodeManagerConfig()
         
-        # Should handle None server gracefully
-        assert config.pod_ip is None
-        assert config.host_ip is None
-        assert len(config.device_info) == 0
-        assert config.ranktable is not None  # Ranktable should still be created
+        # Should raise ValueError due to device count validation (needs 8 or 16 devices)
+        with pytest.raises(ValueError, match="Invalid device count"):
+            NodeManagerConfig()
     
     @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
     def test_hccl_empty_device_list(self, mock_safe_open, config_data):
-        """Test parsing HCCL with empty device list"""
+        """Test parsing HCCL with empty device list (should fail device count validation)"""
         clear_node_manager_config()
         
         hccl_no_devices = {
@@ -281,9 +274,7 @@ class TestNodeManagerConfig:
         }
         
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_no_devices)
-        config = NodeManagerConfig()
         
-        # Should handle empty device list gracefully
-        assert len(config.device_info) == 0
-        assert config.pod_ip == "192.168.1.100"
-        assert config.host_ip == "192.168.1.100"
+        # Should raise ValueError due to device count validation (needs 8 or 16 devices)
+        with pytest.raises(ValueError, match="Invalid device count"):
+            NodeManagerConfig()

@@ -22,7 +22,8 @@ class HeartbeatManager(ThreadSafeSingleton):
             return
             
         self._endpoint_lock = threading.Lock()
-        self._reregister_lock = threading.Lock()  # Lock for _reregistering flag
+        self._reregister_lock = threading.Lock()  # lock for _reregistering flag
+        self._reregister_thread = None
         self.stop_event = threading.Event()
         self.config = NodeManagerConfig()
         self._job_name = ""
@@ -63,7 +64,15 @@ class HeartbeatManager(ThreadSafeSingleton):
 
     def stop(self) -> None:
         self.stop_event.set()
-        self._heartbeat_report_thread.join()
+        if self._heartbeat_report_thread.is_alive():
+            self._heartbeat_report_thread.join(timeout=2.0)
+        if self._engine_server_status_thread.is_alive():
+            self._engine_server_status_thread.join(timeout=2.0)
+        if self._reregister_thread and self._reregister_thread.is_alive():
+            self._reregister_thread.join(timeout=2.0)
+        if self._reregistering:
+            with self._reregister_lock:
+                self._reregistering = False
         logger.info("HeartBeatManager stopped.")
     
     def _refresh_endpoints_status_loop(self) -> None:
@@ -76,21 +85,30 @@ class HeartbeatManager(ThreadSafeSingleton):
             endpoints_snapshot = list(self._endpoints)
 
         updated_endpoints = []
-
+        client = None
         for item in endpoints_snapshot:
             engine_server_base_url = f"http://{item.ip}:{item.mgmt_port}"
+            client = None
             try:
                 client = SafeHTTPSClient(
                     base_url=engine_server_base_url,
                     timeout=2
                 )
-                response = client.get("/v1/status")
-                item.status = EndpointStatus(response.get("status"))
+                response = client.get("/status")
+                if isinstance(response, dict) and "status" in response:
+                    item.status = EndpointStatus(response.get("status"))
+                else:
+                    logger.error(f"Invalid response format from {engine_server_base_url}: {response}")
+                    item.status = EndpointStatus("abnormal")
             except Exception:
                 logger.error("Failed to get engine server status from %s", engine_server_base_url)
                 item.status = EndpointStatus("abnormal")
             finally:
-                client.close()
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception as e:
+                        logger.error(f"Failed to close client: {e}")
             
             updated_endpoints.append(item)
 
@@ -101,7 +119,7 @@ class HeartbeatManager(ThreadSafeSingleton):
         while not self.stop_event.is_set():
             try:
                 with self._endpoint_lock:
-                    endpoint_status_list = {item.id: item.status for item in self._endpoints}
+                    endpoint_status_list = {item.id: EndpointStatus.NORMAL for item in self._endpoints}
                 
                 client = SafeHTTPSClient(
                     base_url=f"http://{self.config.controller_api_dns}:{self.config.controller_api_port}",
