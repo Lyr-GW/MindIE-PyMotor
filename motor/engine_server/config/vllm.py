@@ -36,6 +36,7 @@ def _add_argument_to_list(arg_list: list, key: str, value: Any):
 def _get_default_mapping() -> dict[str, str]:
     return {
         'model_path': 'model',
+        'model_name': 'served_model_name',
         'npu_mem_utils': 'gpu_memory_utilization',
         'dp_rank': 'data_parallel_rank',
         'dp_size': 'data_parallel_size',

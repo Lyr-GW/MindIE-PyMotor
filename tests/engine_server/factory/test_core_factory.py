@@ -101,11 +101,13 @@ class TestServerCoreFactory:
         self.factory = ServerCoreFactory()
 
     def test_initialization(self, mock_dependencies):
-        # Verify core_map is properly initialized
-        assert isinstance(self.factory._core_map, dict)
-        assert "vllm" in self.factory._core_map
+        # Verify ENGINE_CORE_MAP is properly defined as class variable
+        assert isinstance(self.factory._ENGINE_CORE_MAP, dict)
+        assert "vllm" in self.factory._ENGINE_CORE_MAP
+        assert self.factory._ENGINE_CORE_MAP["vllm"] == "motor.engine_server.core.vllm.vllm_core.VLLMServerCore"
 
-    def test_create_server_core_with_valid_engine_type(self, mock_dependencies):
+    @mock.patch('importlib.import_module')
+    def test_create_server_core_with_valid_engine_type(self, mock_import_module, mock_dependencies):
         # Get required classes
         _, IConfig, ServerConfig, IServerCore = get_classes()
 
@@ -120,23 +122,21 @@ class TestServerCoreFactory:
         # Create mock return value
         expected_core = mock.MagicMock(spec=IServerCore)
 
-        # Replace VLLMServerCore in factory
-        original_vllm_core = self.factory._core_map["vllm"]
+        # Mock module import and class retrieval
+        mock_module = mock.MagicMock()
         mock_vllm_core_class = mock.MagicMock()
         mock_vllm_core_class.return_value = expected_core
-        self.factory._core_map["vllm"] = mock_vllm_core_class
+        mock_module.VLLMServerCore = mock_vllm_core_class
+        mock_import_module.return_value = mock_module
 
-        try:
-            # Call method
-            result = self.factory.create_server_core(mock_config)
+        # Call method
+        result = self.factory.create_server_core(mock_config)
 
-            # Verify result
-            assert result == expected_core
-            mock_vllm_core_class.assert_called_once_with(mock_config)
-            mock_config.get_server_config.assert_called_once()
-        finally:
-            # Restore original VLLMServerCore
-            self.factory._core_map["vllm"] = original_vllm_core
+        # Verify result
+        assert result == expected_core
+        mock_import_module.assert_called_once_with("motor.engine_server.core.vllm.vllm_core")
+        mock_vllm_core_class.assert_called_once_with(mock_config)
+        mock_config.get_server_config.assert_called_once()
 
     def test_create_server_core_with_unsupported_engine_type(self, mock_dependencies):
         # Get required classes
@@ -150,8 +150,8 @@ class TestServerCoreFactory:
         mock_config = mock.MagicMock(spec=IConfig)
         mock_config.get_server_config.return_value = mock_server_config
 
-        # Verify ValueError is raised
-        with pytest.raises(ValueError, match="unsupported engine type unsupported_engine"):
+        # Verify ValueError is raised with updated error message
+        with pytest.raises(ValueError, match=r"Unsupported engine type: unsupported_engine.*Supported types are: \['vllm'\]"):
             self.factory.create_server_core(mock_config)
 
         # Verify calls
@@ -170,19 +170,65 @@ class TestServerCoreFactory:
         mock_config.get_server_config.return_value = mock_server_config
 
         # Verify ValueError is raised (case sensitive matching)
-        with pytest.raises(ValueError, match="unsupported engine type VLLM"):
+        with pytest.raises(ValueError, match="Unsupported engine type: VLLM"):
             self.factory.create_server_core(mock_config)
 
-    def test_core_map_immutability(self, mock_dependencies):
+    def test_engine_core_map_class_variable(self, mock_dependencies):
         # Get required classes
         ServerCoreFactory, _, _, _ = get_classes()
 
-        # Verify core_map is instance variable not class variable
+        # Verify ENGINE_CORE_MAP is class variable
         factory1 = ServerCoreFactory()
         factory2 = ServerCoreFactory()
 
-        # Modify core_map in factory1
-        factory1._core_map["test"] = mock.MagicMock()
+        # Modifying instance's reference to ENGINE_CORE_MAP should not affect class variable
+        # This is testing that we're working with the class variable
+        assert factory1._ENGINE_CORE_MAP is factory2._ENGINE_CORE_MAP
+        assert factory1._ENGINE_CORE_MAP is ServerCoreFactory._ENGINE_CORE_MAP
+        
+    @mock.patch('importlib.import_module')
+    def test_create_server_core_with_import_error(self, mock_import_module, mock_dependencies):
+        # Get required classes
+        _, IConfig, ServerConfig, _ = get_classes()
 
-        # Verify factory2's core_map is not affected
-        assert "test" not in factory2._core_map
+        # Create mock ServerConfig
+        mock_server_config = mock.MagicMock(spec=ServerConfig)
+        mock_server_config.engine_type = "vllm"
+
+        # Create mock IConfig
+        mock_config = mock.MagicMock(spec=IConfig)
+        mock_config.get_server_config.return_value = mock_server_config
+
+        # Mock import failure
+        mock_import_module.side_effect = ImportError("Module not found")
+
+        # Verify ValueError is raised
+        with pytest.raises(ValueError) as excinfo:
+            self.factory.create_server_core(mock_config)
+        
+        # Check main error message
+        assert "Failed to load core class for vllm" in str(excinfo.value)
+        # With raise from, the original exception is preserved as __cause__
+        assert "Module not found" in str(excinfo.value.__cause__)
+
+    @mock.patch('importlib.import_module')
+    def test_create_server_core_with_attribute_error(self, mock_import_module, mock_dependencies):
+        # Get required classes
+        _, IConfig, ServerConfig, _ = get_classes()
+
+        # Create mock ServerConfig
+        mock_server_config = mock.MagicMock(spec=ServerConfig)
+        mock_server_config.engine_type = "vllm"
+
+        # Create mock IConfig
+        mock_config = mock.MagicMock(spec=IConfig)
+        mock_config.get_server_config.return_value = mock_server_config
+
+        # Mock module import but missing class
+        mock_module = mock.MagicMock()
+        del mock_module.VLLMServerCore  # Remove VLLMServerCore attribute
+        mock_import_module.return_value = mock_module
+
+        # Verify ValueError is raised
+        with pytest.raises(ValueError, match="Failed to load core class for vllm"):
+            self.factory.create_server_core(mock_config)

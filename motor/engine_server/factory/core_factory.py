@@ -2,24 +2,34 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-from typing import Dict, Type
+from typing import Dict
+import importlib
 
 from motor.engine_server.config.base import IConfig
 from motor.engine_server.core.base_core import IServerCore
-from motor.engine_server.core.vllm.vllm_core import VLLMServerCore
 
 
 class ServerCoreFactory:
-    def __init__(self):
-        self._core_map: Dict[str, Type[IServerCore]] = {
-            "vllm": VLLMServerCore,
-        }
+    _ENGINE_CORE_MAP: Dict[str, str] = {
+        "vllm": "motor.engine_server.core.vllm.vllm_core.VLLMServerCore"
+    }
 
     def create_server_core(self, config: IConfig) -> IServerCore:
         config_type = config.get_server_config().engine_type
-        server_core_class = self._core_map.get(config_type)
+        core_class_path = self._ENGINE_CORE_MAP.get(config_type)
 
-        if not server_core_class:
-            raise ValueError(f"unsupported engine type {config_type}")
+        if not core_class_path:
+            supported_types = list(self._ENGINE_CORE_MAP.keys())
+            raise ValueError(
+                f"Unsupported engine type: {config_type}. "
+                f"Supported types are: {supported_types}."
+            )
 
-        return server_core_class(config)
+        try:
+            module_path, class_name = core_class_path.rsplit('.', 1)
+            module = importlib.import_module(module_path)
+            core_class = getattr(module, class_name)
+            
+            return core_class(config)
+        except (ImportError, AttributeError) as e:
+            raise ValueError(f"Failed to load core class for {config_type}") from e

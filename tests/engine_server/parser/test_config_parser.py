@@ -5,6 +5,7 @@
 import pytest
 from unittest import mock
 import sys
+import importlib.util
 
 
 @pytest.fixture(scope="module")
@@ -34,14 +35,22 @@ def mock_dependencies():
     # Replace modules in sys.modules
     sys.modules['motor.engine_server.utils.logger'] = mock_logger
     sys.modules['motor.engine_server.config.vllm'] = mock_vllm_module
+    
+    # Mock importlib.util.find_spec to return a non-None value for 'vllm'
+    original_find_spec = importlib.util.find_spec
+    mock_find_spec = mock.MagicMock()
+    mock_find_spec.return_value = mock.MagicMock()  # Simulate vllm package exists
+    importlib.util.find_spec = mock_find_spec
 
     # Yield the mock objects for use in tests
     yield {
         'mock_logger': mock_logger,
-        'mock_vllm_config_class': mock_vllm_config_class
+        'mock_vllm_config_class': mock_vllm_config_class,
+        'mock_find_spec': mock_find_spec
     }
 
-    # Restore original modules
+    # Restore original functions and modules
+    importlib.util.find_spec = original_find_spec
     for module_name in modules_to_mock:
         if module_name in original_modules:
             sys.modules[module_name] = original_modules[module_name]
@@ -71,38 +80,79 @@ class TestConfigParser:
     def test_initialization(self, mock_dependencies):
         # Verify initialization sets up properties correctly
         assert self.parser.server_config == self.mock_server_config
-        assert isinstance(self.parser._config_class_map, dict)
-        assert "vllm" in self.parser._config_class_map
+        # Check for new _ENGINE_CONFIG_MAP attribute instead of _config_class_map
+        assert hasattr(self.parser, '_ENGINE_CONFIG_MAP')
+        assert "vllm" in self.parser._ENGINE_CONFIG_MAP
+        assert self.parser._ENGINE_CONFIG_MAP["vllm"] == "motor.engine_server.config.vllm.VLLMConfig"
 
-    def test_parse_with_valid_engine_type(self, mock_dependencies):
+    @mock.patch('importlib.import_module')
+    def test_parse_success(self, mock_import_module, mock_dependencies):
         # Get required classes
         _, IConfig, _ = get_classes()
-
+        
         # Set up mock server_config with valid engine_type
         self.mock_server_config.engine_type = "vllm"
-
-        # Create mock config instance
+        
+        # Mock module import and config class retrieval
+        mock_module = mock.MagicMock()
+        mock_config_class = mock.MagicMock(spec=IConfig)
+        mock_module.VLLMConfig = mock_config_class
+        mock_import_module.return_value = mock_module
+        
+        # Mock config instance and its methods
         mock_config_instance = mock.MagicMock(spec=IConfig)
-
-        # Replace the config class in parser
-        original_config_class = self.parser._config_class_map["vllm"]
-        mock_config_class = mock.MagicMock()
         mock_config_class.return_value = mock_config_instance
-        self.parser._config_class_map["vllm"] = mock_config_class
+        
+        # Call parse method
+        result = self.parser.parse()
+        
+        # Verify module import and class retrieval
+        mock_import_module.assert_called_once_with("motor.engine_server.config.vllm")
+        
+        # Verify config class is instantiated and methods are called
+        mock_config_class.assert_called_once_with(server_config=self.mock_server_config)
+        mock_config_instance.initialize.assert_called_once()
+        mock_config_instance.convert.assert_called_once()
+        mock_config_instance.validate.assert_called_once()
+        
+        # Verify return value
+        assert result == mock_config_instance
 
-        try:
-            # Call parse method
-            result = self.parser.parse()
+    @mock.patch('importlib.import_module')
+    def test_parse_with_import_error(self, mock_import_module, mock_dependencies):
+        # Set up mock server_config with valid engine_type
+        self.mock_server_config.engine_type = "vllm"
+        
+        # Mock import failure
+        mock_import_module.side_effect = ImportError("Module not found")
+        
+        # Verify ValueError is raised
+        with pytest.raises(ValueError) as excinfo:
+            self.parser.parse()
+        
+        # Verify error message contains expected part
+        error_message = str(excinfo.value)
+        assert "Failed to load config class for vllm" in error_message
+        # With raise from, the original exception is preserved as __cause__
+        assert "Module not found" in str(excinfo.value.__cause__)
 
-            # Verify results
-            assert result == mock_config_instance
-            mock_config_class.assert_called_once_with(server_config=self.mock_server_config)
-            mock_config_instance.initialize.assert_called_once()
-            mock_config_instance.convert.assert_called_once()
-            mock_config_instance.validate.assert_called_once()
-        finally:
-            # Restore original config class
-            self.parser._config_class_map["vllm"] = original_config_class
+    @mock.patch('importlib.import_module')
+    def test_parse_with_attribute_error(self, mock_import_module, mock_dependencies):
+        # Set up mock server_config with valid engine_type
+        self.mock_server_config.engine_type = "vllm"
+        
+        # Mock successful module import but missing class
+        mock_module = mock.MagicMock()
+        del mock_module.VLLMConfig  # Remove VLLMConfig attribute to trigger AttributeError
+        mock_import_module.return_value = mock_module
+        
+        # Verify ValueError is raised
+        with pytest.raises(ValueError) as excinfo:
+            self.parser.parse()
+        
+        # Verify error message contains attribute error info
+        error_message = str(excinfo.value)
+        assert "Failed to load config class for vllm" in error_message
 
     def test_parse_with_unsupported_engine_type(self, mock_dependencies):
         # Set up mock server_config with unsupported engine_type
@@ -129,20 +179,3 @@ class TestConfigParser:
         error_message = str(excinfo.value)
         assert "Unsupported engine type: VLLM" in error_message
         assert "vllm" in error_message
-
-    def test_config_class_map_immutability(self, mock_dependencies):
-        # Get required classes
-        ConfigParser, _, ServerConfig = get_classes()
-
-        # Create two parser instances
-        mock_server_config1 = mock.MagicMock(spec=ServerConfig)
-        mock_server_config2 = mock.MagicMock(spec=ServerConfig)
-
-        parser1 = ConfigParser(server_config=mock_server_config1)
-        parser2 = ConfigParser(server_config=mock_server_config2)
-
-        # Modify config_class_map in parser1
-        parser1._config_class_map["test"] = mock.MagicMock()
-
-        # Verify parser2's config_class_map is not affected
-        assert "test" not in parser2._config_class_map
