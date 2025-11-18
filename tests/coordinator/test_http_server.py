@@ -144,8 +144,14 @@ class TestCoordinatorServer:
         # Test /metrics
         response = self.mgmt_client.get("/metrics")
         assert response.status_code == 200, f"Metrics endpoint failed: {response.status_code}"
+        data = response.text
+        assert data == "", "Metrics response should be empty"
+
+        # Test /instance/metrics
+        response = self.mgmt_client.get("/instance/metrics")
+        assert response.status_code == 200, f"Metrics endpoint failed: {response.status_code}"
         data = response.json()
-        assert "status" in data, "Metrics response missing status field"
+        assert data == {}, "Instance metrics response should be empty"
     
     def test_openai_completions_api(self):
         """Test OpenAI Completions API"""

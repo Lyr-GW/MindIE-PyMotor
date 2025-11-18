@@ -56,8 +56,8 @@ class MetricsCollector(ThreadSafeSingleton):
         # Initial metrics state
         self._inactive_instance_metrics_aggregate: list[SingleMetric] = []
         self._instance_metrics_cached: dict[int, dict[str, list[SingleMetric]]] = {}
-        self._last_metrics: str = None
-        self._last_instance_metrics: dict[int, list[SingleMetric]] = None
+        self._last_metrics: str = ""
+        self._last_instance_metrics: dict[int, list[SingleMetric]] = {}
 
         self._reuse_time: int = CoordinatorConfig().prometheus_metrics_config.reuse_time
         self._lock = threading.Lock()
@@ -91,7 +91,7 @@ class MetricsCollector(ThreadSafeSingleton):
         """
 
         with self._lock:
-            instance_metrics = self._last_metrics
+            instance_metrics = self._last_instance_metrics
         return instance_metrics
 
     def prometheus_metrics_handler(self):
@@ -134,7 +134,7 @@ class MetricsCollector(ThreadSafeSingleton):
             response = requests.get(url)
 
             if response.status_code == 200:
-                data = response.json()
+                data = response.text
                 return data
             else:
                 logger.warning(f"[Metrics] request metrics failed: code = {response.status_code}")

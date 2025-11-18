@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 import uvicorn
 
 from motor.common.resources.http_msg_spec import InsEventMsg
@@ -26,6 +27,7 @@ from motor.coordinator.middleware.fastapi_middleware import (
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
 from motor.coordinator.models.request import RequestType, RequestResponse
 from motor.coordinator.router.router import handle_request, handle_metaserver_request
+from motor.coordinator.metrics.metrics_collector import MetricsCollector
 
 
 logger = get_logger(__name__)
@@ -676,15 +678,12 @@ class CoordinatorServer:
         
         @self.management_app.get("/metrics")
         async def get_metrics():
-            return {
-                "status": "ok",
-                "metrics": {
-                    "total_requests": 0,
-                    "active_requests": 0,
-                    "error_count": 0,
-                    "uptime": "0s"
-                }
-            }
+            metrics = MetricsCollector().prometheus_metrics_handler()
+            return PlainTextResponse(content=metrics)
+
+        @self.management_app.get("/instance/metrics")
+        async def get_instance_metrics():
+            return MetricsCollector().prometheus_instance_metrics_handler()
         
         @self.management_app.post("/instances/refresh", response_model=RequestResponse)
         @self._timeout_handler()
@@ -712,7 +711,8 @@ class CoordinatorServer:
                         "GET /health": "health check",
                         "GET /startup": "startup probe",
                         "GET /readiness": "readiness check",
-                        "GET /metrics": "get metrics"
+                        "GET /metrics": "get metrics",
+                        "GET /instance/metrics": "get instance metrics"
                     },
                     "# instance refresh": {
                         "POST /instances/refresh": "refresh instances"

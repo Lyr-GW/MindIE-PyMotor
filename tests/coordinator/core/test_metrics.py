@@ -618,7 +618,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
 
         # Test with None _last_metrics (initial state)
         result = metric_collector.prometheus_metrics_handler()
-        assert result is None  # Initially None
+        assert result is ""  # Initially ""
 
         # Test with set _last_metrics
         with metric_collector._lock:
@@ -650,5 +650,5 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         assert result == ""  # Should return empty string
 
         result = metric_collector.prometheus_instance_metrics_handler()
-        assert result == ""  # Should return empty string (same as metrics handler)
+        assert result == {}  # Should return empty dict
 
