@@ -28,6 +28,9 @@ def _add_argument_to_list(arg_list: list, key: str, value: Any):
             arg_list.append(f"--{key}")
             for item in value:
                 arg_list.append(str(item))
+    elif isinstance(value, dict):
+        arg_list.append(f"--{key}")
+        arg_list.append(json.dumps(value))
     else:
         arg_list.append(f"--{key}")
         arg_list.append(str(value))
