@@ -63,7 +63,7 @@ def daemon(config_data, hccl_data):
             del Daemon._instances[Daemon]
     
     with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
-         patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HOME_HCCL_PATH': './tests/jsons', 'ROLE': 'both'}):
+         patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'}):
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
         daemon_instance = Daemon()
         yield daemon_instance

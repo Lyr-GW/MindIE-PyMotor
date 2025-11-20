@@ -50,9 +50,9 @@
         "combined_host": "0.0.0.0",
         "combined_port": 9999,
         "mgmt_host": "0.0.0.0",
-        "mgmt_port": 9998,
+        "mgmt_port": 1025,
         "inference_host": "0.0.0.0",
-        "inference_port": 9999
+        "inference_port": 1026
     },
     "timeout_config": {
         "request_timeout": 30,

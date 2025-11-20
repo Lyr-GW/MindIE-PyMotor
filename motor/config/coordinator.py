@@ -171,7 +171,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.default_config_file_path = os.path.join(
             os.path.dirname(__file__), 'coordinator_config.json'
         )
-        self.config_file_path_env = "MINDIE_MS_COORDINATOR_CONFIG_FILE_PATH"
+        self.config_file_path_env = "MOTOR_COORDINATOR_CONFIG_PATH"
         self.check_mounted_files = True
         
         # Configuration objects
@@ -358,19 +358,19 @@ class CoordinatorConfig(ThreadSafeSingleton):
         else:
             raise ValueError("mgmt_host must be a string")
 
-        mgmt_port = self.config.get("mgmt_port", CoordinatorConfig.DEFAULT_MGMT_PORT)
+        mgmt_port = config.get("mgmt_port", CoordinatorConfig.DEFAULT_MGMT_PORT)
         if isinstance(mgmt_port, int) and 1 <= mgmt_port <= 65535:
             self.server_config.mgmt_port = mgmt_port
         else:
             raise ValueError("mgmt_port must be an integer between 1 and 65535")
 
-        inference_host = self.config.get("inference_host", "0.0.0.0")
+        inference_host = config.get("inference_host", "0.0.0.0")
         if isinstance(inference_host, str):
             self.server_config.inference_host = inference_host
         else:
             raise ValueError("inference_host must be a string")
 
-        inference_port = self.config.get("inference_port", CoordinatorConfig.DEFAULT_INFERENCE_PORT)
+        inference_port = config.get("inference_port", CoordinatorConfig.DEFAULT_INFERENCE_PORT)
         if isinstance(inference_port, int) and 1 <= inference_port <= 65535:
             self.server_config.inference_port = inference_port
         else:

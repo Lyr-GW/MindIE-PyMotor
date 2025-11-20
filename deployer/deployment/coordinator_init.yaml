@@ -34,12 +34,12 @@ spec:
             valueFrom:
               fieldRef:
                 fieldPath: status.podIP
-          - name: CONFIG_FROM_CONFIGMAP_PATH
+          - name: CONFIGMAP_PATH
             value: /mnt/configmap
           - name: CONFIG_PATH
             value: /usr/local/Ascend/pyMotor/conf
           command: ["/bin/bash", "-c", "
-              /mnt/configmap/boot.sh; \n
+              source /mnt/configmap/boot.sh; \n
           "]
           resources:
             requests:
@@ -60,6 +60,8 @@ spec:
             subPath: user_config.json
           - name: coredump
             mountPath: /var/coredump
+          - name: mnt
+            mountPath: /mnt
       volumes:
       - name: boot-bash-script
         configMap:
@@ -77,6 +79,28 @@ spec:
         hostPath:
           path: /var/coredump
           type: DirectoryOrCreate
+      - name: mnt
+        hostPath:
+          path: /mnt
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: mindie-ms-coordinator
+  name: mindie-ms-coordinator-service
+  namespace: mindie
+spec:
+  ports:
+  - port: 1025
+    protocol: TCP
+    targetPort: 1025
+  selector:
+    app: mindie-ms-coordinator
+  sessionAffinity: None
+  type: ClusterIP
+status:
+  loadBalancer: {}
 ---
 apiVersion: v1
 kind: Service
@@ -87,13 +111,10 @@ metadata:
   namespace: mindie
 spec:
   ports:
-    - nodePort: 31015
-      port: 1025
+    - nodePort: 31016
+      port: 1026
       protocol: TCP
-      targetPort: 1025
+      targetPort: 1026
   selector:
     app: mindie-ms-coordinator
   sessionAffinity: None
-  type: NodePort
-status:
-  loadBalancer: {}

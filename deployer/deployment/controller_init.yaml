@@ -35,12 +35,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: status.podIP
-            - name: CONFIG_FROM_CONFIGMAP_PATH
+            - name: CONFIGMAP_PATH
               value: /mnt/configmap
             - name: CONFIG_PATH
               value: /usr/local/Ascend/pyMotor/conf
           command: ["/bin/bash", "-c", "
-              /mnt/configmap/boot.sh; \n
+              source /mnt/configmap/boot.sh; \n
           "]
           resources:
             requests:

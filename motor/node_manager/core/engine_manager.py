@@ -82,7 +82,7 @@ class EngineManager(ThreadSafeSingleton):
     def parse_start_cmd(self, start_cmd: StartCmdMsg):
         if not self._check_cmd_para(start_cmd):
             return False
-        logger.debug(f"start_cmd is {start_cmd}")
+        logger.info(f"start_cmd is {start_cmd}")
         self.instance_id = start_cmd.instance_id
         self.endpoints = start_cmd.endpoints
         self.instance_ranktable = start_cmd.ranktable
@@ -123,13 +123,16 @@ class EngineManager(ThreadSafeSingleton):
             start_cmd.job_name != self.config.job_name
             or len(start_cmd.endpoints) != self.config.endpoint_num
         ):
+            logger.error(f"check job_name:{self.config.job_name}, endpoint_num:{self.config.endpoint_num} error")
             return False
         if not isinstance(start_cmd.instance_id, int) or not isinstance(
             start_cmd.ranktable, Ranktable
         ):
+            logger.error(f"check start_cmd ranktable error")
             return False
         for endpoint in start_cmd.endpoints:
             if endpoint.ip != self.config.pod_ip:
+                logger.error(f"check pod_ip {self.config.pod_ip} error")
                 return False
         return True
 

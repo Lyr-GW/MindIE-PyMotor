@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 # Constants for enhanced logging
-LOG_MAX_LINE_LENGTH = 1023
+LOG_MAX_LINE_LENGTH = 8192
 LOG_DEFAULT_FORMAT = '%(levelname)s  %(asctime)s  [%(filename)s:%(lineno)d]  %(message)s'
 LOG_DATE_FORMAT = '%Y-%m-%d %H:%M:%S'
 

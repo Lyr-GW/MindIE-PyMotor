@@ -15,8 +15,8 @@ class Env:
         return os.getenv("CONFIG_PATH", None)
 
     @property
-    def home_hccl_path(self):
-        return os.getenv("HOME_HCCL_PATH", None)
+    def hccl_path(self):
+        return os.getenv("HCCL_PATH", None)
 
     @property
     def ranktable_path(self):

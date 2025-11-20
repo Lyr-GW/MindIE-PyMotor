@@ -29,7 +29,7 @@ else
 fi
 
 mkdir $CONFIG_PATH -p
-chmod 640 $CONFIG_PATH
+chmod 750 $CONFIG_PATH
 
 if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
     # Update configuration files based on user configuration
@@ -50,6 +50,8 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
         echo "Using hccl_tools.py to generate ranktable.json..."
         export HCCL_PATH="$CONFIG_PATH/hccl.json"
         PYTHONUNBUFFERED=1 python3 "$CONFIGMAP_PATH/hccl_tools.py" --hccl_path "$HCCL_PATH"
+        # ranktable output path, use by NodeManager
+        export RANKTABLE_PATH="$CONFIG_PATH/ranktable.json"
         echo "Ranktable generated successfully: $HCCL_PATH"
     else
         echo "hccl_tools.py does not exist, skip ranktable generation"
