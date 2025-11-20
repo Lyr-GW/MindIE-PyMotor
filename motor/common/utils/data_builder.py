@@ -19,8 +19,8 @@ def build_ins_ranktable(ins: Instance) -> Ranktable:
         server_count=str(ins.get_node_managers_num()),
         server_list=[
             ServerInfo(
-                server_id=str(nm.pod_ip),
-                container_ip=nm.host_ip,
+                server_id=str(nm.host_ip),
+                container_ip=nm.pod_ip,
                 device=[
                     d 
                     for endpoint in ins.get_endpoints(nm.pod_ip).values()

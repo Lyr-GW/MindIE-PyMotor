@@ -831,3 +831,60 @@ def test_start_method():
         assert mock_thread.start.call_count == 2
 
         assembler.stop()
+
+
+def test_build_ins_ranktable_server_id_container_ip_logic(test_config) -> None:
+    """Test that build_ins_ranktable correctly assigns server_id and container_ip"""
+    from motor.common.utils.data_builder import build_ins_ranktable
+    from motor.common.utils.data_builder import build_endpoints
+
+    # Create an instance
+    instance = Instance(
+        job_name="testRanktableLogic",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    # Add node managers with different pod_ip and host_ip
+    pod_ip1 = "192.168.1.10"
+    host_ip1 = "10.0.0.1"
+    pod_ip2 = "192.168.1.11"
+    host_ip2 = "10.0.0.2"
+
+    instance.add_node_mgr(pod_ip1, host_ip1, "8088")
+    instance.add_node_mgr(pod_ip2, host_ip2, "8089")
+
+    # Add endpoints for the node managers
+    msg1 = create_register_msg("test", pod_ip1, test_config)
+    msg2 = create_register_msg("test", pod_ip2, test_config)
+    endpoints1 = build_endpoints(msg1)
+    endpoints2 = build_endpoints(msg2)
+
+    instance.add_endpoints(pod_ip1, endpoints1)
+    instance.add_endpoints(pod_ip2, endpoints2)
+
+    # Build the ranktable
+    ranktable = build_ins_ranktable(instance)
+
+    # Verify that server_id uses host_ip and container_ip uses pod_ip
+    assert len(ranktable.server_list) == 2
+
+    # Find servers by their host_ip (server_id)
+    server1 = next(s for s in ranktable.server_list if s.server_id == host_ip1)
+    server2 = next(s for s in ranktable.server_list if s.server_id == host_ip2)
+
+    # Verify server_id equals host_ip
+    assert server1.server_id == host_ip1
+    assert server2.server_id == host_ip2
+
+    # Verify container_ip equals pod_ip
+    assert server1.container_ip == pod_ip1
+    assert server2.container_ip == pod_ip2
+
+    # Verify they are NOT swapped (this is the key test - ensure no mix-up)
+    assert server1.server_id != pod_ip1  # server_id should not equal pod_ip
+    assert server1.container_ip != host_ip1  # container_ip should not equal host_ip
+    assert server2.server_id != pod_ip2
+    assert server2.container_ip != host_ip2
