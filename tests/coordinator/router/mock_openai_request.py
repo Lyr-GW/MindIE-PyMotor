@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import time
 
 from fastapi import Request
 import httpx
@@ -174,7 +175,8 @@ async def create_mock_request_info(api = "/v1/chat/completions", max_tokens = 10
         req_data=request_json.copy(),
         req_len=req_len,
         api=api,
-        state=ReqState.ARRIVE
+        state=ReqState.ARRIVE,
+        start_time=time.time()
     )
     
     return req_info

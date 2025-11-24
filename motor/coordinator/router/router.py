@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import time
+
 from fastapi import HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 import httpx
@@ -127,5 +129,6 @@ async def __create_request_info(raw_request: Request) -> RequestInfo:
         req_data=request_json.copy(),
         api=api,
         req_len=req_len,
-        state=ReqState.ARRIVE
+        state=ReqState.ARRIVE,
+        start_time=time.time()
     )

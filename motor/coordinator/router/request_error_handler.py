@@ -5,6 +5,7 @@
 from typing import Callable
 import asyncio
 import functools
+import logging
 
 from fastapi import status, HTTPException
 import httpx
@@ -14,7 +15,7 @@ from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
 from motor.common.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(__name__, None, logging.INFO)
 
 
 def handle_request_errors(stream=True):
@@ -72,7 +73,7 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
     last_exc = None
     self_instance = args[0] if args else None
     resource = kwargs['resource']
-    
+    req_id = self_instance.req_info.req_id
     logger.debug("Forwarding request to instance at %s:%s with data: %s", \
         resource.endpoint.ip, resource.endpoint.business_port, kwargs['req_data'])
     
@@ -84,6 +85,12 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
         except Exception as e:
             last_exc = e 
             await __handle_execution_exception(e, self_instance, resource)
+        except asyncio.CancelledError as ce:
+            logger.debug("Request [%s] was cancelled", req_id)
+            return
+        except BaseException as be:
+            logger.warning(f"Request [{req_id}] occurred unknown critical error: {str(be)}", exc_info=True)
+            raise be
             
         if last_exc and attempt == CoordinatorConfig().exception_config.max_retry - 1:
             __handle_final_failure(self_instance, last_exc)
