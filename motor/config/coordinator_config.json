@@ -45,21 +45,12 @@
         "thread_join_timeout": 5.0,
         "error_retry_interval": 1.0
     },
-    "server_config":{
+    "http_config": {
+        "coordinator_api_dns": "motor-controller-service.mindie.svc.cluster.local",
         "combined_mode": false,
-        "combined_host": "0.0.0.0",
-        "combined_port": 9999,
-        "mgmt_host": "0.0.0.0",
-        "mgmt_port": 1025,
-        "inference_host": "0.0.0.0",
-        "inference_port": 1026
-    },
-    "timeout_config": {
-        "request_timeout": 30,
-        "connection_timeout": 10,
-        "read_timeout": 15,
-        "write_timeout": 15,
-        "keep_alive_timeout": 60
+        "coordinator_api_host": "127.0.0.1",
+        "coordinator_api_infer_port": 1025,
+        "coordinator_api_mgmt_port": 1026
     },
     "api_key_config": {
         "enabled": true,

@@ -2,7 +2,7 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 from motor.common.utils.logger import get_logger
 from motor.common.resources.instance import Instance, ParallelConfig
@@ -31,6 +31,7 @@ class RegisterMsg(BaseModel):
     """
     Registration message format sent from NodeManager to controller.
     """
+    model_config = ConfigDict(protected_namespaces=())
     job_name: str = Field(..., description="Instance job name")
     model_name: str = Field(..., description="Instance model name")
     role: str = Field(..., description="Instance role")
@@ -62,6 +63,7 @@ class ReregisterMsg(BaseModel):
     It only occured when controller restarts and NodeManager needs to
     re-register to controller.
     """
+    model_config = ConfigDict(protected_namespaces=())
     job_name: str = Field(..., description="Instance job name")
     model_name: str = Field(..., description="Instance model name")
     instance_id: int = Field(..., description="Instance id")

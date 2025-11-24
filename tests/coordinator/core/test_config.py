@@ -45,14 +45,12 @@ COMPLETE_CONFIG = {
         "controller_api_dns": "mindie-ms-controller-service.mindie.svc.cluster.local",
         "controller_api_port": 57675
     },
-    "server_config": {
+    "http_config": {
+        "coordinator_api_dns": "motor-controller-service.mindie.svc.cluster.local",
         "combined_mode": False,
-        "combined_host": "0.0.0.0",
-        "combined_port": 9999,
-        "mgmt_host": "0.0.0.0",
-        "mgmt_port": 9998,
-        "inference_host": "0.0.0.0",
-        "inference_port": 9999
+        "coordinator_api_host": "127.0.0.1",
+        "coordinator_api_infer_port": 1025,
+        "coordinator_api_mgmt_port": 1026
     },
 }
 
@@ -157,18 +155,16 @@ class TestCoordinatorConfig:
         assert coordinator.health_check_config.controller_api_port == 57675
 
     @pytest.mark.usefixtures("reset_singleton")
-    def test_server_config_full(self):
-        """Test full server configuration"""
+    def test_http_config_full(self):
+        """Test full HTTP configuration"""
         config = COMPLETE_CONFIG.copy()
         coordinator = create_coordinator_with_config(config)
         
-        assert coordinator.server_config.combined_mode is False
-        assert coordinator.server_config.combined_host == "0.0.0.0"
-        assert coordinator.server_config.combined_port == 9999
-        assert coordinator.server_config.mgmt_host == "0.0.0.0"
-        assert coordinator.server_config.mgmt_port == 9998
-        assert coordinator.server_config.inference_host == "0.0.0.0"
-        assert coordinator.server_config.inference_port == 9999
+        assert coordinator.http_config.combined_mode is False
+        assert coordinator.http_config.coordinator_api_dns == "motor-controller-service.mindie.svc.cluster.local"
+        assert coordinator.http_config.coordinator_api_host == "127.0.0.1"
+        assert coordinator.http_config.coordinator_api_infer_port == 1025
+        assert coordinator.http_config.coordinator_api_mgmt_port == 1026
 
     @pytest.mark.usefixtures("reset_singleton")
     def test_invalid_deploy_mode(self):

@@ -6,7 +6,7 @@ import threading
 import copy
 from enum import Enum
 from types import MappingProxyType
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from motor.common.utils.logger import get_logger
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
 
@@ -107,6 +107,7 @@ class Instance(BaseModel):
     """
     instance is a group of endpoints, it can be prefill or decode
     """
+    model_config = ConfigDict(protected_namespaces=())
     job_name: str = Field(..., description="Instance job name")
     model_name: str = Field(..., description="Instance model name")
     id: int = Field(..., description="Instance ID")

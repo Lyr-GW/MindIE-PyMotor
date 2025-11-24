@@ -214,8 +214,8 @@ class TestRouterCDPSeparation:
             assert kv_transfer_params["request_id"] == mock_async_client.req_headers_from_router["X-Request-Id"]
             assert kv_transfer_params["do_remote_decode"] is False
             assert kv_transfer_params["do_remote_prefill"] is True
-            assert kv_transfer_params["remote_host"] == CoordinatorConfig().server_config.mgmt_host
-            assert kv_transfer_params["remote_port"] == str(CoordinatorConfig().server_config.mgmt_port)
+            assert kv_transfer_params["remote_host"] == CoordinatorConfig().http_config.coordinator_api_host
+            assert kv_transfer_params["remote_port"] == str(CoordinatorConfig().http_config.coordinator_api_mgmt_port)
 
             # Request info should not be modified by metaserver
             assert req_info.req_id == origin_req_id

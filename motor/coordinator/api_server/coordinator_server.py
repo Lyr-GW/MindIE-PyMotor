@@ -383,7 +383,7 @@ class CoordinatorServer:
         return unified_app
     
     async def run(self):
-        combined_mode = self.coordinator_config.server_config.combined_mode
+        combined_mode = self.coordinator_config.http_config.combined_mode
         rate_limit_config = self.coordinator_config.rate_limit_config
         
         mgmt_server = None
@@ -417,19 +417,14 @@ class CoordinatorServer:
                 raise RuntimeError("Failed to initialize CoordinatorConfig") from e
         
         self.coordinator_config = coordinator_config
-        self.timeout_config = coordinator_config.timeout_config
         self.api_key_config = coordinator_config.api_key_config
         self.ssl_config = SSLConfig()
         self._load_ssl_config()
     
     def _log_configuration(self):
         logger.info(
-            "Timeout configuration: request=%ss, connection=%ss, read=%ss, write=%ss, keep_alive=%ss",
-            self.timeout_config.request_timeout,
-            self.timeout_config.connection_timeout,
-            self.timeout_config.read_timeout,
-            self.timeout_config.write_timeout,
-            self.timeout_config.keep_alive_timeout
+            "Infer timeout configuration: infer_timeout=%ss",
+            self.coordinator_config.exception_config.infer_timeout
         )
         
         if self.api_key_config.enabled and not self.api_key_config.valid_keys:
@@ -481,9 +476,9 @@ class CoordinatorServer:
         self.inference_app.add_middleware(CORSMiddleware, **cors_config)
     
     def _apply_timeout_to_config(self, config_kwargs: dict[str, Any]):
-        if self.timeout_config:
-            config_kwargs[UVICORN_KEY_TIMEOUT_KEEP_ALIVE] = self.timeout_config.keep_alive_timeout
-            config_kwargs[UVICORN_KEY_TIMEOUT_GRACEFUL_SHUTDOWN] = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+        infer_timeout = self.coordinator_config.exception_config.infer_timeout
+        config_kwargs[UVICORN_KEY_TIMEOUT_KEEP_ALIVE] = infer_timeout
+        config_kwargs[UVICORN_KEY_TIMEOUT_GRACEFUL_SHUTDOWN] = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
     
     def _apply_ssl_to_unified_config(self, config_kwargs: dict[str, Any]):
         if not (self.ssl_config and self.ssl_config.enabled):
@@ -543,14 +538,14 @@ class CoordinatorServer:
         unified_app = self.create_unified_app(rate_limit_config=rate_limit_config)
         logger.info(
             "Starting Unified server %s:%s",
-            self.coordinator_config.server_config.combined_host,
-            self.coordinator_config.server_config.combined_port
+            self.coordinator_config.http_config.coordinator_api_host,
+            self.coordinator_config.http_config.coordinator_api_mgmt_port
         )
         
         unified_config_kwargs = self._create_base_uvicorn_config(
             unified_app,
-            self.coordinator_config.server_config.combined_host,
-            self.coordinator_config.server_config.combined_port
+            self.coordinator_config.http_config.coordinator_api_host,
+            self.coordinator_config.http_config.coordinator_api_mgmt_port
         )
         
         self._apply_timeout_to_config(unified_config_kwargs)
@@ -565,25 +560,25 @@ class CoordinatorServer:
         
         logger.info(
             "Starting Management server %s:%s",
-            self.coordinator_config.server_config.mgmt_host,
-            self.coordinator_config.server_config.mgmt_port
+            self.coordinator_config.http_config.coordinator_api_host,
+            self.coordinator_config.http_config.coordinator_api_mgmt_port
         )
         logger.info(
             "Starting Inference server %s:%s",
-            self.coordinator_config.server_config.inference_host,
-            self.coordinator_config.server_config.inference_port
+            self.coordinator_config.http_config.coordinator_api_host,
+            self.coordinator_config.http_config.coordinator_api_infer_port
         )
         
         mgmt_config_kwargs = self._create_base_uvicorn_config(
             self.management_app,
-            self.coordinator_config.server_config.mgmt_host,
-            self.coordinator_config.server_config.mgmt_port
+            self.coordinator_config.http_config.coordinator_api_host,
+            self.coordinator_config.http_config.coordinator_api_mgmt_port
         )
         
         inference_config_kwargs = self._create_base_uvicorn_config(
             self.inference_app,
-            self.coordinator_config.server_config.inference_host,
-            self.coordinator_config.server_config.inference_port
+            self.coordinator_config.http_config.coordinator_api_host,
+            self.coordinator_config.http_config.coordinator_api_infer_port
         )
         
         self._apply_timeout_to_config(mgmt_config_kwargs)
@@ -622,7 +617,10 @@ class CoordinatorServer:
         def decorator(func):
             @wraps(func)
             async def wrapper(*args, **kwargs):
-                actual_timeout = timeout_seconds if timeout_seconds is not None else self.timeout_config.request_timeout
+                actual_timeout = (
+                    timeout_seconds if timeout_seconds is not None
+                    else self.coordinator_config.exception_config.infer_timeout
+                )
                 
                 try:
                     return await asyncio.wait_for(

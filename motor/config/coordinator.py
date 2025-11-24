@@ -119,16 +119,13 @@ class APIKeyConfig:
                                "/docs", "/redoc", "/openapi.json", "/favicon.ico"])
 
 
-class ServerConfig:
+class HttpConfig:
     def __init__(self):
+        self.coordinator_api_dns: str = CoordinatorConfig.DEFAULT_DNS
         self.combined_mode = False
-        self.combined_host = CoordinatorConfig.DEFAULT_HOST
-        self.combined_port = CoordinatorConfig.DEFAULT_INFERENCE_PORT
-        
-        self.mgmt_host = CoordinatorConfig.DEFAULT_HOST
-        self.mgmt_port = CoordinatorConfig.DEFAULT_MGMT_PORT
-        self.inference_port = CoordinatorConfig.DEFAULT_INFERENCE_PORT
-        self.inference_host = CoordinatorConfig.DEFAULT_HOST
+        self.coordinator_api_host: str = CoordinatorConfig.DEFAULT_HOST
+        self.coordinator_api_infer_port: int = CoordinatorConfig.DEFAULT_INFERENCE_PORT
+        self.coordinator_api_mgmt_port: int = CoordinatorConfig.DEFAULT_MGMT_PORT
 
 
 class RateLimitConfig:
@@ -148,9 +145,10 @@ class RateLimitConfig:
 
 class CoordinatorConfig(ThreadSafeSingleton):
 
-    DEFAULT_HOST = "0.0.0.0"
-    DEFAULT_MGMT_PORT = 9998
-    DEFAULT_INFERENCE_PORT = 9999
+    DEFAULT_HOST = "127.0.0.1"
+    DEFAULT_MGMT_PORT = 1025
+    DEFAULT_INFERENCE_PORT = 1026
+    DEFAULT_DNS = "motor-controller-service.mindie.svc.cluster.local"
     ENABLED_KEY = "enabled"
     VALID_KEY = "valid_keys"
     HEADER_NAME_KEY = "header_name"
@@ -185,7 +183,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.timeout_config = TimeoutConfig()
         self.api_key_config = APIKeyConfig()
         self.rate_limit_config = RateLimitConfig()        
-        self.server_config = ServerConfig()
+        self.http_config = HttpConfig()
         
         # Auto-initialize on creation
         self._initialize()
@@ -223,7 +221,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
             self._load_tls_config,
             self._load_scheduler_config,
             self._load_health_check_config,
-            self._load_server_config,
+            self._load_http_config,
             self._load_timeout_config,
             self._load_api_key_config,
             self._load_rate_limit_config
@@ -330,51 +328,39 @@ class CoordinatorConfig(ThreadSafeSingleton):
             else:
                 logging.warning(f"Invalid type for Health Check config field '{field}', using default")
 
-    def _load_server_config(self) -> None:
-        """Load server configuration section."""
-        config = self.config.get("server_config", {})
+    def _load_http_config(self) -> None:
+        """Load HTTP configuration section."""
+        config = self.config.get("http_config", {})
+
+        coordinator_api_dns = config.get("coordinator_api_dns", CoordinatorConfig.DEFAULT_DNS)
+        if isinstance(coordinator_api_dns, str):
+            self.http_config.coordinator_api_dns = coordinator_api_dns
+        else:
+            raise ValueError("coordinator_api_dns must be a string")
 
         combined_mode = config.get("combined_mode", False)
         if isinstance(combined_mode, bool):
-            self.server_config.combined_mode = combined_mode
+            self.http_config.combined_mode = combined_mode
         else:
             raise ValueError("combined_mode must be a boolean")
 
-        combined_host = config.get("combined_host", CoordinatorConfig.DEFAULT_HOST)
-        if isinstance(combined_host, str):
-            self.server_config.combined_host = combined_host
+        coordinator_api_host = config.get("coordinator_api_host", CoordinatorConfig.DEFAULT_HOST)
+        if isinstance(coordinator_api_host, str):
+            self.http_config.coordinator_api_host = coordinator_api_host
         else:
-            raise ValueError("combined_host must be a string")
+            raise ValueError("coordinator_api_host must be a string")
 
-        combined_port = config.get("combined_port", CoordinatorConfig.DEFAULT_INFERENCE_PORT)
-        if isinstance(combined_port, int) and 1 <= combined_port <= 65535:
-            self.server_config.combined_port = combined_port
+        coordinator_api_infer_port = config.get("coordinator_api_infer_port", CoordinatorConfig.DEFAULT_INFERENCE_PORT)
+        if isinstance(coordinator_api_infer_port, int) and 1 <= coordinator_api_infer_port <= 65535:
+            self.http_config.coordinator_api_infer_port = coordinator_api_infer_port
         else:
-            raise ValueError("combined_port must be an integer between 1 and 65535")
+            raise ValueError("coordinator_api_infer_port must be an integer between 1 and 65535")
 
-        mgmt_host = config.get("mgmt_host", CoordinatorConfig.DEFAULT_HOST)
-        if isinstance(mgmt_host, str):
-            self.server_config.mgmt_host = mgmt_host
+        coordinator_api_mgmt_port = config.get("coordinator_api_mgmt_port", CoordinatorConfig.DEFAULT_MGMT_PORT)
+        if isinstance(coordinator_api_mgmt_port, int) and 1 <= coordinator_api_mgmt_port <= 65535:
+            self.http_config.coordinator_api_mgmt_port = coordinator_api_mgmt_port
         else:
-            raise ValueError("mgmt_host must be a string")
-
-        mgmt_port = config.get("mgmt_port", CoordinatorConfig.DEFAULT_MGMT_PORT)
-        if isinstance(mgmt_port, int) and 1 <= mgmt_port <= 65535:
-            self.server_config.mgmt_port = mgmt_port
-        else:
-            raise ValueError("mgmt_port must be an integer between 1 and 65535")
-
-        inference_host = config.get("inference_host", "0.0.0.0")
-        if isinstance(inference_host, str):
-            self.server_config.inference_host = inference_host
-        else:
-            raise ValueError("inference_host must be a string")
-
-        inference_port = config.get("inference_port", CoordinatorConfig.DEFAULT_INFERENCE_PORT)
-        if isinstance(inference_port, int) and 1 <= inference_port <= 65535:
-            self.server_config.inference_port = inference_port
-        else:
-            raise ValueError("inference_port must be an integer between 1 and 65535")
+            raise ValueError("coordinator_api_mgmt_port must be an integer between 1 and 65535")
 
     def _load_timeout_config(self) -> None:
         """Load timeout configuration section."""

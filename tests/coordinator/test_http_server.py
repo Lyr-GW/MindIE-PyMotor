@@ -1683,7 +1683,7 @@ async def test_run_combined_mode(monkeypatch):
     monkeypatch.setattr("motor.coordinator.api_server.coordinator_server.uvicorn.Server", server_factory)
 
     cfg = CoordinatorConfig()
-    cfg.server_config.combined_mode = True
+    cfg.http_config.combined_mode = True
 
     srv = CoordinatorServer(coordinator_config=cfg)
     await srv.run()
@@ -1711,7 +1711,7 @@ async def test_run_split_mode(monkeypatch):
     monkeypatch.setattr("motor.coordinator.api_server.coordinator_server.uvicorn.Server", server_factory)
 
     cfg = CoordinatorConfig()
-    cfg.server_config.combined_mode = False
+    cfg.http_config.combined_mode = False
 
     srv = CoordinatorServer(coordinator_config=cfg)
     await srv.run()
