@@ -82,18 +82,19 @@ class Daemon(ThreadSafeSingleton):
                 device_ids_str = ",".join(map(str, device_ids))
                 logger.info(f"Device IDs: {device_ids_str}")
                 env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids_str
-                cmd = f"engine_server \
-                --dp-rank {i} \
-                --instance-id {instance_id} \
-                --role {pd_role_info.value} \
-                --host {endpoint.ip} \
-                --mgmt-port {int(endpoint.mgmt_port)} \
-                --config-path {Env.motor_engine_path} \
-                --port {int(endpoint.business_port)}"
-                logger.info(cmd)
+                cmd = [
+                    "engine_server",
+                    "--dp-rank", str(i),
+                    "--instance-id", str(instance_id),
+                    "--role", str(pd_role_info.value),
+                    "--host", str(endpoint.ip),
+                    "--port", str(int(endpoint.business_port)),
+                    "--mgmt-port", str(int(endpoint.mgmt_port)),
+                    "--config-path", str(Env.motor_engine_path)
+                ]
+                logger.info(" ".join(cmd))
                 process = subprocess.Popen(cmd,
                                            shell=False,
-                                           executable='/bin/bash',
                                            env=env)
                 if process.poll() is not None:
                     raise RuntimeError(f"Engine process exited immediately with code {process.returncode}")
