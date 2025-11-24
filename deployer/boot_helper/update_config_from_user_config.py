@@ -12,8 +12,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Constants
 ENCODING_UTF8 = 'utf-8'
-COORDINATOR_API_PORT = 'coordinator_api_port'
-CONTROLLER_API_PORT = 'controller_api_port'
+HEALTH_CHECK_CONFIG = 'health_check_config'
+HTTP_CONFIG = 'http_config'
 CONTROLLER_API_HOST = 'controller_api_host'
 COORDINATOR_API_DNS = 'coordinator_api_dns'
 COORDINATOR_API_HOST = 'coordinator_api_host'
@@ -112,20 +112,12 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
             if config_key == ConfigKey.MOTOR_CONTROLLER.value:
                 updated_config[CONTROLLER_API_HOST] = os.getenv('POD_IP')
                 updated_config[COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
-                if COORDINATOR_API_PORT in user_config_data[ConfigKey.MOTOR_COORDINATOR.value]:
-                    updated_config[COORDINATOR_API_PORT] = \
-                        user_config_data[ConfigKey.MOTOR_COORDINATOR.value][COORDINATOR_API_PORT]
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
-                updated_config[COORDINATOR_API_HOST] = os.getenv('POD_IP')
-                updated_config[CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
-                if CONTROLLER_API_PORT in user_config_data[ConfigKey.MOTOR_CONTROLLER.value]:
-                    updated_config[CONTROLLER_API_PORT] = \
-                        user_config_data[ConfigKey.MOTOR_CONTROLLER.value][CONTROLLER_API_PORT]
+                updated_config[HTTP_CONFIG][COORDINATOR_API_HOST] = os.getenv('POD_IP')
+                updated_config[HTTP_CONFIG][COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
+                updated_config[HEALTH_CHECK_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
             elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:
                 updated_config[CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
-                if CONTROLLER_API_PORT in user_config_data[ConfigKey.MOTOR_CONTROLLER.value]:
-                    updated_config[CONTROLLER_API_PORT] = \
-                        user_config_data[ConfigKey.MOTOR_CONTROLLER.value][CONTROLLER_API_PORT]
                 role = os.getenv('ROLE')
                 if role == PREFILL:
                     updated_config[PARALLEL_CONFIG] = \
