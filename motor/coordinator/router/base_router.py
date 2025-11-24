@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import logging
+import time
 
 from abc import ABC, abstractmethod
 from fastapi import status, HTTPException
@@ -16,7 +18,7 @@ from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import PDRole
 from motor.common.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(__name__, None, logging.INFO)
 
 
 class BaseRouter(ABC):
@@ -69,7 +71,7 @@ class BaseRouter(ABC):
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
                     detail=f"Scheduling failed, role:{role}"
                 )
-        logger.debug(f"Scheduled instance: {ins.job_name}, role: {role}")
+        logger.debug("[%s] Scheduled instance: %s, role: %s", self.req_info.req_id, ins.job_name, role)
 
         # If scheduler returns normally, it means allocation was successful
         self.req_info.update_state(ReqState.P_ALLOCATED if role == PDRole.ROLE_P else ReqState.D_ALLOCATED)
@@ -80,7 +82,7 @@ class BaseRouter(ABC):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 detail=f"Allocation failed, role:{role}"
             )
-        logger.debug(f"Allocated instance: {ins.job_name}, role: {role}")
+        logger.debug("[%s] Allocated instance: %s, role: %s", self.req_info.req_id, ins.job_name, role)
         return ScheduledResource(instance=ins, endpoint=endpoint)
     
     @handle_request_errors(stream=True)
@@ -100,10 +102,13 @@ class BaseRouter(ABC):
             'X-Request-Id': self.req_info.req_id
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
-        logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s", 
-                     base_url, self.req_info.api, headers, req_data)
+        logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
+                     base_url, self.req_info.api, headers, req_data, 
+                     CoordinatorConfig().exception_config.first_token_timeout)
+        timeout = CoordinatorConfig().exception_config.first_token_timeout \
+            if CoordinatorConfig().exception_config.first_token_timeout != 0 else None
         
-        async with httpx.AsyncClient(timeout=CoordinatorConfig().exception_config.first_token_timeout,
+        async with httpx.AsyncClient(timeout=timeout,
                                     base_url=base_url,
                                     verify=False) as client:
             self.first_chunk_sent = False
@@ -137,8 +142,15 @@ class BaseRouter(ABC):
             'Content-Type': 'application/json',
             'X-Request-Id': self.req_info.req_id
         }
-        async with httpx.AsyncClient(timeout=CoordinatorConfig().exception_config.infer_timeout,
-                                    base_url=f"http://{endpoint.ip}:{endpoint.business_port}",
+        base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
+        logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
+                     base_url, self.req_info.api, headers, req_data, 
+                     CoordinatorConfig().exception_config.first_token_timeout)
+        timeout = CoordinatorConfig().exception_config.infer_timeout \
+            if CoordinatorConfig().exception_config.infer_timeout != 0 else None
+        
+        async with httpx.AsyncClient(timeout=timeout,
+                                    base_url=base_url,
                                     verify=False) as client:
 
             response = await client.post(f"/{self.req_info.api}",
@@ -172,3 +184,12 @@ class BaseRouter(ABC):
         
         return Scheduler().update_workload(resource.instance, resource.endpoint, 
                                            self.req_info.req_id, action, self.req_info.req_len) 
+
+    def _log_request_details(self):
+        current_time = time.time()
+        cost_time = current_time - self.req_info.start_time
+        logger.debug("Request ID: %s, API: %s, Length: %d, State: %s, Start Time: %s, Prefill End Time: %s, " +
+                     "Decode End Time: %s, Current Time: %s, Cost Time: %s",
+                     self.req_info.req_id, self.req_info.api, self.req_info.req_len, self.req_info.state, 
+                     self.req_info.start_time, self.req_info.prefill_end_time, self.req_info.decode_end_time, 
+                     current_time, cost_time)

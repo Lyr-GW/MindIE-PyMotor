@@ -3,6 +3,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import logging
 
 from fastapi.responses import StreamingResponse
 from fastapi import HTTPException, status
@@ -16,7 +17,7 @@ from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.models.contants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX, COMPLETION_SUFFIX
 from motor.common.utils.logger import get_logger
 
-logger = get_logger(__name__)
+logger = get_logger(__name__, None, logging.INFO)
 
 
 class SeparateCDPRouter(BaseRouter):
@@ -61,6 +62,7 @@ class SeparateCDPRouter(BaseRouter):
                     logger.warning(f"Fail to release decode resource, instance id: {decode_resource.instance.id}, \
                         endpoint id: {decode_resource.endpoint.id}, \
                         req state: {self.req_info.state}")
+                self._log_request_details()
                 
         async def generate_post():
             logger.debug("Handling non-streaming Decode request")
@@ -81,6 +83,7 @@ class SeparateCDPRouter(BaseRouter):
                     logger.warning(f"Fail to release decode resource, instance id: {decode_resource.instance.id}, \
                         endpoint id: {decode_resource.endpoint.id}, \
                         req state: {self.req_info.state}")
+                self._log_request_details()
         
         if self.req_info.req_data.get("stream", False):
             return StreamingResponse(generate_stream(), media_type="text/event-stream")

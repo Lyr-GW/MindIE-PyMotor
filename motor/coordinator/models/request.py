@@ -5,7 +5,6 @@
 import time
 from enum import Enum
 from typing import Optional, Dict, Any
-from datetime import datetime
 from pydantic import BaseModel, Field
 
 from motor.common.resources.endpoint import Endpoint
@@ -41,12 +40,12 @@ class RequestInfo(BaseModel):
     req_len: int = Field(..., description="Request body length")
     api: str = Field(..., description="API need to be forwarded")
     state: ReqState = Field(default=ReqState.INVALID, description="Request status")
-    start_time: datetime = Field(default=time.time(), description="Request start time")
-    p_scheduled_time: datetime = Field(default=None, description="P instance scheduled time")
-    prefill_end_time: datetime = Field(default=None, description="Prefill end time")
-    d_scheduled_time: datetime = Field(default=None, description="D instance scheduled time")
-    first_token_time: datetime = Field(default=None, description="First token decoded time")
-    decode_end_time: datetime = Field(default=None, description="Decode end time")
+    start_time: float = Field(default=None, description="Request start time")
+    p_scheduled_time: float = Field(default=None, description="P instance scheduled time")
+    prefill_end_time: float = Field(default=None, description="Prefill end time")
+    d_scheduled_time: float = Field(default=None, description="D instance scheduled time")
+    first_token_time: float = Field(default=None, description="First token decoded time")
+    decode_end_time: float = Field(default=None, description="Decode end time")
     input_tokens: int = Field(default=0, description="Input tokens")
     output_tokens: int = Field(default=0, description="Output tokens")
     
