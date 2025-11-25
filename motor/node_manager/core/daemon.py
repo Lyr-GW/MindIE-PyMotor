@@ -84,7 +84,7 @@ class Daemon(ThreadSafeSingleton):
                 env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids_str
                 cmd = [
                     "engine_server",
-                    "--dp-rank", str(i),
+                    "--dp-rank", str(endpoint.id),
                     "--instance-id", str(instance_id),
                     "--role", str(pd_role_info.value),
                     "--host", str(endpoint.ip),
