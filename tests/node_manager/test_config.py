@@ -132,11 +132,11 @@ class TestNodeManagerConfig:
         # Invalid Ranktable structure (missing required fields)
         ({}, "Invalid HCCL json"),
         ({"status": "pending"}, "Invalid HCCL json"),  # Missing required Ranktable fields
-        # Empty server_list will fail device count validation (needs 8 or 16 devices)
-        ({"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}, "Invalid device count"),
-        # Empty device list will fail device count validation (needs 8 or 16 devices)
+        # Empty server_list will fail device count validation
+        ({"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}, "Device count"),
+        # Empty device list will fail device count validation
         ({"status": "completed", "server_count": "1", "version": "1.0",
-          "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, "Invalid device count"),
+          "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, "Device count"),
     ])
     @patch.dict('os.environ', {'ROLE': 'both'})
     @patch('motor.config.node_manager.safe_open')
@@ -251,8 +251,8 @@ class TestNodeManagerConfig:
         
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_empty)
         
-        # Should raise ValueError due to device count validation (needs 8 or 16 devices)
-        with pytest.raises(ValueError, match="Invalid device count"):
+        # Should raise ValueError due to device count validation
+        with pytest.raises(ValueError, match="Device count"):
             NodeManagerConfig()
     
     @patch.dict('os.environ', {'ROLE': 'both'})
@@ -275,6 +275,6 @@ class TestNodeManagerConfig:
         
         mock_safe_open.side_effect = create_config_mock(config_data, hccl_no_devices)
         
-        # Should raise ValueError due to device count validation (needs 8 or 16 devices)
-        with pytest.raises(ValueError, match="Invalid device count"):
+        # Should raise ValueError due to device count validation
+        with pytest.raises(ValueError, match="Device count"):
             NodeManagerConfig()

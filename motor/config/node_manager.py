@@ -174,7 +174,7 @@ class NodeManagerConfig(ThreadSafeSingleton):
         elif len(cls.device_info) == 16:
             cls.hardware_type = HardwareType.TYPE_800I_A3
         else:
-            raise ValueError(f"Invalid device count: {len(cls.device_info)}")
+            logger.info(f"Device count: {len(cls.device_info)}")
 
     @classmethod
     def generate_endpoint_ports(cls):

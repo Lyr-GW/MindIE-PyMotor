@@ -2,7 +2,7 @@
   "controller_api_host": "127.0.0.1",
   "controller_api_port": 57675,
   "coordinator_api_dns": "127.0.0.1",
-  "coordinator_api_port": 1025,
+  "coordinator_api_port": 1026,
   "enable_tls": false,
   "ca_cert_path": "security/controller/cert/ca.crt",
   "cert_path": "security/controller/cert/server.crt",
