@@ -121,7 +121,6 @@ class APIKeyConfig:
 
 class HttpConfig:
     def __init__(self):
-        self.coordinator_api_dns: str = CoordinatorConfig.DEFAULT_DNS
         self.combined_mode = False
         self.coordinator_api_host: str = CoordinatorConfig.DEFAULT_HOST
         self.coordinator_api_infer_port: int = CoordinatorConfig.DEFAULT_INFERENCE_PORT
@@ -148,7 +147,6 @@ class CoordinatorConfig(ThreadSafeSingleton):
     DEFAULT_HOST = "127.0.0.1"
     DEFAULT_MGMT_PORT = 1025
     DEFAULT_INFERENCE_PORT = 1026
-    DEFAULT_DNS = "motor-controller-service.mindie.svc.cluster.local"
     ENABLED_KEY = "enabled"
     VALID_KEY = "valid_keys"
     HEADER_NAME_KEY = "header_name"
@@ -331,12 +329,6 @@ class CoordinatorConfig(ThreadSafeSingleton):
     def _load_http_config(self) -> None:
         """Load HTTP configuration section."""
         config = self.config.get("http_config", {})
-
-        coordinator_api_dns = config.get("coordinator_api_dns", CoordinatorConfig.DEFAULT_DNS)
-        if isinstance(coordinator_api_dns, str):
-            self.http_config.coordinator_api_dns = coordinator_api_dns
-        else:
-            raise ValueError("coordinator_api_dns must be a string")
 
         combined_mode = config.get("combined_mode", False)
         if isinstance(combined_mode, bool):

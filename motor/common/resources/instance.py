@@ -244,9 +244,9 @@ class Instance(BaseModel):
                                  f"endpoints size {len(self.endpoints[ip])} for pod_ip {ip} "
                                  f"in instance {self.job_name}")
                     return False
-                for (i, endpoint) in enumerate(self.endpoints[ip].values()):
+                for endpoint in self.endpoints[ip].values():
                     endpoint.hb_timestamp = timestamp
-                    endpoint.status = status[i]
+                    endpoint.status = status[endpoint.id]
                 logger.debug(f"Updated heartbeat for pod_ip {ip} in instance {self.job_name}")
                 return True
             else:

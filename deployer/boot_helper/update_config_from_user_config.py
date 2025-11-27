@@ -114,7 +114,6 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
                 updated_config[COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
                 updated_config[HTTP_CONFIG][COORDINATOR_API_HOST] = os.getenv('POD_IP')
-                updated_config[HTTP_CONFIG][COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
                 updated_config[HEALTH_CHECK_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
             elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:
                 updated_config[CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')

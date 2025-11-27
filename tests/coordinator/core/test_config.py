@@ -46,7 +46,6 @@ COMPLETE_CONFIG = {
         "controller_api_port": 57675
     },
     "http_config": {
-        "coordinator_api_dns": "motor-controller-service.mindie.svc.cluster.local",
         "combined_mode": False,
         "coordinator_api_host": "127.0.0.1",
         "coordinator_api_infer_port": 1025,
@@ -161,7 +160,6 @@ class TestCoordinatorConfig:
         coordinator = create_coordinator_with_config(config)
         
         assert coordinator.http_config.combined_mode is False
-        assert coordinator.http_config.coordinator_api_dns == "motor-controller-service.mindie.svc.cluster.local"
         assert coordinator.http_config.coordinator_api_host == "127.0.0.1"
         assert coordinator.http_config.coordinator_api_infer_port == 1025
         assert coordinator.http_config.coordinator_api_mgmt_port == 1026
