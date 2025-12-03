@@ -100,7 +100,7 @@ class ControllerAPI:
         app.add_api_route("/controller/heartbeat", self._heartbeat, methods=POST_METHODS)
         app.add_api_route("/controller/register", self._register, methods=POST_METHODS)
         app.add_api_route("/controller/reregister", self._reregister, methods=POST_METHODS)
-        app.add_api_route("/controller/terminate-instance", self._terminate_instance, methods=["POST"])
+        app.add_api_route("/controller/terminate_instance", self._terminate_instance, methods=["POST"])
 
         app.include_router(probe_api.router)
         app.include_router(om_api.router)
@@ -178,8 +178,12 @@ class ControllerAPI:
             logger.error("Failed to parse TerminateInstanceMsg: %s, body: %s", e, body)
             return {"error": "Invalid TerminateInstanceMsg format"}
         logger.warning("Terminate instance, reason: %s", terminate_instance_msg.reason)
-        instance = InstanceManager.get_instance(terminate_instance_msg.instance_id)
+        instance = InstanceManager().get_instance(terminate_instance_msg.instance_id)
+
+        if instance is None:
+            logger.error("Instance %d not found.", terminate_instance_msg.instance_id)
+            return {"error": "Instance not found"}
+
         for node_mgr in instance.get_node_managers():
-            api_client = NodeManagerApiClient()
-            api_client.stop(node_mgr)
+            NodeManagerApiClient.stop(node_mgr)
         return {"result": "Terminate instance succeed!"}

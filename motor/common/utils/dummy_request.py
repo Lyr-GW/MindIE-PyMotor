@@ -32,7 +32,7 @@ class DummyRequestUtil:
             bool: True if response is valid, False otherwise
         """
         if response.status_code != 200:
-            logger.warning(f"Dummy request failed with status: {response.status_code}")
+            logger.warning(f"Dummy request failed with status {response.status_code} :{response}")
             return False
         
         try:
@@ -75,27 +75,45 @@ class DummyRequestUtil:
                 return False
             
             url_path = getattr(self.config, 'dummy_request_endpoint', '/v1/completions')
-            request_data = self._get_completion_request()
-            
+
+            try:
+                request_data = self._get_completion_request()
+            except Exception as e:
+                logger.warning(f"Failed to generate request data for endpoint {endpoint.id}: {e}")
+                return False
+
             url = f"http://{endpoint.ip}:{endpoint.business_port}{url_path}"
-            
-            response = self._http_session.post(
-                url,
-                json=request_data,
-                timeout=self.config.dummy_request_timeout,
-                headers={"Content-Type": "application/json"}
-            )
-            
+            logger.debug(f"Sending dummy request to: {url}")
+            logger.debug(f"Request body: {request_data}")
+
+            headers = {
+                "Content-Type": "application/json",
+            }
+
+            try:
+                response = self._http_session.post(
+                    url,
+                    json=request_data,
+                    timeout=self.config.dummy_request_timeout,
+                    headers=headers
+                )
+            except Timeout:
+                logger.warning(f"Dummy request to endpoint {endpoint.id} timed out. URL: {url}")
+                return False
+            except RequestException as e:
+                logger.warning(f"Dummy request to endpoint {endpoint.id} failed: {e}. URL: {url}, Body: {request_data}")
+                return False
+            except Exception as e:
+                logger.warning(
+                    f"Unexpected error during dummy request to endpoint {endpoint.id}: {e}.\n"
+                    f"URL: {url}, Body: {request_data}"
+                )
+                return False
+
             return self._validate_response(response)
-                
-        except Timeout:
-            logger.warning(f"Dummy request to endpoint {endpoint.id} timeout")
-            return False
-        except RequestException as e:
-            logger.warning(f"Dummy request to endpoint {endpoint.id} failed: {e}")
-            return False
+
         except Exception as e:
-            logger.warning(f"Unexpected error during dummy request to endpoint {endpoint.id}: {e}")
+            logger.error(f"Critical error in send_dummy_request for endpoint {endpoint.id}: {e}")
             return False
 
     def close(self):
@@ -109,6 +127,7 @@ class DummyRequestUtil:
         return {
             "model": request_config.get('model', 'test-model'),
             "prompt": request_config.get('prompt', 'Health check. Please respond with OK only.'),
+            "message": request_config.get('message', "[{'role': 'user', 'content': 'hi'}]"),
             "max_tokens": request_config.get('max_tokens', 3),
             "temperature": request_config.get('temperature', 0.1),
             "top_p": request_config.get('top_p', 0.9),

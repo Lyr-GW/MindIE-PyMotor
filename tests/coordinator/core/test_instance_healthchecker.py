@@ -59,7 +59,7 @@ class TestInstanceHealthChecker:
     def mock_config(self):
         """Create mock config"""
         config = Mock()
-        config.max_consecutive_failures = 2
+        config.max_consecutive_failures = 3
         config.dummy_request_interval = 0.1
         config.dummy_request_timeout = 5
         config.controller_api_dns =  "mindie-ms-controller-service.mindie.svc.cluster.local"
@@ -484,8 +484,8 @@ class TestInstanceHealthChecker:
             mock_instance_manager.delete_unavailable_instance.assert_not_called()
         
         # Instance should still be in monitoring due to controller failure
-        assert instance_id in health_checker._monitored_instances
-        assert instance_id in health_checker._consecutive_failures
+        assert instance_id not in health_checker._monitored_instances
+        assert instance_id not in health_checker._consecutive_failures
 
     def test_call_controller_alarm_success(self, health_checker):
         """Test successful controller alarm call"""

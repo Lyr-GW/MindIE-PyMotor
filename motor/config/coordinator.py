@@ -79,12 +79,12 @@ class HealthCheckConfig:
         self.dummy_request_body: dict = {
             'model': 'test-model', 
             'prompt': 'Health check. Please respond with OK only.',
+            'message': "[{'role': 'user', 'content': 'hi'}]",
             'max_tokens': 3,
             'temperature': 0.1,
             'top_p': 0.9,
             'stream': False,
         }
-        0
         self.alarm_endpoint: str = '/v1/alarm/coordinator'
         self.alarm_timeout: float = 5.
         self.terminate_instance_endpoint: str = '/controller/terminate_instance'
@@ -174,7 +174,6 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.config = {}
         self.prometheus_metrics_config = PrometheusMetricsConfig()
         self.exception_config = ExceptionConfig()
-        self.health_check_config = HealthCheckConfig()
         self.scheduler_config = SchedulerConfig()
         self.request_server_tls = TlsItems()
         self.health_check_config = HealthCheckConfig()
@@ -318,19 +317,60 @@ class CoordinatorConfig(ThreadSafeSingleton):
         config = self.config.get("health_check_config", {})
         
         health_check_mappings = {
-            "dummy_request_interval": (float, 5.0),
-            "max_consecutive_failures": (int, 3),
-            "dummy_request_timeout": (float, 10.0),
-            "controller_api_dns": (str, "mindie-ms-controller-service.mindie.svc.cluster.local"),
-            "controller_api_port": (int, 57675)
+            "dummy_request_interval": (float, 5.0, lambda x: x > 0),
+            "max_consecutive_failures": (int, 3, lambda x: x > 0),
+            "dummy_request_timeout": (float, 10.0, lambda x: x > 0),
+            "controller_api_dns": (str, "mindie-ms-controller-service.mindie.svc.cluster.local", None),
+            "controller_api_port": (int, 57675, lambda x: 1 <= x <= 65535),
+            "dummy_request_endpoint": (str, '/v1/completions', lambda x: x.startswith('/')),
+            "dummy_request_body": (dict, {
+                "model": "test-model",
+                "prompt": "Health check. Please respond with OK only.",
+                "message": [{'role': 'user', 'content': 'hi'}],
+                "max_tokens": 3,
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "stream": False
+            }, lambda x: isinstance(x, dict)),
+            "alarm_endpoint": (str, "/v1/alarm/coordinator", lambda x: x.startswith('/')),
+            "alarm_timeout": (float, 5.0, lambda x: x > 0),
+            "terminate_instance_endpoint": (str, "/controller/terminate_instance", lambda x: x.startswith('/')),
+            "thread_join_timeout": (float, 5.0, lambda x: x > 0),
+            "error_retry_interval": (float, 1.0, lambda x: x > 0)
         }
         
-        for field, (field_type, default) in health_check_mappings.items():
-            value = config.get(field, default)
-            if isinstance(value, field_type):
-                setattr(self.health_check_config, field, value)
-            else:
-                logging.warning(f"Invalid type for Health Check config field '{field}', using default")
+        for field, (field_type, default, validator) in health_check_mappings.items():
+            value = config.get(field)
+            
+            if value is None:
+                setattr(self.health_check_config, field, default)
+                logging.debug("Health Check config field '%s' not found, using default", field)
+                continue
+            
+            converted_value = None
+            try:
+                if isinstance(value, field_type):
+                    converted_value = value
+                elif field_type == dict and isinstance(value, str):
+                    converted_value = json.loads(value)
+                elif field_type == int and isinstance(value, (int, float)):
+                    converted_value = int(value)
+                elif field_type == float and isinstance(value, (int, float)):
+                    converted_value = float(value)
+                else:
+                    raise TypeError(f"Cannot convert {type(value).__name__} to {field_type.__name__}")
+                
+                if not isinstance(converted_value, field_type):
+                    raise TypeError(f"Conversion failed: {type(converted_value).__name__} is not {field_type.__name__}")
+                
+                setattr(self.health_check_config, field, converted_value)
+                
+            except (TypeError, ValueError) as e:
+                logging.warning(
+                    f"Invalid value for Health Check config field '{field}': {e}, "
+                    f"using default: {default}"
+                )
+                setattr(self.health_check_config, field, default)
 
     def _load_http_config(self) -> None:
         """Load HTTP configuration section."""

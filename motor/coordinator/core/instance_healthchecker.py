@@ -234,6 +234,8 @@ class InstanceHealthChecker(ThreadSafeSingleton):
                 return
             
             if not self._terminate_via_controller(instance_id, instance_info):
+                logger.error(f"Failed to terminate instance {instance_id} via controller, removing from monitoring.")
+                self._cleanup_instance_state(instance_id)
                 return
             
             self._cleanup_instance_state(instance_id)
@@ -242,6 +244,7 @@ class InstanceHealthChecker(ThreadSafeSingleton):
             
         except Exception as e:
             logger.error(f"Failed to terminate instance {instance_id}: {e}")
+            self._cleanup_instance_state(instance_id)
 
     def _get_instance_info(self, instance_id: int) -> Optional[dict[str, Any]]:
         """Get instance information with proper error handling."""
@@ -331,8 +334,11 @@ class InstanceHealthChecker(ThreadSafeSingleton):
     def _call_controller_terminate(self, instance_id: int, reason: str) -> bool:
         """Call controller terminate instance interface"""
         try:
-            url = f"{self.config.controller_api_dns}:{self.config.controller_api_port}\
-                {self.config.terminate_instance_endpoint}"
+            url = "http://{dns}:{port}{endpoint}".format(
+                dns=self.config.controller_api_dns,
+                port=self.config.controller_api_port,
+                endpoint=self.config.terminate_instance_endpoint
+            )
             response = requests.post(
                 url,
                 json={

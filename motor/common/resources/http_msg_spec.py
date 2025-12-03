@@ -89,7 +89,7 @@ class TerminateInstanceMsg(BaseModel):
     """
     Heartbeat message format sent from NodeManager to controller.
     """
-    instance_id: str = Field(..., description="Instance id")
+    instance_id: int = Field(..., description="Instance id")
     reason: str = Field(..., description="The reason for terminating the instance")
 
 
