@@ -35,7 +35,7 @@ def test_collector_is_abstract():
     assert issubclass(Collector, ABC)
 
     mock_cfg = Mock(spec=IConfig)
-    with pytest.raises(TypeError, match="Can't instantiate abstract class Collector with abstract method collect"):
+    with pytest.raises(TypeError, match=r"Can't instantiate abstract class Collector.*abstract method.*collect"):
         Collector(config=mock_cfg)
 
 

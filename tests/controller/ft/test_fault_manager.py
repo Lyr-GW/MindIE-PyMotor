@@ -21,7 +21,6 @@ from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.controller.ft.fault_manager import (
     FaultManager,
     ServerMetadata,
-    InstanceGroupMetadata,
     InstanceMetadata,
     DeviceFaultInfo,
     Status,
@@ -34,6 +33,17 @@ TEST_PORT = "8080"
 TEST_NODE_NAMES = ["node_0", "node_1"]
 TEST_SERIAL_NUMBERS = ["SN0:06d", "SN1:06d"]
 TEST_FAULT_CODES = [0x1234, 0x2000, 0x3000, 0x3001, 0x4000, 0x00f1fef5]
+
+
+@pytest.fixture(autouse=True)
+def mock_etcd_client():
+    """Mock EtcdClient to avoid real ETCD operations in tests"""
+    with patch('motor.controller.ft.fault_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.persist_data.return_value = True
+        mock_client.restore_data.return_value = None
+        mock_etcd_class.return_value = mock_client
+        yield mock_client
 
 
 @pytest.fixture(autouse=True)
@@ -94,13 +104,12 @@ class FaultManagerTestHelper:
     """Helper class for common FaultManager test setup"""
 
     @staticmethod
-    def create_mock_instance(instance_id=100, job_name="test_job", group_id=1, role="prefill",
+    def create_mock_instance(instance_id=100, job_name="test_job", role="prefill",
                            pod_ip=TEST_IPS[0], host_ip=TEST_IPS[0], port=TEST_PORT):
         """Create a mock instance with specified parameters"""
         mock_instance = Mock(spec=Instance)
         mock_instance.id = instance_id
         mock_instance.job_name = job_name
-        mock_instance.group_id = group_id
         mock_instance.role = role
         mock_instance.update_instance_status = Mock()
         mock_instance.get_node_managers.return_value = [
@@ -242,13 +251,10 @@ def test_initialization(fault_manager):
     assert isinstance(fault_manager.lock, type(threading.Lock()))
     assert isinstance(fault_manager.servers, dict)
     assert isinstance(fault_manager.instances, dict)
-    assert isinstance(fault_manager.groups, dict)
 
-    # Check thread creation (threads are created but not started)
-    assert not fault_manager.server_status_subscriber_thread.is_alive()
-    assert not fault_manager.ft_strategy_center_thread.is_alive()
-    assert fault_manager.server_status_subscriber_thread.daemon is True
-    assert fault_manager.ft_strategy_center_thread.daemon is True
+    # Check threads are None before start() is called
+    assert fault_manager.server_status_subscriber_thread is None
+    assert fault_manager.ft_strategy_center_thread is None
 
 @pytest.mark.parametrize("dataclass_name,expected_attrs", [
     ("DeviceFaultInfo", {
@@ -272,11 +278,6 @@ def test_initialization(fault_manager):
         "fault_level": "L0",
         "fault_code": 0x0,
         "strategy": None
-    }),
-    ("InstanceGroupMetadata", {
-        "id": 1,
-        "p_ids": [100, 101],
-        "d_ids": [200, 201]
     })
 ])
 def test_dataclass_creation(dataclass_name, expected_attrs):
@@ -291,9 +292,6 @@ def test_dataclass_creation(dataclass_name, expected_attrs):
     elif dataclass_name == "InstanceMetadata":
         obj = InstanceMetadata(**{k: v for k, v in expected_attrs.items()
                                   if k in ["instance_id", "status", "node_managers"]})
-    elif dataclass_name == "InstanceGroupMetadata":
-        obj = InstanceGroupMetadata(**{k: v for k, v in expected_attrs.items()
-                                       if k in ["id", "p_ids", "d_ids"]})
 
     for attr, expected_value in expected_attrs.items():
         assert getattr(obj, attr) == expected_value
@@ -515,39 +513,59 @@ def test_update_instances_status(fault_manager, test_case, server_configs, expec
     assert instance_metadata.fault_level == expected_fault_level
     assert instance_metadata.fault_code == expected_fault_code
 
-@pytest.mark.parametrize("role,expected_group_ids", [
-    ("prefill", {"p_ids": [100], "d_ids": []}),
-    ("decode", {"p_ids": [], "d_ids": [200]}),
-])
-def test_update_instance_added(fault_manager, role, expected_group_ids):
-    """Test update method with INSTANCE_ADDED event for different roles"""
+def test_update_instance_added(fault_manager):
+    """Test update method with INSTANCE_ADDED event"""
     # Create mock instance using helper
-    instance_id = 100 if role == "prefill" else 200
-    server_ip = TEST_IPS[0] if role == "prefill" else TEST_IPS[1]
     mock_instance = FaultManagerTestHelper.create_mock_instance(
-        instance_id=instance_id, role=role, pod_ip=server_ip, host_ip=server_ip
+        instance_id=100, role="prefill", pod_ip=TEST_IPS[0], host_ip=TEST_IPS[0]
     )
 
     fault_manager.update(mock_instance, ObserverEvent.INSTANCE_ADDED)
 
     # Check instance registration
-    assert instance_id in fault_manager.instances
-    instance_metadata = fault_manager.instances[instance_id]
-    assert instance_metadata.instance_id == instance_id
+    assert 100 in fault_manager.instances
+    instance_metadata = fault_manager.instances[100]
+    assert instance_metadata.instance_id == 100
     assert len(instance_metadata.node_managers) == 1
 
     # Check server metadata creation
-    assert server_ip in fault_manager.servers
-    server = fault_manager.servers[server_ip]
-    assert server.pod_ip == server_ip
+    assert TEST_IPS[0] in fault_manager.servers
+    server = fault_manager.servers[TEST_IPS[0]]
+    assert server.pod_ip == TEST_IPS[0]
     assert server.status == Status.HEALTHY
 
-    # Check group metadata
-    assert 1 in fault_manager.groups
-    group = fault_manager.groups[1]
-    assert group.id == 1
-    for id_list, expected_ids in expected_group_ids.items():
-        assert getattr(group, id_list) == expected_ids
+def test_update_instance_added_duplicate(fault_manager):
+    """Test update method with INSTANCE_ADDED event for duplicate instance"""
+    # Create first mock instance
+    mock_instance1 = FaultManagerTestHelper.create_mock_instance(
+        instance_id=100, role="prefill", pod_ip=TEST_IPS[0], host_ip=TEST_IPS[0]
+    )
+
+    # Add the instance first time
+    fault_manager.update(mock_instance1, ObserverEvent.INSTANCE_ADDED)
+
+    # Check instance registration
+    assert 100 in fault_manager.instances
+    instance_metadata = fault_manager.instances[100]
+    assert instance_metadata.instance_id == 100
+    assert len(instance_metadata.node_managers) == 1
+    assert TEST_IPS[0] in fault_manager.servers
+
+    # Create another instance with same ID but different pod_ip
+    mock_instance2 = FaultManagerTestHelper.create_mock_instance(
+        instance_id=100, role="prefill", pod_ip=TEST_IPS[1], host_ip=TEST_IPS[1]
+    )
+
+    # Try to add the same instance again
+    fault_manager.update(mock_instance2, ObserverEvent.INSTANCE_ADDED)
+
+    # Check that the original instance data is preserved (not overwritten)
+    assert len(fault_manager.instances) == 1  # Still only one instance
+    assert fault_manager.instances[100].instance_id == 100
+    assert len(fault_manager.instances[100].node_managers) == 1
+    # Original pod_ip should still be there, new one should not be added due to duplicate check
+    assert TEST_IPS[0] in fault_manager.servers
+    assert TEST_IPS[1] not in fault_manager.servers  # New server should not be added
 
 def test_update_instance_separated(fault_manager, mock_instance):
     """Test update method with INSTANCE_SEPERATED event"""
@@ -562,10 +580,6 @@ def test_update_instance_separated(fault_manager, mock_instance):
     assert fault_manager.instances[100].status == Status.UNHEALTHY
     assert TEST_IPS[0] in fault_manager.servers
 
-    # Check group metadata remains unchanged for separated instance
-    group = fault_manager.groups[1]
-    assert 100 in group.p_ids  # instance still in group but separated
-
 def test_update_instance_removed(fault_manager, mock_instance):
     """Test update method with INSTANCE_REMOVED event"""
     # First add the instance
@@ -577,9 +591,6 @@ def test_update_instance_removed(fault_manager, mock_instance):
     # Check removal
     assert 100 not in fault_manager.instances
     assert TEST_IPS[0] not in fault_manager.servers
-
-    # Check group metadata update - group should be removed when empty
-    assert 1 not in fault_manager.groups
 
 def test_update_invalid_event(fault_manager, mock_instance):
     """Test update method with invalid event"""
@@ -679,7 +690,7 @@ def test_ft_strategy_center_strategy_levels(fault_manager_with_instances):
             pass
 
     # Verify L2 strategy was called
-    manager.strategies["L2"].assert_called_once_with(TEST_FAULT_CODES[4], 1)
+    manager.strategies["L2"].assert_called_once_with(TEST_FAULT_CODES[4], 1, manager.config)
 
 def test_ft_strategy_center_strategy_finished(fault_manager_with_instances):
     """Test that finished strategies are cleaned up"""
@@ -739,11 +750,11 @@ def test_ft_strategy_center_fault_transitions(fault_manager_with_instances, test
     # For same level same code test, mock strategy factory to return None
     if test_case == "same_level_same_code":
         original_l3_strategy_factory = manager.strategies["L3"]
-        def same_strategy_factory(fault_code, instance_id):
+        def same_strategy_factory(fault_code, instance_id, config):
             if fault_code == 0x3000:  # Same fault code
                 return None  # No new strategy needed
             else:
-                return original_l3_strategy_factory(fault_code, instance_id)
+                return original_l3_strategy_factory(fault_code, instance_id, config)
         manager.strategies["L3"] = same_strategy_factory
 
     # Mock time.sleep to control the loop execution
@@ -773,32 +784,11 @@ def test_ft_strategy_center_fault_transitions(fault_manager_with_instances, test
         assert ins_metadata.strategy is not None
         # Verify correct strategy was called
         expected_level = new_fault["level"]
-        manager.strategies[expected_level].assert_called_once_with(new_fault["code"], 1)
+        manager.strategies[expected_level].assert_called_once_with(new_fault["code"], 1, manager.config)
     elif test_case == "same_level_same_code":
         # Strategy should remain the same
         assert ins_metadata.strategy is mock_strategy
 
-
-def test_multiple_instances_same_group(fault_manager):
-    """Test adding multiple instances to the same group"""
-    # Add prefill instance using helper
-    mock_prefill = FaultManagerTestHelper.create_mock_instance(
-        instance_id=100, role="prefill", group_id=1
-    )
-    fault_manager.update(mock_prefill, ObserverEvent.INSTANCE_ADDED)
-
-    # Add decode instance to same group using helper
-    mock_decode = FaultManagerTestHelper.create_mock_instance(
-        instance_id=200, role="decode", group_id=1, pod_ip=TEST_IPS[1], host_ip=TEST_IPS[1]
-    )
-    fault_manager.update(mock_decode, ObserverEvent.INSTANCE_ADDED)
-
-    # Check group contains both instances
-    group = fault_manager.groups[1]
-    assert 100 in group.p_ids
-    assert 200 in group.d_ids
-    assert len(group.p_ids) == 1
-    assert len(group.d_ids) == 1
 
 def test_concurrent_updates(fault_manager):
     """Test batch updates to FaultManager"""
@@ -808,7 +798,6 @@ def test_concurrent_updates(fault_manager):
         mock_instance = FaultManagerTestHelper.create_mock_instance(
             instance_id=i * 100,
             job_name=f"job_{i}",
-            group_id=i,
             role="prefill" if i % 2 == 0 else "decode",
             pod_ip=f"192.168.1.{i+1}",
             host_ip=f"192.168.1.{i+1}"
@@ -821,7 +810,6 @@ def test_concurrent_updates(fault_manager):
 
     # Verify all instances are registered
     assert len(fault_manager.instances) == 5
-    assert len(fault_manager.groups) == 5
 
     # Remove all instances
     for instance in instances:
@@ -829,7 +817,6 @@ def test_concurrent_updates(fault_manager):
 
     # Verify all instances are removed
     assert len(fault_manager.instances) == 0
-    assert len(fault_manager.groups) == 0
 
 def test_triggered_update_workflow(fault_manager):
     """Test the complete triggered update workflow"""
@@ -881,7 +868,7 @@ def test_triggered_update_workflow(fault_manager):
     assert instance_id == 100
 
     # Verify L3 strategy was called with correct parameters
-    fault_manager.strategies["L3"].assert_called_once_with(TEST_FAULT_CODES[0], 100)
+    fault_manager.strategies["L3"].assert_called_once_with(TEST_FAULT_CODES[0], 100, fault_manager.config)
 
 
 # @pytest.mark.parametrize("device_faults,fault_level,expected_status,expected_separate_called,expected_recover_called", [
@@ -1027,3 +1014,352 @@ def test_fault_manager_unhealthy_fault_level_without_device_faults(fault_manager
     # Verify recovery is called (instance became healthy)
     mock_instance_manager.separate_instance.assert_not_called()
     mock_instance_manager.recover_instance.assert_called_once_with(100)  # instance_id
+
+
+def test_persist_data_success(fault_manager_with_instances, mock_etcd_client):
+    """Test successful data persistence to ETCD"""
+    manager = fault_manager_with_instances
+
+    # Mock the persist_data calls to return True
+    mock_etcd_client.persist_data.return_value = True
+
+    # Call persist_data
+    result = manager.persist_data()
+
+    # Verify success
+    assert result is True
+
+    # Verify persist_data was called twice (for servers and instances)
+    assert mock_etcd_client.persist_data.call_count == 2
+
+    # Verify the call arguments
+    calls = mock_etcd_client.persist_data.call_args_list
+
+    # First call should be for servers
+    servers_call = calls[0]
+    assert servers_call[0][0] == "/controller/fault/servers"
+    servers_data = servers_call[0][1]
+    assert isinstance(servers_data, dict)
+    assert len(servers_data) == 2  # Two servers in test setup
+
+    # Verify server data structure
+    server_data = servers_data[TEST_IPS[0]]
+    assert server_data['pod_ip'] == TEST_IPS[0]
+    assert server_data['host_ip'] == TEST_IPS[0]
+    assert server_data['status'] == Status.HEALTHY.value
+    assert 'device_fault_infos' in server_data
+
+    # Second call should be for instances
+    instances_call = calls[1]
+    assert instances_call[0][0] == "/controller/fault/instances"
+    instances_data = instances_call[0][1]
+    assert isinstance(instances_data, dict)
+    assert len(instances_data) == 2  # Two instances in test setup
+
+    # Verify instance data structure
+    instance_data = instances_data['1']  # instance_id 1
+    assert instance_data['instance_id'] == 1
+    assert instance_data['status'] == Status.HEALTHY.value
+    assert 'node_managers' in instance_data
+    assert 'fault_level' in instance_data
+    assert 'fault_code' in instance_data
+
+
+def test_persist_data_with_device_faults(fault_manager_with_instances, mock_etcd_client):
+    """Test data persistence with device fault information"""
+    manager = fault_manager_with_instances
+
+    # Add device faults to a server
+    device_fault = FaultManagerTestHelper.create_device_fault_info(
+        fault_level=FaultLevel.L3, fault_code=TEST_FAULT_CODES[0]
+    )
+    manager.servers[TEST_IPS[0]].device_fault_infos = [device_fault]
+    manager.servers[TEST_IPS[0]].status = Status.UNHEALTHY
+
+    # Update instance status to reflect the fault
+    manager._update_instances_status()
+
+    # Mock the persist_data calls to return True
+    mock_etcd_client.persist_data.return_value = True
+
+    # Call persist_data
+    result = manager.persist_data()
+
+    # Verify success
+    assert result is True
+
+    # Get the persisted data
+    servers_call = mock_etcd_client.persist_data.call_args_list[0]
+    servers_data = servers_call[0][1]
+
+    # Verify device fault information is persisted
+    server_data = servers_data[TEST_IPS[0]]
+    assert len(server_data['device_fault_infos']) == 1
+    persisted_fault = server_data['device_fault_infos'][0]
+    assert persisted_fault['fault_level'] == FaultLevel.L3
+    assert persisted_fault['fault_code'] == TEST_FAULT_CODES[0]
+
+
+def test_persist_data_etcd_failure(fault_manager_with_instances, mock_etcd_client):
+    """Test data persistence when ETCD operations fail"""
+    manager = fault_manager_with_instances
+
+    # Mock the persist_data calls to return False (failure)
+    mock_etcd_client.persist_data.return_value = False
+
+    # Call persist_data
+    result = manager.persist_data()
+
+    # Verify failure
+    assert result is False
+
+
+def test_persist_data_exception_handling(fault_manager_with_instances, mock_etcd_client):
+    """Test data persistence exception handling"""
+    manager = fault_manager_with_instances
+
+    # Mock the persist_data calls to raise an exception
+    mock_etcd_client.persist_data.side_effect = Exception("ETCD connection error")
+
+    # Call persist_data
+    result = manager.persist_data()
+
+    # Verify failure
+    assert result is False
+
+
+def test_persist_data_empty_data(fault_manager, mock_etcd_client):
+    """Test data persistence with empty data"""
+    manager = fault_manager
+
+    # Ensure no data exists
+    manager.servers.clear()
+    manager.instances.clear()
+
+    # Mock the persist_data calls to return True
+    mock_etcd_client.persist_data.return_value = True
+
+    # Call persist_data
+    result = manager.persist_data()
+
+    # Verify success
+    assert result is True
+
+    # Verify empty data was persisted
+    calls = mock_etcd_client.persist_data.call_args_list
+    servers_data = calls[0][0][1]
+    instances_data = calls[1][0][1]
+
+    assert servers_data == {}
+    assert instances_data == {}
+
+
+def test_restore_data_success(fault_manager, mock_etcd_client):
+    """Test successful data restoration from ETCD"""
+    manager = fault_manager
+
+    # Prepare test data to be restored
+    servers_data = {
+        TEST_IPS[0]: {
+            'pod_ip': TEST_IPS[0],
+            'host_ip': TEST_IPS[0],
+            'status': Status.HEALTHY.value,
+            'device_fault_infos': [{
+                'device_type': 'npu',
+                'rank_id': 0,
+                'fault_code': TEST_FAULT_CODES[0],
+                'fault_level': FaultLevel.L3,
+                'fault_type': 'HARDWARE',
+                'fault_reason': 'Memory failure'
+            }]
+        }
+    }
+
+    instances_data = {
+        '1': {
+            'instance_id': 1,
+            'status': Status.HEALTHY.value,
+            'node_managers': [{
+                'pod_ip': TEST_IPS[0],
+                'host_ip': TEST_IPS[0],
+                'port': TEST_PORT
+            }],
+            'fault_level': FaultLevel.L0,
+            'fault_code': 0x0
+        }
+    }
+
+    # Mock the restore_data calls
+    mock_etcd_client.restore_data.side_effect = [servers_data, instances_data]
+
+    # Call restore_data
+    result = manager.restore_data()
+
+    # Verify success
+    assert result is True
+
+    # Verify data was restored
+    assert len(manager.servers) == 1
+    assert TEST_IPS[0] in manager.servers
+
+    server = manager.servers[TEST_IPS[0]]
+    assert server.pod_ip == TEST_IPS[0]
+    assert server.host_ip == TEST_IPS[0]
+    assert server.status == Status.HEALTHY
+    assert len(server.device_fault_infos) == 1
+    assert server.device_fault_infos[0].fault_level == FaultLevel.L3
+    assert server.device_fault_infos[0].fault_code == TEST_FAULT_CODES[0]
+
+    assert len(manager.instances) == 1
+    assert 1 in manager.instances
+
+    instance = manager.instances[1]
+    assert instance.instance_id == 1
+    assert instance.status == Status.HEALTHY
+    assert instance.fault_level == FaultLevel.L0
+    assert instance.fault_code == 0x0
+    assert len(instance.node_managers) == 1
+
+
+def test_restore_data_none_data(fault_manager, mock_etcd_client):
+    """Test data restoration when ETCD returns None (no data)"""
+    manager = fault_manager
+
+    # Mock the restore_data calls to return None
+    mock_etcd_client.restore_data.return_value = None
+
+    # Call restore_data
+    result = manager.restore_data()
+
+    # Verify success (graceful handling of None data)
+    assert result is True
+
+    # Verify no data was restored
+    assert len(manager.servers) == 0
+    assert len(manager.instances) == 0
+
+
+def test_restore_data_etcd_failure(fault_manager, mock_etcd_client):
+    """Test data restoration when ETCD operations fail"""
+    manager = fault_manager
+
+    # Mock the restore_data calls to raise an exception
+    mock_etcd_client.restore_data.side_effect = Exception("ETCD connection error")
+
+    # Call restore_data
+    result = manager.restore_data()
+
+    # Verify failure
+    assert result is False
+
+
+def test_restore_data_corrupted_data(fault_manager, mock_etcd_client):
+    """Test data restoration with corrupted/invalid data"""
+    manager = fault_manager
+
+    # Prepare corrupted test data
+    corrupted_servers_data = {
+        TEST_IPS[0]: {
+            'pod_ip': TEST_IPS[0],
+            'host_ip': TEST_IPS[0],
+            'status': 'invalid_status',  # Invalid status enum value
+            'device_fault_infos': []
+        }
+    }
+
+    corrupted_instances_data = {
+        '1': {
+            'instance_id': 'not_an_int',  # Invalid instance_id type
+            'status': Status.HEALTHY.value,
+            'node_managers': [],
+            'fault_level': FaultLevel.L0,
+            'fault_code': 0x0
+        }
+    }
+
+    # Mock the restore_data calls
+    mock_etcd_client.restore_data.side_effect = [corrupted_servers_data, corrupted_instances_data]
+
+    # Call restore_data - should handle corruption gracefully
+    result = manager.restore_data()
+
+    # Verify failure due to corrupted data
+    assert result is False
+
+    # Verify data structures remain empty due to failed restoration
+    assert len(manager.servers) == 0
+    assert len(manager.instances) == 0
+
+
+def test_restore_data_partial_failure(fault_manager, mock_etcd_client):
+    """Test data restoration when one ETCD operation fails"""
+    manager = fault_manager
+
+    # Mock servers data restoration to succeed, instances to fail
+    servers_data = {
+        TEST_IPS[0]: {
+            'pod_ip': TEST_IPS[0],
+            'host_ip': TEST_IPS[0],
+            'status': Status.HEALTHY.value,
+            'device_fault_infos': []
+        }
+    }
+
+    mock_etcd_client.restore_data.side_effect = [servers_data, Exception("Instances ETCD error")]
+
+    # Call restore_data
+    result = manager.restore_data()
+
+    # Verify failure
+    assert result is False
+
+    # Since restoration failed, data should be cleared even if partial success
+    assert len(manager.servers) == 0
+    assert len(manager.instances) == 0
+
+
+def test_update_config():
+    """Test update_config method updates configuration and recreates ETCD client"""
+    # Create FaultManager with mocked dependencies
+    with patch('motor.controller.ft.fault_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.persist_data.return_value = True
+        mock_client.restore_data.return_value = None
+        mock_etcd_class.return_value = mock_client
+
+        # Create FaultManager instance
+        from motor.config.controller import ControllerConfig
+        config = ControllerConfig()
+        manager = FaultManager(config)
+
+        # Store original config
+        original_config = manager.config
+
+        # Create new config with different ETCD settings
+        new_config = ControllerConfig()
+        new_config.etcd_config.etcd_host = "new-etcd-host"
+        new_config.etcd_config.etcd_port = 2380
+        new_config.etcd_config.etcd_timeout = 30.0
+        new_config.etcd_config.enable_etcd_persistence = True
+
+        # Clear the mock call history to track new calls
+        mock_etcd_class.reset_mock()
+
+        # Update config
+        manager.update_config(new_config)
+
+        # Verify config was updated
+        assert manager.config is new_config
+        assert manager.config.etcd_config.etcd_host == "new-etcd-host"
+        assert manager.config.etcd_config.etcd_port == 2380
+        assert manager.config.etcd_config.etcd_timeout == 30.0
+
+        # Verify ETCD client constructor was called with new config
+        mock_etcd_class.assert_called_once_with(
+            host="new-etcd-host",
+            port=2380,
+            ca_cert=new_config.etcd_config.etcd_ca_cert,
+            cert_key=new_config.etcd_config.etcd_cert_key,
+            cert_cert=new_config.etcd_config.etcd_cert_cert,
+            timeout=30.0
+        )

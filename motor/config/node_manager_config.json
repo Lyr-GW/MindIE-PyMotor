@@ -1,41 +1,34 @@
 {
   "version": "v1.0",
-  "controller_api_dns": "127.0.0.1",
-  "controller_api_port": 57675,
-  "node_manager_port": 1027,
-  "role": "prefill",
-  "model_name": "vllm",
-  "base_port": 10000,
-  "parallel_config": {
-    "dp": 1,
-    "cp": 1,
-    "tp": 8,
-    "sp": 1,
-    "ep": 1,
-    "pp": 1,
-    "world_size": 16
+  "basic_config": {
+    "role": "prefill",
+    "model_name": "vllm",
+    "hardware_type": "800I-A3"
   },
-  "heartbeat_interval_seconds": 5,
-  "nodemanager_tls_config": {
-    "server_tls_enable": false,
-    "server_tls_items": {
-      "ca_cert": "./security/nm/cert/ca_cert/ca.pem",
-      "tls_cert": "./security/nm/cert/server_cert/server.pem",
-      "tls_key": "./security/nm/cert/server_cert/server.key.pem",
-      "tls_passwd": "./security/nm/cert/server_cert/server_pwd.txt",
-      "kmcKsfMaster": "./security/nm/cert/server_cert/tools/pmt/master/ksfa",
-      "kmcKsfStandby": "./security/nm/cert/server_cert/tools/pmt/standby/ksfb",
-      "tls_crl": ""
-    },
-    "client_tls_enable": false,
-    "client_tls_items": {
-      "ca_cert": "./security/nm/cert/ca_cert/ca.pem",
-      "tls_cert": "./security/nm/cert/server_cert/server.pem",
-      "tls_key": "./security/nm/cert/server_cert/server.key.pem",
-      "tls_passwd": "./security/nm/cert/server_cert/server_pwd.txt",
-      "kmcKsfMaster": "./security/nm/cert/server_cert/tools/pmt/master/ksfa",
-      "kmcKsfStandby": "./security/nm/cert/server_cert/tools/pmt/standby/ksfb",
-      "tls_crl": ""
-    }
+  "logging_config": {
+    "log_level": "INFO",
+    "log_max_line_length": 8192,
+    "log_file": null,
+    "log_format": "%(levelname)s  %(asctime)s  [%(filename)s:%(lineno)d]  %(message)s",
+    "log_date_format": "%Y-%m-%d %H:%M:%S"
+  },
+  "api_config": {
+    "pod_ip": null,
+    "host_ip": null,
+    "node_manager_port": 1027,
+    "controller_api_dns": "127.0.0.1",
+    "controller_api_port": 57675
+  },
+  "tls_config": {
+    "enable_tls": false,
+    "ca_cert_path": "security/controller/cert/ca.crt",
+    "cert_path": "security/controller/cert/server.crt",
+    "key_path": "security/controller/keys/server.key"
+  },
+  "endpoint_config": {
+    "endpoint_num": 0,
+    "base_port": 10000,
+    "mgmt_ports": [],
+    "service_ports": []
   }
 }

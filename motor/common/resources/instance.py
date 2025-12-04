@@ -113,7 +113,6 @@ class Instance(BaseModel):
     id: int = Field(..., description="Instance ID")
     role: str = Field(..., description="Instance role")
     status: InsStatus = Field(default=InsStatus.INITIAL, description="Instance status")
-    group_id: int = Field(default=0, description="Instance group id")
     parallel_config: ParallelConfig | None = Field(None, description="Parallel configuration")
     node_managers: list[NodeManagerInfo] = Field(default_factory=list,
                                              description="List of node manager info")
@@ -253,13 +252,6 @@ class Instance(BaseModel):
                 logger.error(f"Instance {self.id} not found endpoints for pod_ip {ip}")
                 return False
 
-    def set_group_id(self, group_id: int) -> None:
-        with self._lock:
-            self.group_id = group_id
-
-    def get_group_id(self) -> int:
-        with self._lock:
-            return self.group_id
 
     def get_endpoints_num(self) -> int:
         with self._lock:
@@ -311,7 +303,7 @@ class ReadOnlyInstance:
         # Block modification methods
         modification_methods = {
             'add_node_mgr', 'del_node_mgr', 'add_endpoints', 'del_endpoints',
-            'update_heartbeat', 'set_group_id', 'update_instance_status'
+            'update_heartbeat', 'update_instance_status'
         }
 
         if name in modification_methods:
@@ -337,7 +329,6 @@ class ReadOnlyInstance:
         )
         # Copy status and other attributes
         copied_instance.status = self._instance.status
-        copied_instance.group_id = self._instance.group_id
         copied_instance.parallel_config = copy.deepcopy(self._instance.parallel_config, memo)
 
         # Deep copy node managers
@@ -376,7 +367,6 @@ class ReadOnlyInstance:
         )
         # Copy status and other attributes
         copied_instance.status = self._instance.status
-        copied_instance.group_id = self._instance.group_id
         copied_instance.parallel_config = copy.deepcopy(self._instance.parallel_config)
 
         # Deep copy node managers

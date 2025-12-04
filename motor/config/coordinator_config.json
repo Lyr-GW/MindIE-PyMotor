@@ -1,4 +1,11 @@
 {
+    "logging_config": {
+        "log_level": "INFO",
+        "log_max_line_length": 8192,
+        "log_file": null,
+        "log_format": "%(levelname)s  %(asctime)s  [%(filename)s:%(lineno)d]  %(message)s",
+        "log_date_format": "%Y-%m-%d %H:%M:%S"
+    },
     "prometheus_metrics_config": {
         "reuse_time": 3
     },
@@ -91,6 +98,14 @@
         ],
         "error_message": "too many requests, please try again later",
         "error_status_code": 429
+    },
+    "standby_config": {
+        "enable_master_standby": false,
+        "master_standby_check_interval": 5,
+        "master_lock_ttl": 60,
+        "master_lock_retry_interval": 5,
+        "master_lock_max_failures": 3,
+        "master_lock_key": "/coordinator/master_lock"
     },
     "aigw": {
         "id": "model-id-0",

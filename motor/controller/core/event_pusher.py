@@ -23,7 +23,8 @@ from motor.common.resources.instance import Instance, ReadOnlyInstance
 from motor.common.resources.http_msg_spec import InsEventMsg, EventType
 from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.utils.logger import get_logger
-from motor.controller.core.observer import Observer, ObserverEvent
+from motor.controller.core import Observer, ObserverEvent
+from motor.controller.api_client.coordinator_api_client import CoordinatorApiClient
 
 logger = get_logger(__name__)
 
@@ -37,12 +38,23 @@ class Event:
 class EventPusher(Observer):
     def __init__(self, config: ControllerConfig | None = None) -> None:
         super().__init__()
+        # Use default config if not provided
+        if config is None:
+            config = ControllerConfig()
+
+        # Extract required config fields
+        self.coordinator_api_dns = config.api_config.coordinator_api_dns
+        self.coordinator_api_port = config.api_config.coordinator_api_port
+        self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
+        self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
+
         self.is_coordinator_reset = False
+        self.is_first_heartbeat_success = False  # Track if we've ever successfully connected to coordinator
         self.event_queue = queue.Queue()
         self.instances: dict[str, Instance] = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
-        self.base_url = f"http://{config.coordinator_api_dns}:{config.coordinator_api_port}"
+        self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
         logger.info("Coordinator API URL: %s", self.base_url)
 
         self.heart_client = SafeHTTPSClient(
@@ -109,51 +121,62 @@ class EventPusher(Observer):
         self.heart_client.close()
         logger.info("EventPusher stopped.")
 
+    def update_config(self, config: ControllerConfig) -> None:
+        """Update configuration for the event pusher"""
+        # Update config fields
+        self.coordinator_api_dns = config.api_config.coordinator_api_dns
+        self.coordinator_api_port = config.api_config.coordinator_api_port
+        self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
+        self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
+
+        # Update base URL and HTTP client if API config changed
+        self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
+        self.heart_client = SafeHTTPSClient(
+            base_url=self.base_url,
+            cert_file=None,
+            key_file=None,
+            ca_file=None,
+            timeout=0.5
+        )
+        logger.info("EventPusher configuration updated, new coordinator URL: %s", self.base_url)
+
     def _event_consumer(self) -> None:
         while not self.stop_event.is_set():
             event = self.event_queue.get()
             if event is not None:
-                try:
-                    client = SafeHTTPSClient(
-                        base_url=self.base_url,
-                        timeout=0.5
-                    )
-                    event_type = event.event_type
-                    if event_type == EventType.ADD:
-                        event_msg = InsEventMsg(event=event_type, instances=[event.instance])
-                    elif event_type == EventType.DEL:
-                        event_msg = InsEventMsg(event=event_type, instances=[event.instance])
-                    elif event_type == EventType.SET:
-                        with self.lock:
-                            event_msg = InsEventMsg(
-                                event=event_type,
-                                instances=[instance.to_instance() for instance in self.instances.values()]
-                            )
-                    else:
-                        logger.error("Unknown event type: %s", event_type)
-                        continue
+                event_type = event.event_type
+                if event_type == EventType.ADD:
+                    event_msg = InsEventMsg(event=event_type, instances=[event.instance])
+                elif event_type == EventType.DEL:
+                    event_msg = InsEventMsg(event=event_type, instances=[event.instance])
+                elif event_type == EventType.SET:
+                    with self.lock:
+                        event_msg = InsEventMsg(
+                            event=event_type,
+                            instances=[instance.to_instance() for instance in self.instances.values()]
+                        )
+                else:
+                    logger.error("Unknown event type: %s", event_type)
+                    continue
 
-                    response = client.post("/instances/refresh", data=event_msg.model_dump())
-                    response_text = response.get("text")
-                    if event.instance is not None:
-                        logger.info("Event pushed type: %s, job name: %s, response: %s",
-                                    event_type, event.instance.job_name, response_text)
-                    else:
-                        logger.info("Event pushed type: %s, push all instances, response: %s",
-                                    event_type, response_text)
-                except Exception as e:
-                    logger.error("Exception occurred while pushing event: %s", e)
-                finally:
-                    client.close()
+                CoordinatorApiClient.send_instance_refresh(self.base_url, event_msg)
                 
-            time.sleep(1)
+            time.sleep(self.event_consumer_sleep_interval)
 
     def _coordinator_heartbeat_detector(self) -> None:
         """detect coordinator heartbeat"""
         hb_loss_cnt = 0
+        log_counter = 0  # Counter to control log frequency
+        log_interval = 10  # Only log every 10 iterations
+
         while not self.stop_event.is_set():
             try:
                 response = self.heart_client.get("/health", params={"status": "normal"})
+                # Mark that we've successfully connected to coordinator at least once
+                if not self.is_first_heartbeat_success:
+                    self.is_first_heartbeat_success = True
+                    logger.info("Coordinator heartbeat established successfully.")
+                    log_counter = 0  # Reset counter on successful connection
                 if self.is_coordinator_reset:
                     # SET event means push all instances to coordinator,
                     # so job_name is not a instance job_name, it is "coordinator_restart".
@@ -163,11 +186,23 @@ class EventPusher(Observer):
                     hb_loss_cnt = 0
 
             except Exception as e:
-                hb_loss_cnt += 1
-                if hb_loss_cnt >= 2:
-                    self.is_coordinator_reset = True
-                    logger.warning("Coordinator heartbeat lost. Possible restart detected.")
-                    hb_loss_cnt = 0
-                logger.warning("Send Coordinator heartbeat failed, Exception occurred %s", e)
+                # Only count heartbeat loss after we've successfully connected at least once
+                if self.is_first_heartbeat_success:
+                    hb_loss_cnt += 1
+                    if hb_loss_cnt >= 2:
+                        self.is_coordinator_reset = True
+                        logger.warning("Coordinator heartbeat lost. Possible restart detected.")
+                        hb_loss_cnt = 0
+                    # Only log heartbeat failure periodically to avoid spam
+                    log_counter += 1
+                    if log_counter >= log_interval:
+                        logger.warning("Send Coordinator heartbeat failed, Exception occurred %s", e)
+                        log_counter = 0
+                else:
+                    # Only log waiting message periodically to avoid spam
+                    log_counter += 1
+                    if log_counter >= log_interval:
+                        logger.info("Coordinator not yet available, waiting for first successful heartbeat.")
+                        log_counter = 0
 
-            time.sleep(0.5)
+            time.sleep(self.coordinator_heartbeat_interval)

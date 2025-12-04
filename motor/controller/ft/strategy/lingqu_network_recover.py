@@ -1,7 +1,7 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 from motor.common.utils.logger import get_logger
-from motor.controller.ft.strategy.strategy import StrategyBase
+from motor.controller.ft.strategy import StrategyBase
 
 
 logger = get_logger(__name__)

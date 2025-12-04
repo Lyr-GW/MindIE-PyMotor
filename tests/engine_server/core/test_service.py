@@ -30,7 +30,7 @@ def test_service_is_abstract():
     assert issubclass(Service, ABC)
 
     # Verify instantiation raises TypeError (missing abstract method implementation)
-    with pytest.raises(TypeError, match="Can't instantiate abstract class Service with abstract method get_data"):
+    with pytest.raises(TypeError, match=r"Can't instantiate abstract class Service.*abstract method.*get_data"):
         Service()
 
 

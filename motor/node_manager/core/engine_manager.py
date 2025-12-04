@@ -11,7 +11,7 @@ import signal
 
 from motor.common.resources.http_msg_spec import Ranktable, RegisterMsg, StartCmdMsg, ReregisterMsg
 from motor.common.utils.http_client import SafeHTTPSClient
-from motor.common.resources.endpoint import Endpoint, DeviceInfo
+from motor.common.resources.endpoint import Endpoint
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
 from motor.common.utils.logger import get_logger
@@ -22,40 +22,51 @@ logger = get_logger(__name__)
 
 
 class EngineManager(ThreadSafeSingleton):
-    def __init__(self) -> None:
+    def __init__(self, config: NodeManagerConfig | None = None) -> None:
         if hasattr(self, "_initialized"):
             return
 
         self.endpoints: list[Endpoint] = []
-        self.config = NodeManagerConfig()
+        if config is None:
+            config = NodeManagerConfig.from_json()
+        self._config = config
+        self.ranktable: Ranktable = None
         self.instance_ranktable: Ranktable = None
         self.instance_id: int = 0
         self.is_working = False
+
+        controller_api_dns = self._config.api_config.controller_api_dns
+        controller_api_port = self._config.api_config.controller_api_port
+        self.controller_api_url = f"http://{controller_api_dns}:{controller_api_port}"
+
         self._register_thread = threading.Thread(
-            target=self._register, daemon=True, name="engine_register"
+            target=self._register,
+            daemon=True,
+            name="engine_register"
         )
         self._register_thread.start()
 
         self._initialized = True
         logger.info("Engine Manager module start.")
 
+
     def post_register_msg(self) -> Optional[bool]:
         register_msg = self._gen_register_msg()
         if register_msg is None:
             return False
-        logger.debug(f"register_msg is {register_msg}")
+        logger.debug("register_msg is %s", register_msg)
         try:
             with SafeHTTPSClient(
-                base_url=f"http://{self.config.controller_api_dns}:{self.config.controller_api_port}",
+                base_url=self.controller_api_url,
                 timeout=1,
             ) as client:
                 response = client.post("/controller/register", register_msg.model_dump())
-                logger.info(f"Register success!")
+                logger.info("Register success!")
                 return True
         except Exception as e:
             logger.error(
-                "Exception occurred while register to controller at "
-                f"{self.config.controller_api_dns}:{self.config.controller_api_port}: {e}"
+                "Exception occurred while register to controller at %s: %s",
+                self.controller_api_url, e
             )
             return False
 
@@ -63,26 +74,26 @@ class EngineManager(ThreadSafeSingleton):
         reregister_msg = self._gen_reregister_msg()
         if reregister_msg is None:
             return False
-        logger.debug(f"reregister_msg is {reregister_msg}")
+        logger.debug("reregister_msg is %s", reregister_msg)
         try:
             with SafeHTTPSClient(
-                base_url=f"http://{self.config.controller_api_dns}:{self.config.controller_api_port}",
+                base_url=self.controller_api_url,
                 timeout=1,
             ) as client:
                 response = client.post("/controller/reregister", reregister_msg.model_dump())
-                logger.info(f"Register success!")
+                logger.info("Register success!")
                 return True
         except Exception as e:
             logger.error(
-                "Exception occurred while reregister to controller at "
-                f"{self.config.controller_api_dns}:{self.config.controller_api_port}: {e}"
+                "Exception occurred while reregister to controller at %s: %s",
+                self.controller_api_url, e
             )
             return False
 
     def parse_start_cmd(self, start_cmd: StartCmdMsg):
         if not self._check_cmd_para(start_cmd):
             return False
-        logger.info(f"start_cmd is {start_cmd}")
+        logger.info("start_cmd is %s", start_cmd)
         self.instance_id = start_cmd.instance_id
         self.endpoints = start_cmd.endpoints
         self.instance_ranktable = start_cmd.ranktable
@@ -94,7 +105,7 @@ class EngineManager(ThreadSafeSingleton):
             if hasattr(self, "_register_thread") and self._register_thread.is_alive():
                 self._register_thread.join(timeout=2.0)
         except Exception as e:
-            logger.error(f"Failed to stop engine manager: {e}")
+            logger.error("Failed to stop engine manager: %s", e)
 
     def _write_ranktable_to_file(self):
         """
@@ -114,25 +125,29 @@ class EngineManager(ThreadSafeSingleton):
             with open(output_path, "w") as f:
                 json.dump(rk_dump, f, ensure_ascii=False, indent=2)
 
-            logger.info(f"Ranktable written to {output_path}")
+            logger.info("Ranktable written to %s", output_path)
         except Exception as e:
-            logger.error(f"Failed to write ranktable to file: {e}")
+            logger.error("Failed to write ranktable to file: %s", e)
 
     def _check_cmd_para(self, start_cmd: StartCmdMsg) -> bool:
         if (
-            start_cmd.job_name != self.config.job_name
-            or len(start_cmd.endpoints) != self.config.endpoint_num
+            start_cmd.job_name != self._config.basic_config.job_name
+            or len(start_cmd.endpoints) != self._config.endpoint_config.endpoint_num
         ):
-            logger.error(f"check job_name:{self.config.job_name}, endpoint_num:{self.config.endpoint_num} error")
+            logger.error(
+                "check job_name:%s, endpoint_num:%d error",
+                self._config.basic_config.job_name, self._config.endpoint_config.endpoint_num
+            )
             return False
-        if not isinstance(start_cmd.instance_id, int) or not isinstance(
-            start_cmd.ranktable, Ranktable
+        if (
+            not isinstance(start_cmd.instance_id, int) or
+            not isinstance(start_cmd.ranktable, Ranktable)
         ):
-            logger.error(f"check start_cmd ranktable error")
+            logger.error("check start_cmd ranktable error")
             return False
         for endpoint in start_cmd.endpoints:
-            if endpoint.ip != self.config.pod_ip:
-                logger.error(f"check pod_ip {self.config.pod_ip} error")
+            if endpoint.ip != self._config.api_config.pod_ip:
+                logger.error("check pod_ip %s error", self._config.api_config.pod_ip)
                 return False
         return True
 
@@ -143,7 +158,8 @@ class EngineManager(ThreadSafeSingleton):
 
         while retries < max_retries:
             logger.info(
-                f"Attempting registration (Attempt {retries + 1} of {max_retries})..."
+                "Attempting registration (Attempt %d of %d)...",
+                retries + 1, max_retries
             )
             success = self.post_register_msg()
 
@@ -153,7 +169,8 @@ class EngineManager(ThreadSafeSingleton):
                 retries += 1
                 if retries < max_retries:
                     logger.warning(
-                        f"Registration attempt {retries} failed. Retrying in {retry_interval} seconds..."
+                        "Registration attempt %d failed. Retrying in %d seconds...",
+                        retries, retry_interval
                     )
                     time.sleep(retry_interval)
                     retry_interval = retry_interval * 2
@@ -165,29 +182,45 @@ class EngineManager(ThreadSafeSingleton):
             # triggering the signal handler in main using a process signal
             os.kill(os.getpid(), signal.SIGTERM)
         except Exception as e:
-            logger.error(f"failed to send SIGTERM after registration failure: {e}")
+            logger.error("failed to send SIGTERM after registration failure: %s", e)
 
     def _check_config_paras(self) -> bool:
-        if self.config.job_name is None:
+        if self._config.basic_config.job_name is None:
             logger.error("job name is None, please check")
             return False
         return True
+
+    def _get_ranktable(self) -> Ranktable | None:
+        """Get ranktable from HCCL file"""
+        try:
+            with open(self._config.hccl_path, 'r') as f:
+                data = json.load(f)
+            return Ranktable(**data)
+        except Exception as e:
+            logger.error("Failed to load ranktable from %s: %s", self._config.hccl_path, e)
+            return None
 
     def _gen_register_msg(self) -> RegisterMsg | None:
         if not self._check_config_paras():
             return None
 
+        # Get ranktable from HCCL file
+        self.ranktable = self._get_ranktable()
+        if self.ranktable is None:
+            logger.error("Failed to get ranktable")
+            return None
+
         register_msg = RegisterMsg(
-            job_name=self.config.job_name,
-            model_name=self.config.model_name,
-            role=self.config.role,
-            pod_ip=self.config.pod_ip,
-            host_ip=self.config.host_ip,
-            business_port=self.config.service_ports,
-            mgmt_port=self.config.mgmt_ports,
-            nm_port=str(self.config.node_manager_port),
-            parallel_config=self.config.parallel_config,
-            ranktable=self.config.ranktable,
+            job_name=self._config.basic_config.job_name,
+            model_name=self._config.basic_config.model_name,
+            role=self._config.basic_config.role,
+            pod_ip=self._config.api_config.pod_ip,
+            host_ip=self._config.api_config.host_ip,
+            business_port=self._config.endpoint_config.service_ports,
+            mgmt_port=self._config.endpoint_config.mgmt_ports,
+            nm_port=str(self._config.api_config.node_manager_port),
+            parallel_config=self._config.basic_config.parallel_config,
+            ranktable=self.ranktable,
         )
         return register_msg
 
@@ -196,18 +229,20 @@ class EngineManager(ThreadSafeSingleton):
             return None
         if len(self.endpoints) == 0 or self.instance_id <= 0:
             logger.error(
-                f"para check fail for reregister, please check"
-                f"len[endpoints]:{len(self.endpoints)}, instance_id:{type(self.instance_id)}"
+                "para check fail for reregister, please check"
+                "len[endpoints]:%d, instance_id:%s",
+                len(self.endpoints), type(self.instance_id)
             )
             return None
+
         reregister_msg = ReregisterMsg(
-            job_name=self.config.job_name,
-            model_name="",
-            role=self.config.role,
-            pod_ip=self.config.pod_ip,
-            host_ip=self.config.host_ip,
-            nm_port=str(self.config.node_manager_port),
-            parallel_config=self.config.parallel_config,
+            job_name=self._config.basic_config.job_name,
+            model_name=self._config.basic_config.model_name,
+            role=self._config.basic_config.role,
+            pod_ip=self._config.api_config.pod_ip,
+            host_ip=self._config.api_config.host_ip,
+            nm_port=str(self._config.api_config.node_manager_port),
+            parallel_config=self._config.basic_config.parallel_config,
             instance_id=self.instance_id,
             endpoints=self.endpoints,
         )

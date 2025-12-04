@@ -5,8 +5,7 @@ import os
 from typing import Callable
 import grpc
 
-from motor.controller.ft.cluster_grpc import cluster_fault_pb2
-from motor.controller.ft.cluster_grpc import cluster_fault_pb2_grpc
+from motor.controller.ft.cluster_grpc import cluster_fault_pb2, cluster_fault_pb2_grpc
 from motor.common.utils.grpc_connect_base import GrpcSecureClientBase
 from motor.common.utils.logger import get_logger
 

@@ -10,15 +10,17 @@ from unittest.mock import patch, MagicMock, mock_open
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from motor.node_manager.core.daemon import Daemon
+from motor.config.node_manager import NodeManagerConfig
 from motor.common.resources.endpoint import Endpoint
-from motor.common.resources.instance import PDRole
+from motor.common.resources.instance import PDRole, ParallelConfig
 
 
 def create_config_mock(config_data, hccl_data):
     def mock_side_effect(file_path, mode):
-        if "node_manager_config.json" in file_path:
+        file_path_str = str(file_path)
+        if "node_manager_config.json" in file_path_str:
             return mock_open(read_data=json.dumps(config_data)).return_value
-        elif "hccl.json" in file_path:
+        elif "hccl.json" in file_path_str:
             return mock_open(read_data=json.dumps(hccl_data)).return_value
         return mock_open().return_value
     return mock_side_effect
@@ -57,15 +59,28 @@ def hccl_data():
 
 @pytest.fixture
 def daemon(config_data, hccl_data):
-    # Clear singleton instance
+    # Clear singleton instance (Daemon is still singleton)
     if hasattr(Daemon, '_instances') and Daemon in Daemon._instances:
         if Daemon in Daemon._instances:
             del Daemon._instances[Daemon]
-    
-    with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
-         patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'}):
-        mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
-        daemon_instance = Daemon()
+
+    with patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': 'tests/jsons', 'HCCL_PATH': 'tests/jsons', 'ROLE': 'both'}):
+        config = NodeManagerConfig()
+        # Manually set the configuration data
+        config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])
+        config.basic_config.job_name = config_data.get("model_name", "test_job")
+        config.basic_config.role = PDRole(config_data.get("role", "both"))
+        config.api_config.controller_api_dns = config_data.get("controller_api_dns", "localhost")
+        config.api_config.controller_api_port = config_data.get("controller_api_port", 8080)
+        config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
+
+        # Set device info from hccl_data
+        server = (hccl_data.get("server_list") or [None])[0]
+        if server:
+            devices = server.get("device") or []
+            config.basic_config.device_num = len(devices)
+
+        daemon_instance = Daemon(config)
         yield daemon_instance
 
 

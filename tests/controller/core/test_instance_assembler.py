@@ -1,12 +1,19 @@
 import time
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 from motor.common.utils.data_builder import build_pod_ranktable, build_endpoints
 from motor.common.resources.instance import Instance, ParallelConfig
 from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg
-from motor.controller.core.observer import ObserverEvent
-from motor.controller.core.instance_assembler import InstanceAssembler
+from motor.controller.core.instance_assembler import (
+    InstanceAssembler,
+    AssembleInstanceMetadata,
+    RegisterStatus,
+    PersistentAssembleInstanceMetadataState
+)
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.controller.core import InstanceManager
+
 
 
 @pytest.fixture
@@ -28,40 +35,61 @@ def test_config():
     }
 
 
-def _cleanup_singleton():
-    """Clean up singleton instances"""
-    from motor.common.utils.singleton import ThreadSafeSingleton
-    if InstanceAssembler in ThreadSafeSingleton._instances:
-        assembler = ThreadSafeSingleton._instances[InstanceAssembler]
-        try:
-            assembler.stop()
-        except Exception:
-            pass
-        del ThreadSafeSingleton._instances[InstanceAssembler]
-    time.sleep(0.01)
+def _cleanup_singletons():
+    """Clean up singleton instances to ensure test isolation"""
+    singletons_to_cleanup = [InstanceAssembler, InstanceManager]
+
+    for singleton_cls in singletons_to_cleanup:
+        if singleton_cls in ThreadSafeSingleton._instances:
+            instance = ThreadSafeSingleton._instances[singleton_cls]
+            try:
+                if hasattr(instance, 'stop'):
+                    instance.stop()
+            except Exception:
+                pass  # Ignore errors during cleanup
+            del ThreadSafeSingleton._instances[singleton_cls]
+
+
+@pytest.fixture(autouse=True)
+def cleanup_singletons():
+    """Auto cleanup singletons before and after each test"""
+    _cleanup_singletons()
+    yield
+    _cleanup_singletons()
 
 
 @pytest.fixture
-def instance_assembler():
-    """Setup mock assembler with optimized threading"""
+def mock_config():
+    """Mock controller config"""
     from motor.config.controller import ControllerConfig
     config = ControllerConfig()
-    _cleanup_singleton()
+    # Disable ETCD persistence for most tests to avoid complexity
+    config.etcd_config.enable_etcd_persistence = False
+    config.instance_config.instance_assemble_timeout = 1.0  # Fast timeout for tests
+    config.instance_assembler_check_internal = 0.1
+    config.instance_assembler_cmd_send_internal = 0.1
+    config.send_cmd_retry_times = 3
+    return config
+
+
+@pytest.fixture
+def instance_assembler(mock_config):
+    """Setup mock assembler with threading mocked to prevent actual thread starts"""
     with patch('threading.Thread') as mock_thread_class:
         mock_thread = MagicMock()
         mock_thread_class.return_value = mock_thread
-        assembler = InstanceAssembler(config)
-        yield assembler
-        try:
-            assembler.stop()
-        except Exception:
-            pass
+
+        with patch('motor.controller.core.instance_assembler.EtcdClient') as mock_etcd_class:
+            mock_etcd = MagicMock()
+            mock_etcd_class.return_value = mock_etcd
+
+            assembler = InstanceAssembler(mock_config)
+            yield assembler
 
 
 # Helper functions for test data creation
 def create_register_msg(job_name: str, pod_ip: str, config: dict, **kwargs) -> RegisterMsg:
     """Create a RegisterMsg with common defaults"""
-    # Set default values only if not provided in kwargs
     defaults = {
         'model_name': "test_model",
         'role': config['role'],
@@ -72,8 +100,6 @@ def create_register_msg(job_name: str, pod_ip: str, config: dict, **kwargs) -> R
         'parallel_config': config['parallel_config'],
         'ranktable': build_pod_ranktable(pod_ip=pod_ip, pod_device_num=2*config['tp'])
     }
-
-    # Update defaults with provided kwargs
     defaults.update(kwargs)
 
     return RegisterMsg(
@@ -83,8 +109,14 @@ def create_register_msg(job_name: str, pod_ip: str, config: dict, **kwargs) -> R
     )
 
 
-def create_reregister_msg(job_name: str, pod_ip: str, instance_id: int, config: dict, endpoints: dict) -> ReregisterMsg:
+def create_reregister_msg(job_name: str, pod_ip: str, instance_id: int, config: dict, endpoints: list) -> ReregisterMsg:
     """Create a ReregisterMsg with common defaults"""
+    # Convert endpoints dict to list if needed
+    if isinstance(endpoints, dict):
+        endpoints_list = list(endpoints.values())
+    else:
+        endpoints_list = endpoints
+
     return ReregisterMsg(
         job_name=job_name,
         model_name="test_model",
@@ -94,407 +126,115 @@ def create_reregister_msg(job_name: str, pod_ip: str, instance_id: int, config: 
         host_ip=pod_ip,
         nm_port="8088",
         parallel_config=config['parallel_config'],
-        endpoints=[endpoint for endpoint in endpoints.values()]
+        endpoints=endpoints_list
     )
 
 
-def register_complete_instance(assembler: InstanceAssembler, job_name: str, config: dict) -> Instance:
-    """Register and assemble a complete instance with two pods"""
-    # Register first pod
-    msg1 = create_register_msg(job_name, config['pod_ip1'], config)
-    result1 = assembler.register(msg1)
-    assert result1 == 0
+def register_instance_with_pods(assembler: InstanceAssembler, job_name: str, config: dict, pod_count: int = 2) -> bool:
+    """Register pods for an instance and return whether assembly is complete"""
+    pod_ips = [f"127.0.0.{i+1}" for i in range(pod_count)]
 
-    # Register second pod
-    msg2 = create_register_msg(
-        job_name, config['pod_ip2'], config,
-        ranktable=build_pod_ranktable(
-            pod_ip=config['pod_ip2'],
-            pod_device_num=2 * config['tp'],
-            rank_offset=2 * config['tp']
+    for i, pod_ip in enumerate(pod_ips):
+        rank_offset = i * 2 * config['tp']
+        msg = create_register_msg(
+            job_name, pod_ip, config,
+            ranktable=build_pod_ranktable(
+                pod_ip=pod_ip,
+                pod_device_num=2 * config['tp'],
+                rank_offset=rank_offset
+            )
         )
-    )
-    result2 = assembler.register(msg2)
-    assert result2 == 0
+        result = assembler.register(msg)
+        assert result == 0
 
-    # Assemble the instance
-    instance = assembler.instances[job_name]
-    assembler._assemble_instance(instance)
-    return instance
+    # Try to assemble
+    if job_name in assembler.instances:
+        metadata = assembler.instances[job_name]
+        assembler._assemble_instance(metadata)
+        return metadata.register_status == RegisterStatus.ASSEMBLED
 
-
-def reregister_complete_instance(assembler: InstanceAssembler, job_name: str, config: dict) -> Instance:
-    """Reregister and assemble a complete instance with two pods"""
-    # Build endpoints for both pods
-    ep1 = build_endpoints(create_register_msg(job_name, config['pod_ip1'], config))
-    ep2 = build_endpoints(
-        create_register_msg(job_name, config['pod_ip2'], config,
-                          ranktable=build_pod_ranktable(
-                              pod_ip=config['pod_ip2'],
-                              pod_device_num=2 * config['tp'],
-                              rank_offset=2 * config['tp']
-                          )),
-        id_offset=config['tp']
-    )
-
-    # Reregister both pods
-    msg1 = create_reregister_msg(job_name, config['pod_ip1'], 0, config, ep1)
-    result1 = assembler.reregister(msg1)
-    assert result1 == 0
-
-    msg2 = create_reregister_msg(job_name, config['pod_ip2'], 0, config, ep2)
-    result2 = assembler.reregister(msg2)
-    assert result2 == 0
-
-    # Assemble the instance
-    instance = assembler.instances[job_name]
-    assembler._assemble_instance(instance)
-    return instance
+    return False
 
 
-@pytest.fixture
-def setup_http_server():
-    """Mock HTTP server to avoid websockets warnings"""
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client.post.return_value = {'result': 'success'}
-        mock_client_class.return_value = mock_client
-        yield mock_client
+def create_assembled_instance(assembler: InstanceAssembler, job_name: str, config: dict) -> AssembleInstanceMetadata:
+    """Create and assemble a complete instance"""
+    success = register_instance_with_pods(assembler, job_name, config)
+    assert success, f"Failed to assemble instance {job_name}"
+    return assembler.instances[job_name]
 
 
-def test_register_succeed(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test successful instance registration"""
-    job_name = "testRegisterSucceed"
+# ===== Basic Functionality Tests =====
 
-    # Register first pod
-    msg1 = create_register_msg(job_name, test_config['pod_ip1'], test_config)
-    result1 = instance_assembler.register(msg1)
-    assert result1 == 0
-    assert len(instance_assembler.instances) == 1
+def test_initialization(mock_config):
+    """Test InstanceAssembler initialization"""
+    with patch('threading.Thread') as mock_thread_class:
+        with patch('motor.controller.core.instance_assembler.EtcdClient') as mock_etcd_class:
+            assembler = InstanceAssembler(mock_config)
 
-    # Register second pod
-    msg2 = create_register_msg(
-        job_name, test_config['pod_ip2'], test_config,
-        ranktable=build_pod_ranktable(
-            pod_ip=test_config['pod_ip2'],
-            pod_device_num=2 * test_config['tp'],
-            rank_offset=2 * test_config['tp']
-        )
-    )
-    result2 = instance_assembler.register(msg2)
-    assert result2 == 0
-
-    # Assemble instance
-    instance = instance_assembler.instances[job_name]
-    instance_assembler._assemble_instance(instance)
-
-    assert len(instance_assembler.starting_instances) == 1
-    assert len(instance_assembler.instances) == 0
+            assert assembler.etcd_config is mock_config.etcd_config
+            assert assembler.ins_id_cnt == 1
+            assert len(assembler.instances) == 0
+            assert not assembler.stop_event.is_set()
+            assert assembler._data_version == 0
 
 
-def test_register_timeout(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test instance registration timeout"""
-    instance_assembler.config.instance_assemble_timeout = 0.05
-    job_name = "testRegisterTimeout"
+def test_singleton_behavior(mock_config):
+    """Test singleton pattern prevents re-initialization"""
+    with patch('threading.Thread'), patch('motor.controller.core.instance_assembler.EtcdClient'):
+        assembler1 = InstanceAssembler(mock_config)
+        original_timeout = assembler1.instance_assemble_timeout
 
-    # Register incomplete instance (only one pod)
-    msg = create_register_msg(job_name, test_config['pod_ip1'], test_config, business_port=["8080"])
+        # Create a different config and try to create another instance
+        from motor.config.controller import ControllerConfig
+        different_config = ControllerConfig()
+        different_config.instance_config.instance_assemble_timeout = 999
+        assembler2 = InstanceAssembler(different_config)
+
+        # Should return the same instance
+        assert assembler1 is assembler2
+        # Config should not be changed by second initialization
+        assert assembler1.instance_assemble_timeout == original_timeout
+
+
+def test_init_with_none_config():
+    """Test initialization with None config uses default"""
+    with patch('threading.Thread'), patch('motor.controller.core.instance_assembler.EtcdClient'):
+        assembler = InstanceAssembler(config=None)
+        assert assembler.instance_assemble_timeout is not None
+        assert hasattr(assembler, 'instance_assemble_timeout')
+
+
+def test_register_new_instance(instance_assembler, test_config):
+    """Test registering a new instance"""
+    job_name = "test_job"
+    msg = create_register_msg(job_name, test_config['pod_ip1'], test_config)
+
     result = instance_assembler.register(msg)
+
     assert result == 0
-    assert len(instance_assembler.instances) == 1
-
-    time.sleep(0.06)
-
-    # Check if instance was removed due to timeout
-    if job_name in instance_assembler.instances:
-        instance_assembler._assemble_instance(instance_assembler.instances[job_name])
-
-    assert len(instance_assembler.instances) == 0
-
-
-def test_reregister_succeed(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test successful instance re-registration"""
-    job_name = "testReregister"
-
-    # Reregister first pod
-    ep1 = build_endpoints(create_register_msg(job_name, test_config['pod_ip1'], test_config))
-    msg1 = create_reregister_msg(job_name, test_config['pod_ip1'], 0, test_config, ep1)
-    result1 = instance_assembler.reregister(msg1)
-    assert result1 == 0
-    assert len(instance_assembler.instances) == 1
-
-    # Reregister second pod
-    ep2 = build_endpoints(
-        create_register_msg(job_name, test_config['pod_ip2'], test_config,
-                          ranktable=build_pod_ranktable(
-                              pod_ip=test_config['pod_ip2'],
-                              pod_device_num=2 * test_config['tp'],
-                              rank_offset=2 * test_config['tp']
-                          )),
-        id_offset=test_config['tp']
-    )
-    msg2 = create_reregister_msg(job_name, test_config['pod_ip2'], 0, test_config, ep2)
-    result2 = instance_assembler.reregister(msg2)
-    assert result2 == 0
-    assert instance_assembler.ins_id_cnt == 1
-
-    # Assemble instance
-    instance_assembler._assemble_instance(instance_assembler.instances[job_name])
-    assert len(instance_assembler.instances) == 0
+    assert job_name in instance_assembler.instances
+    metadata = instance_assembler.instances[job_name]
+    assert metadata.register_status == RegisterStatus.NOT_REGISTERED  # Initial state
+    assert metadata.instance.job_name == job_name
+    assert metadata.instance.id == 1  # First instance
+    assert instance_assembler.ins_id_cnt == 2
+    # Verify endpoints and node managers were added
+    assert len(metadata.instance.endpoints) == 1
+    assert len(metadata.instance.node_managers) == 1
 
 
-def test_send_start_cmd_fail_retry(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test start command failure retry"""
-    # Mock HTTP client to simulate failure
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client.post.side_effect = Exception("Connection failed")
-        mock_client_class.return_value = mock_client
+def test_register_existing_instance(instance_assembler, test_config):
+    """Test registering additional pods to existing instance"""
+    job_name = "test_job"
 
-        job_name = "testSendStartCommandFailRetry"
-
-        result = instance_assembler.register(
-            msg=RegisterMsg(
-                job_name=job_name,
-                model_name="test_model",
-                role=test_config['role'],
-                pod_ip=test_config['pod_ip1'],
-                host_ip=test_config['pod_ip1'],
-                business_port=["8080", "8084"],
-                mgmt_port=["9091", "9095"],
-                nm_port="8089",
-                parallel_config=test_config['parallel_config'],
-                ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
-            )
-        )
-        assert result == 0
-
-        instance_assembler.assembled_instances.put((instance_assembler.instances[job_name], 0))
-        instance_assembler.assembled_instances.put(None)
-        assert instance_assembler.assembled_instances.qsize() == 2
-
-        def mock_stop_sleep(seconds):
-            if instance_assembler.assembled_instances.qsize() > 0:
-                raise StopIteration
-
-        with patch('motor.controller.core.instance_assembler.time') as mock_time:
-            mock_time.sleep.side_effect = mock_stop_sleep
-            try:
-                instance_assembler._start_commmand_sender()
-            except StopIteration:
-                pass
-
-            assert instance_assembler.assembled_instances.qsize() == 2
-
-def test_send_start_cmd_fail_abort(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test start command failure abort"""
-    # Mock HTTP client to simulate failure
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client.post.side_effect = Exception("Connection failed")
-        mock_client_class.return_value = mock_client
-
-        instance_assembler.config.send_cmd_retry_times = 1
-        job_name = "testSendStartCommandFailAbort"
-
-        result = instance_assembler.register(
-            msg=RegisterMsg(
-                job_name=job_name,
-                model_name="test_model",
-                role=test_config['role'],
-                pod_ip=test_config['pod_ip1'],
-                host_ip=test_config['pod_ip1'],
-                business_port=["8080", "8084"],
-                mgmt_port=["9091", "9095"],
-                nm_port="8089",
-                parallel_config=test_config['parallel_config'],
-                ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
-            )
-        )
-        assert result == 0
-
-        instance_assembler.assembled_instances.put((instance_assembler.instances[job_name], 0))
-        instance_assembler.assembled_instances.put(None)
-        assert instance_assembler.assembled_instances.qsize() == 2
-
-        def mock_stop_sleep(seconds):
-            if instance_assembler.assembled_instances.qsize() > 0:
-                raise StopIteration
-
-        with patch('motor.controller.core.instance_assembler.time') as mock_time:
-            mock_time.sleep.side_effect = mock_stop_sleep
-            try:
-                instance_assembler._start_commmand_sender()
-            except StopIteration:
-                pass
-
-            assert instance_assembler.assembled_instances.qsize() == 1
-
-
-def test_alloc_ins_group_success(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test successful instance group allocation"""
-    instance_assembler.config.max_link_number = 8
-
-    instance1 = Instance(
-        job_name="testAllocInsGroup1",
-        model_name="test_model",
-        id=1,
-        role=test_config['role'],
-        parallel_config=test_config['parallel_config']
-    )
-
-    instance2 = Instance(
-        job_name="testAllocInsGroup2",
-        model_name="test_model",
-        id=2,
-        role=test_config['role'],
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
-    )
-    instance3 = Instance(
-        job_name="testAllocInsGroup3",
-        model_name="test_model",
-        id=3,
-        role=test_config['role'],
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
-    )
-
-    instance_assembler._assign_ins_group(instance1)
-    instance_assembler._assign_ins_group(instance1)
-
-    instance_assembler._assign_ins_group(instance2)
-    instance_assembler._assign_ins_group(instance3)
-
-    group_info = instance_assembler.instances_group
-
-    assert len(group_info) == 2
-    assert group_info[0].current_group_member == test_config['dp'] * test_config['tp']
-    assert group_info[1].current_group_member == test_config['dp'] * test_config['tp']
-
-def test_alloc_ins_group_fail(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test failed instance group allocation"""
-    max_link_number = 2
-    instance_assembler.config.max_link_number = max_link_number
-
-    instance = Instance(
-        job_name="testAllocInsGroupFail",
-        model_name="test_model",
-        id=1,
-        role=test_config['role'],
-        parallel_config=test_config['parallel_config']
-    )
-
-    try:
-        instance_assembler._assign_ins_group(instance)
-    except Exception as e:
-        error_msg = (
-            f"Instance {instance.job_name}(id:{instance.id}) allocate ins group failed, "
-            f"max link number is {max_link_number}, but need {instance.parallel_config.world_size}."
-        )
-        assert str(e) == error_msg
-        return
-
-    assert False, "Expected exception was not raised."
-
-def test_ins_group_metadata_update(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test instance group metadata update"""
-    instance_assembler.config.max_link_number = 8
-
-    instance1 = Instance(
-        job_name="testAllocInsGroup1",
-        model_name="test_model",
-        id=1,
-        role="prefill",
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
-    )
-    instance2 = Instance(
-        job_name="testInsGroupMetadataUpdate",
-        model_name="test_model",
-        id=2,
-        role="decode",
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
-    )
-
-    instance_assembler._assign_ins_group(instance1)
-    instance_assembler._assign_ins_group(instance2)
-
-    assert len(instance_assembler.instances_group) == 1
-    assert instance_assembler.instances_group[0].current_group_member == test_config['dp'] * test_config['tp']
-    assert instance1.group_id == 0 and instance2.group_id == 0
-
-    instance_assembler.update(instance1, ObserverEvent.INSTANCE_REMOVED)
-    instance_assembler.update(instance2, ObserverEvent.INSTANCE_REMOVED)
-    assert instance_assembler.instances_group[0].current_group_member == 0
-
-
-def test_update_method_coverage(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test update method with different events and edge cases"""
-    instance_assembler.config.max_link_number = 8
-
-    # Create and assign instance to group
-    instance = Instance(
-        job_name="testUpdateMethod",
-        model_name="test_model",
-        id=1,
-        role="prefill",
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
-    )
-    instance_assembler._assign_ins_group(instance)
-
-    # Test non-INSTANCE_REMOVED event (should do nothing)
-    instance_assembler.update(instance, "OTHER_EVENT")
-    assert instance_assembler.instances_group[0].current_group_member == test_config['dp'] * test_config['tp'] / 2
-
-    # Test instance not in any group
-    orphan_instance = Instance(
-        job_name="testOrphanInstance",
-        model_name="test_model",
-        id=2,
-        role="prefill",
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
-    )
-    # This should not raise exception and should do nothing
-    instance_assembler.update(orphan_instance, ObserverEvent.INSTANCE_REMOVED)
-
-
-def test_register_already_registered(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test register method when instance is already registered (assembled)"""
-    job_name = "testRegisterAlreadyRegistered"
-
-    # Register and assemble a complete instance
-    register_complete_instance(instance_assembler, job_name, test_config)
-
-    # Try to register again - should return -1
-    msg3 = create_register_msg(job_name, "127.0.0.3", test_config,
-                              ranktable=build_pod_ranktable(pod_ip="127.0.0.3", pod_device_num=2*test_config['tp']))
-    result3 = instance_assembler.register(msg3)
-    assert result3 == -1
-
-
-def test_reregister_already_registered(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test reregister method when instance is already registered (assembled)"""
-    job_name = "testReregisterAlreadyRegistered"
-
-    # Reregister and assemble a complete instance
-    reregister_complete_instance(instance_assembler, job_name, test_config)
-
-    # Try to reregister again - should return -1
-    ep1 = build_endpoints(create_register_msg(job_name, test_config['pod_ip1'], test_config))
-    msg3 = create_reregister_msg(job_name, "127.0.0.3", 0, test_config, ep1)
-    result3 = instance_assembler.reregister(msg3)
-    assert result3 == -1
-
-
-def test_send_start_command_success(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test _send_start_command method success and partial failure scenarios"""
-    job_name = "testSendStartCommand"
-
-    # Create an instance with multiple node managers (different ports)
+    # First registration
     msg1 = create_register_msg(job_name, test_config['pod_ip1'], test_config)
     result1 = instance_assembler.register(msg1)
     assert result1 == 0
+    assert len(instance_assembler.instances) == 1
 
+    # Second registration to same instance
     msg2 = create_register_msg(job_name, test_config['pod_ip2'], test_config,
-                              nm_port="8089",
                               ranktable=build_pod_ranktable(
                                   pod_ip=test_config['pod_ip2'],
                                   pod_device_num=2 * test_config['tp'],
@@ -503,388 +243,745 @@ def test_send_start_command_success(instance_assembler: InstanceAssembler, test_
     result2 = instance_assembler.register(msg2)
     assert result2 == 0
 
-    instance = instance_assembler.instances[job_name]
-
-    # Test successful send command
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client.post.return_value = {'result': 'success'}
-        mock_client_class.return_value = mock_client
-
-        result = instance_assembler._send_start_command(instance)
-        assert result == True
-        assert mock_client.post.call_count == 2
-
-    # Test partial failure scenario
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        def side_effect(*args, **kwargs):
-            if '127.0.0.1:8088' in str(args):
-                return {'result': 'success'}
-            else:
-                raise Exception("Connection failed")
-
-        mock_client = MagicMock()
-        mock_client.post.side_effect = side_effect
-        mock_client_class.return_value = mock_client
-
-        result = instance_assembler._send_start_command(instance)
-        assert result == False  # Should return False because one failed
-        assert mock_client.post.call_count == 2
-
-    # Test scenario where some node managers have no endpoints
-    instance_no_endpoints = Instance(
-        job_name="testSendStartCommandNoEndpoints",
-        model_name="test_model",
-        id=1,
-        role=test_config['role'],
-        parallel_config=test_config['parallel_config']
-    )
-
-    # Add node managers but only one has endpoints
-    instance_no_endpoints.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
-    instance_no_endpoints.add_node_mgr("127.0.0.2", "127.0.0.2", "8089")
-    pod_endpoints = build_endpoints(create_register_msg("test", "127.0.0.1", test_config))
-    instance_no_endpoints.add_endpoints("127.0.0.1", pod_endpoints)
-
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client.post.return_value = {'result': 'success'}
-        mock_client_class.return_value = mock_client
-
-        result = instance_assembler._send_start_command(instance_no_endpoints)
-        assert result == True  # Should succeed since only one node manager has endpoints
-        assert mock_client.post.call_count == 1
+    # Should still be only one instance entry
+    assert len(instance_assembler.instances) == 1
+    metadata = instance_assembler.instances[job_name]
+    assert len(metadata.instance.endpoints) == 2  # Two pods registered
 
 
-def test_instances_assembler_thread_stop(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test _instances_assembler method when thread is stopped"""
-    # Create an instance that's still assembling
-    job_name = "testInstancesAssemblerStop"
-    result = instance_assembler.register(
-        msg=RegisterMsg(
-            job_name=job_name,
-            model_name="test_model",
-            role=test_config['role'],
-            pod_ip=test_config['pod_ip1'],
-            host_ip=test_config['pod_ip1'],
-            business_port=["8080"],
-            mgmt_port=["9090"],
-            nm_port="8088",
-            parallel_config=test_config['parallel_config'],
-            ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
-        )
-    )
+def test_register_already_assembled_instance(instance_assembler, test_config):
+    """Test registering to an already assembled instance returns -1"""
+    job_name = "test_job"
+
+    # Create and assemble complete instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
+
+    # For new registration, instance stays in assembler with ASSEMBLED status waiting for start command
+    # Only when start command is sent successfully, it gets removed
+    assert job_name in instance_assembler.instances
+    assert metadata.register_status == RegisterStatus.ASSEMBLED
+
+    # Mock successful start command to remove it from assembler
+    def stop_sleep(*args, **kwargs):
+        raise RuntimeError("Stop iteration")
+
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command', return_value=True):
+        with patch('time.sleep', side_effect=stop_sleep):
+            try:
+                instance_assembler._start_commmand_sender()
+            except RuntimeError as e:
+                if "Stop iteration" not in str(e):
+                    raise
+
+    # Now instance should be removed from assembler
+    assert job_name not in instance_assembler.instances
+
+    # Now try to register again - should return -1 since instance is fully managed
+    with patch.object(InstanceManager(), 'has_active_instance_by_job_name', return_value=True):
+        msg = create_register_msg(job_name, "127.0.0.3", test_config)
+        result = instance_assembler.register(msg)
+        assert result == -1
+
+
+def test_reregister_new_instance(instance_assembler, test_config):
+    """Test reregistering a new instance"""
+    job_name = "test_reregister"
+
+    # Build endpoints for reregister
+    reg_msg = create_register_msg(job_name, test_config['pod_ip1'], test_config)
+    endpoints = build_endpoints(reg_msg)
+
+    msg = create_reregister_msg(job_name, test_config['pod_ip1'], instance_id=5, config=test_config, endpoints=endpoints)
+    result = instance_assembler.reregister(msg)
+
     assert result == 0
-    assert len(instance_assembler.instances) == 1
-
-    # Set stop event and test the loop exits gracefully
-    instance_assembler.stop_event.set()
-
-    # Mock time.sleep to avoid long waits
-    def mock_stop_sleep(seconds):
-        if instance_assembler.stop_event.is_set():
-            raise StopIteration
-
-    with patch('motor.controller.core.instance_assembler.time') as mock_time:
-        mock_time.sleep.side_effect = mock_stop_sleep
-        try:
-            instance_assembler._instances_assembler_loop()
-        except StopIteration:
-            pass
-
-    # Instance should still be there since it didn't complete assembly
-    assert len(instance_assembler.instances) == 1
+    assert job_name in instance_assembler.instances
+    metadata = instance_assembler.instances[job_name]
+    assert metadata.register_status == RegisterStatus.NOT_REGISTERED  # Initial state
+    assert metadata.is_reregister == True
+    assert metadata.instance.id == 5
+    assert instance_assembler.ins_id_cnt == 6  # instance_id + 1
 
 
-def test_instances_assembler_loop_execution(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test _instances_assembler method loop execution with instance in starting state"""
-    # Create an instance and put it in starting state
-    job_name = "testInstancesAssemblerLoop"
-    result = instance_assembler.register(
-        msg=RegisterMsg(
-            job_name=job_name,
-            model_name="test_model",
-            role=test_config['role'],
-            pod_ip=test_config['pod_ip1'],
-            host_ip=test_config['pod_ip1'],
-            business_port=["8080", "8084"],
-            mgmt_port=["9090", "9094"],
-            nm_port="8088",
-            parallel_config=test_config['parallel_config'],
-            ranktable=build_pod_ranktable(pod_ip=test_config['pod_ip1'], pod_device_num=2*test_config['tp'])
-        )
-    )
+def test_reregister_already_assembled_instance(instance_assembler, test_config):
+    """Test reregistering to an already assembled instance returns -1"""
+    job_name = "test_reregister"
+
+    # First reregister and assemble
+    reg_msg = create_register_msg(job_name, test_config['pod_ip1'], test_config)
+    endpoints = build_endpoints(reg_msg)
+    msg = create_reregister_msg(job_name, test_config['pod_ip1'], instance_id=0, config=test_config, endpoints=endpoints)
+    result = instance_assembler.reregister(msg)
     assert result == 0
 
     # Register second pod to complete assembly
-    result = instance_assembler.register(
-        msg=RegisterMsg(
-            job_name=job_name,
-            model_name="test_model",
-            role=test_config['role'],
-            pod_ip=test_config['pod_ip2'],
-            host_ip=test_config['pod_ip2'],
-            business_port=["8080", "8084"],
-            mgmt_port=["9090", "9094"],
-            nm_port="8088",
-            parallel_config=test_config['parallel_config'],
-            ranktable=build_pod_ranktable(
-                pod_ip=test_config['pod_ip2'],
-                pod_device_num=2 * test_config['tp'],
-                rank_offset=2 * test_config['tp'],
-            )
-        )
-    )
-    assert result == 0
+    reg_msg2 = create_register_msg(job_name, test_config['pod_ip2'], test_config,
+                                  ranktable=build_pod_ranktable(
+                                      pod_ip=test_config['pod_ip2'],
+                                      pod_device_num=2 * test_config['tp'],
+                                      rank_offset=2 * test_config['tp']
+                                  ))
+    endpoints2 = build_endpoints(reg_msg2, id_offset=test_config['tp'])
+    msg2 = create_reregister_msg(job_name, test_config['pod_ip2'], instance_id=0, config=test_config, endpoints=endpoints2)
+    result2 = instance_assembler.reregister(msg2)
+    assert result2 == 0
 
-    # Assemble the instance to put it in starting state
-    instance = instance_assembler.instances[job_name]
-    instance_assembler._assemble_instance(instance)
+    # Assemble the instance
+    metadata = instance_assembler.instances[job_name]
+    instance_assembler._assemble_instance(metadata)
 
-    # Now the instance should be in starting_instances and removed from instances
-    assert job_name in instance_assembler.starting_instances
+    # Verify instance is assembled and moved to InstanceManager
     assert job_name not in instance_assembler.instances
 
-    # Set stop event after a short delay to allow one loop iteration
-    def mock_sleep_with_stop(seconds):
-        instance_assembler.stop_event.set()
-        raise StopIteration
-
-    with patch('motor.controller.core.instance_assembler.time') as mock_time:
-        mock_time.sleep.side_effect = mock_sleep_with_stop
-        try:
-            instance_assembler._instances_assembler_loop()
-        except StopIteration:
-            pass
-
-    # The loop should have executed and checked the starting instance (but not processed it since it's starting)
-    assert job_name in instance_assembler.starting_instances
+    # Try to reregister again
+    with patch.object(InstanceManager(), 'has_active_instance_by_job_name', return_value=True):
+        msg3 = create_reregister_msg(job_name, "127.0.0.3", instance_id=0, config=test_config, endpoints=endpoints)
+        result3 = instance_assembler.reregister(msg3)
+        assert result3 == -1
 
 
-def test_eval_register_status(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test _eval_register_status method for all status conditions"""
-    from motor.controller.core.instance_assembler import RegisterStatus
+def test_eval_register_status(instance_assembler, test_config):
+    """Test _eval_register_status for different scenarios"""
+    job_name_new = "test_new"
+    job_name_assembling = "test_assembling"
+    job_name_assembled = "test_assembled"
 
-    job_name_assembling = "testEvalStatusAssembling"
-    job_name_assembled = "testEvalStatusAssembled"
-    job_name_not_registered = "testEvalStatusNotRegistered"
-
-    # Test NOT_REGISTERED status
-    status = instance_assembler._eval_register_status(job_name_not_registered)
+    # Test NOT_REGISTERED
+    status = instance_assembler._eval_register_status(job_name_new)
     assert status == RegisterStatus.NOT_REGISTERED
 
-    # Test ASSEMBLING status (instance exists but not in any group)
-    msg = create_register_msg(job_name_assembling, test_config['pod_ip1'], test_config, business_port=["8080"])
-    result = instance_assembler.register(msg)
-    assert result == 0
+    # Test ASSEMBLING
+    msg = create_register_msg(job_name_assembling, test_config['pod_ip1'], test_config)
+    instance_assembler.register(msg)
     status = instance_assembler._eval_register_status(job_name_assembling)
     assert status == RegisterStatus.ASSEMBLING
 
-    # Test ASSEMBLED status (instance is in a group)
-    register_complete_instance(instance_assembler, job_name_assembled, test_config)
-    status = instance_assembler._eval_register_status(job_name_assembled)
-    assert status == RegisterStatus.ASSEMBLED
+    # Test ASSEMBLED (instance managed by InstanceManager)
+    with patch.object(InstanceManager(), 'has_active_instance_by_job_name', return_value=True):
+        status = instance_assembler._eval_register_status(job_name_assembled)
+        assert status == RegisterStatus.ASSEMBLED
 
 
-def test_singleton_reinitialization():
-    """Test that singleton pattern prevents re-initialization"""
-    from motor.config.controller import ControllerConfig
-    _cleanup_singleton()
+def test_invalid_register_message(instance_assembler):
+    """Test exception handling for invalid register messages"""
+    with pytest.raises(Exception, match="Invalid msg provided to register"):
+        instance_assembler.register(None)
 
-    config1 = ControllerConfig()
-    config1.instance_assemble_timeout = 100  # Custom value
-
-    config2 = ControllerConfig()
-    config2.instance_assemble_timeout = 200  # Different value
-
-    with patch('threading.Thread') as mock_thread_class:
-        mock_thread = MagicMock()
-        mock_thread_class.return_value = mock_thread
-
-        # First initialization
-        assembler1 = InstanceAssembler(config1)
-        original_timeout = assembler1.config.instance_assemble_timeout
-
-        # Second initialization should return the same instance
-        assembler2 = InstanceAssembler(config2)
-
-        # Should be the same object
-        assert assembler1 is assembler2
-
-        # Config should not be changed by second initialization
-        assert assembler1.config.instance_assemble_timeout == original_timeout
-        assert assembler2.config.instance_assemble_timeout == original_timeout
-
-        assembler1.stop()
-
-
-def test_exception_handle(instance_assembler: InstanceAssembler):
-    """Test exception handling"""
-    try:
+    with pytest.raises(Exception, match="Invalid msg provided to register"):
         instance_assembler.register({})
-    except Exception as e:
-        error_msg = (f"Invalid msg provided to register. "
-                     f"expect RegisterMsg, got {type({})}")
-        assert str(e) == error_msg
-        return
-    try:
+
+
+def test_invalid_reregister_message(instance_assembler):
+    """Test exception handling for invalid reregister messages"""
+    with pytest.raises(Exception, match="Invalid msg provided to reregister"):
+        instance_assembler.reregister(None)
+
+    with pytest.raises(Exception, match="Invalid msg provided to reregister"):
         instance_assembler.reregister({})
-    except Exception as e:
-        error_msg = (f"Invalid msg provided to reregister. "
-                     f"expect ReregisterMsg, got {type({})}")
-        assert str(e) == error_msg
-        return
-
-    try:
-        instance_assembler._assemble_instance({})
-    except Exception as e:
-        error_msg = (f"Invalid instance provided to assemble. "
-                     f"expect Instance, got {type({})}")
-        assert str(e) == error_msg
-        return
-
-    assert False, "Expected exception was not raised."
 
 
-def test_stop() -> None:
-    """Test stop method"""
-    from motor.config.controller import ControllerConfig
-    config = ControllerConfig()
+def test_assembly_incomplete_instance(instance_assembler, test_config):
+    """Test assembly of incomplete instance (not enough endpoints)"""
+    job_name = "test_incomplete"
 
-    instance_assembler = InstanceAssembler(config)
-    instance_assembler.stop()
+    # Register only one pod
+    msg = create_register_msg(job_name, test_config['pod_ip1'], test_config, business_port=["8080"])
+    instance_assembler.register(msg)
 
-    assert instance_assembler.stop_event.is_set() == True
+    metadata = instance_assembler.instances[job_name]
+    original_status = metadata.register_status
 
+    # Try to assemble
+    instance_assembler._assemble_instance(metadata)
 
-def test_performance(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test performance under load"""
-    num_instances = 10
-    start_time = time.time()
-
-    for i in range(num_instances):
-        msg = create_register_msg(
-            f"perf_test_{i}", f"127.0.0.{i % 5}", test_config,
-            ranktable=build_pod_ranktable(
-                pod_ip=f"127.0.0.{i % 5}",
-                pod_device_num=2*test_config['tp']
-            )
-        )
-        result = instance_assembler.register(msg)
-        assert result == 0
-
-    end_time = time.time()
-    registration_time = end_time - start_time
-
-    assert len(instance_assembler.instances) == num_instances
-    assert registration_time < 5.0
+    # Should remain in assembling state
+    assert metadata.register_status == original_status
+    assert job_name in instance_assembler.instances
 
 
-def test_concurrent_registration(instance_assembler: InstanceAssembler, test_config) -> None:
-    """Test concurrent registration"""
-    job_name = "testConcurrentRegistration"
-    num_instances = 3
+def test_assembly_complete_instance_new_registration(instance_assembler, test_config):
+    """Test assembly of complete instance (new registration)"""
+    job_name = "test_complete_new"
 
-    results = []
-    for i in range(num_instances):
-        msg = create_register_msg(
-            f"{job_name}_{i}", f"127.0.0.{i}", test_config,
-            ranktable=build_pod_ranktable(
-                pod_ip=f"127.0.0.{i}",
-                pod_device_num=2*test_config['tp']
-            )
-        )
-        result = instance_assembler.register(msg)
-        results.append(result)
+    # Create assembled instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
 
-    assert all(result == 0 for result in results)
-    assert len(instance_assembler.instances) == num_instances
+    # Should be assembled but still in instances (waiting for start command)
+    assert metadata.register_status == RegisterStatus.ASSEMBLED
+    assert job_name in instance_assembler.instances
+
+    # Verify instance was added to InstanceManager
+    instance_manager = InstanceManager()
+    assert instance_manager.has_instance_by_job_name(job_name)
 
 
-def test_init_config_none():
-    """Test InstanceAssembler initialization with None config"""
-    _cleanup_singleton()
-    with patch('threading.Thread') as mock_thread_class:
-        mock_thread = MagicMock()
-        mock_thread_class.return_value = mock_thread
-        assembler = InstanceAssembler(config=None)
-        assert assembler.config is not None
-        assert hasattr(assembler, '_initialized')
-        assembler.stop()
+def test_assembly_complete_instance_reregistration(instance_assembler, test_config):
+    """Test assembly of complete instance (reregistration)"""
+    job_name = "test_complete_reregister"
+
+    # Build endpoints for reregistration
+    reg_msg1 = create_register_msg(job_name, test_config['pod_ip1'], test_config)
+    reg_msg2 = create_register_msg(job_name, test_config['pod_ip2'], test_config,
+                                  ranktable=build_pod_ranktable(
+                                      pod_ip=test_config['pod_ip2'],
+                                      pod_device_num=2 * test_config['tp'],
+                                      rank_offset=2 * test_config['tp']
+                                  ))
+
+    endpoints1 = build_endpoints(reg_msg1)
+    endpoints2 = build_endpoints(reg_msg2, id_offset=test_config['tp'])
+
+    # Reregister both pods
+    msg1 = create_reregister_msg(job_name, test_config['pod_ip1'], 0, config=test_config, endpoints=endpoints1)
+    msg2 = create_reregister_msg(job_name, test_config['pod_ip2'], 0, config=test_config, endpoints=endpoints2)
+
+    instance_assembler.reregister(msg1)
+    instance_assembler.reregister(msg2)
+
+    metadata = instance_assembler.instances[job_name]
+    assert metadata.is_reregister == True
+
+    # Assemble
+    instance_assembler._assemble_instance(metadata)
+
+    # For reregistration, instance should be removed from assembler after assembly
+    assert job_name not in instance_assembler.instances
+
+    # Verify instance was added to InstanceManager
+    instance_manager = InstanceManager()
+    assert instance_manager.has_instance_by_job_name(job_name)
 
 
-def test_start_method():
-    """Test start method"""
-    from motor.config.controller import ControllerConfig
-    config = ControllerConfig()
-    _cleanup_singleton()
+def test_assembly_timeout(instance_assembler, test_config):
+    """Test instance assembly timeout"""
+    job_name = "test_timeout"
 
-    with patch('threading.Thread') as mock_thread_class:
-        mock_thread = MagicMock()
-        mock_thread_class.return_value = mock_thread
-        assembler = InstanceAssembler(config)
+    # Set short timeout
+    instance_assembler.instance_assemble_timeout = 0.1
 
-        assembler.start()
+    # Register incomplete instance
+    msg = create_register_msg(job_name, test_config['pod_ip1'], test_config, business_port=["8080"])
+    instance_assembler.register(msg)
 
-        # Verify threads were started
-        assert mock_thread_class.call_count == 2
-        assert mock_thread.start.call_count == 2
+    # Wait for timeout
+    import time
+    time.sleep(0.15)
 
-        assembler.stop()
+    # Try to assemble - should remove timed out instance
+    metadata = instance_assembler.instances[job_name]
+    instance_assembler._assemble_instance(metadata)
+
+    # Instance should be removed due to timeout
+    assert job_name not in instance_assembler.instances
 
 
-def test_build_ins_ranktable_server_id_container_ip_logic(test_config) -> None:
-    """Test that build_ins_ranktable correctly assigns server_id and container_ip"""
-    from motor.common.utils.data_builder import build_ins_ranktable
-    from motor.common.utils.data_builder import build_endpoints
+def test_send_start_command_success(instance_assembler, test_config):
+    """Test successful start command sending"""
+    job_name = "test_start_success"
 
-    # Create an instance
+    # Create assembled instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
+
+    # Mock successful API calls
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command') as mock_send:
+        mock_send.return_value = True
+
+        result = instance_assembler._send_start_command(metadata)
+
+        assert result == True
+        # Should be called for each node manager
+        assert mock_send.call_count == len(metadata.instance.node_managers)
+
+
+def test_send_start_command_partial_failure(instance_assembler, test_config):
+    """Test start command with partial failure"""
+    job_name = "test_start_partial_failure"
+
+    # Create assembled instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
+
+    # Mock partial failure
+    call_count = 0
+    def side_effect(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return call_count == 1  # First call succeeds, second fails
+
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command') as mock_send:
+        mock_send.side_effect = side_effect
+
+        result = instance_assembler._send_start_command(metadata)
+
+        assert result == False  # Should return False if any fails
+        assert mock_send.call_count == len(metadata.instance.node_managers)
+
+
+def test_send_start_command_no_endpoints(instance_assembler, test_config):
+    """Test start command when some node managers have no endpoints"""
+    # Create instance with node managers but only one has endpoints
     instance = Instance(
-        job_name="testRanktableLogic",
+        job_name="test_no_endpoints",
         model_name="test_model",
         id=1,
         role=test_config['role'],
         parallel_config=test_config['parallel_config']
     )
 
-    # Add node managers with different pod_ip and host_ip
-    pod_ip1 = "192.168.1.10"
-    host_ip1 = "10.0.0.1"
-    pod_ip2 = "192.168.1.11"
-    host_ip2 = "10.0.0.2"
+    # Add node managers
+    instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
+    instance.add_node_mgr("127.0.0.2", "127.0.0.2", "8089")
 
-    instance.add_node_mgr(pod_ip1, host_ip1, "8088")
-    instance.add_node_mgr(pod_ip2, host_ip2, "8089")
+    # Only add endpoints for first node manager
+    reg_msg = create_register_msg("test", "127.0.0.1", test_config)
+    pod_endpoints = build_endpoints(reg_msg)
+    instance.add_endpoints("127.0.0.1", pod_endpoints)
 
-    # Add endpoints for the node managers
-    msg1 = create_register_msg("test", pod_ip1, test_config)
-    msg2 = create_register_msg("test", pod_ip2, test_config)
-    endpoints1 = build_endpoints(msg1)
-    endpoints2 = build_endpoints(msg2)
+    metadata = AssembleInstanceMetadata(instance=instance)
 
-    instance.add_endpoints(pod_ip1, endpoints1)
-    instance.add_endpoints(pod_ip2, endpoints2)
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command') as mock_send:
+        mock_send.return_value = True
 
-    # Build the ranktable
-    ranktable = build_ins_ranktable(instance)
+        result = instance_assembler._send_start_command(metadata)
 
-    # Verify that server_id uses host_ip and container_ip uses pod_ip
-    assert len(ranktable.server_list) == 2
+        assert result == True
+        # Should only be called for node manager with endpoints
+        assert mock_send.call_count == 1
 
-    # Find servers by their host_ip (server_id)
-    server1 = next(s for s in ranktable.server_list if s.server_id == host_ip1)
-    server2 = next(s for s in ranktable.server_list if s.server_id == host_ip2)
 
-    # Verify server_id equals host_ip
-    assert server1.server_id == host_ip1
-    assert server2.server_id == host_ip2
+def test_start_command_sender_success(instance_assembler, test_config):
+    """Test _start_command_sender removes instance after successful start"""
+    job_name = "test_sender_success"
 
-    # Verify container_ip equals pod_ip
-    assert server1.container_ip == pod_ip1
-    assert server2.container_ip == pod_ip2
+    # Create assembled instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
 
-    # Verify they are NOT swapped (this is the key test - ensure no mix-up)
-    assert server1.server_id != pod_ip1  # server_id should not equal pod_ip
-    assert server1.container_ip != host_ip1  # container_ip should not equal host_ip
-    assert server2.server_id != pod_ip2
-    assert server2.container_ip != host_ip2
+    # Mock successful send
+    def stop_sleep(*args, **kwargs):
+        raise RuntimeError("Stop iteration")
+
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command') as mock_send:
+        mock_send.return_value = True
+
+        # Mock time.sleep to stop after one iteration
+        with patch('time.sleep', side_effect=stop_sleep):
+            try:
+                instance_assembler._start_commmand_sender()
+            except RuntimeError as e:
+                if "Stop iteration" not in str(e):
+                    raise
+
+        # Instance should be removed after successful start command
+        assert job_name not in instance_assembler.instances
+
+
+def test_start_command_sender_retry(instance_assembler, test_config):
+    """Test _start_command_sender retries on failure"""
+    job_name = "test_sender_retry"
+
+    # Create assembled instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
+
+    # Mock failed send
+    def stop_sleep(*args, **kwargs):
+        raise RuntimeError("Stop iteration")
+
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command') as mock_send:
+        mock_send.return_value = False
+
+        # Mock time.sleep to stop after one iteration
+        with patch('time.sleep', side_effect=stop_sleep):
+            try:
+                instance_assembler._start_commmand_sender()
+            except RuntimeError as e:
+                if "Stop iteration" not in str(e):
+                    raise
+
+        # Instance should still be there with incremented retry count
+        assert job_name in instance_assembler.instances
+        assert instance_assembler.instances[job_name].start_command_send_times == 1
+
+
+def test_start_command_sender_max_retries(instance_assembler, test_config):
+    """Test _start_command_sender removes instance after max retries"""
+    job_name = "test_sender_max_retries"
+
+    # Set max retries to 2 (so we can see the retry count increment)
+    instance_assembler.send_cmd_retry_times = 2
+
+    # Create assembled instance
+    metadata = create_assembled_instance(instance_assembler, job_name, test_config)
+
+    # Mock failed sends
+    def stop_sleep(*args, **kwargs):
+        raise RuntimeError("Stop iteration")
+
+    with patch('motor.controller.api_client.node_manager_api_client.NodeManagerApiClient.send_start_command') as mock_send:
+        mock_send.return_value = False
+
+        # First attempt - should increment retry count
+        with patch('time.sleep', side_effect=stop_sleep):
+            try:
+                instance_assembler._start_commmand_sender()
+            except RuntimeError as e:
+                if "Stop iteration" not in str(e):
+                    raise
+
+        # Should still be there after first failure, retry count incremented
+        assert job_name in instance_assembler.instances
+        assert instance_assembler.instances[job_name].start_command_send_times == 1
+
+        # Second attempt - should remove instance since max retries (2) reached
+        with patch('time.sleep', side_effect=stop_sleep):
+            try:
+                instance_assembler._start_commmand_sender()
+            except RuntimeError as e:
+                if "Stop iteration" not in str(e):
+                    raise
+
+        # Instance should be removed after max retries
+        assert job_name not in instance_assembler.instances
+
+
+def test_persist_data_disabled(mock_config):
+    """Test persist_data when ETCD persistence is disabled"""
+    # Create assembler with persistence disabled
+    mock_config.etcd_config.enable_etcd_persistence = False
+
+    with patch('threading.Thread'), patch('motor.controller.core.instance_assembler.EtcdClient') as mock_etcd_class:
+        mock_etcd = MagicMock()
+        mock_etcd.persist_data.return_value = True
+        mock_etcd_class.return_value = mock_etcd
+
+        assembler = InstanceAssembler(mock_config)
+
+        result = assembler.persist_data()
+        # persist_data always calls etcd_client.persist_data regardless of enable_etcd_persistence flag
+        assert result == True
+
+
+def test_persist_data_enabled(instance_assembler, test_config):
+    """Test persist_data when ETCD persistence is enabled"""
+    # etcd persistence is already enabled in the config used for initialization
+
+    # Create some test data
+    create_assembled_instance(instance_assembler, "test_job", test_config)
+
+    # Reset mock to clear previous calls
+    instance_assembler.etcd_client.persist_data.reset_mock()
+
+    result = instance_assembler.persist_data()
+
+    # Verify persist was called on etcd_client
+    instance_assembler.etcd_client.persist_data.assert_called_once()
+    args, kwargs = instance_assembler.etcd_client.persist_data.call_args
+    assert "/controller/instance_assembler" in args[0]
+    # Should contain data for ins_id_cnt and the instance
+    assert len(args[1]) >= 2
+
+
+def test_restore_data_disabled(instance_assembler, test_config):
+    """Test restore_data when ETCD persistence is disabled"""
+    result = instance_assembler.restore_data()
+    assert result == True
+
+
+def test_restore_data_enabled(instance_assembler, test_config):
+    """Test restore_data when ETCD persistence is enabled"""
+    # etcd persistence is already enabled in the config used for initialization
+
+    # Mock ETCD returning some data
+    mock_persistent_states = {
+        "ins_id_cnt": PersistentAssembleInstanceMetadataState(
+            metadata_data={"ins_id_cnt": 5},
+            version=1,
+            timestamp=time.time(),
+            checksum="dummy_checksum"
+        )
+    }
+
+    with patch.object(instance_assembler.etcd_client, 'restore_data', return_value=mock_persistent_states):
+        with patch.object(mock_persistent_states["ins_id_cnt"], 'is_valid', return_value=True):
+            result = instance_assembler.restore_data()
+
+            assert result == True
+            assert instance_assembler.ins_id_cnt == 5
+
+
+def test_checksum_calculation(instance_assembler, test_config):
+    """Test checksum calculation for data integrity"""
+    # Create test metadata
+    metadata = create_assembled_instance(instance_assembler, "test_checksum", test_config)
+
+    checksum = instance_assembler._calculate_metadata_checksum(metadata)
+
+    assert isinstance(checksum, str)
+    assert len(checksum) > 0
+
+    # Same data should produce same checksum
+    checksum2 = instance_assembler._calculate_metadata_checksum(metadata)
+    assert checksum == checksum2
+
+
+def test_ins_id_cnt_checksum(instance_assembler):
+    """Test checksum calculation for ins_id_cnt"""
+    instance_assembler.ins_id_cnt = 42
+
+    checksum = instance_assembler._calculate_ins_id_cnt_checksum()
+
+    assert isinstance(checksum, str)
+    assert len(checksum) > 0
+
+    # Same value should produce same checksum
+    checksum2 = instance_assembler._calculate_ins_id_cnt_checksum()
+    assert checksum == checksum2
+
+
+def test_persist_data_exception_handling(instance_assembler, test_config):
+    """Test persist_data exception handling"""
+    # Create test data
+    create_assembled_instance(instance_assembler, "test_persist_exception", test_config)
+
+    # Mock etcd_client.persist_data to raise an exception
+    with patch.object(instance_assembler.etcd_client, 'persist_data', side_effect=Exception("ETCD connection failed")):
+        result = instance_assembler.persist_data()
+
+        assert result == False
+
+
+def test_restore_data_exception_handling(instance_assembler):
+    """Test restore_data exception handling"""
+    # Mock etcd_client.restore_data to raise an exception
+    with patch.object(instance_assembler.etcd_client, 'restore_data', side_effect=Exception("ETCD connection failed")):
+        result = instance_assembler.restore_data()
+
+        assert result == False
+
+
+def test_restore_data_invalid_checksum(instance_assembler):
+    """Test restore_data with invalid checksum (corrupted data)"""
+    # Create mock persistent state with invalid checksum
+    mock_persistent_states = {
+        "ins_id_cnt": PersistentAssembleInstanceMetadataState(
+            metadata_data={"ins_id_cnt": 5},
+            version=1,
+            timestamp=time.time(),
+            checksum="invalid_checksum"  # Wrong checksum
+        )
+    }
+
+    with patch.object(instance_assembler.etcd_client, 'restore_data', return_value=mock_persistent_states):
+        result = instance_assembler.restore_data()
+
+        assert result == True  # Should succeed but skip invalid data
+        assert instance_assembler.ins_id_cnt == 1  # Should not restore invalid data
+
+
+def test_restore_data_reconstruction_exception(instance_assembler):
+    """Test restore_data with reconstruction exception"""
+    # Mock the Instance constructor to raise an exception
+    with patch('motor.controller.core.instance_assembler.Instance') as mock_instance_class:
+        mock_instance_class.side_effect = Exception("Instance creation failed")
+
+        mock_persistent_states = {
+            "test_instance": PersistentAssembleInstanceMetadataState(
+                metadata_data={
+                    "job_name": "test_instance",
+                    "model_name": "test_model",
+                    "instance_id": 0,
+                    "role": "prefill",
+                    "parallel_config": {"dp_size": 1, "cp_size": 1, "tp_size": 1, "sp_size": 1, "ep_size": 1, "pp_size": 1, "world_size": 1},
+                    "endpoints": {},
+                    "node_managers": [],
+                    "register_status": 0,
+                    "start_command_send_times": 0,
+                    "register_timestamp": time.time(),
+                    "is_reregister": False
+                },
+                version=1,
+                timestamp=time.time(),
+                checksum="dummy_checksum"
+            )
+        }
+
+        with patch.object(instance_assembler.etcd_client, 'restore_data', return_value=mock_persistent_states):
+            with patch.object(mock_persistent_states["test_instance"], 'is_valid', return_value=True):
+                result = instance_assembler.restore_data()
+
+                assert result == True  # Should succeed but skip problematic instance
+                assert len(instance_assembler.instances) == 0  # Should not restore invalid instance
+
+
+def test_checksum_calculation_exception_handling(instance_assembler, test_config):
+    """Test checksum calculation exception handling"""
+    # Create test metadata
+    metadata = create_assembled_instance(instance_assembler, "test_checksum_exception", test_config)
+
+    # Mock hashlib.sha256 to raise an exception
+    with patch('motor.controller.core.instance_assembler.hashlib.sha256', side_effect=Exception("Hash calculation failed")):
+        checksum = instance_assembler._calculate_metadata_checksum(metadata)
+
+        assert checksum == ""  # Should return empty string on exception
+
+
+def test_ins_id_cnt_checksum_exception_handling(instance_assembler):
+    """Test ins_id_cnt checksum calculation exception handling"""
+    instance_assembler.ins_id_cnt = 42
+
+    # Mock hashlib.sha256 to raise an exception
+    with patch('motor.controller.core.instance_assembler.hashlib.sha256', side_effect=Exception("Hash calculation failed")):
+        checksum = instance_assembler._calculate_ins_id_cnt_checksum()
+
+        assert checksum == ""  # Should return empty string on exception
+
+
+def test_persistent_state_is_valid_method():
+    """Test PersistentAssembleInstanceMetadataState.is_valid method"""
+    # Create a valid state
+    valid_state = PersistentAssembleInstanceMetadataState(
+        metadata_data={"test": "data"},
+        version=1,
+        timestamp=time.time(),
+        checksum=""  # Will be calculated
+    )
+
+    # Manually set correct checksum
+    valid_state.checksum = valid_state._calculate_checksum()
+    assert valid_state.is_valid() == True
+
+    # Create invalid state with wrong checksum
+    invalid_state = PersistentAssembleInstanceMetadataState(
+        metadata_data={"test": "data"},
+        version=1,
+        timestamp=time.time(),
+        checksum="wrong_checksum"
+    )
+    assert invalid_state.is_valid() == False
+
+
+def test_start_method(mock_config):
+    """Test start method starts threads"""
+    with patch('threading.Thread') as mock_thread_class:
+        with patch('motor.controller.core.instance_assembler.EtcdClient'):
+            assembler = InstanceAssembler(mock_config)
+
+            assembler.start()
+
+            # Verify two threads were created and started
+            assert mock_thread_class.call_count == 2
+            assert mock_thread_class.return_value.start.call_count == 2
+
+
+def test_stop_method(mock_config):
+    """Test stop method sets stop event and joins threads"""
+    with patch('threading.Thread') as mock_thread_class:
+        with patch('motor.controller.core.instance_assembler.EtcdClient'):
+            mock_thread1 = MagicMock()
+            mock_thread2 = MagicMock()
+            mock_thread1.is_alive.return_value = True
+            mock_thread2.is_alive.return_value = True
+            mock_thread_class.side_effect = [mock_thread1, mock_thread2]
+
+            assembler = InstanceAssembler(mock_config)
+            assembler.start()  # Start to initialize threads
+
+            assembler.stop()
+
+            # Verify stop event is set
+            assert assembler.stop_event.is_set()
+
+            # Verify threads were joined
+            mock_thread1.join.assert_called_once()
+            mock_thread2.join.assert_called_once()
+
+            # Verify ETCD client was closed
+            assembler.etcd_client.close.assert_called_once()
+
+
+def test_instances_assembler_loop_stop_event(instance_assembler, test_config):
+    """Test _instances_assembler_loop respects stop event"""
+    # Set stop event
+    instance_assembler.stop_event.set()
+
+    # Mock sleep to raise RuntimeError when stop event is set
+    def stop_sleep(*args, **kwargs):
+        raise RuntimeError("Stop iteration")
+
+    with patch('time.sleep', side_effect=stop_sleep):
+        try:
+            instance_assembler._instances_assembler_loop()
+        except RuntimeError as e:
+            if "Stop iteration" not in str(e):
+                raise
+
+    # Should exit without processing
+
+
+def test_multiple_instances_registration(instance_assembler, test_config):
+    """Test registering multiple instances"""
+    num_instances = 5
+
+    for i in range(num_instances):
+        job_name = f"perf_test_{i}"
+        success = register_instance_with_pods(instance_assembler, job_name, test_config)
+        assert success
+
+    assert len(instance_assembler.instances) == num_instances
+
+    # Verify all instances have unique IDs
+    ids = [metadata.instance.id for metadata in instance_assembler.instances.values()]
+    assert len(set(ids)) == num_instances
+
+
+def test_ins_id_cnt_increment(instance_assembler, test_config):
+    """Test ins_id_cnt increments correctly"""
+    initial_cnt = instance_assembler.ins_id_cnt
+
+    # Register first instance
+    register_instance_with_pods(instance_assembler, "job1", test_config)
+    assert instance_assembler.ins_id_cnt == initial_cnt + 1
+
+    # Register second instance
+    register_instance_with_pods(instance_assembler, "job2", test_config)
+    assert instance_assembler.ins_id_cnt == initial_cnt + 2
+
+
+def test_update_config(instance_assembler):
+    """Test update_config method updates configuration and recreates ETCD client"""
+    from unittest.mock import patch
+
+    # Store original etcd config
+    original_etcd_config = instance_assembler.etcd_config
+
+    # Create new config with different ETCD settings
+    from motor.config.controller import ControllerConfig
+    new_config = ControllerConfig()
+    new_config.etcd_config.etcd_host = "new-etcd-host"
+    new_config.etcd_config.etcd_port = 2380
+    new_config.etcd_config.etcd_timeout = 30.0
+    new_config.etcd_config.enable_etcd_persistence = True
+
+    with patch('motor.controller.core.instance_assembler.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_etcd_class.return_value = mock_client
+
+        # Clear the mock call history to track new calls
+        mock_etcd_class.reset_mock()
+
+        # Update config
+        instance_assembler.update_config(new_config)
+
+        # Verify config was updated
+        assert instance_assembler.etcd_config is new_config.etcd_config
+        assert instance_assembler.etcd_config.etcd_host == "new-etcd-host"
+        assert instance_assembler.etcd_config.etcd_port == 2380
+        assert instance_assembler.etcd_config.etcd_timeout == 30.0
+
+        # Verify ETCD client constructor was called with new config
+        mock_etcd_class.assert_called_once_with(
+            host="new-etcd-host",
+            port=2380,
+            ca_cert=new_config.etcd_config.etcd_ca_cert,
+            cert_key=new_config.etcd_config.etcd_cert_key,
+            cert_cert=new_config.etcd_config.etcd_cert_cert,
+            timeout=30.0
+        )

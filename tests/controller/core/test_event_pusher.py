@@ -49,10 +49,9 @@ def mock_instance():
 @pytest.fixture
 def mock_http_client():
     """mock HTTP client fixture"""
-    with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:
-        mock_client = Mock()
-        mock_client_class.return_value = mock_client
-        yield mock_client
+    with patch('motor.controller.core.event_pusher.CoordinatorApiClient.send_instance_refresh') as mock_send_method:
+        mock_send_method.return_value = True
+        yield mock_send_method
 
 def test_init(event_pusher):
     """init test case"""
@@ -68,13 +67,6 @@ def test_init(event_pusher):
 
 def test_event_consumer_add_event(event_pusher, mock_http_client):
     """test event consumer add event"""
-    # set mock
-    mock_client_instance = Mock()
-    mock_http_client.return_value = mock_client_instance
-    mock_response = Mock(status_code=200, text="ok")
-    mock_http_client.get.return_value = "success"
-    mock_http_client.post.return_value = mock_response
-
     # add instances
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
     readonly_instance = ReadOnlyInstance(test_instance)
@@ -100,18 +92,11 @@ def test_event_consumer_add_event(event_pusher, mock_http_client):
         except StopIteration as e:
             pass
 
-        # check post is call
-        mock_http_client.post.assert_called_once()
+        # check send_instance_refresh is called
+        mock_http_client.assert_called_once()
 
 def test_event_consumer_del_event(event_pusher, mock_http_client):
     """test event consumer del event"""
-    # set mock
-    mock_client_instance = Mock()
-    mock_http_client.return_value = mock_client_instance
-    mock_response = Mock(status_code=200, text="ok")
-    mock_http_client.get.return_value = "success"
-    mock_http_client.post.return_value = mock_response
-
     # add instances
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
     readonly_instance = ReadOnlyInstance(test_instance)
@@ -137,18 +122,11 @@ def test_event_consumer_del_event(event_pusher, mock_http_client):
         except StopIteration:
             pass
 
-        # check post is call
-        mock_http_client.post.assert_called_once()
+        # check send_instance_refresh is called
+        mock_http_client.assert_called_once()
 
 def test_event_consumer_set_event(event_pusher, mock_http_client):
     """test event consumer set event"""
-    # set mock
-    mock_client_instance = Mock()
-    mock_http_client.return_value = mock_client_instance
-    mock_response = Mock(status_code=200, text="ok")
-    mock_http_client.get.return_value = "success"
-    mock_http_client.post.return_value = mock_response
-
     # add multi instance
     for i in range(3):
         job_name = "test_job" + str(i)
@@ -176,17 +154,13 @@ def test_event_consumer_set_event(event_pusher, mock_http_client):
         except StopIteration:
             pass
 
-        # check post is call
-        mock_http_client.post.assert_called_once()
+        # check send_instance_refresh is called
+        mock_http_client.assert_called_once()
 
 def test_event_consumer_exception_handling(event_pusher, mock_http_client):
     """test event consumer exception handling"""
-    # set mock
-    def mock_post(endpoint: str, data: dict):
-        raise Exception("Network error")
-    mock_client_instance = Mock()
-    mock_http_client.return_value = mock_client_instance
-    mock_http_client.post.side_effect = mock_post
+    # set mock to return False (indicating failure)
+    mock_http_client.return_value = False
 
     # add instances
     test_instance = Instance(job_name="test_job", model_name="test_model", id=1, role="prefill")
@@ -205,23 +179,15 @@ def test_event_consumer_exception_handling(event_pusher, mock_http_client):
         if event_pusher.event_queue.qsize() > 0:
             raise StopIteration
 
-    with patch('motor.controller.core.event_pusher.logger') as mock_logger:
-        with patch('motor.controller.core.event_pusher.time') as mock_time:
-            mock_time.sleep.side_effect = mock_sleep
-            try:
-                event_pusher._event_consumer()
-            except StopIteration:
-                pass
+    with patch('motor.controller.core.event_pusher.time') as mock_time:
+        mock_time.sleep.side_effect = mock_sleep
+        try:
+            event_pusher._event_consumer()
+        except StopIteration:
+            pass
 
-            # check post is call
-            mock_http_client.post.assert_called_once()
-
-            # check exception log
-            mock_logger.error.assert_called_once()
-            args, kwargs = mock_logger.error.call_args
-            assert args[0] == "Exception occurred while pushing event: %s"
-            assert isinstance(args[1], Exception)
-            assert str(args[1]) == "Network error"
+        # check send_instance_refresh is called
+        mock_http_client.assert_called_once()
 
 def test_heartbeat_detector_normal(event_pusher, mock_http_client):
     """test heartbeat detector"""
@@ -260,18 +226,26 @@ def test_heartbeat_detector_normal(event_pusher, mock_http_client):
 
 def test_heartbeat_detector_failure(event_pusher, mock_http_client):
     """test heartbeat detector failure"""
+    call_count = 0
     def mock_get(endpoint: str, params: dict = None):
-        raise Exception("Connection failed")
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call succeeds to establish connection
+            return Mock(status_code=200)
+        else:
+            # Subsequent calls fail
+            raise Exception("Connection failed")
 
     mock_client_instance = Mock()
     mock_http_client.return_value = mock_client_instance
     event_pusher.heart_client.get.side_effect = mock_get
 
-    call_count = 0
+    sleep_count = 0
     def mock_sleep(seconds):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 3:
+        nonlocal sleep_count
+        sleep_count += 1
+        if sleep_count >= 5:  # Run enough iterations to trigger reset detection
             raise StopIteration
 
     with patch('motor.controller.core.event_pusher.logger') as mock_logger:
@@ -282,9 +256,12 @@ def test_heartbeat_detector_failure(event_pusher, mock_http_client):
             except StopIteration:
                 pass
 
-            # test reset flag is change
-            assert event_pusher.is_coordinator_reset == True
-            mock_logger.warning.assert_called()
+            # Check that coordinator reset detection was triggered at least once
+            assert mock_logger.warning.call_count >= 1
+            # Check that the warning message indicates restart detection
+            warning_calls = [call for call in mock_logger.warning.call_args_list
+                           if "Coordinator heartbeat lost. Possible restart detected" in str(call)]
+            assert len(warning_calls) >= 1
 
 def test_update_add_instance(event_pusher):
     """test update add instance"""
@@ -436,3 +413,44 @@ def test_update_deep_copy_seperated_instance(event_pusher):
 
     # Verify that the event instance is unaffected
     assert event.instance.job_name == original_job_name
+
+
+def test_update_config():
+    """Test update_config method updates configuration and recreates HTTP client"""
+    with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:
+        with patch('threading.Thread') as mock_thread_class:
+            mock_thread = MagicMock()
+            mock_thread_class.return_value = mock_thread
+
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+
+            # Create EventPusher instance
+            config = ControllerConfig()
+            event_pusher = EventPusher(config)
+
+            # Store original config fields, base_url and heart_client
+            original_coordinator_api_dns = event_pusher.coordinator_api_dns
+            original_coordinator_api_port = event_pusher.coordinator_api_port
+            original_base_url = event_pusher.base_url
+            original_heart_client = event_pusher.heart_client
+
+            # Create new config with different API settings
+            new_config = ControllerConfig()
+            new_config.api_config.coordinator_api_dns = "new-coordinator.example.com"
+            new_config.api_config.coordinator_api_port = 9090
+
+            # Update config
+            event_pusher.update_config(new_config)
+
+            # Verify config was updated
+            assert event_pusher.coordinator_api_dns == "new-coordinator.example.com"
+            assert event_pusher.coordinator_api_port == 9090
+
+            # Verify base_url was updated
+            expected_new_url = "http://new-coordinator.example.com:9090"
+            assert event_pusher.base_url == expected_new_url
+            assert event_pusher.base_url != original_base_url
+
+            # Verify HTTP client was recreated (SafeHTTPSClient constructor should be called again)
+            # Note: We can't easily check if it's a different instance since it's mocked

@@ -64,7 +64,7 @@ def test_is_server_core_is_abstract():
     assert issubclass(IServerCore, ABC)
 
     # Verify instantiation raises TypeError
-    with pytest.raises(TypeError, match="Can't instantiate abstract class IServerCore with abstract methods"):
+    with pytest.raises(TypeError, match=r"Can't instantiate abstract class IServerCore.*abstract methods"):
         IServerCore(config=Mock(spec=IConfig))
 
 

@@ -22,9 +22,9 @@ def build_ins_ranktable(ins: Instance) -> Ranktable:
                 server_id=str(nm.host_ip),
                 container_ip=nm.pod_ip,
                 device=[
-                    d 
+                    d
                     for endpoint in ins.get_endpoints(nm.pod_ip).values()
-                    for d in endpoint.device_infos 
+                    for d in endpoint.device_infos
                 ]
             ) for nm in ins.get_node_managers()
         ],

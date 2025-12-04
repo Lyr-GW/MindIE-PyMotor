@@ -9,21 +9,24 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-os.environ['HCCL_PATH'] = './tests/jsons/hccl.json'
+os.environ['HCCL_PATH'] = 'tests/jsons'
 os.environ['JOB_NAME'] = 'test_job'
 os.environ['POD_IP'] = '192.168.1.100'
-os.environ['CONFIG_PATH'] = './'
+os.environ['CONFIG_PATH'] = 'tests/jsons'
 
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, DeviceInfo
 from motor.common.resources.http_msg_spec import StartCmdMsg, Ranktable, ServerInfo
+from motor.common.resources.instance import ParallelConfig, PDRole
 from motor.node_manager.core.heartbeat_manager import HeartbeatManager
+from motor.config.node_manager import NodeManagerConfig
 
 
 def create_config_mock(config_data, hccl_data):
     def mock_side_effect(file_path, mode):
-        if "node_manager_config.json" in file_path:
+        file_path_str = str(file_path)
+        if "node_manager_config.json" in file_path_str:
             return mock_open(read_data=json.dumps(config_data)).return_value
-        elif "hccl.json" in file_path:
+        elif "hccl.json" in file_path_str:
             return mock_open(read_data=json.dumps(hccl_data)).return_value
         return mock_open().return_value
     return mock_side_effect
@@ -66,11 +69,11 @@ class TestHeartBeatManager:
         """return HeartBeatManager instance"""
         with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
              patch('threading.Thread') as mock_thread_class, \
-             patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'}):
+             patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': 'tests/jsons', 'HCCL_PATH': 'tests/jsons', 'ROLE': 'both'}):
             mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
             mock_thread = MagicMock()
             mock_thread_class.return_value = mock_thread
-            # clear HeartBeatManager instance
+            # clear HeartBeatManager instance (HeartbeatManager is still singleton)
             if hasattr(HeartbeatManager, '_instances') and HeartbeatManager in HeartbeatManager._instances:
                 try:
                     HeartbeatManager._instances[HeartbeatManager].stop()
@@ -79,7 +82,22 @@ class TestHeartBeatManager:
                 if HeartbeatManager in HeartbeatManager._instances:
                     del HeartbeatManager._instances[HeartbeatManager]
 
-            manager = HeartbeatManager()
+            config = NodeManagerConfig()
+            # Manually set the configuration data
+            config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])
+            config.basic_config.job_name = config_data.get("model_name", "test_job")
+            config.basic_config.role = PDRole(config_data.get("role", "both"))
+            config.api_config.controller_api_dns = config_data.get("controller_api_dns", "localhost")
+            config.api_config.controller_api_port = config_data.get("controller_api_port", 8080)
+            config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
+
+            # Set device info from hccl_data
+            server = (hccl_data.get("server_list") or [None])[0]
+            if server:
+                devices = server.get("device") or []
+                config.basic_config.device_num = len(devices)
+
+            manager = HeartbeatManager(config)
             yield manager
 
     @pytest.fixture
@@ -123,8 +141,9 @@ class TestHeartBeatManager:
                 del HeartbeatManager._instances[HeartbeatManager]
         
         with patch('threading.Thread'):
-            manager1 = HeartbeatManager()
-            manager2 = HeartbeatManager()
+            config = NodeManagerConfig()
+            manager1 = HeartbeatManager(config)
+            manager2 = HeartbeatManager(config)
             assert manager1 is manager2
 
     def test_initial_state(self, heart_beat_manager):
@@ -188,14 +207,14 @@ class TestHeartBeatManager:
         
         mock_client_instance = MagicMock()
         mock_client_instance.post.return_value = {}
-        mock_client_instance.close = MagicMock()
-        # SafeHTTPSClient is instantiated directly, not as context manager
-        mock_client_class.return_value = mock_client_instance
+        # SafeHTTPSClient is used as context manager
+        mock_client_class.return_value.__enter__.return_value = mock_client_instance
+        mock_client_class.return_value.__exit__.return_value = None
 
         # set endpoint info
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
-        heart_beat_manager.config.pod_ip = "192.168.1.100"
+        # pod_ip is already set during initialization
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
@@ -216,7 +235,7 @@ class TestHeartBeatManager:
     def test_heartbeat_report_loop(self, mock_client_class, mock_sleep, heart_beat_manager):
         """test heartbeat report loop"""
         call_count = {"count": 0}
-        
+
         # set loop exec once
         def mock_stop_sleep(seconds):
             call_count["count"] += 1
@@ -226,13 +245,15 @@ class TestHeartBeatManager:
         mock_client_instance = MagicMock()
         mock_client_instance.post.return_value = {}
         mock_client_instance.close = MagicMock()
-        # SafeHTTPSClient is instantiated and used directly, not as context manager in the code
+        # SafeHTTPSClient is used as context manager in heartbeat reporting
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = None
         mock_client_class.return_value = mock_client_instance
 
         # set endpoint info
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
-        heart_beat_manager.config.pod_ip = "192.168.1.100"
+        # pod_ip is already set during initialization
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
@@ -251,7 +272,7 @@ class TestHeartBeatManager:
     def test_heartbeat_report_with_empty_endpoints(self, mock_client_class, mock_sleep, heart_beat_manager):
         """test heartbeat report with empty endpoints"""
         call_count = {"count": 0}
-        
+
         # set loop exec once
         def mock_stop_sleep(seconds):
             call_count["count"] += 1
@@ -261,13 +282,15 @@ class TestHeartBeatManager:
         mock_client_instance = MagicMock()
         mock_client_instance.post.return_value = {}
         mock_client_instance.close = MagicMock()
-        # SafeHTTPSClient is instantiated and used directly, not as context manager in the code
+        # SafeHTTPSClient is used as context manager in heartbeat reporting
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = None
         mock_client_class.return_value = mock_client_instance
 
         # set endpoint info
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
-        heart_beat_manager.config.pod_ip = "192.168.1.100"
+        # pod_ip is already set during initialization
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         # clear endpoint list
         with heart_beat_manager._endpoint_lock:
@@ -293,8 +316,9 @@ class TestHeartBeatManager:
                 del HeartbeatManager._instances[HeartbeatManager]
         
         with patch('threading.Thread'):
-            heartbeat_manager = HeartbeatManager()
-            
+            config = NodeManagerConfig()
+            heartbeat_manager = HeartbeatManager(config)
+
             # Set initial state
             heartbeat_manager.update_endpoint(sample_start_cmd_msg)
             
@@ -394,7 +418,7 @@ class TestHeartBeatManager:
         
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
-        heart_beat_manager.config.pod_ip = "192.168.1.100"
+        # pod_ip is already set during initialization
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         
         mock_sleep.side_effect = mock_stop_sleep
@@ -422,7 +446,7 @@ class TestHeartBeatManager:
         
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
-        heart_beat_manager.config.pod_ip = "192.168.1.100"
+        # pod_ip is already set during initialization
         
         mock_sleep.side_effect = mock_stop_sleep
         

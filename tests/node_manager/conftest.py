@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 TEST_ENV_VARS = {
     'JOB_NAME': 'test_job',
-    'CONFIG_PATH': './',
-    'HCCL_PATH': './tests/jsons/hccl.json'
+    'CONFIG_PATH': 'tests/jsons',
+    'HCCL_PATH': 'tests/jsons'
 }
 
 def setup_test_environment():

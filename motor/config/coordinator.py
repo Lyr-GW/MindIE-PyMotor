@@ -5,9 +5,12 @@
 import os
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Optional, Any
 from enum import Enum
+
 from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.logger import LoggingConfig, reconfigure_logging
+from motor.config.standby import StandbyConfig
 
 
 class DeployMode(Enum):
@@ -162,16 +165,18 @@ class CoordinatorConfig(ThreadSafeSingleton):
         # Prevent re-initialization in singleton
         if hasattr(self, '_initialized'):
             return
-            
+
         self._initialized = False
         self.default_config_file_path = os.path.join(
             os.path.dirname(__file__), 'coordinator_config.json'
         )
         self.config_file_path_env = "MOTOR_COORDINATOR_CONFIG_PATH"
+        self.config_file_path = None  # Store the actual config file path
         self.check_mounted_files = True
         
         # Configuration objects
         self.config = {}
+        self.logging_config = LoggingConfig()
         self.prometheus_metrics_config = PrometheusMetricsConfig()
         self.exception_config = ExceptionConfig()
         self.scheduler_config = SchedulerConfig()
@@ -179,36 +184,59 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.health_check_config = HealthCheckConfig()
         self.timeout_config = TimeoutConfig()
         self.api_key_config = APIKeyConfig()
-        self.rate_limit_config = RateLimitConfig()        
+        self.rate_limit_config = RateLimitConfig()
+        self.standby_config = StandbyConfig()
         self.http_config = HttpConfig()
         self.aigw_model: dict[str, Any] | None = None
         
-        # Auto-initialize on creation
-        self._initialize()
+        try:
+            self.config_file_path = os.getenv(self.config_file_path_env, self.default_config_file_path)
+            self.check_mounted_files = self._get_check_files()
+
+            if not os.path.exists(self.config_file_path):
+                logging.error(f"Configuration file not found: {self.config_file_path}")
+                raise FileNotFoundError(f"Configuration file not found: {self.config_file_path}")
+
+            with open(self.config_file_path, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+
+            self._load_all_configs()
+            self._initialized = True
+            logging.info("Coordinator configuration initialized successfully")
+
+        except Exception as e:
+            logging.error(f"Failed to initialize coordinator configuration: {e}")
+            raise
 
     def get_aigw_models(self) -> Optional[dict[str, Any]]:
         """Return configured AIGW model."""
         return self.aigw_model
 
-    def _initialize(self) -> None:
+    def reload(self) -> bool:
+        """Reload configuration from file"""
         try:
-            config_file = os.getenv(self.config_file_path_env, self.default_config_file_path)
-            self.check_mounted_files = self._get_check_files()
-            
-            if not os.path.exists(config_file):
-                logging.error(f"Configuration file not found: {config_file}")
-                raise FileNotFoundError(f"Configuration file not found: {config_file}")
-            
-            with open(config_file, 'r', encoding='utf-8') as f:
+            if not self.config_file_path or not os.path.exists(self.config_file_path):
+                logging.error("Configuration file path does not exist, cannot reload")
+                return False
+
+            logging.info(f"Reloading configuration from: {self.config_file_path}")
+
+            # Re-read the configuration file
+            with open(self.config_file_path, 'r', encoding='utf-8') as f:
                 self.config = json.load(f)
-            
+
+            # Re-initialize all configuration objects
             self._load_all_configs()
-            self._initialized = True
-            logging.info("Coordinator configuration initialized successfully")
-            
+
+            # Reconfigure logging with new settings
+            reconfigure_logging(self.logging_config)
+
+            logging.info("Coordinator configuration reloaded successfully")
+            return True
+
         except Exception as e:
-            logging.error(f"Failed to initialize coordinator configuration: {e}")
-            raise
+            logging.error(f"Failed to reload coordinator configuration: {e}")
+            return False
 
     def _get_check_files(self) -> bool:
         """Get file permission check setting from environment."""
@@ -218,11 +246,13 @@ class CoordinatorConfig(ThreadSafeSingleton):
     def _load_all_configs(self) -> None:
         """Load all configuration sections."""
         config_loaders = [
+            self._load_logging_config,
             self._load_prometheus_metrics_config,
             self._load_exception_config,
             self._load_tls_config,
             self._load_scheduler_config,
             self._load_health_check_config,
+            self._load_standby_config,
             self._load_http_config,
             self._load_timeout_config,
             self._load_api_key_config,
@@ -237,10 +267,49 @@ class CoordinatorConfig(ThreadSafeSingleton):
                 logging.error(f"Failed to load configuration section {loader.__name__}: {e}")
                 raise
 
+    def _load_logging_config(self) -> None:
+        """Load logging configuration section."""
+        config = self.config.get("logging_config", {})
+
+        # Load log level
+        log_level = config.get("log_level", "INFO")
+        if isinstance(log_level, str):
+            self.logging_config.log_level = log_level
+        else:
+            raise ValueError("log_level must be a string")
+
+        # Load max line length
+        max_length = config.get("log_max_line_length", 8192)
+        if isinstance(max_length, int) and max_length > 0:
+            self.logging_config.log_max_line_length = max_length
+        else:
+            raise ValueError("log_max_line_length must be a positive integer")
+
+        # Load log file
+        log_file = config.get("log_file", None)
+        if log_file is None or isinstance(log_file, str):
+            self.logging_config.log_file = log_file
+        else:
+            raise ValueError("log_file must be a string or null")
+
+        # Load log format
+        log_format = config.get("log_format", '%(levelname)s  %(asctime)s  [%(filename)s:%(lineno)d]  %(message)s')
+        if isinstance(log_format, str):
+            self.logging_config.log_format = log_format
+        else:
+            raise ValueError("log_format must be a string")
+
+        # Load date format
+        date_format = config.get("log_date_format", '%Y-%m-%d %H:%M:%S')
+        if isinstance(date_format, str):
+            self.logging_config.log_date_format = date_format
+        else:
+            raise ValueError("log_date_format must be a string")
+
     def _load_prometheus_metrics_config(self) -> None:
         """Load Prometheus metrics configuration section."""
         config = self.config.get("prometheus_metrics_config", {})
-        
+
         value = config.get("reuse_time", 3)
         if isinstance(value, int):
             self.prometheus_metrics_config.reuse_time = value
@@ -283,7 +352,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
                 else:
                     raise ValueError(f"Invalid TLS configuration for {enable_field}")
 
-    def _validate_tls_items(self, items: Dict[str, str]) -> bool:
+    def _validate_tls_items(self, items: dict[str, str]) -> bool:
         """Validate TLS configuration items."""
         required_items = [
             "ca_cert", "tls_cert", "tls_key", "tls_passwd", 
@@ -315,7 +384,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
     def _load_health_check_config(self) -> None:
         """Load health check configuration section."""
         config = self.config.get("health_check_config", {})
-        
+
         health_check_mappings = {
             "dummy_request_interval": (float, 5.0, lambda x: x > 0),
             "max_consecutive_failures": (int, 3, lambda x: x > 0),
@@ -371,6 +440,26 @@ class CoordinatorConfig(ThreadSafeSingleton):
                     f"using default: {default}"
                 )
                 setattr(self.health_check_config, field, default)
+
+    def _load_standby_config(self) -> None:
+        """Load standby configuration section."""
+        config = self.config.get("standby_config", {})
+
+        standby_mappings = {
+            "enable_master_standby": (bool, StandbyConfig.enable_master_standby),
+            "master_standby_check_interval": (int, StandbyConfig.master_standby_check_interval),
+            "master_lock_ttl": (int, StandbyConfig.master_lock_ttl),
+            "master_lock_retry_interval": (int, StandbyConfig.master_lock_retry_interval),
+            "master_lock_max_failures": (int, StandbyConfig.master_lock_max_failures),
+            "master_lock_key": (str, StandbyConfig.master_lock_key)
+        }
+
+        for field, (field_type, default) in standby_mappings.items():
+            value = config.get(field, default)
+            if isinstance(value, field_type):
+                setattr(self.standby_config, field, value)
+            else:
+                logging.warning(f"Invalid type for Standby config field '{field}', using default")
 
     def _load_http_config(self) -> None:
         """Load HTTP configuration section."""

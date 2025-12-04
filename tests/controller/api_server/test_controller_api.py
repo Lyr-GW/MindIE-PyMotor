@@ -317,3 +317,28 @@ def test_api_access_filter_default_config() -> None:
         exc_info=None
     )
     assert filter_instance.filter(record) is True
+
+
+def test_update_config():
+    """Test update_config method updates configuration reference"""
+    from motor.config.controller import ControllerConfig
+
+    # Create ControllerAPI instance
+    config = ControllerConfig()
+    api_instance = controller_api.ControllerAPI(config)
+
+    # Store original config
+    original_config = api_instance.config
+
+    # Create new config with different settings
+    new_config = ControllerConfig()
+    new_config.api_config.controller_api_port = 9090
+    new_config.api_config.controller_api_dns = "new-api.example.com"
+
+    # Update config
+    api_instance.update_config(new_config)
+
+    # Verify config reference was updated
+    assert api_instance.config is new_config
+    assert api_instance.config.api_config.controller_api_port == 9090
+    assert api_instance.config.api_config.controller_api_dns == "new-api.example.com"

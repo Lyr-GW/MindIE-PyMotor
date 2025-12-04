@@ -4,16 +4,16 @@
 
 import os
 import json
-from typing import Any, Optional
+from typing import Any
 from enum import Enum
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
 
-from motor.common.resources.http_msg_spec import Ranktable
 from motor.common.resources.instance import ParallelConfig, PDRole
-from motor.common.resources.endpoint import DeviceInfo
-from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
-from motor.common.utils.logger import get_logger
+from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
+
 
 PP = "pp_size"
 TP = "tp_size"
@@ -29,174 +29,437 @@ class HardwareType(str, Enum):
         return str.__repr__(self.value)
 
 
-class NodeManagerConfig(ThreadSafeSingleton):
+@dataclass
+class BasicConfig:
+    """Basic configuration class"""
+
+    # Job configuration
+    job_name: str = Env.job_name
+    role: PDRole = PDRole.ROLE_U
+    model_name: str = ""
+    hardware_type: HardwareType = HardwareType.TYPE_800I_A3
+
+    # Heartbeat sending configuration
+    heartbeat_interval_seconds: int = 1
+
+    # Device information
+    device_num: int = 0
+    # Parallel configuration
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+
+
+@dataclass
+class APIConfig:
+    """API configuration class"""
+    # http config
+    pod_ip: str | None = "127.0.0.1"
+    host_ip: str | None = "127.0.0.1"
+    node_manager_port: int = 1027
+
+    # Controller API configuration
+    controller_api_dns: str | None = "127.0.0.1"
+    controller_api_port: int | None = 57675
+
+
+@dataclass
+class TLSConfig:
+    """TLS configuration class"""
+
+    # TLS enable/disable
+    enable_tls: bool = False
+
+    # certificate paths
+    ca_cert_path: str = 'security/controller/cert/ca.crt'
+    cert_path: str = 'security/controller/cert/server.crt'
+    key_path: str = 'security/controller/keys/server.key'
+
+
+@dataclass
+class EndpointConfig:
+
+    # EngineServer's number
+    endpoint_num: int = 0
+
+    # EngineServer's Port configuration
+    base_port: int = 10000
+    mgmt_ports: list[str] = field(default_factory=list)
+    service_ports: list[str] = field(default_factory=list)
+
+
+@dataclass
+class NodeManagerConfig:
     """
     Global configuration singleton for node manager.
     Loads basic config and HCCL config file.
     """
 
-    pod_ip: Optional[str] = None
-    host_ip: Optional[str] = None
-    parallel_config: Optional[ParallelConfig] = None
-    endpoint_num: int = 0
+    # Configuration sections
+    api_config: APIConfig = field(default_factory=APIConfig)
+    tls_config: TLSConfig = field(default_factory=TLSConfig)
+    endpoint_config: EndpointConfig = field(default_factory=EndpointConfig)
+    basic_config: BasicConfig = field(default_factory=BasicConfig)
+    logging_config: LoggingConfig = field(default_factory=LoggingConfig)
 
-    node_manager_port: int = 8080
-    mgmt_ports: list[str] = []
-    service_ports: list[str] = []
+    # Internal fields
+    config_path: str = field(init=False)
+    hccl_path: str = field(init=False)
+    last_modified: float | None = field(default=None, init=False)
 
-    job_name: str = Env.job_name
-    role: Optional[PDRole] = None
-    model_name: str = None
-    device_info: list[DeviceInfo] = []
-    heartbeat_interval_seconds: int = 1
-    tls_config: {} = None
 
-    controller_api_dns: Optional[str] = None
-    controller_api_port: Optional[int] = None
+    def __post_init__(self):
+        """Validate configuration after initialization"""
+        # Set internal paths with defaults only if not already set (e.g., by from_json)
+        if not hasattr(self, 'config_path') or self.config_path is None:
+            config_dir = Env.config_path or os.getcwd()
+            self.config_path = os.path.join(config_dir, "node_manager_config.json")
 
-    ranktable: Ranktable = None
-    base_port: int = 10000
-    hardware_type: HardwareType = None
+        if not hasattr(self, 'hccl_path') or self.hccl_path is None:
+            # Handle HCCL path: if it's a directory, append hccl.json; otherwise use as-is
+            hccl_base_path = Env.hccl_path or (Env.config_path or os.getcwd())
+            hccl_path_obj = Path(hccl_base_path)
+            if hccl_path_obj.is_dir():
+                self.hccl_path = str(hccl_path_obj / "hccl.json")
+            else:
+                self.hccl_path = hccl_base_path
 
-    def __init__(self) -> None:
-        if hasattr(self, "_initialized"):
-            return  # Ensure singleton only initializes once
+        # Set last modified time if config file exists
+        try:
+            if os.path.exists(self.config_path):
+                self.last_modified = os.path.getmtime(self.config_path)
+        except (OSError, IOError):
+            # Ignore errors when checking file modification time
+            pass
 
-        config_path = os.path.join(Env.config_path, "node_manager_config.json")
-        hccl_path = os.path.join(Env.hccl_path)
-
-        NodeManagerConfig.parse_config_json(config_path)
-        NodeManagerConfig.parse_hccl_json(hccl_path)
-        NodeManagerConfig.generate_endpoint_ports()
-
-        self._initialized = True
-
-    @staticmethod
-    def _check_json(json_data: dict[str, Any]) -> bool:
-        """Validate required config json fields"""
-        required_fields = [
-            "parallel_config",
-            "role",
-            "controller_api_dns",
-            "controller_api_port",
-            "node_manager_port",
-            "model_name",
-        ]
-
-        # Ensure required top-level fields exist
-        for field in required_fields:
-            if field not in json_data:
-                logger.error(f"Missing required config field: {field}")
-                return False
-
-        # Validate parallel config structure
-        pc = json_data.get("parallel_config")
-        if not isinstance(pc, dict):
-            logger.error("parallel_config must be a dict")
-            return False
-
-        if TP not in pc or PP not in pc:
-            logger.error("parallel_config must contain tp and pp fields")
-            return False
-
-        if not isinstance(pc[TP], int) or not isinstance(pc[PP], int):
-            logger.error("tp and pp must be integers")
-            return False
-
-        if pc[TP] <= 0 or pc[PP] <= 0:
-            logger.error("tp and pp must be > 0")
-            return False
-
-        return True
+        self.validate_config()
 
     @classmethod
-    def parse_config_json(cls, file_path: str):
-        """Load basic node config JSON and validate required settings."""
-        with safe_open(file_path, "r") as f:
-            cfg = json.load(f)
-
-        if not cls._check_json(cfg):
-            raise ValueError("Invalid config json")
-
-        cls.model_name = str(cfg.get("model_name"))
-
-        cls.parallel_config = ParallelConfig(**cfg["parallel_config"])
-
-        try:
-            cls.role = PDRole(Env.role)
-        except ValueError as e:
-            raise ValueError(f"Invalid role value") from e
-
-        cls.controller_api_dns = cfg.get("controller_api_dns") or cfg.get("controller_api_dns")
-        cls.controller_api_port = cfg.get("controller_api_port")
-
-        cls.node_manager_port = cfg.get("node_manager_port", 8080)
-
-        cls.heartbeat_interval_seconds = cfg.get("heartbeat_interval_seconds", 1)
-
-        cls.tls_config = cfg.get("nodemanager_tls_config", {})
-        cls.base_port = cfg.get("base_port", 10000)
-
-        logger.info(
-            f"[NodeManagerConfig] Loaded: role={cls.role}, "
-            f"controller={cls.controller_api_dns}:{cls.controller_api_port}, "
-            f"NM_port={cls.node_manager_port}"
-        )
-
-    @classmethod
-    def parse_hccl_json(cls, file_path: str):
-        """Load HCCL topology info JSON. It includes devices & IP mapping."""
-        with safe_open(file_path, "r") as f:
-            data = json.load(f)
-
-        try:
-            cls.ranktable = Ranktable(**data)
-        except ValueError as e:
-            raise ValueError("Invalid HCCL json") from e
-
-        server = (data.get("server_list") or [None])[0]
-
-        cls.pod_ip = server.get("container_ip") if server else None
-        cls.host_ip = server.get("host_ip") or server.get("server_id") if server else None
-
-        devices = server.get("device") if server else []
-        for d in devices or []:
-            dev_info = DeviceInfo(
-                device_ip=d.get("device_ip"),
-                device_id=d.get("device_id"),
-                rank_id=d.get("rank_id"),
-            )
-            if d.get("super_device_id"):
-                dev_info.super_device_id = d["super_device_id"]
-            cls.device_info.append(dev_info)
-        if len(cls.device_info) == 8:
-            cls.hardware_type = HardwareType.TYPE_800I_A2
-        elif len(cls.device_info) == 16:
-            cls.hardware_type = HardwareType.TYPE_800I_A3
+    def from_json(cls, config_path: str | None = None, hccl_path: str | None = None) -> 'NodeManagerConfig':
+        """Load configuration from config and HCCL files"""
+        if config_path is None:
+            config_path = os.path.join(Env.config_path or os.getcwd(), "node_manager_config.json")
         else:
-            logger.info(f"Device count: {len(cls.device_info)}")
+            # If config_path is a directory, append the default config filename
+            config_path_obj = Path(config_path)
+            if config_path_obj.is_dir():
+                config_path = str(config_path_obj / "node_manager_config.json")
+
+        config_path_obj = Path(config_path)
+        logger.info("Loading configuration files: config=%s", config_path_obj)
+
+        if hccl_path is None:
+            # Try to find HCCL file in the same directory
+            config_dir = config_path_obj.parent
+            hccl_path = str(config_dir / "hccl.json")
+        else:
+            # If hccl_path is a directory, append the default hccl filename
+            hccl_path_obj = Path(hccl_path)
+            if hccl_path_obj.is_dir():
+                hccl_path = str(hccl_path_obj / "hccl.json")
+
+        hccl_path_obj = Path(hccl_path)
+        logger.info("HCCL file: %s", hccl_path_obj)
+
+        # Create configuration instance with default values
+        try:
+            config = cls()
+
+            # Set the resolved paths
+            config.config_path = config_path
+            config.hccl_path = hccl_path
+
+            # Load config JSON
+            config_data = {}
+            if os.path.exists(str(config_path_obj)):
+                try:
+                    with safe_open(str(config_path_obj), "r") as f:
+                        config_data = json.load(f)
+                    logger.info("Successfully loaded config file: %s", config_path_obj)
+                    # Update configuration from loaded data
+                    cls._update_from_config_data(config, config_data)
+                except Exception as e:
+                    logger.error("Failed to read config file: %s", e)
+                    raise ValueError(f"Unable to read config file {config_path}: {e}") from e
+            else:
+                logger.warning("Config file does not exist, using default configuration: %s", config_path_obj)
+
+            # Load HCCL JSON
+            hccl_data = {}
+            if os.path.exists(str(hccl_path_obj)):
+                try:
+                    with safe_open(str(hccl_path_obj), "r") as f:
+                        hccl_data = json.load(f)
+                    logger.info("Successfully loaded HCCL file: %s", hccl_path_obj)
+                    # Update configuration from loaded data
+                    cls._update_from_hccl_data(config, hccl_data)
+                    # Generate endpoint ports only if we have HCCL data
+                    cls._generate_endpoint_ports(config)
+                except Exception as e:
+                    logger.error("Failed to read HCCL file: %s", e)
+                    raise ValueError(f"Unable to read HCCL file {hccl_path}: {e}") from e
+            else:
+                logger.warning("HCCL file does not exist, using default configuration: %s", hccl_path_obj)
+                # No HCCL data, set default endpoint configuration
+                config.endpoint_config.endpoint_num = 0
+                config.endpoint_config.service_ports = []
+                config.endpoint_config.mgmt_ports = []
+
+            config.validate_config()
+
+            # Set last modified time
+            if config_path_obj.exists():
+                config.last_modified = config_path_obj.stat().st_mtime
+
+            # Configure logging for this module with the loaded configuration
+            from motor.common.utils.logger import set_logging_config_for_module
+            set_logging_config_for_module(
+                'motor.config.node_manager',
+                log_config=config.logging_config
+            )
+
+            logger.info(
+                "[NodeManagerConfig] Loaded: "
+                "job_name=%s, "
+                "role=%s, "
+                "controller=%s:%s, "
+                "NM_port=%s",
+                config.basic_config.job_name,
+                config.basic_config.role,
+                config.api_config.controller_api_dns,
+                config.api_config.controller_api_port,
+                config.api_config.node_manager_port
+            )
+
+            logger.info("Configuration loading completed")
+            return config
+
+        except Exception as e:
+            logger.error("Failed to create configuration instance: %s", e)
+            raise
 
     @classmethod
-    def generate_endpoint_ports(cls):
+    def _update_from_config_data(cls, config: 'NodeManagerConfig', cfg: dict[str, Any]):
+        """Update configuration from config JSON data"""
+        # Helper function to update config object from dict
+        def update_config_from_dict(config_obj, config_dict):
+            """Update configuration object fields from dictionary, only for existing keys"""
+            for key, value in config_dict.items():
+                if hasattr(config_obj, key):
+                    setattr(config_obj, key, value)
+
+        # Update configuration sections if they exist in JSON
+        if 'logging_config' in cfg:
+            update_config_from_dict(config.logging_config, cfg['logging_config'])
+
+        if 'api_config' in cfg:
+            update_config_from_dict(config.api_config, cfg['api_config'])
+
+        if 'tls_config' in cfg:
+            update_config_from_dict(config.tls_config, cfg['tls_config'])
+
+        if 'endpoint_config' in cfg:
+            update_config_from_dict(config.endpoint_config, cfg['endpoint_config'])
+
+        if 'basic_config' in cfg:
+            basic_cfg = cfg['basic_config']
+            update_config_from_dict(config.basic_config, basic_cfg)
+            # Handle parallel_config specially
+            if 'parallel_config' in basic_cfg:
+                pc = basic_cfg['parallel_config']
+                if isinstance(pc, dict):
+                    config.basic_config.parallel_config = ParallelConfig(**pc)
+
+        # Set role from environment
+        try:
+            role = Env.role
+            config.basic_config.role = PDRole(role)
+            logger.info("Role from environment: %s", role)
+            logger.info("Role from config: %s", config.basic_config.role)
+        except ValueError as e:
+            raise ValueError(f"Invalid role value from environment") from e
+
+    @classmethod
+    def _update_from_hccl_data(cls, config: 'NodeManagerConfig', data: dict[str, Any]):
+        """Update configuration from HCCL JSON data"""
+        # Extract server and device information
+        server = (data.get("server_list") or [None])[0]
+        if server:
+            # Update API config with server information
+            config.api_config.pod_ip = server.get("container_ip")
+            config.api_config.host_ip = server.get("host_ip") or server.get("server_id")
+
+            # Extract device count
+            devices = server.get("device") or []
+            device_count = len(devices)
+            config.basic_config.device_num = device_count
+
+            # Determine hardware type based on device count
+            if device_count == 8:
+                hardware_type = HardwareType.TYPE_800I_A2
+            elif device_count == 16:
+                hardware_type = HardwareType.TYPE_800I_A3
+            else:
+                logger.info("Device count: %d", device_count)
+                hardware_type = HardwareType.TYPE_800I_A2  # Default to A2
+
+            config.basic_config.hardware_type = hardware_type
+
+    @classmethod
+    def _generate_endpoint_ports(cls, config: 'NodeManagerConfig'):
         """
         Calculate endpoint number based on tensor parallel & pipeline parallel config.
         Example: tp=2, pp=4 => 8 devices per pod
         """
-        dp = cls.parallel_config.dp_size
-        devices_per_dp = cls.parallel_config.tp_size * cls.parallel_config.pp_size
+        dp = config.basic_config.parallel_config.dp_size
+        devices_per_dp = config.basic_config.parallel_config.tp_size * config.basic_config.parallel_config.pp_size
 
-        if len(cls.device_info) < devices_per_dp or dp < 1:
+        if config.basic_config.device_num < devices_per_dp or dp < 1:
             raise ValueError(
-                f"Device count ({len(cls.device_info)}) must bigger than"
+                f"Device count ({config.basic_config.device_num}) must bigger than"
                 f"or equal to devices per dp ({devices_per_dp})"
                 f"and dp must be bigger than 0"
             )
 
-        cls.endpoint_num = min(dp, len(cls.device_info) // devices_per_dp)
-        cls.service_ports = [str(cls.base_port + i * 2) for i in range(cls.endpoint_num)]
-        cls.mgmt_ports = [str(cls.base_port + i * 2 + 1) for i in range(cls.endpoint_num)]
+        config.endpoint_config.endpoint_num = min(dp, config.basic_config.device_num // devices_per_dp)
+        config.endpoint_config.service_ports = [
+            str(config.endpoint_config.base_port + i * 2)
+            for i in range(config.endpoint_config.endpoint_num)
+        ]
+        config.endpoint_config.mgmt_ports = [
+            str(config.endpoint_config.base_port + i * 2 + 1)
+            for i in range(config.endpoint_config.endpoint_num)
+        ]
 
         logger.info(
-            f"Generate endpoint ports successfully: endpoint_num: {cls.endpoint_num},"
-            f"mgmt_ports: {cls.mgmt_ports}, service_ports: {cls.service_ports}."
+            "Generate endpoint ports successfully: endpoint_num: %d, mgmt_ports: %s, service_ports: %s.",
+            config.endpoint_config.endpoint_num, config.endpoint_config.mgmt_ports, config.endpoint_config.service_ports
         )
+
+    def validate_config(self) -> None:
+        """Validate the validity of configuration values"""
+        errors = []
+
+        # Validate API configuration
+        if self.api_config.node_manager_port <= 0 or self.api_config.node_manager_port > 65535:
+            errors.append("node_manager_port must be in range 1-65535")
+
+        # Validate network configuration
+        if self.endpoint_config.base_port < 0 or self.endpoint_config.base_port > 65535:
+            errors.append("base_port must be in range 0-65535")
+
+        if self.endpoint_config.endpoint_num < 0:
+            errors.append("endpoint_num cannot be negative")
+
+        # Validate device configuration
+        if self.basic_config.heartbeat_interval_seconds <= 0:
+            errors.append("heartbeat_interval_seconds must be greater than 0")
+
+        # Validate logging configuration
+        valid_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+        if self.logging_config.log_level.upper() not in valid_log_levels:
+            errors.append(f"log_level must be one of: {', '.join(valid_log_levels)}")
+
+        if self.logging_config.log_max_line_length <= 0:
+            errors.append("log_max_line_length must be greater than 0")
+
+        if errors:
+            error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in errors)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
+    def reload(self) -> bool:
+        """Reload configuration from files"""
+        if not self.config_path or not os.path.exists(self.config_path):
+            logger.warning("Configuration file path does not exist, cannot reload")
+            return False
+
+        try:
+            # Check if config file has been modified
+            current_mtime = os.path.getmtime(self.config_path)
+            if self.last_modified and current_mtime <= self.last_modified:
+                logger.debug("Configuration file not modified, skipping reload")
+                return True
+
+            logger.info("Configuration file change detected, reloading...")
+            new_config = NodeManagerConfig.from_json(self.config_path, self.hccl_path)
+
+            # Update current configuration
+            for field_name in self.__dataclass_fields__:
+                if field_name not in ['config_path', 'hccl_path', 'last_modified']:
+                    setattr(self, field_name, getattr(new_config, field_name))
+
+            self.last_modified = current_mtime
+
+            # Reconfigure logging for this module with new settings
+            from motor.common.utils.logger import set_logging_config_for_module
+            set_logging_config_for_module(
+                'motor.config.node_manager',
+                log_config=self.logging_config
+            )
+
+            # Reconfigure logging with new settings
+            reconfigure_logging(self.logging_config)
+
+            logger.info("NodeManager configuration reload successful")
+            return True
+
+        except Exception as e:
+            logger.error("Failed to reload NodeManager configuration: %s", e)
+            return False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert configuration to dictionary with grouped structure"""
+
+        # Use dataclasses.asdict to automatically serialize all config objects
+        config_dict = asdict(self)
+
+        # Handle BaseModel objects that can't be serialized by asdict
+        if hasattr(self.basic_config.parallel_config, 'model_dump'):
+            config_dict['basic_config']['parallel_config'] = self.basic_config.parallel_config.model_dump()
+
+        # Remove internal fields that shouldn't be in the output
+        config_dict.pop('config_path', None)
+        config_dict.pop('hccl_path', None)
+        config_dict.pop('last_modified', None)
+
+        return config_dict
+
+    def save_to_json(self, config_path: str | None = None, hccl_path: str | None = None) -> bool:
+        """Save configuration to JSON files"""
+        save_config_path = config_path or self.config_path
+        save_hccl_path = hccl_path or self.hccl_path
+
+        if not save_config_path or not save_hccl_path:
+            logger.error("Save paths not specified")
+            return False
+
+        try:
+            # Save config file
+            config_dict = self.to_dict()
+            with open(save_config_path, 'w', encoding='utf-8') as f:
+                json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            logger.info("Configuration saved to: %s", save_config_path)
+
+            # Note: HCCL file saving is not implemented as it's typically read-only
+            # from the cluster management system
+
+            return True
+        except Exception as e:
+            logger.error("Failed to save configuration: %s", e)
+            return False
+
+    def get_config_summary(self) -> str:
+        """Get configuration summary information"""
+        return f"""
+                NodeManager Configuration Summary:
+                  Controller API: {self.api_config.controller_api_dns}:{self.api_config.controller_api_port}
+                  Node Manager Port: {self.api_config.node_manager_port}
+                  Role: {self.basic_config.role}
+                  Model: {self.basic_config.model_name}
+                  Device Count: {self.basic_config.device_num}
+                  Hardware Type: {self.basic_config.hardware_type}
+                  Endpoint Count: {self.endpoint_config.endpoint_num}
+                  Pod IP: {self.api_config.pod_ip}
+                  Host IP: {self.api_config.host_ip}
+                  Parallel Config: TP={getattr(self.basic_config.parallel_config, 'tp_size', 'N/A')}, \
+                      PP={getattr(self.basic_config.parallel_config, 'pp_size', 'N/A')}
+                """

@@ -4,7 +4,9 @@ from unittest.mock import MagicMock, patch
 
 from motor.controller.main import (
     parse_arguments, stop_all_modules, signal_handler,
-    attach_observer, start_modules, main, modules
+    init_all_modules, start_all_modules, on_config_updated,
+    on_become_master, on_become_standby, get_controller_status,
+    modules
 )
 
 
@@ -87,41 +89,56 @@ def test_signal_handler(mock_exit):
 
 
 @patch('motor.controller.main.logger')
-def test_attach_observer_success(mock_logger):
-    """Test successful observer attachment"""
+def test_init_all_modules_success(mock_logger):
+    """Test successful module initialization"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = False
+
     # Create mock instance manager
     mock_instance_manager = MagicMock()
     mock_observer1 = MagicMock()
     mock_observer2 = MagicMock()
 
-    modules.update({
-        "InstanceManager": mock_instance_manager,
-        "InstanceAssembler": mock_observer1,
-        "EventPusher": mock_observer2
-    })
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.InstanceManager', return_value=mock_instance_manager), \
+         patch('motor.controller.main.InstanceAssembler', return_value=mock_observer1), \
+         patch('motor.controller.main.EventPusher', return_value=mock_observer2), \
+         patch('motor.controller.main.ControllerAPI'):
 
-    attach_observer()
+        init_all_modules()
 
-    # Verify observers are attached
-    mock_instance_manager.attach.assert_any_call(mock_observer1)
-    mock_instance_manager.attach.assert_any_call(mock_observer2)
-    assert mock_instance_manager.attach.call_count == 2
+        # Verify modules are created
+        assert "InstanceManager" in modules
+        assert "InstanceAssembler" in modules
+        assert "EventPusher" in modules
+        assert "ControllerAPI" in modules
 
-
-@patch('motor.controller.main.logger')
-def test_attach_observer_no_manager(mock_logger):
-    """Test case when instance manager is not available"""
-    # Clear modules
-    modules.clear()
-
-    # Should not raise exception
-    attach_observer()
-
-    mock_logger.error.assert_called_once()
+        # Verify observers are attached (only EventPusher from observers_list)
+        mock_instance_manager.attach.assert_called_once_with(mock_observer2)
 
 
 @patch('motor.controller.main.logger')
-def test_start_modules(mock_logger):
+def test_init_all_modules_no_manager(mock_logger):
+    """Test case when module initialization fails"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = False
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.InstanceManager', return_value=None), \
+         patch('motor.controller.main.InstanceAssembler'), \
+         patch('motor.controller.main.EventPusher'), \
+         patch('motor.controller.main.ControllerAPI'):
+
+        # Should not raise exception
+        init_all_modules()
+
+        mock_logger.error.assert_called_once()
+
+
+@patch('motor.controller.main.logger')
+def test_start_all_modules(mock_logger):
     """Test starting modules"""
     # Create mock modules
     mock_module1 = MagicMock()
@@ -134,7 +151,7 @@ def test_start_modules(mock_logger):
         "Module3": mock_module3
     })
 
-    start_modules()
+    start_all_modules()
 
     # Verify all modules' start methods are called
     mock_module1.start.assert_called_once()
@@ -142,7 +159,7 @@ def test_start_modules(mock_logger):
     mock_module3.start.assert_called_once()
 
 
-def test_start_modules_no_start_method():
+def test_start_all_modules_no_start_method():
     """Test starting modules without start method"""
     # Create mock modules
     mock_module1 = MagicMock()
@@ -155,170 +172,459 @@ def test_start_modules_no_start_method():
     })
 
     # Should not raise exception
-    start_modules()
+    start_all_modules()
 
     mock_module1.start.assert_called_once()
     assert not hasattr(mock_module2, 'start')
 
 
-@patch('builtins.input')
-@patch('motor.controller.main.logger')
-@patch('motor.controller.main.start_modules')
-@patch('motor.controller.main.attach_observer')
-@patch('signal.signal')
-def test_main_success_flow(mock_signal, mock_attach, mock_start, mock_logger, mock_input):
-    """Test main function success flow"""
-    config_path = "/path/to/config.json"
+def test_init_all_modules_fault_tolerance_enabled():
+    """Test enabling fault tolerance in module initialization"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = True
 
-    with patch('sys.argv', ['main.py', '--config', config_path]), \
-         patch('motor.controller.main.ControllerConfig.from_json') as mock_from_json, \
-         patch('motor.controller.main.InstanceManager') as mock_im_class, \
-         patch('motor.controller.main.InstanceAssembler') as mock_ia_class, \
-         patch('motor.controller.main.EventPusher') as mock_ep_class, \
-         patch('motor.controller.main.ControllerAPI') as mock_api_class:
+    # Create mock modules
+    mock_instance_manager = MagicMock()
+    mock_fault_manager = MagicMock()
 
-        mock_config = MagicMock()
-        mock_from_json.return_value = mock_config
-        mock_config.enable_fault_tolerance = False
-
-        # Simulate user input 'stop' to exit loop
-        mock_input.side_effect = ['stop']
-
-        main()
-
-        # Verify configuration loading
-        mock_from_json.assert_called_once_with(config_path)
-        mock_logger.info.assert_any_call("Using configuration file: %s", config_path)
-
-        # Verify signal registration
-        assert mock_signal.call_count == 2
-
-        # Verify module initialization
-        mock_im_class.assert_called_once_with(mock_config)
-        mock_ia_class.assert_called_once_with(mock_config)
-        mock_ep_class.assert_called_once_with(mock_config)
-        mock_api_class.assert_called_once_with(mock_config)
-
-        # Verify flow execution
-        mock_attach.assert_called_once()
-        mock_start.assert_called_once()
-
-
-@patch('builtins.input')
-@patch('motor.controller.main.logger')
-def test_main_auto_config_load(mock_logger, mock_input):
-    """Test automatic configuration loading"""
-    with patch('sys.argv', ['main.py']), \
-         patch('motor.controller.main.ControllerConfig') as mock_config_class, \
-         patch('motor.controller.main.find_config_file', return_value="auto_config.json"), \
-         patch('motor.controller.main.InstanceManager'), \
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.InstanceManager', return_value=mock_instance_manager), \
          patch('motor.controller.main.InstanceAssembler'), \
          patch('motor.controller.main.EventPusher'), \
          patch('motor.controller.main.ControllerAPI'), \
-         patch('motor.controller.main.attach_observer'), \
-         patch('motor.controller.main.start_modules'):
+         patch('motor.controller.ft.fault_manager.FaultManager', return_value=mock_fault_manager):
 
-        mock_config = MagicMock()
-        mock_config_class.from_json.return_value = mock_config
-        mock_config.enable_fault_tolerance = False
+        init_all_modules()
 
-        # Simulate user input 'stop' to exit loop
-        mock_input.side_effect = ['stop']
-
-        main()
-
-        # Verify automatic config file detection
-        mock_config_class.from_json.assert_called_once_with("auto_config.json")
-        mock_logger.info.assert_any_call("Using auto-detected configuration file")
+        # Verify FaultManager is created when fault tolerance is enabled
+        assert "FaultManager" in modules
 
 
-@patch('builtins.input')
 @patch('motor.controller.main.logger')
-def test_main_fault_tolerance_enabled(mock_logger, mock_input):
-    """Test enabling fault tolerance"""
-    with patch('sys.argv', ['main.py']), \
-         patch('motor.controller.main.ControllerConfig.from_json') as mock_from_json, \
-         patch('motor.controller.main.InstanceManager') as mock_im_class, \
-         patch('motor.controller.main.InstanceAssembler') as mock_ia_class, \
-         patch('motor.controller.main.EventPusher') as mock_ep_class, \
-         patch('motor.controller.main.ControllerAPI') as mock_api_class, \
-         patch('motor.controller.ft.fault_manager.FaultManager') as mock_fm_class, \
-         patch('motor.controller.main.attach_observer'), \
-         patch('motor.controller.main.start_modules'):
+def test_on_config_updated_config_none(mock_logger):
+    """Test on_config_updated when config is None"""
+    with patch('motor.controller.main.config', None), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', False):
+        on_config_updated()
 
-        mock_config = MagicMock()
-        mock_from_json.return_value = mock_config
-        mock_config.enable_fault_tolerance = True
-
-        # Simulate user input 'stop' to exit loop
-        mock_input.side_effect = ['stop']
-
-        main()
-
-        # Verify FaultManager is initialized
-        mock_fm_class.assert_called_once_with(mock_config)
+        mock_logger.error.assert_called_once_with("Configuration is None in config update callback")
 
 
-@patch('builtins.input')
 @patch('motor.controller.main.logger')
-def test_main_invalid_command(mock_logger, mock_input):
-    """Test invalid command handling"""
-    with patch('sys.argv', ['main.py']), \
-         patch('motor.controller.main.ControllerConfig.from_json') as mock_from_json, \
-         patch('motor.controller.main.ControllerConfig') as mock_config_class, \
-         patch('motor.controller.main.InstanceManager'), \
-         patch('motor.controller.main.InstanceAssembler'), \
-         patch('motor.controller.main.EventPusher'), \
-         patch('motor.controller.main.ControllerAPI'), \
-         patch('motor.controller.main.attach_observer'), \
-         patch('motor.controller.main.start_modules'):
+def test_on_config_updated_enable_fault_tolerance(mock_logger):
+    """Test enabling fault tolerance in config update"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = True
 
-        mock_config = MagicMock()
-        mock_from_json.return_value = mock_config
-        mock_config.enable_fault_tolerance = False
+    # Create mock modules
+    mock_instance_manager = MagicMock()
+    mock_fault_manager = MagicMock()
 
-        # Input invalid command first, then 'stop' to exit
-        mock_input.side_effect = ['invalid_cmd', 'stop']
+    modules_copy = {"InstanceManager": mock_instance_manager}
 
-        main()
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', False), \
+         patch('motor.controller.ft.fault_manager.FaultManager', return_value=mock_fault_manager):
 
-        # Verify error logging
-        mock_logger.error.assert_any_call("Unknown command: %s", 'invalid_cmd')
+        on_config_updated()
+
+        # Verify FaultManager is created and started
+        assert modules_copy["FaultManager"] is mock_fault_manager
+        mock_fault_manager.start.assert_called_once()
+        mock_instance_manager.attach.assert_called_once_with(mock_fault_manager)
+        mock_logger.info.assert_any_call("Fault tolerance feature enabled, starting FaultManager...")
 
 
-@patch('builtins.input')
 @patch('motor.controller.main.logger')
-def test_main_eof_handling(mock_logger, mock_input):
-    """Test EOF handling (non-interactive environment)"""
-    with patch('sys.argv', ['main.py']), \
-         patch('motor.controller.main.ControllerConfig.from_json') as mock_from_json, \
-         patch('motor.controller.main.ControllerConfig') as mock_config_class, \
-         patch('motor.controller.main.InstanceManager'), \
-         patch('motor.controller.main.InstanceAssembler'), \
-         patch('motor.controller.main.EventPusher'), \
-         patch('motor.controller.main.ControllerAPI'), \
-         patch('motor.controller.main.attach_observer'), \
-         patch('motor.controller.main.start_modules'), \
-         patch('time.sleep') as mock_sleep:
+def test_on_config_updated_disable_fault_tolerance(mock_logger):
+    """Test disabling fault tolerance in config update"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = False
 
-        mock_config = MagicMock()
-        mock_from_json.return_value = mock_config
-        mock_config.enable_fault_tolerance = False
+    # Create mock modules
+    mock_fault_manager = MagicMock()
+    modules_copy = {"FaultManager": mock_fault_manager}
 
-        # Simulate EOFError, then exit via KeyboardInterrupt
-        mock_input.side_effect = EOFError
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', True):
 
-        # Set sleep counter, raise KeyboardInterrupt on second call
-        call_count = 0
-        def stop_after_two_calls(seconds):
-            nonlocal call_count
-            call_count += 1
-            if call_count >= 2:
-                raise KeyboardInterrupt
+        on_config_updated()
 
-        mock_sleep.side_effect = stop_after_two_calls
+        # Verify FaultManager is stopped and removed
+        mock_fault_manager.stop.assert_called_once()
+        assert "FaultManager" not in modules_copy
+        mock_logger.info.assert_any_call("Fault tolerance feature disabled, stopping FaultManager...")
 
-        main()
 
-        # Verify entering non-interactive mode and sleep was called
-        assert call_count >= 1
+@patch('motor.controller.main.logger')
+def test_on_config_updated_no_fault_tolerance_change(mock_logger):
+    """Test when fault tolerance state doesn't change"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = False
+
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module2 = MagicMock()
+    modules_copy = {
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    }
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', False):
+
+        on_config_updated()
+
+        # Verify modules are updated
+        mock_module1.update_config.assert_called_once_with(mock_config)
+        mock_module2.update_config.assert_called_once_with(mock_config)
+        mock_logger.info.assert_any_call("Updating configuration for all modules...")
+
+
+@patch('motor.controller.main.logger')
+def test_on_config_updated_enable_fault_tolerance_exception(mock_logger):
+    """Test exception when enabling fault tolerance"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = True
+
+    modules_copy = {}
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', False), \
+         patch('motor.controller.ft.fault_manager.FaultManager', side_effect=Exception("Test error")):
+
+        on_config_updated()
+
+        mock_logger.error.assert_called_with("Failed to start FaultManager: Test error")
+
+
+@patch('motor.controller.main.logger')
+def test_on_config_updated_disable_fault_tolerance_exception(mock_logger):
+    """Test exception when disabling fault tolerance"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = False
+
+    # Create mock modules
+    mock_fault_manager = MagicMock()
+    mock_fault_manager.stop.side_effect = Exception("Test error")
+    modules_copy = {"FaultManager": mock_fault_manager}
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', True):
+
+        on_config_updated()
+
+        mock_logger.error.assert_called_with("Failed to stop FaultManager: Test error")
+
+
+@patch('motor.controller.main.logger')
+def test_on_config_updated_module_update_exception(mock_logger):
+    """Test exception when updating module config"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.fault_tolerance_config.enable_fault_tolerance = False
+
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module2 = MagicMock()
+    mock_module2.update_config.side_effect = Exception("Update error")
+    modules_copy = {
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    }
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.previous_fault_tolerance_enabled', False):
+
+        on_config_updated()
+
+        # Verify Module1 was updated successfully
+        mock_module1.update_config.assert_called_once_with(mock_config)
+        # Verify error was logged for Module2
+        mock_logger.error.assert_called_with("Failed to update configuration for Module2: Update error")
+
+
+@patch('motor.controller.main.logger')
+def test_on_become_master_initialize_modules(mock_logger):
+    """Test on_become_master when modules are not initialized"""
+    # Clear modules
+    modules.clear()
+
+    # Create mock config
+    mock_config = MagicMock()
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.init_all_modules') as mock_init, \
+         patch('motor.controller.main.start_all_modules') as mock_start:
+
+        on_become_master()
+
+        mock_init.assert_called_once()
+        mock_start.assert_called_once_with(exclude_modules={"ControllerAPI"})
+
+
+@patch('motor.controller.main.logger')
+def test_on_become_master_modules_already_initialized(mock_logger):
+    """Test on_become_master when modules are already initialized"""
+    # Set up existing modules
+    modules["TestModule"] = MagicMock()
+
+    with patch('motor.controller.main.init_all_modules') as mock_init, \
+         patch('motor.controller.main.start_all_modules') as mock_start:
+
+        on_become_master()
+
+        mock_init.assert_not_called()
+        mock_start.assert_called_once_with(exclude_modules={"ControllerAPI"})
+
+
+@patch('motor.controller.main.logger')
+def test_on_become_standby(mock_logger):
+    """Test on_become_standby"""
+    with patch('motor.controller.main.stop_all_modules') as mock_stop:
+        on_become_standby()
+
+        mock_stop.assert_called_once_with(exclude_modules={"ControllerAPI"})
+
+
+@patch('motor.controller.main.logger')
+def test_get_controller_status_master_standby_healthy(mock_logger):
+    """Test get_controller_status in master_standby mode with healthy modules"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.standby_config.enable_master_standby = True
+
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module1.is_alive.return_value = True
+    mock_module2 = MagicMock()
+    mock_module2.is_alive.return_value = True
+
+    modules_copy = {
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    }
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.StandbyManager') as mock_standby_class:
+
+        mock_standby_instance = MagicMock()
+        mock_standby_instance.is_master.return_value = True
+        mock_standby_class.return_value = mock_standby_instance
+
+        status = get_controller_status()
+
+        assert status["deploy_mode"] == "master_standby"
+        assert status["role"] == "master"
+        assert status["overall_healthy"] is True
+
+
+@patch('motor.controller.main.logger')
+def test_get_controller_status_master_standby_unhealthy(mock_logger):
+    """Test get_controller_status in master_standby mode with unhealthy modules"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.standby_config.enable_master_standby = True
+
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module1.is_alive.return_value = True
+    mock_module2 = MagicMock()
+    mock_module2.is_alive.return_value = False
+
+    modules_copy = {
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    }
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy), \
+         patch('motor.controller.main.StandbyManager') as mock_standby_class:
+
+        mock_standby_instance = MagicMock()
+        mock_standby_instance.is_master.return_value = False
+        mock_standby_class.return_value = mock_standby_instance
+
+        status = get_controller_status()
+
+        assert status["deploy_mode"] == "master_standby"
+        assert status["role"] == "standby"
+        assert status["overall_healthy"] is False
+        mock_logger.error.assert_called_with("Unhealthy modules: %s", ["Module2"])
+
+
+def test_get_controller_status_standalone():
+    """Test get_controller_status in standalone mode"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.standby_config.enable_master_standby = False
+
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module1.is_alive.return_value = True
+
+    modules_copy = {
+        "Module1": mock_module1
+    }
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy):
+
+        status = get_controller_status()
+
+        assert status["deploy_mode"] == "standalone"
+        assert "role" not in status
+        assert status["overall_healthy"] is True
+
+
+@patch('motor.controller.main.logger')
+def test_get_controller_status_no_is_alive_method(mock_logger):
+    """Test get_controller_status with modules that don't have is_alive method"""
+    # Create mock config
+    mock_config = MagicMock()
+    mock_config.standby_config.enable_master_standby = False
+
+    # Create mock modules
+    mock_module1 = MagicMock()
+    del mock_module1.is_alive  # Remove is_alive method
+    mock_module2 = MagicMock()
+    mock_module2.is_alive.return_value = True
+
+    modules_copy = {
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    }
+
+    with patch('motor.controller.main.config', mock_config), \
+         patch('motor.controller.main.modules', modules_copy):
+
+        status = get_controller_status()
+
+        assert status["deploy_mode"] == "standalone"
+        assert status["overall_healthy"] is True  # Only Module2 is checked
+
+
+@patch('motor.controller.main.logger')
+def test_start_all_modules_with_exclude(mock_logger):
+    """Test starting modules with exclude_modules parameter"""
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module2 = MagicMock()
+    mock_module3 = MagicMock()
+
+    modules.update({
+        "Module1": mock_module1,
+        "Module2": mock_module2,
+        "Module3": mock_module3
+    })
+
+    start_all_modules(exclude_modules={"Module2"})
+
+    # Verify Module2 was not started
+    mock_module1.start.assert_called_once()
+    mock_module3.start.assert_called_once()
+    mock_module2.start.assert_not_called()
+
+
+@patch('motor.controller.main.logger')
+def test_stop_all_modules_with_exclude(mock_logger):
+    """Test stopping modules with exclude_modules parameter"""
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module2 = MagicMock()
+    mock_module3 = MagicMock()
+
+    modules.update({
+        "Module1": mock_module1,
+        "Module2": mock_module2,
+        "Module3": mock_module3
+    })
+
+    stop_all_modules(exclude_modules={"Module2"})
+
+    # Verify Module2 was not stopped
+    mock_module1.stop.assert_called_once()
+    mock_module3.stop.assert_called_once()
+    mock_module2.stop.assert_not_called()
+
+
+@patch('motor.controller.main.logger')
+def test_start_all_modules_exclude_none(mock_logger):
+    """Test start_all_modules with exclude_modules=None"""
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module2 = MagicMock()
+
+    modules.update({
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    })
+
+    start_all_modules(exclude_modules=None)
+
+    # Verify all modules are started
+    mock_module1.start.assert_called_once()
+    mock_module2.start.assert_called_once()
+
+
+@patch('motor.controller.main.logger')
+def test_stop_all_modules_exclude_none(mock_logger):
+    """Test stop_all_modules with exclude_modules=None"""
+    # Create mock modules
+    mock_module1 = MagicMock()
+    mock_module2 = MagicMock()
+
+    modules.update({
+        "Module1": mock_module1,
+        "Module2": mock_module2
+    })
+
+    stop_all_modules(exclude_modules=None)
+
+    # Verify all modules are stopped
+    mock_module1.stop.assert_called_once()
+    mock_module2.stop.assert_called_once()
+
+
+def test_signal_handler_with_config_watcher():
+    """Test signal handler with config watcher present"""
+    mock_watcher = MagicMock()
+
+    with patch('motor.controller.main.stop_event') as mock_stop_event, \
+         patch('motor.controller.main.stop_all_modules') as mock_stop, \
+         patch('motor.controller.main.config_watcher', mock_watcher), \
+         patch('sys.exit') as mock_exit:
+
+        signal_handler(signal.SIGINT, None)
+
+        mock_stop_event.set.assert_called_once()
+        mock_stop.assert_called_once()
+        mock_watcher.stop.assert_called_once()
+        mock_exit.assert_called_once_with(0)
+
+
+def test_signal_handler_no_config_watcher():
+    """Test signal handler without config watcher"""
+    with patch('motor.controller.main.stop_event') as mock_stop_event, \
+         patch('motor.controller.main.stop_all_modules') as mock_stop, \
+         patch('motor.controller.main.config_watcher', None), \
+         patch('sys.exit') as mock_exit:
+
+        signal_handler(signal.SIGTERM, None)
+
+        mock_stop_event.set.assert_called_once()
+        mock_stop.assert_called_once()
+        mock_exit.assert_called_once_with(0)

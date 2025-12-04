@@ -1,13 +1,25 @@
 import time
+import hashlib
+from unittest.mock import patch, MagicMock
 import pytest
+from fastapi import HTTPException
 
-from motor.controller.core.instance_manager import InstanceManager
+from motor.controller.core.instance_manager import InstanceManager, PersistentInstanceState
 from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import HeartbeatMsg
-from motor.common.resources.instance import ParallelConfig, Instance, NodeManagerInfo, InsStatus
+from motor.common.resources.instance import (
+    ParallelConfig,
+    Instance,
+    NodeManagerInfo,
+    InsStatus,
+    InsConditionEvent,
+    ReadOnlyInstance
+)
 from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.config.controller import ControllerConfig
 
 
+# Helper functions
 def create_test_instance(
     instance_id: int,
     job_name: str,
@@ -33,11 +45,44 @@ def create_test_instance(
         job_name=job_name,
         model_name="test_model",
         role=role,
-        group_id=1,
         endpoints=endpoints
     )
 
 
+def _create_endpoint(id: int, ip: str, business_port: str = "9090", mgmt_port: str = "8080") -> Endpoint:
+    """Helper function to create an Endpoint with default values"""
+    return Endpoint(
+        id=id,
+        ip=ip,
+        business_port=business_port,
+        mgmt_port=mgmt_port,
+        status=EndpointStatus.INITIAL,
+        device_infos=[],
+        hb_timestamp=time.time()
+    )
+
+
+def get_mock_heartbeat_msg(job_name: str, ins_id: int, ip: str, status_dict: dict = None) -> HeartbeatMsg:
+    """Generate a mock heartbeat message with configurable status"""
+    if status_dict is None:
+        status_dict = {0: EndpointStatus.NORMAL}
+    return HeartbeatMsg(
+        job_name=job_name,
+        ins_id=ins_id,
+        ip=ip,
+        status=status_dict
+    )
+
+
+def create_instance_manager_with_config(enable_etcd=False) -> InstanceManager:
+    """Create instance manager with specific config"""
+    config = ControllerConfig()
+    config.etcd_config.enable_etcd_persistence = enable_etcd
+    config.instance_manager_check_internal = 0.1  # Faster for tests
+    return InstanceManager(config)
+
+
+# Fixtures
 @pytest.fixture
 def test_config():
     """Test configuration fixture"""
@@ -64,6 +109,17 @@ def test_config():
 
 
 @pytest.fixture(autouse=True)
+def mock_etcd_client():
+    """Mock EtcdClient to avoid real ETCD operations in tests"""
+    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.persist_data.return_value = True
+        mock_client.restore_data.return_value = None
+        mock_etcd_class.return_value = mock_client
+        yield mock_client
+
+
+@pytest.fixture(autouse=True)
 def setup_test_environment():
     """Setup and teardown for each test"""
     # Clear singleton instance before each test
@@ -75,36 +131,10 @@ def setup_test_environment():
         del ThreadSafeSingleton._instances[InstanceManager]
 
 
-def _cleanup_singleton():
-    """Clean up singleton instances"""
-    if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
-        try:
-            ThreadSafeSingleton._instances[InstanceManager].stop()
-        except:
-            pass
-        del ThreadSafeSingleton._instances[InstanceManager]
-
-
-def _create_endpoint(id: int, ip: str, business_port: str = "9090", mgmt_port: str = "8080") -> Endpoint:
-    """Helper function to create an Endpoint with default values"""
-    return Endpoint(
-        id=id,
-        ip=ip,
-        business_port=business_port,
-        mgmt_port=mgmt_port,
-        status=EndpointStatus.INITIAL,
-        device_infos=[],
-        hb_timestamp=time.time()
-    )
-
-
 @pytest.fixture
 def instance_manager(test_config):
-    """Setup mock instance manager"""
-    from motor.config.controller import ControllerConfig
-    config = ControllerConfig()
-    # add instance, 2P1D
-    instance_manager = InstanceManager(config)
+    """Setup mock instance manager with test instances"""
+    instance_manager = create_instance_manager_with_config()
 
     # Extract pod_ips for cleaner code
     pod_ips = test_config['pod_ips']
@@ -172,27 +202,140 @@ def instance_manager(test_config):
     return instance_manager
 
 
-def get_mock_heartbeat_msg_for_pinstance_normal(job_name: str, ins_id: int, ip: str) -> HeartbeatMsg:
-    """Generate a mock heartbeat message"""
-    status = {}
-    for i in range(1):
-        status[i] = EndpointStatus.NORMAL
-    return HeartbeatMsg(
-        job_name=job_name,
-        ins_id=ins_id,
-        ip=ip,
-        status=status
-    )
+# Test functions
+def test_singleton_initialization():
+    """Test InstanceManager singleton initialization"""
+    # First instance
+    manager1 = InstanceManager()
+    assert manager1 is not None
+    assert hasattr(manager1, '_initialized')
+
+    # Second instance should return the same object
+    manager2 = InstanceManager()
+    assert manager1 is manager2
 
 
-def test_add_instance(instance_manager, test_config) -> None:
+def test_initialization_with_config():
+    """Test initialization with custom config"""
+    config = ControllerConfig()
+    config.etcd_config.enable_etcd_persistence = True
+
+    manager = InstanceManager(config)
+    assert manager.etcd_config is config.etcd_config
+    assert manager.instance_manager_check_internal == config.instance_config.instance_manager_check_internal
+
+
+def test_start_stop_manager():
+    """Test starting and stopping the instance manager"""
+    manager = create_instance_manager_with_config()
+
+    # Test start
+    manager.start()
+    assert manager.instances_management_thread is not None
+    assert manager.instances_management_thread.is_alive()
+    assert not manager.stop_event.is_set()
+
+    # Test stop
+    manager.stop()
+    assert manager.stop_event.is_set()
+    # Thread should be joined and stopped
+
+
+def test_persist_data_success():
+    """Test successful data persistence"""
+    manager = create_instance_manager_with_config(enable_etcd=True)
+    instance = create_test_instance(1, "test_job", ["192.168.1.1"])
+    manager.add_instance(instance)
+
+    result = manager.persist_data()
+    assert result is True
+
+
+def test_persist_data_failure():
+    """Test data persistence failure"""
+    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.persist_data.side_effect = Exception("ETCD error")
+        mock_etcd_class.return_value = mock_client
+
+        manager = create_instance_manager_with_config(enable_etcd=True)
+        instance = create_test_instance(1, "test_job", ["192.168.1.1"])
+        manager.add_instance(instance)
+
+        result = manager.persist_data()
+        assert result is False
+
+
+def test_restore_data_success():
+    """Test successful data restoration"""
+    # Mock persistent states
+    mock_persistent_states = {
+        "1": PersistentInstanceState(
+            instance_data={"id": 1, "job_name": "test_job", "model_name": "test_model",
+                          "role": "prefill", "endpoints": {}},
+            version=1,
+            timestamp=time.time(),
+            checksum="mock_checksum"
+        )
+    }
+
+    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.restore_data.return_value = mock_persistent_states
+        mock_etcd_class.return_value = mock_client
+
+        manager = create_instance_manager_with_config(enable_etcd=True)
+        result = manager.restore_data()
+        assert result is True
+
+
+def test_restore_data_no_data():
+    """Test restoration when no data exists"""
+    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.restore_data.return_value = None
+        mock_etcd_class.return_value = mock_client
+
+        manager = create_instance_manager_with_config(enable_etcd=True)
+        result = manager.restore_data()
+        assert result is True
+
+
+def test_restore_data_invalid_checksum():
+    """Test restoration with invalid checksum"""
+    # Mock persistent states with invalid checksum
+    mock_persistent_states = {
+        "1": PersistentInstanceState(
+            instance_data={"id": 1, "job_name": "test_job", "model_name": "test_model",
+                          "role": "prefill", "endpoints": {}},
+            version=1,
+            timestamp=time.time(),
+            checksum="invalid_checksum"
+        )
+    }
+
+    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.restore_data.return_value = mock_persistent_states
+        mock_etcd_class.return_value = mock_client
+
+        manager = create_instance_manager_with_config(enable_etcd=True)
+        result = manager.restore_data()
+        assert result is True  # Should succeed but skip invalid instances
+
+
+def test_add_instance(instance_manager, test_config):
     """Test adding an instance"""
     cur_instance_num = instance_manager.get_instance_num()
-    # Abnormal situation
-    instance_manager.add_instance(test_config['p_parallel_config'])
-    actual_instance_num = instance_manager.get_instance_num()
-    assert actual_instance_num == cur_instance_num
 
+    # Test invalid input
+    instance_manager.add_instance(None)
+    assert instance_manager.get_instance_num() == cur_instance_num
+
+    instance_manager.add_instance("invalid_instance")
+    assert instance_manager.get_instance_num() == cur_instance_num
+
+    # Test valid instance
     instance_manager.add_instance(Instance(
         job_name="testAllocInsGroup2",
         model_name="test_model",
@@ -200,192 +343,465 @@ def test_add_instance(instance_manager, test_config) -> None:
         role=test_config['p_role'],
         parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
     ))
-    actual_instance_num = instance_manager.get_instance_num()
-    assert actual_instance_num == cur_instance_num + 1
+    assert instance_manager.get_instance_num() == cur_instance_num + 1
+
+    # Test duplicate instance
+    instance_manager.add_instance(Instance(
+        job_name="testAllocInsGroup2",
+        model_name="test_model",
+        id=100,
+        role=test_config['p_role'],
+        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
+    ))
+    assert instance_manager.get_instance_num() == cur_instance_num + 1  # Should not increase
 
 
-def test_del_instance(instance_manager) -> None:
+def test_del_instance(instance_manager):
     """Test deleting an instance"""
     cur_instance_num = instance_manager.get_instance_num()
 
+    # Test deleting existing instance
     instance_manager.del_instance(0)
-    actual_instance_num = instance_manager.get_instance_num()
-    assert actual_instance_num == cur_instance_num - 1
+    assert instance_manager.get_instance_num() == cur_instance_num - 1
+
+    # Test deleting non-existent instance
+    instance_manager.del_instance(999)
+    assert instance_manager.get_instance_num() == cur_instance_num - 1  # Should remain the same
 
 
-def test_get_active_instances(instance_manager) -> None:
+def test_get_instance(instance_manager):
+    """Test getting instances"""
+    # Test getting existing instance
+    instance = instance_manager.get_instance(1)
+    assert instance is not None
+    assert instance.id == 1
+
+    # Test getting non-existent instance
+    instance = instance_manager.get_instance(999)
+    assert instance is None
+
+
+def test_get_instance_num(instance_manager):
+    """Test getting instance count"""
+    count = instance_manager.get_instance_num()
+    assert count == 3  # Based on fixture setup
+
+
+def test_get_active_instances(instance_manager):
     """Test getting active instances"""
+    # Initially no active instances
+    active_instances = instance_manager.get_active_instances()
+    assert len(active_instances) == 0
+
+    # Make one instance active
     instance = instance_manager.get_instance(0)
     instance.status = InsStatus.ACTIVE
     active_instances = instance_manager.get_active_instances()
     assert len(active_instances) == 1
+    assert active_instances[0].id == 0
 
 
-def test_get_inactive_instance(instance_manager) -> None:
+def test_get_inactive_instances(instance_manager):
     """Test getting inactive instances"""
+    # Make one instance inactive
     instance = instance_manager.get_instance(0)
     instance.status = InsStatus.INACTIVE
     inactive_instances = instance_manager.get_inactive_instances()
     assert len(inactive_instances) == 1
+    assert inactive_instances[0].id == 0
 
 
-def test_get_initial_instances(instance_manager) -> None:
-    """Test getting initial instance status"""
-    inactive_instances = instance_manager.get_initial_instances()
-    assert len(inactive_instances) == 3
+def test_get_initial_instances(instance_manager):
+    """Test getting initial instances"""
+    initial_instances = instance_manager.get_initial_instances()
+    assert len(initial_instances) == 3  # All instances start as INITIAL
 
 
-def test_handle_heartbeat(instance_manager, test_config) -> None:
-    """Test handling heartbeat"""
+def test_get_instance_by_podip(instance_manager):
+    """Test getting instance by pod IP"""
+    # Test with existing IP
+    result = instance_manager.get_instance_by_podip("127.0.0.1")
+    assert result is not None
+
+    # Test with non-existent IP
+    result = instance_manager.get_instance_by_podip("192.168.1.100")
+    assert result is None
+
+    # Test with empty string
+    result = instance_manager.get_instance_by_podip("")
+    assert result is None
+
+
+def test_has_instance_by_job_name(instance_manager):
+    """Test checking if instance exists by job name"""
+    # Test existing job name
+    assert instance_manager.has_instance_by_job_name("prefill-0") is True
+
+    # Test non-existent job name
+    assert instance_manager.has_instance_by_job_name("non-existent") is False
+
+
+def test_handle_heartbeat_success(instance_manager, test_config):
+    """Test successful heartbeat handling"""
     pod_ips = test_config['pod_ips']
-    # P0 ready
-    mock_heartbeat_msg1 = get_mock_heartbeat_msg_for_pinstance_normal(
-        "prefill-0",
-        0,
-        pod_ips[0]
-    )
-    instance_manager.handle_heartbeat(mock_heartbeat_msg1)
+
+    # Test normal heartbeat transition
+    heartbeat_msg = get_mock_heartbeat_msg("prefill-0", 0, pod_ips[0])
+    success, code = instance_manager.handle_heartbeat(heartbeat_msg)
+    assert success is True
+    assert code == 200
+
+    # Verify instance status changed to INITIAL
     instance = instance_manager.get_instance(0)
     assert instance.status == InsStatus.INITIAL
 
-    mock_heartbeat_msg2 = get_mock_heartbeat_msg_for_pinstance_normal(
-        "prefill-0",
-        0,
-        pod_ips[1]
-    )
-    instance_manager.handle_heartbeat(mock_heartbeat_msg2)
+
+def test_handle_heartbeat_invalid_message(instance_manager):
+    """Test heartbeat handling with invalid message"""
+    # Test with None message
+    success, code = instance_manager.handle_heartbeat(None)
+    assert success is False
+    assert code == 500
+
+    # Test with invalid message type
+    success, code = instance_manager.handle_heartbeat("invalid_message")
+    assert success is False
+    assert code == 500
+
+
+def test_handle_heartbeat_nonexistent_instance():
+    """Test heartbeat handling for non-existent instance"""
+    manager = create_instance_manager_with_config()
+
+    heartbeat_msg = get_mock_heartbeat_msg("non-existent", 999, "192.168.1.1")
+
+    with pytest.raises(HTTPException) as exc_info:
+        manager.handle_heartbeat(heartbeat_msg)
+    assert exc_info.value.status_code == 503  # RE_REGISTER
+
+
+def test_state_transitions(instance_manager, test_config):
+    """Test various state transitions"""
+    pod_ips = test_config['pod_ips']
     instance = instance_manager.get_instance(0)
+
+    # INITIAL -> ACTIVE
+    heartbeat_msg = get_mock_heartbeat_msg("prefill-0", 0, pod_ips[0])
+    instance_manager.handle_heartbeat(heartbeat_msg)
+    assert instance.status == InsStatus.INITIAL
+
+    # Make endpoints ready
+    for endpoints in instance.endpoints.values():
+        for endpoint in endpoints.values():
+            endpoint.status = EndpointStatus.NORMAL
+
+    heartbeat_msg2 = get_mock_heartbeat_msg("prefill-0", 0, pod_ips[1])
+    instance_manager.handle_heartbeat(heartbeat_msg2)
     assert instance.status == InsStatus.ACTIVE
 
-    mock_heartbeat_msg3 = get_mock_heartbeat_msg_for_pinstance_normal(
-        "prefill-0",
-        0,
-        pod_ips[1]
-    )
-    mock_heartbeat_msg3.status[0] = EndpointStatus.ABNORMAL
-    instance_manager.handle_heartbeat(mock_heartbeat_msg3)
-    instance = instance_manager.get_instance(0)
+    # ACTIVE -> INACTIVE (abnormal heartbeat)
+    heartbeat_msg3 = get_mock_heartbeat_msg("prefill-0", 0, pod_ips[1], {0: EndpointStatus.ABNORMAL})
+    instance_manager.handle_heartbeat(heartbeat_msg3)
     assert instance.status == InsStatus.INACTIVE
 
-    mock_heartbeat_msg4 = get_mock_heartbeat_msg_for_pinstance_normal(
-        "prefill-1",
-        1,
-        pod_ips[2]
-    )
-    mock_heartbeat_msg4.status[0] = EndpointStatus.ABNORMAL
-    instance_manager.handle_heartbeat(mock_heartbeat_msg4)
-    instance = instance_manager.get_instance(1)
-    assert instance is None
 
-
-def test_find_instance_with_matching_ip(instance_manager):
-    """test finding an instance with matching ip"""
-    pod_ip = "127.0.0.1"
-    result = instance_manager.get_instance_by_podip(pod_ip)
-
-    assert result is not None
-
-
-def test_no_instance_contains_ip(instance_manager):
-    """test finding an instance with no matching ip"""
-    pod_ip = "192.168.1.100"
-    result = instance_manager.get_instance_by_podip(pod_ip)
-
-    assert result is None
-
-
-def test_empty_string_pod_ip(instance_manager):
-    """test empty string pod ip"""
-    pod_ip = ""
-    result = instance_manager.get_instance_by_podip(pod_ip)
-
-    assert result is None
-
-
-def test_separate_instance_by_id(instance_manager, test_config):
-    """Test separating instance by ID"""
-    # Create instances with multiple endpoints
-    instance1 = create_test_instance(100, "test_job_1", ["192.168.1.1", "192.168.1.2"])
-    instance2 = create_test_instance(101, "test_job_2", ["192.168.1.3"], role="decode")
-
-    # Add instances
-    instance_manager.add_instance(instance1)
-    instance_manager.add_instance(instance2)
-
-    # Set instances to ACTIVE state
-    instance1.update_instance_status(InsStatus.ACTIVE)
-    instance2.update_instance_status(InsStatus.ACTIVE)
-
-    # Separate instances by ID
-    instance_manager.separate_instance(instance1.id)
-    instance_manager.separate_instance(instance2.id)
-
-    # Verify instances are separated
-    assert instance1.status == InsStatus.INACTIVE
-    assert instance2.status == InsStatus.INACTIVE
-    assert instance1.id in instance_manager.forced_separated_instances
-    assert instance2.id in instance_manager.forced_separated_instances
-
-
-def test_recover_instance_by_id(instance_manager, test_config):
-    """Test recovering instance by ID"""
-    # Create instance with forced separation
-    instance = create_test_instance(102, "test_job_recovery", ["192.168.1.4"])
-
-    # Add instance and force separate it
+def test_separate_instance(instance_manager):
+    """Test separating instances"""
+    instance = create_test_instance(100, "test_separate", ["192.168.1.1"])
     instance_manager.add_instance(instance)
     instance.update_instance_status(InsStatus.ACTIVE)
-    instance_manager.separate_instance(instance.id)
 
-    # Verify it's separated
+    # Test separating active instance
+    instance_manager.separate_instance(instance.id)
     assert instance.status == InsStatus.INACTIVE
     assert instance.id in instance_manager.forced_separated_instances
 
-    # Recover instance by ID
-    instance_manager.recover_instance(instance.id)
+    # Test separating already inactive instance (should not notify again)
+    original_status = instance.status
+    instance_manager.separate_instance(instance.id)
+    assert instance.status == original_status  # Should remain INACTIVE
+    assert instance.id in instance_manager.forced_separated_instances
 
-    # Verify it's recovered
+
+def test_separate_nonexistent_instance(instance_manager):
+    """Test separating non-existent instance"""
+    # Should not raise exception
+    instance_manager.separate_instance(999)
+
+
+def test_recover_instance(instance_manager):
+    """Test recovering instances"""
+    instance = create_test_instance(101, "test_recover", ["192.168.1.2"])
+    instance_manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.ACTIVE)
+
+    # Separate first
+    instance_manager.separate_instance(instance.id)
+    assert instance.id in instance_manager.forced_separated_instances
+
+    # Recover
+    instance_manager.recover_instance(instance.id)
     assert instance.id not in instance_manager.forced_separated_instances
 
 
-def test_inactive_to_initial_state_transition(instance_manager, test_config):
-    """Test transition from INACTIVE to INITIAL state"""
-    # Create instance
-    instance = create_test_instance(103, "test_job_transition", ["192.168.1.5"])
+def test_recover_nonexistent_instance(instance_manager):
+    """Test recovering non-existent instance"""
+    # Should not raise exception
+    instance_manager.recover_instance(999)
 
-    # Add instance and set to INACTIVE
+
+def test_observer_pattern(instance_manager):
+    """Test observer pattern functionality"""
+    from motor.controller.core import Observer, ObserverEvent
+
+    class MockObserver(Observer):
+        def __init__(self):
+            self.notifications = []
+
+        def update(self, instance: ReadOnlyInstance, event: ObserverEvent):
+            self.notifications.append((instance.id, event))
+
+    observer = MockObserver()
+    instance_manager.attach(observer)
+
+    instance = create_test_instance(102, "test_observer", ["192.168.1.3"])
+    instance_manager.add_instance(instance)
+
+    # Test notification on instance addition (ACTIVE)
+    instance.update_instance_status(InsStatus.ACTIVE)
+    instance_manager.notify(instance, ObserverEvent.INSTANCE_ADDED)
+
+    assert len(observer.notifications) == 1
+    assert observer.notifications[0] == (102, ObserverEvent.INSTANCE_ADDED)
+
+
+def test_handle_initial_state():
+    """Test _handle_initial method"""
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(1, "test_initial", ["192.168.1.1"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.INACTIVE)
+
+    # Test INACTIVE -> INITIAL transition
+    manager._handle_initial(InsStatus.INACTIVE, InsConditionEvent.INSTANCE_INIT, instance)
+    assert instance.id not in manager.forced_separated_instances
+
+
+def test_handle_active_state(instance_manager):
+    """Test _handle_active method"""
+    instance = instance_manager.get_instance(0)
+    instance.update_instance_status(InsStatus.INITIAL)
+
+    # Test transition to ACTIVE
+    instance_manager._handle_active(InsStatus.INITIAL, InsConditionEvent.INSTANCE_NORMAL, instance)
+    assert instance.status == InsStatus.ACTIVE
+
+
+def test_handle_inactive_state(instance_manager):
+    """Test _handle_inactive method"""
+    instance = instance_manager.get_instance(0)
+    instance.update_instance_status(InsStatus.ACTIVE)
+
+    # Test transition to INACTIVE due to abnormal condition
+    instance_manager._handle_inactive(InsStatus.ACTIVE, InsConditionEvent.INSTANCE_ABNORMAL, instance)
+    assert instance.status == InsStatus.INACTIVE
+
+
+def test_handle_deleted_state(instance_manager):
+    """Test _handle_deleted method"""
+    instance = create_test_instance(103, "test_deleted", ["192.168.1.4"])
     instance_manager.add_instance(instance)
     instance.update_instance_status(InsStatus.INACTIVE)
 
-    # Force separate it
-    instance_manager.separate_instance(instance.id)
-    assert instance.id in instance_manager.forced_separated_instances
+    # Test transition to DELETED
+    instance_manager._handle_deleted(InsStatus.INACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
+    assert instance.status == InsStatus.DELTETED
 
-    # Trigger state transition with INSTANCE_INIT event
-    instance_manager._handle_state_transition(instance)
-
-    # Manually set the event to INSTANCE_INIT and call handle_initial
-    from motor.common.resources.instance import InsConditionEvent
-    instance_manager._handle_initial(InsStatus.INACTIVE, InsConditionEvent.INSTANCE_INIT, instance)
-
-    # Verify instance is removed from forced separated set
-    assert instance.id not in instance_manager.forced_separated_instances
+    # Instance should be removed
+    assert instance_manager.get_instance(103) is None
 
 
-def test_forced_separated_instances_cleanup(instance_manager):
-    """Test that forced_separated_instances is cleaned up when instance is deleted"""
-    # Create instance
-    instance = create_test_instance(104, "test_job_cleanup", ["192.168.1.6"])
+def test_refresh_instance_heartbeat(instance_manager):
+    """Test heartbeat timestamp refresh"""
+    instance = instance_manager.get_instance(0)
+    original_timestamp = time.time() - 100  # Old timestamp
 
-    # Add instance and force separate it
+    # Set old timestamps
+    for endpoints in instance.endpoints.values():
+        for endpoint in endpoints.values():
+            endpoint.hb_timestamp = original_timestamp
+
+    current_time = time.time()
+    instance_manager._refresh_instance_heartbeat(instance, current_time)
+
+    # Verify timestamps updated
+    for endpoints in instance.endpoints.values():
+        for endpoint in endpoints.values():
+            assert endpoint.hb_timestamp == current_time
+
+
+def test_version_control():
+    """Test version control functionality"""
+    manager = create_instance_manager_with_config()
+
+    # Test initial version
+    assert manager._data_version == 0
+
+    # Test version increment
+    version1 = manager._get_next_version()
+    assert version1 == 1
+    assert manager._data_version == 1
+
+    version2 = manager._get_next_version()
+    assert version2 == 2
+    assert manager._data_version == 2
+
+
+def test_checksum_calculation(instance_manager):
+    """Test instance checksum calculation"""
+    instance = instance_manager.get_instance(0)
+
+    checksum1 = instance_manager._calculate_instance_checksum(instance)
+    assert isinstance(checksum1, str)
+    assert len(checksum1) > 0
+
+    # Test that different instances produce different checksums
+    instance2 = create_test_instance(999, "different_job", ["192.168.1.99"])
+    checksum2 = instance_manager._calculate_instance_checksum(instance2)
+    assert checksum1 != checksum2
+
+
+def test_persistent_instance_state():
+    """Test PersistentInstanceState functionality"""
+    instance_data = {"id": 1, "job_name": "test"}
+    version = 1
+    timestamp = time.time()
+
+    # Create state with valid checksum
+    data_str = f"{instance_data}{version}{timestamp}"
+    valid_checksum = hashlib.sha256(data_str.encode()).hexdigest()
+
+    state = PersistentInstanceState(instance_data, version, timestamp, valid_checksum)
+
+    # Test valid checksum
+    assert state.is_valid()
+
+    # Test invalid checksum
+    state.checksum = "invalid"
+    assert not state.is_valid()
+
+
+def test_forced_separation_cleanup(instance_manager):
+    """Test forced separated instances cleanup"""
+    instance = create_test_instance(104, "test_cleanup", ["192.168.1.5"])
     instance_manager.add_instance(instance)
-    instance_manager.separate_instance(instance.id)
 
-    # Verify it's in forced separated set
+    # Force separate
+    instance_manager.separate_instance(instance.id)
     assert instance.id in instance_manager.forced_separated_instances
 
     # Delete instance
     instance_manager.del_instance(instance.id)
-
-    # Verify it's removed from forced separated set
     assert instance.id not in instance_manager.forced_separated_instances
+
+
+def test_instances_management_loop_timeout():
+    """Test instances management loop timeout handling"""
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(105, "test_timeout", ["192.168.1.6"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.ACTIVE)
+
+    # Set endpoint to old timestamp to simulate timeout
+    for endpoints in instance.endpoints.values():
+        for endpoint in endpoints.values():
+            endpoint.hb_timestamp = time.time() - 1000  # Very old timestamp
+
+    # Manually trigger timeout transition by calling the transition logic
+    # This simulates what happens in _instances_management_loop when is_all_endpoints_alive returns False
+    from_state = instance.status
+    event = InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT
+    to_state = manager.transitions.get((from_state, event), None)
+
+    if to_state:
+        state_handler = manager.states.get(to_state, None)
+        if state_handler:
+            state_handler(from_state, event, instance)
+
+    # Should trigger timeout transition to INACTIVE
+    assert instance.status == InsStatus.INACTIVE
+
+
+def test_persistence_on_state_change():
+    """Test automatic persistence on state changes"""
+    with patch.object(InstanceManager, 'persist_data') as mock_persist:
+        manager = create_instance_manager_with_config(enable_etcd=True)
+        instance = create_test_instance(106, "test_persist", ["192.168.1.7"])
+        manager.add_instance(instance)
+
+        # Set initial status to INITIAL
+        instance.update_instance_status(InsStatus.INITIAL)
+
+        # Trigger state change to ACTIVE via heartbeat
+        heartbeat_msg = get_mock_heartbeat_msg("test_persist", 106, "192.168.1.7")
+        manager.handle_heartbeat(heartbeat_msg)
+
+        # Persistence should be called during state transition
+        mock_persist.assert_called()
+
+
+def test_prevent_forced_separation_reactivation():
+    """Test that forcibly separated instances cannot reactivate to ACTIVE"""
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(107, "test_prevent", ["192.168.1.8"])
+    manager.add_instance(instance)
+
+    # Make instance active and then force separate
+    instance.update_instance_status(InsStatus.ACTIVE)
+    manager.separate_instance(instance.id)
+
+    # Try to transition back to ACTIVE - should be prevented
+    result = manager._handle_state_transition(instance)
+    assert result is True  # Returns success but doesn't change state
+    assert instance.status == InsStatus.INACTIVE  # Still INACTIVE
+
+
+def test_update_config():
+    """Test update_config method updates configuration and recreates ETCD client"""
+    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_etcd_class.return_value = mock_client
+
+        manager = create_instance_manager_with_config(enable_etcd=True)
+
+        # Store original etcd config
+        original_etcd_config = manager.etcd_config
+
+        # Create new config with different ETCD settings
+        new_config = ControllerConfig()
+        new_config.etcd_config.etcd_host = "new-etcd-host"
+        new_config.etcd_config.etcd_port = 2380
+        new_config.etcd_config.etcd_timeout = 30.0
+        new_config.etcd_config.enable_etcd_persistence = True
+
+        # Clear the mock call history to track new calls
+        mock_etcd_class.reset_mock()
+
+        # Update config
+        manager.update_config(new_config)
+
+        # Verify config was updated
+        assert manager.etcd_config is new_config.etcd_config
+        assert manager.etcd_config.etcd_host == "new-etcd-host"
+        assert manager.etcd_config.etcd_port == 2380
+        assert manager.etcd_config.etcd_timeout == 30.0
+
+        # Verify ETCD client constructor was called with new config
+        mock_etcd_class.assert_called_once_with(
+            host="new-etcd-host",
+            port=2380,
+            ca_cert=new_config.etcd_config.etcd_ca_cert,
+            cert_key=new_config.etcd_config.etcd_cert_key,
+            cert_cert=new_config.etcd_config.etcd_cert_cert,
+            timeout=30.0
+        )

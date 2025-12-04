@@ -3,8 +3,7 @@
 import time
 
 from motor.common.utils.logger import get_logger
-from motor.controller.ft.strategy.strategy import StrategyBase
-from motor.controller.ft.fault_manager import FaultManager
+from motor.controller.ft.strategy import StrategyBase
 
 logger = get_logger(__name__)
 

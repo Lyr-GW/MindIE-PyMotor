@@ -23,14 +23,21 @@ MIN_PORT = 1024
 
 
 class Daemon(ThreadSafeSingleton):
-    def __init__(self):
+    def __init__(self, config: NodeManagerConfig | None = None):
         if hasattr(self, "_initialized"):
             return
 
         self.engine_pids: list[int] = []
-        self.config = NodeManagerConfig()
+        if config is None:
+            config = NodeManagerConfig.from_json()
+
+        # related config
+        self.parallel_config = config.basic_config.parallel_config
+        self.device_num = config.basic_config.device_num
+        
         self._initialized = True
         self._pids_lock = threading.Lock()
+
 
     @staticmethod
     def _check_params(params: Endpoint) -> bool:
@@ -66,10 +73,10 @@ class Daemon(ThreadSafeSingleton):
             --config-path engine config file path
         """
         try:
-            parallel_config = self.config.parallel_config
+            parallel_config = self.parallel_config
             local_world_size = parallel_config.tp_size * parallel_config.pp_size
             env = os.environ.copy()
-            device_size = len(self.config.device_info)
+            device_size = self.device_num
             for i, endpoint in enumerate(endpoints_info):
                 if not self._check_params(endpoint):
                     raise ValueError(f"Invalid endpoint parameters")

@@ -14,6 +14,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 ENCODING_UTF8 = 'utf-8'
 HEALTH_CHECK_CONFIG = 'health_check_config'
 HTTP_CONFIG = 'http_config'
+API_CONFIG = 'api_config'
+BASIC_CONFIG = 'basic_config'
 CONTROLLER_API_HOST = 'controller_api_host'
 COORDINATOR_API_DNS = 'coordinator_api_dns'
 COORDINATOR_API_HOST = 'coordinator_api_host'
@@ -142,22 +144,22 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
 
         try:
             if config_key == ConfigKey.MOTOR_CONTROLLER.value:
-                updated_config[CONTROLLER_API_HOST] = os.getenv('POD_IP')
-                updated_config[COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
+                updated_config[API_CONFIG][CONTROLLER_API_HOST] = os.getenv('POD_IP')
+                updated_config[API_CONFIG][COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
                 updated_config[HTTP_CONFIG][COORDINATOR_API_HOST] = os.getenv('POD_IP')
                 updated_config[HEALTH_CHECK_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
                 if AIGW in updated_config:
                     update_aigw_config(updated_config, user_config_data)
             elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:
-                updated_config[CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
+                updated_config[API_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
                 role = os.getenv('ROLE')
                 if role == PREFILL:
-                    updated_config[PARALLEL_CONFIG] = \
+                    updated_config[BASIC_CONFIG][PARALLEL_CONFIG] = \
                         user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value]\
                             [MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
                 elif role == DECODE:
-                    updated_config[PARALLEL_CONFIG] = \
+                    updated_config[BASIC_CONFIG][PARALLEL_CONFIG] = \
                         user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value][MODEL_CONFIG][DECODE_PARALLEL_CONFIG]
             elif config_key == ConfigKey.MOTOR_ENGINE_PREFILL.value:
                 updated_config[MODEL_CONFIG][DECODE_PARALLEL_CONFIG] = \

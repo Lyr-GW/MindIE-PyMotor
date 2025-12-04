@@ -3,16 +3,19 @@
 
 import time
 import threading
+import hashlib
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 from fastapi import HTTPException
 
 from motor.common.resources.http_msg_spec import HeartbeatMsg
 from motor.common.utils.logger import get_logger
 from motor.common.resources.instance import Instance, InsStatus, InsConditionEvent, ReadOnlyInstance
-from motor.controller.core.observer import Observer, ObserverEvent
+from motor.controller.core import Observer, ObserverEvent
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
-
+from motor.common.utils.etcd_client import EtcdClient
 
 logger = get_logger(__name__)
 
@@ -20,6 +23,25 @@ logger = get_logger(__name__)
 HEARTBEAT_HANDLER_SUCCESS = 200
 HEARTBEAT_HANDLER_ERROR = 500
 HEARTBEAT_HANDLER_RE_REGISTER = 503
+
+
+@dataclass
+class PersistentInstanceState:
+    """Enhanced persistent instance state with version control and data integrity"""
+    instance_data: dict[str, Any]
+    version: int
+    timestamp: float
+    checksum: str
+
+    def is_valid(self) -> bool:
+        """Validate data integrity using checksum"""
+        current_checksum = self._calculate_checksum()
+        return self.checksum == current_checksum
+
+    def _calculate_checksum(self) -> str:
+        """Calculate checksum for data integrity verification"""
+        data_str = f"{self.instance_data}{self.version}{self.timestamp}"
+        return hashlib.sha256(data_str.encode()).hexdigest()
 
 
 class InstanceManager(ThreadSafeSingleton):
@@ -43,7 +65,10 @@ class InstanceManager(ThreadSafeSingleton):
 
         if config is None:
             config = ControllerConfig()
-        self.config = config
+
+        # Extract required config fields
+        self.etcd_config = config.etcd_config
+        self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
 
         self.instances: dict[int, Instance] = {}
         self.observers: list[Observer] = []
@@ -54,6 +79,19 @@ class InstanceManager(ThreadSafeSingleton):
 
         self.stop_event = threading.Event()
         self.ins_lock = threading.Lock()
+
+        # Version control for data persistence
+        self._data_version = 0
+        self._version_lock = threading.Lock()
+
+        self.etcd_client = EtcdClient(
+            host=self.etcd_config.etcd_host,
+            port=self.etcd_config.etcd_port,
+            ca_cert=self.etcd_config.etcd_ca_cert,
+            cert_key=self.etcd_config.etcd_cert_key,
+            cert_cert=self.etcd_config.etcd_cert_cert,
+            timeout=self.etcd_config.etcd_timeout
+        )
 
         """
         self.states: dict[InsStatus, Callable]: State handle function mapping
@@ -83,27 +121,54 @@ class InstanceManager(ThreadSafeSingleton):
             (InsStatus.INACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.DELTETED
         }
 
-        # Create instances management thread
-        self.instances_management_thread = threading.Thread(
-            target=self._instances_management_thread,
-            daemon=True,
-            name="InstancesManagementThread"
-        )
+        self.instances_management_thread = None
 
         self._initialized = True
         logger.info("InstanceManager initialized.")
 
     def start(self) -> None:
-        """Start the instances management thread"""
+        """Start the instance heartbeat timeout management thread"""
+        # Reset stop_event if it was previously set (for singleton reuse)
+        if self.stop_event.is_set():
+            self.stop_event.clear()
+
+        # Try to restore data from ETCD, if failed,
+        # it will start with empty state.
+        if self.etcd_config.enable_etcd_persistence:
+            self.restore_data()
+
+        # Create instance heartbeat timeout management thread
+        self.instances_management_thread = threading.Thread(
+            target=self._instances_management_loop,
+            daemon=True,
+            name="InstancesManagementLoop"
+        )
         self.instances_management_thread.start()
         logger.info("InstanceManager started.")
 
     def stop(self) -> None:
         self.stop_event.set()
         # Only join thread that have been started
-        if self.instances_management_thread.is_alive():
+        if self.instances_management_thread and self.instances_management_thread.is_alive():
             self.instances_management_thread.join()
         logger.info("InstanceManager stopped.")
+
+    def update_config(self, config: ControllerConfig) -> None:
+        """Update configuration for the instance manager"""
+        # Update config fields
+        self.etcd_config = config.etcd_config
+        self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
+
+        # Update ETCD client with new configuration
+        self.etcd_client = EtcdClient(
+            host=self.etcd_config.etcd_host,
+            port=self.etcd_config.etcd_port,
+            ca_cert=self.etcd_config.etcd_ca_cert,
+            cert_key=self.etcd_config.etcd_cert_key,
+            cert_cert=self.etcd_config.etcd_cert_cert,
+            timeout=self.etcd_config.etcd_timeout
+        )
+        logger.info("InstanceManager configuration updated")
 
     def attach(self, observer: Observer) -> None:
         # For observer pattern
@@ -115,6 +180,98 @@ class InstanceManager(ThreadSafeSingleton):
         readonly_instance = ReadOnlyInstance(instance)
         for observer in self.observers:
             observer.update(readonly_instance, event)
+
+    def persist_data(self) -> bool:
+        """Persist instance manager data to ETCD with version control and checksum"""
+        try:
+            with self.ins_lock:
+                current_time = time.time()
+                next_version = self._get_next_version()
+
+                persistent_states = {}
+                for ins_id, instance in self.instances.items():
+                    # Create persistent state with version control and checksum
+                    instance_data = instance.model_dump()
+                    checksum = self._calculate_instance_checksum(instance)
+
+                    persistent_state = PersistentInstanceState(
+                        instance_data=instance_data,
+                        version=next_version,
+                        timestamp=current_time,
+                        checksum=checksum
+                    )
+
+                    persistent_states[str(ins_id)] = persistent_state
+
+                success = self.etcd_client.persist_data("/controller/instances", persistent_states)
+                if success:
+                    logger.info("Successfully persisted %d instances with version %d",
+                              len(persistent_states), next_version)
+                return success
+
+        except Exception as e:
+            logger.error("Error persisting instance manager data: %s", e)
+            return False
+
+    def restore_data(self) -> bool:
+        """Restore instance manager data from ETCD with version control and validation"""
+        try:
+            persistent_states = self.etcd_client.restore_data("/controller/instances", PersistentInstanceState)
+            if persistent_states is None:
+                logger.info("No instance data found in ETCD, starting with empty state")
+                return True
+
+            # Process enhanced persistent format
+            with self.ins_lock:
+                self.instances.clear()
+                current_time = time.time()
+                valid_instances = 0
+                invalid_instances = 0
+
+                for ins_id_str, persistent_state in persistent_states.items():
+                    if isinstance(persistent_state, PersistentInstanceState):
+                        # Validate data integrity
+                        if not persistent_state.is_valid():
+                            logger.warning("Data integrity check failed for instance %s, skipping", ins_id_str)
+                            invalid_instances += 1
+                            continue
+
+                        # Reconstruct instance from persistent state
+                        try:
+                            instance = Instance(**persistent_state.instance_data)
+
+                            # Update data version
+                            with self._version_lock:
+                                self._data_version = max(self._data_version, persistent_state.version)
+
+                            # Refresh heartbeat timestamp for ACTIVE instances to avoid immediate timeout
+                            if instance.status == InsStatus.ACTIVE:
+                                self._refresh_instance_heartbeat(instance, current_time)
+                                self.notify(instance, ObserverEvent.INSTANCE_ADDED)
+                                logger.info("Restored ACTIVE instance %d (%s) with refreshed heartbeat (v%d)",
+                                            instance.id, instance.job_name, persistent_state.version)
+                            else:
+                                logger.info("Restored instance %d (%s) with status %s (v%d)",
+                                            instance.id,
+                                            instance.job_name,
+                                            instance.status.value,
+                                            persistent_state.version)
+
+                            self.instances[instance.id] = instance
+                            valid_instances += 1
+
+                        except Exception as e:
+                            logger.error("Error reconstructing instance %s: %s", ins_id_str, e)
+                            invalid_instances += 1
+                            continue
+
+                logger.info("Successfully restored %d valid instances, %d invalid instances skipped",
+                          valid_instances, invalid_instances)
+                return True
+
+        except Exception as e:
+            logger.error("Error restoring instance manager data: %s", e)
+            return False
 
     def get_instance_num(self) -> int:
         with self.ins_lock:
@@ -157,16 +314,17 @@ class InstanceManager(ThreadSafeSingleton):
                 logger.error("Instance %s(id:%d) already exists.", ins.job_name, ins.id)
                 return
             self.instances[ins.id] = ins
-            logger.info("Instance %s(id:%d) added.", ins.job_name, ins.id)
+            logger.info("Instance %s(id:%d) role:%s added.", ins.job_name, ins.id, ins.role)
 
     def del_instance(self, ins_id: int):
         with self.ins_lock:
             if ins_id in self.instances:
                 job_name = self.instances[ins_id].job_name
+                role = self.instances[ins_id].role
                 self.instances.pop(ins_id)
                 # Also remove from forced separated set if present
                 self.forced_separated_instances.discard(ins_id)
-                logger.info("Instance %s(id:%d) removed.", job_name, ins_id)
+                logger.info("Instance %s(id:%d) role:%s removed.", job_name, ins_id, role)
             else:
                 logger.error("Instance %d not found.", ins_id)
 
@@ -242,6 +400,22 @@ class InstanceManager(ThreadSafeSingleton):
         except Exception as e:
             logger.error("Error recovering instance %d: %s", instance_id, e)
 
+    def has_instance_by_job_name(self, job_name: str) -> bool:
+        """Check if instance exists by job name"""
+        with self.ins_lock:
+            for _, instance in self.instances.items():
+                if instance.job_name == job_name:
+                    return True
+            return False
+
+    def has_active_instance_by_job_name(self, job_name: str) -> bool:
+        """Check if active instance exists by job name"""
+        with self.ins_lock:
+            for _, instance in self.instances.items():
+                if instance.job_name == job_name and instance.status == InsStatus.ACTIVE:
+                    return True
+            return False
+
     def handle_heartbeat(self, heartbeat_msg: HeartbeatMsg) -> tuple[bool, str]:
         """
         Handle heartbeat and update instance status
@@ -279,11 +453,12 @@ class InstanceManager(ThreadSafeSingleton):
     """
     State transition callback function
     """
-    def _instances_management_thread(self) -> None:
-        """Instance heartbeat timeout management"""
+    def _instances_management_loop(self) -> None:
+        """Instance management loop"""
         while not self.stop_event.is_set():
             with self.ins_lock:
-                cur_instances = self.instances.values()
+                # use copy to avoid modifying the dictionary while iterating
+                cur_instances = list(self.instances.values())
 
             for instance in cur_instances:
                 if instance.status == InsStatus.DELTETED:
@@ -305,7 +480,7 @@ class InstanceManager(ThreadSafeSingleton):
                 if state_handler:
                     state_handler(from_state, event, instance)
 
-            time.sleep(self.config.instance_manager_check_internal)
+            time.sleep(self.instance_manager_check_internal)
 
     def _handle_initial(
         self,
@@ -400,6 +575,12 @@ class InstanceManager(ThreadSafeSingleton):
         if state_handler:
             state_handler(from_state, event, instance)
 
+            # Active persistence on state change
+            if from_state != to_state and self.etcd_config.enable_etcd_persistence:
+                logger.debug("Instance %d state changed from %s to %s, triggering persistence",
+                            instance.id, from_state, to_state)
+                self.persist_data()
+
             # Remove from forced separated set if transitioning to DELETED
             if to_state == InsStatus.DELTETED and instance.id in self.forced_separated_instances:
                 with self.ins_lock:
@@ -408,3 +589,34 @@ class InstanceManager(ThreadSafeSingleton):
                             instance.id, instance.job_name)
 
         return True
+
+    def _refresh_instance_heartbeat(self, instance: Instance, timestamp: float) -> None:
+        """Refresh heartbeat timestamp for all endpoints in an instance"""
+        try:
+            # Update heartbeat timestamp for all endpoints
+            for endpoints in instance.endpoints.values():
+                for endpoint in endpoints.values():
+                    endpoint.hb_timestamp = timestamp
+            logger.debug("Refreshed heartbeat timestamp for instance %d (%s) to %f",
+                        instance.id, instance.job_name, timestamp)
+        except Exception as e:
+            logger.error("Error refreshing heartbeat for instance %d: %s", instance.id, e)
+
+    def _get_next_version(self) -> int:
+        """Get next data version for persistence"""
+        with self._version_lock:
+            self._data_version += 1
+            return self._data_version
+
+    def _calculate_instance_checksum(self, instance: Instance) -> str:
+        """Calculate checksum for instance data integrity"""
+        try:
+            # Calculate checksum using key fields
+            data_str = f"{instance.job_name}{instance.id}{instance.status.value}"
+            # Include endpoint information
+            for pod_ip, endpoints in instance.endpoints.items():
+                data_str += f"{pod_ip}:{len(endpoints)}"
+            return hashlib.sha256(data_str.encode()).hexdigest()
+        except Exception as e:
+            logger.error("Error calculating checksum for instance %d: %s", instance.id, e)
+            return ""

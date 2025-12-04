@@ -21,11 +21,16 @@ from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
+from motor.common.utils.config_watcher import ConfigWatcher
 from motor.common.utils.logger import get_logger
+
 
 logger = get_logger(__name__)
 
 modules: dict[str, Any] = {}
+
+# Global config watcher
+config_watcher: ConfigWatcher | None = None
 
 
 def stop_all_modules() -> None:
@@ -76,18 +81,33 @@ def initialize_components():
 
 
 async def main():
+    global config_watcher
+
     try:
         logger.info("Starting Motor Coordinator HTTP server...")
-        
+
         initialize_components()
-        
+
+        # Start configuration file watcher
+        coordinator_config = modules.get("CoordinatorConfig")
+        if (
+            coordinator_config and coordinator_config.config_file_path and 
+            os.path.exists(coordinator_config.config_file_path)
+        ):
+            config_watcher = ConfigWatcher(
+                config_path=coordinator_config.config_file_path,
+                reload_callback=coordinator_config.reload
+            )
+            config_watcher.start()
+            logger.info("Configuration file watcher started")
+
         coordinator_server = modules.get("CoordinatorServer")
-        
+
         if not coordinator_server:
             raise RuntimeError("Failed to initialize server")
-        
+
         await coordinator_server.run()
-        
+
     except KeyboardInterrupt:
         logger.info("Received stop signal")
     except asyncio.CancelledError:
@@ -96,15 +116,16 @@ async def main():
         logger.error(f"Server startup failed: {e}")
         raise
     finally:
+        # Stop config watcher
+        if config_watcher:
+            config_watcher.stop()
+            logger.info("Configuration file watcher stopped")
+
         stop_all_modules()
         logger.info("Coordinator server shutdown complete")
 
 
 if __name__ == "__main__":
-    if sys.version_info < (3, 6):
-        logger.error("Python 3.6 or higher is required")
-        sys.exit(1)
-    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

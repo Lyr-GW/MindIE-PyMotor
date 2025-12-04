@@ -85,9 +85,18 @@ async def stop_instance(request: Request):
 
 
 class NodeManagerAPI:
-    def __init__(self, host: str, port: int):
-        self.host = host
-        self.port = port
+    def __init__(self, config=None):
+        self._config = config
+        # Get host and port from config
+        if self._config and self._config.api_config.pod_ip:
+            self.host = self._config.api_config.pod_ip
+        else:
+            self.host = "0.0.0.0"  # Default host
+
+        if self._config:
+            self.port = self._config.api_config.node_manager_port
+        else:
+            self.port = 8080  # Default port
         self.server = None
         self.serve_task = None
         self._thread = None

@@ -9,14 +9,12 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request
 
-from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
+from motor.controller.api_client import NodeManagerApiClient
 from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.config.controller import ControllerConfig
 from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
-from motor.controller.core.instance_assembler import InstanceAssembler
-from motor.controller.core.instance_manager import InstanceManager
-from motor.controller.api_server import probe_api
-from motor.controller.api_server import om_api
+from motor.controller.core import InstanceAssembler, InstanceManager
+from motor.controller.api_server import probe_api, om_api
 
 
 logger = get_logger(__name__)
@@ -32,26 +30,33 @@ def validate_cert_and_key(cert_path: str, key_path: str):
                 raise ValueError(f"{desc} file format is nor correct: {path}")
 
 
+
 class ControllerAPI:
     def __init__(self, config: ControllerConfig | None = None, host: str = None, port: int = None):
         if config is None:
             config = ControllerConfig()
         self.config = config
-        self.host = host if host is not None else config.controller_api_host
-        self.port = port if port is not None else config.controller_api_port
+        self.host = host if host is not None else config.api_config.controller_api_host
+        self.port = port if port is not None else config.api_config.controller_api_port
         self.server = None
         self.loop = None
         self.app = self._create_app()
+        self.api_server_thread = None
+        logger.info("ControllerAPI initialized.")
+        
+    def start(self) -> None:
+        # Create API server thread
         self.api_server_thread = threading.Thread(
             target=self._run_api_server,
             daemon=True,
             name="APIServer"
         )
-        logger.info("ControllerAPI initialized.")
-        
-    def start(self) -> None:
         self.api_server_thread.start()
         logger.info("ControllerAPI started.")
+
+    def is_alive(self) -> bool:
+        """Check if the API server thread is alive"""
+        return self.api_server_thread is not None and self.api_server_thread.is_alive()
 
     def stop(self) -> None:
         if self.server and self.loop:
@@ -64,11 +69,18 @@ class ControllerAPI:
                 if self.loop and not self.loop.is_closed():
                     self.loop.call_soon_threadsafe(self.loop.stop)
 
+    def update_config(self, config: ControllerConfig) -> None:
+        """Update configuration for the controller API"""
+        # Note: API server configuration cannot be updated while running
+        # Only update the config reference for future use
+        self.config = config
+        logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
+
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI):
-        if self.config.enable_tls:
-            cert_path = self.config.cert_path
-            key_path = self.config.key_path
+        if self.config.tls_config.enable_tls:
+            cert_path = self.config.tls_config.cert_path
+            key_path = self.config.tls_config.key_path
             try:
                 validate_cert_and_key(cert_path, key_path)
                 logger.info("Cert and key validate pass: %s, %s", cert_path, key_path)
@@ -89,8 +101,8 @@ class ControllerAPI:
             "/controller/reregister": logging.INFO,
             "/controller/terminate-instance": logging.INFO,
             "/v1/alarm/coordinator": logging.ERROR,
-            "/startup": logging.INFO,
-            "/readiness": logging.INFO,
+            "/startup": logging.ERROR,
+            "/readiness": logging.ERROR,
             "/liveness": logging.ERROR
         }
         logging.getLogger("uvicorn.access").addFilter(ApiAccessFilter(api_filters))
@@ -148,8 +160,8 @@ class ControllerAPI:
             enable_tls = os.environ.get("ENABLE_TLS", "0").lower() in ("1", "true", "yes")
             logger.info("Starting API server on %s:%d TLS=%s", self.host, self.port, enable_tls)
             if enable_tls:
-                cert_path = os.environ.get("CERT_PATH", self.config.cert_path)
-                key_path = os.environ.get("KEY_PATH", self.config.key_path)
+                cert_path = os.environ.get("CERT_PATH", self.config.tls_config.cert_path)
+                key_path = os.environ.get("KEY_PATH", self.config.tls_config.key_path)
                 server_config = uvicorn.Config(
                     self.app,
                     host=self.host, 

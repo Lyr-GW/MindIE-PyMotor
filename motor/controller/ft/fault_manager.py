@@ -11,12 +11,11 @@ from motor.common.utils.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
 from motor.common.resources.instance import Instance, ReadOnlyInstance, NodeManagerInfo
-from motor.controller.core.observer import Observer, ObserverEvent
-from motor.controller.core.instance_manager import InstanceManager, InsStatus
-from motor.controller.ft.cluster_grpc import cluster_fault_pb2
-from motor.controller.ft.cluster_grpc.cluster_grpc_client import ClusterNodeClient
-from motor.controller.ft.strategy.strategy import StrategyBase, generate_strategy_map
-
+from motor.controller.core import Observer, ObserverEvent, InstanceManager
+from motor.controller.core.instance_manager import InsStatus
+from motor.controller.ft.cluster_grpc import cluster_fault_pb2, ClusterNodeClient
+from motor.controller.ft.strategy import StrategyBase, generate_strategy_map
+from motor.common.utils.etcd_client import EtcdClient
 
 logger = get_logger(__name__)
 
@@ -118,18 +117,6 @@ class InstanceMetadata:
     strategy: StrategyBase | None = None # current handling strategy
 
     
-@dataclass
-class InstanceGroupMetadata:
-    """
-    Instance group metadata for scale prefill to decode recovery.
-    it is defferent from instance group metadata in instance assembler.
-    because it interact with instance manager, which manage instances 
-    by instance id, so it use instance id instead of job name.
-    """
-    id: int
-    p_ids: list[int] = field(default_factory=list)
-    d_ids: list[int] = field(default_factory=list)
-
 
 class FaultManager(ThreadSafeSingleton, Observer):
     """
@@ -151,16 +138,27 @@ class FaultManager(ThreadSafeSingleton, Observer):
             config = ControllerConfig()
         self.config = config
 
+        # Extract required config fields
+        self.etcd_config = config.etcd_config
+        self.strategy_center_check_internal = config.fault_tolerance_config.strategy_center_check_internal
+
         # Manage all servers's status with pod_ip, when it comes a faulty server,
         # we firstly find out which instance this server belongs to,
         # and then use self.instances to find out all nodes in this instance.
         self.servers: dict[str, ServerMetadata] = {}
         self.instances: dict[int, InstanceMetadata] = {}
-        # For scale prefill to decode recovery
-        self.groups: dict[int, InstanceGroupMetadata] = {}
         self.lock = threading.Lock()
 
         self.client = ClusterNodeClient('localhost', 5005)
+
+        self.etcd_client = EtcdClient(
+            host=self.etcd_config.etcd_host,
+            port=self.etcd_config.etcd_port,
+            ca_cert=self.etcd_config.etcd_ca_cert,
+            cert_key=self.etcd_config.etcd_cert_key,
+            cert_cert=self.etcd_config.etcd_cert_cert,
+            timeout=self.etcd_config.etcd_timeout
+        )
 
         self.stop_event = threading.Event()
 
@@ -169,6 +167,18 @@ class FaultManager(ThreadSafeSingleton, Observer):
 
         self.strategies = generate_strategy_map()
 
+        self.server_status_subscriber_thread = None
+        self.ft_strategy_center_thread = None
+        self._initialized = True
+        logger.info("FaultManager initialized.")
+
+    def start(self) -> None:
+        """Start the fault tolerance threads"""
+        # Reset stop_event if it was previously set (for singleton reuse)
+        if self.stop_event.is_set():
+            self.stop_event.clear()
+
+        # Create server status subscriber and fault tolerance strategy center threads
         self.server_status_subscriber_thread = threading.Thread(
             target=self._server_status_subscriber,
             daemon=True,
@@ -179,21 +189,148 @@ class FaultManager(ThreadSafeSingleton, Observer):
             daemon=True,
             name="FaultToleranceStrategyCenter"
         )
-        self._initialized = True
-        logger.info("FaultManager initialized.")
 
-    def start(self) -> None:
-        """Start the fault tolerance threads"""
+        # Try to restore data from ETCD, if failed,
+        # it will start with empty state.
+        if self.etcd_config.enable_etcd_persistence:
+            self.restore_data()
+
         self.server_status_subscriber_thread.start()
         self.ft_strategy_center_thread.start()
         logger.info("FaultManager started.")
 
+    def is_alive(self) -> bool:
+        """Check if the fault manager threads are alive"""
+        return (
+            (self.server_status_subscriber_thread is not None and self.server_status_subscriber_thread.is_alive()) and
+            (self.ft_strategy_center_thread is not None and self.ft_strategy_center_thread.is_alive())
+        )
+
     def stop(self) -> None:
         self.stop_event.set()
+
         # Only join threads that have been started
-        if self.ft_strategy_center_thread.is_alive():
+        if (
+            self.ft_strategy_center_thread is not None and 
+            self.ft_strategy_center_thread.is_alive()
+        ):
             self.ft_strategy_center_thread.join()
+
+        # Close ETCD client
+        if hasattr(self, 'etcd_client'):
+            self.etcd_client.close()
+
         logger.info("FaultManager stopped.")
+
+    def update_config(self, config: ControllerConfig) -> None:
+        """Update configuration for the fault manager"""
+        self.config = config
+
+        # Update config fields
+        self.etcd_config = config.etcd_config
+        self.strategy_center_check_internal = config.fault_tolerance_config.strategy_center_check_internal
+
+        # Update ETCD client with new configuration
+        self.etcd_client = EtcdClient(
+            host=self.etcd_config.etcd_host,
+            port=self.etcd_config.etcd_port,
+            ca_cert=self.etcd_config.etcd_ca_cert,
+            cert_key=self.etcd_config.etcd_cert_key,
+            cert_cert=self.etcd_config.etcd_cert_cert,
+            timeout=self.etcd_config.etcd_timeout
+        )
+        logger.info("FaultManager configuration updated")
+
+    def persist_data(self) -> bool:
+        """Persist fault manager data to ETCD"""
+        # Persist servers data
+        servers_data = {}
+        instances_data = {}
+
+        try:
+            with self.lock:
+                for pod_ip, server_metadata in self.servers.items():
+                    servers_data[pod_ip] = {
+                        'pod_ip': server_metadata.pod_ip,
+                        'host_ip': server_metadata.host_ip,
+                        'status': server_metadata.status.value,
+                        'device_fault_infos': [fault.__dict__ for fault in server_metadata.device_fault_infos]
+                    }
+
+                for ins_id, ins_metadata in self.instances.items():
+                    instances_data[str(ins_id)] = {
+                        'instance_id': ins_metadata.instance_id,
+                        'status': ins_metadata.status.value,
+                        'node_managers': [node_mgr.__dict__ for node_mgr in ins_metadata.node_managers],
+                        'fault_level': ins_metadata.fault_level,
+                        'fault_code': ins_metadata.fault_code
+                        # Note: strategy is not persisted as it's runtime state
+                    }
+
+
+            success = True
+            success &= self.etcd_client.persist_data("/controller/fault/servers", servers_data)
+            success &= self.etcd_client.persist_data("/controller/fault/instances", instances_data)
+
+            if success:
+                logger.info("Successfully persisted fault manager data")
+            return success
+
+        except Exception as e:
+            logger.error("Error persisting fault manager data: %s", e)
+            return False
+
+    def restore_data(self) -> bool:
+        """Restore fault manager data from ETCD"""
+        try:
+            # Restore servers data
+            servers_data = self.etcd_client.restore_data("/controller/fault/servers")
+            instances_data = self.etcd_client.restore_data("/controller/fault/instances")
+
+            if servers_data is None:
+                servers_data = {}
+            if instances_data is None:
+                instances_data = {}
+
+            with self.lock:
+                self.servers.clear()
+                self.instances.clear()
+
+                # Restore servers
+                for pod_ip, server_dict in servers_data.items():
+                    server_metadata = ServerMetadata(
+                        pod_ip=server_dict['pod_ip'],
+                        host_ip=server_dict['host_ip'],
+                        status=Status(server_dict['status']),
+                        device_fault_infos=[
+                            DeviceFaultInfo(**fault)
+                            for fault in server_dict.get('device_fault_infos', [])
+                        ]
+                    )
+                    self.servers[pod_ip] = server_metadata
+
+                # Restore instances
+                for ins_id, ins_dict in instances_data.items():
+                    ins_metadata = InstanceMetadata(
+                        instance_id=ins_dict['instance_id'],
+                        status=Status(ins_dict['status']),
+                        node_managers=[
+                            NodeManagerInfo(**node_mgr)
+                            for node_mgr in ins_dict.get('node_managers', [])
+                        ],
+                        fault_level=ins_dict.get('fault_level', 'L0'),
+                        fault_code=ins_dict.get('fault_code', 0x0)
+                    )
+                    self.instances[ins_metadata.instance_id] = ins_metadata
+                    logger.debug("Restored instance %d with status %s", ins_id, ins_metadata.status.value)
+
+            logger.info("Successfully restored fault manager data: %d servers, %d instances",
+                       len(self.servers), len(self.instances))
+            return True
+
+        except Exception as e:
+            logger.error("Error restoring fault manager data: %s", e)
+            return False
 
     def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
         logger.info("FaultManager update instance %s with event: %s.",
@@ -210,11 +347,18 @@ class FaultManager(ThreadSafeSingleton, Observer):
             raise ValueError(f"Invalid event: {event}.")
 
     def _handle_instance_added(self, instance: Instance) -> None:
+        with self.lock:
+            # Check if instance already exists, if so, skip adding
+            if instance.id in self.instances:
+                logger.debug("Instance %d already exists in fault manager, skipping add operation.",
+                             instance.id)
+                return
+
         ins_metadata = InstanceMetadata(
             instance_id=instance.id,
             node_managers=instance.get_node_managers()
         )
-        
+
         server_metadatas = {}
         for node_mgr in ins_metadata.node_managers:
             server_metadatas[node_mgr.pod_ip] = ServerMetadata(
@@ -225,17 +369,6 @@ class FaultManager(ThreadSafeSingleton, Observer):
         with self.lock:
             self.instances[instance.id] = ins_metadata
             self.servers.update(server_metadatas)
-
-            if instance.group_id not in self.groups:
-                group = InstanceGroupMetadata(id=instance.group_id)
-                self.groups[instance.group_id] = group
-            else:
-                group = self.groups[instance.group_id]
-            
-            if instance.role == "prefill":
-                group.p_ids.append(instance.id)
-            else:
-                group.d_ids.append(instance.id)
 
     def _handle_instance_separated(self, instance: Instance) -> None:
         with self.lock:
@@ -258,15 +391,6 @@ class FaultManager(ThreadSafeSingleton, Observer):
         with self.lock:
             for node_mgr in node_managers:
                 self.servers.pop(node_mgr.pod_ip, None)
-
-            if instance.group_id in self.groups:
-                group = self.groups[instance.group_id]
-                if instance.role == "prefill" and instance.id in group.p_ids:
-                    group.p_ids.remove(instance.id)
-                elif instance.role == "decode" and instance.id in group.d_ids:
-                    group.d_ids.remove(instance.id)
-                if len(group.p_ids) == 0 and len(group.d_ids) == 0:
-                    self.groups.pop(instance.group_id)
 
             self.instances.pop(instance.id, None)
 
@@ -455,6 +579,12 @@ class FaultManager(ThreadSafeSingleton, Observer):
                 logger.error("Critical error updating status for instance %d: %s", instance_id, e)
                 continue
 
+        # Active persistence whenever hardware fault info is updated
+        if self.etcd_config.enable_etcd_persistence:
+            logger.debug("Instance %d fault status updated to %s:%s, triggering persistence",
+                        instance_id, final_level, str(fault_code))
+            self.persist_data()
+
     def _eval_server_status(self, pod_ip: str) -> DeviceFaultInfo | None:
         server_metadata = None
         with self.lock:
@@ -489,7 +619,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
             for instance_id in instance_ids:
                 self._process_instance_strategy(instance_id)
 
-            time.sleep(self.config.strategy_center_check_internal)
+            time.sleep(self.strategy_center_check_internal)
 
     def _process_instance_strategy(self, ins_id: int) -> None:
         """
@@ -511,7 +641,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
         
         with ins_metadata.lock:
             fault_level, fault_code = ins_metadata.fault_level, ins_metadata.fault_code
-            new_strategy_cls = self.strategies[fault_level](fault_code, ins_id)
+            new_strategy_cls = self.strategies[fault_level](fault_code, ins_id, self.config)
             current_strategy = ins_metadata.strategy
             current_cls = current_strategy.__class__ if current_strategy is not None else None
 
@@ -538,6 +668,11 @@ class FaultManager(ThreadSafeSingleton, Observer):
                     ins_metadata.fault_level = FaultLevel.L0
                     ins_metadata.fault_code = 0x0
                     logger.info("Strategy for instance %d finished, reset state.", ins_id)
+
+                    # Active persistence whenever strategy completes
+                    if self.etcd_config.enable_etcd_persistence:
+                        logger.debug("Strategy for instance %d finished, triggering persistence", ins_id)
+                        self.persist_data()
                 else:
                     # New strategy and have unfinished strategy will both reach here.
                     ins_metadata.fault_level = fault_level

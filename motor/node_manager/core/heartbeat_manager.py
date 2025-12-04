@@ -5,27 +5,35 @@
 import threading
 import time
 
-from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.engine_manager import EngineManager
 from motor.common.utils.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
 from motor.common.utils.http_client import SafeHTTPSClient
+from motor.config.node_manager import NodeManagerConfig
 
 logger = get_logger(__name__)
 
 
 class HeartbeatManager(ThreadSafeSingleton):
-    def __init__(self) -> None:
+    def __init__(self, config: NodeManagerConfig | None = None) -> None:
         if hasattr(self, '_initialized'):
             return
-            
+
         self._endpoint_lock = threading.Lock()
         self._reregister_lock = threading.Lock()  # lock for _reregistering flag
         self._reregister_thread = None
         self.stop_event = threading.Event()
-        self.config = NodeManagerConfig()
+
+        if config is None:
+            config = NodeManagerConfig.from_json()
+        self.heartbeat_interval_seconds = config.basic_config.heartbeat_interval_seconds
+        self.controller_api_dns = config.api_config.controller_api_dns
+        self.controller_api_port = config.api_config.controller_api_port
+        self.pod_ip = config.api_config.pod_ip
+        self.controller_api_url = f"http://{self.controller_api_dns}:{self.controller_api_port}"
+
         self._job_name = ""
         self._role = "prefill"
         self._instance_id = -1
@@ -44,6 +52,7 @@ class HeartbeatManager(ThreadSafeSingleton):
         self._reregistering = False
         self._initialized = True
         logger.info("HeartBeatManager module start.")
+
 
     def start(self):
         if self._thread_started is False:
@@ -120,20 +129,19 @@ class HeartbeatManager(ThreadSafeSingleton):
             try:
                 with self._endpoint_lock:
                     endpoint_status_list = {item.id: EndpointStatus.NORMAL for item in self._endpoints}
-                
-                client = SafeHTTPSClient(
-                    base_url=f"http://{self.config.controller_api_dns}:{self.config.controller_api_port}",
-                    timeout=0.5
-                )
 
-                heartbeat_msg = HeartbeatMsg(
-                    job_name=self._job_name,
-                    ins_id=self._instance_id,
-                    ip=self.config.pod_ip,
-                    status=endpoint_status_list
-                )
-                _ = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
-                logger.info("report endpoint status to controller status successfully.")
+                with SafeHTTPSClient(
+                    base_url=self.controller_api_url,
+                    timeout=0.5
+                ) as client:
+                    heartbeat_msg = HeartbeatMsg(
+                        job_name=self._job_name,
+                        ins_id=self._instance_id,
+                        ip=self.pod_ip,
+                        status=endpoint_status_list
+                    )
+                    _ = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
+                    logger.info("report endpoint status to controller status successfully.")
             except Exception as e:
                 if "503" in str(e):
                     with self._reregister_lock:
@@ -147,12 +155,10 @@ class HeartbeatManager(ThreadSafeSingleton):
                             self._reregister_thread.start()
                         else:
                             logger.info("already in reregistering, skip reregister")
-                logger.error(f"Exception occurred while reporting endpoint status to controller at "
-                             f"{self.config.controller_api_dns}:{self.config.controller_api_port}: {e}")
-            finally:
-                client.close()
+                logger.error("Exception occurred while reporting endpoint status to controller at %s ",
+                             self.controller_api_url)
 
-            time.sleep(1)
+            time.sleep(self.heartbeat_interval_seconds)
 
     def _reregister(self) -> None:
         ret = EngineManager().post_reregister_msg()
@@ -162,4 +168,3 @@ class HeartbeatManager(ThreadSafeSingleton):
         with self._reregister_lock:
             self._reregistering = False
         logger.info("reregister success")
-

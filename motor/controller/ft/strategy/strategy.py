@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 import threading
 from collections.abc import Callable
+from motor.config.controller import ControllerConfig
 
 
 class StrategyBase(ABC):
@@ -31,35 +32,51 @@ class StrategyBase(ABC):
             return self._is_finished
 
 
-def general_level0_strategy(fault_code: int, instance_id: int) -> type[StrategyBase] | None:
+def general_level0_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
     "level0 means healthy, so no strategy is needed."
     return None
 
 
-def general_level1_strategy(fault_code: int, instance_id: int) -> type[StrategyBase] | None:
+def general_level1_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
     return None
 
 
-def specific_level2_strategy(fault_code: int, instance_id: int) -> type[StrategyBase] | None:
-    # Only handle whitelisted fault codes for L2 strategy
-    if fault_code in [0x00f1fef5, 0x08520003]:
+def specific_level2_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
+    # Only handle whitelisted fault codes for L2 strategy and check config switch
+    if fault_code in [0x00f1fef5, 0x08520003] and config.fault_tolerance_config.enable_lingqu_network_recover:
         from motor.controller.ft.strategy.lingqu_network_recover import LingquNetworkRecoverStrategy
         return LingquNetworkRecoverStrategy
     else:
         return None
 
 
-def general_level3_to_level6_strategy(fault_code: int, instance_id: int) -> type[StrategyBase]:
+def general_level3_to_level6_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
     from motor.controller.core.instance_manager import InstanceManager
     from motor.controller.ft.strategy.scale_p2d import ScaleP2DStrategy
     instance = InstanceManager().get_instance(instance_id)
-    if instance is not None and instance.role == "decode":
+    if instance is not None and instance.role == "decode" and config.fault_tolerance_config.enable_scale_p2d:
         return ScaleP2DStrategy
     else:
         return None
     
 
-def generate_strategy_map() -> dict[str, Callable[[int], type[StrategyBase] | None] | None]:
+def generate_strategy_map() -> dict[str, Callable[[int, int, ControllerConfig], type[StrategyBase] | None] | None]:
     return {
         "L0": general_level0_strategy,
         "L1": general_level1_strategy,
