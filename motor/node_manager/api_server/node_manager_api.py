@@ -3,6 +3,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
 import asyncio
+import json
 import threading
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import Response
@@ -74,8 +75,8 @@ async def stop_instance(request: Request):
     """
     try:
         await asyncio.to_thread(Daemon().stop)
-
-        return Response(status_code=status.HTTP_200_OK, content="All engine processes stopped successfully.")
+        content = {"message": "All engine processes stopped successfully."}
+        return Response(status_code=status.HTTP_200_OK, content=json.dumps(content))
     except Exception as err:
         logger.error(f"Failed to stop engines via daemon: {err}")
         raise HTTPException(
