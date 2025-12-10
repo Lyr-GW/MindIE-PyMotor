@@ -30,6 +30,14 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: "RuntimeDefault"
+          readinessProbe:
+            httpGet:
+              path: /readiness
+              port: 57675
+              scheme: HTTP
+            initialDelaySeconds: 20   #启动 20s 后开始检测
+            periodSeconds: 5          #探测周期5s
+            successThreshold: 1       #连续1次成功，即就绪
           env:
             - name: POD_IP
               valueFrom:
@@ -39,6 +47,10 @@ spec:
               value: /mnt/configmap
             - name: CONFIG_PATH
               value: /usr/local/Ascend/pyMotor/conf
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           command: ["/bin/bash", "-c", "
               source /mnt/configmap/boot.sh; \n
           "]

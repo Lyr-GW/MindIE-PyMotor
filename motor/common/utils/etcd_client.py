@@ -2,6 +2,7 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
 import json
+import os
 import threading
 from typing import Any, Type, TypeVar
 from contextlib import contextmanager
@@ -16,6 +17,8 @@ from motor.common.utils.logger import get_logger
 logger = get_logger(__name__)
 
 T = TypeVar('T', bound=BaseModel)
+
+namespace = os.getenv("POD_NAMESPACE")
 
 
 class EtcdClient:
@@ -39,7 +42,8 @@ class EtcdClient:
             kwargs.update({
                 'ca_cert': ca_cert,
                 'cert_key': cert_key,
-                'cert_cert': cert_cert
+                'cert_cert': cert_cert,
+                "protocol": "https"
             })
 
         self.client = Etcd3GwClient(**kwargs)
@@ -54,10 +58,15 @@ class EtcdClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    @staticmethod
+    def get_key_with_namespace(key: str) -> str:
+        return namespace + key
+
     def acquire_lock(self, lock_key: str, ttl: int = 30) -> str | None:
         """Acquire a lease lock"""
         try:
             with self._lock:
+                lock_key = self.get_key_with_namespace(lock_key)
                 if lock_key in self._leases:
                     logger.warning("Lock %s already exists", lock_key)
                     return None
@@ -83,6 +92,7 @@ class EtcdClient:
         """Renew lease for a lock"""
         try:
             with self._lock:
+                lock_key = self.get_key_with_namespace(lock_key)
                 if lock_key not in self._leases:
                     logger.warning("Lock %s does not exist", lock_key)
                     return False
@@ -100,6 +110,7 @@ class EtcdClient:
         """Release a lease lock"""
         try:
             with self._lock:
+                lock_key = self.get_key_with_namespace(lock_key)
                 if lock_key not in self._leases:
                     logger.warning("Lock %s does not exist", lock_key)
                     return False
@@ -130,6 +141,7 @@ class EtcdClient:
             # etcd3gw expects string, not bytes
             value = json_data
 
+            key = self.get_key_with_namespace(key)
             if lease:
                 self.client.put(key, value, lease=lease)
             else:
@@ -149,6 +161,7 @@ class EtcdClient:
     ) -> dict[str, Any] | T | None:
         """Retrieve JSON data"""
         try:
+            key = self.get_key_with_namespace(key)
             value = self.client.get(key)
 
             if value is None:
@@ -193,6 +206,7 @@ class EtcdClient:
         """Retrieve instances dictionary"""
         instances = {}
         try:
+            prefix = self.get_key_with_namespace(prefix)
             for value, metadata in self.client.get_prefix(prefix):
                 key = metadata['key']  # etcd3gw returns dict, not object
                 instance_id = int(key.split('/')[-1])
@@ -215,6 +229,7 @@ class EtcdClient:
     def delete_prefix(self, prefix: str) -> bool:
         """Delete all keys with given prefix"""
         try:
+            prefix = self.get_key_with_namespace(prefix)
             self.client.delete_prefix(prefix)
             logger.debug("Deleted all keys with prefix %s", prefix)
             return True
@@ -226,6 +241,7 @@ class EtcdClient:
     def delete_key(self, key: str) -> bool:
         """Delete a specific key"""
         try:
+            key = self.get_key_with_namespace(key)
             self.client.delete(key)
             logger.debug("Deleted key %s", key)
             return True
@@ -305,6 +321,7 @@ class EtcdClient:
         """Get all data under a prefix as dictionary"""
         data = {}
         try:
+            key_prefix = self.get_key_with_namespace(key_prefix)
             for value, metadata in self.client.get_prefix(key_prefix):
                 key = metadata['key']  # etcd3gw returns dict
                 # Extract the relative key after prefix

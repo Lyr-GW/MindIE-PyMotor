@@ -112,16 +112,16 @@ class StandbyManager(ThreadSafeSingleton):
         self.on_become_standby = None
 
     def is_master(self) -> bool:
-        """Check if current controller is master"""
+        """Check if current pod is master"""
         with self.role_lock:
             return self.current_role == StandbyRole.MASTER
 
     def set_role(self, role: StandbyRole) -> None:
-        """Set current controller role"""
+        """Set current pod role"""
         with self.role_lock:
             old_role = self.current_role
             self.current_role = role
-            logger.info("Controller role changed from %s to %s", old_role.value, role.value)
+            logger.info("Role changed from %s to %s", old_role.value, role.value)
 
     def _master_standby_loop(self) -> None:
         """Master/standby management loop"""
@@ -173,7 +173,7 @@ class StandbyManager(ThreadSafeSingleton):
             logger.error(f"Error releasing master lock: {e}")
 
     def _try_become_master(self) -> bool:
-        """Try to become master controller using ETCD lock with enhanced reliability"""
+        """Try to become master pod using ETCD lock with enhanced reliability"""
         consecutive_failures = 0
 
         while consecutive_failures < self.max_lock_failures and not self.stop_event.is_set():
@@ -185,10 +185,10 @@ class StandbyManager(ThreadSafeSingleton):
                 )
                 if lease_id:
                     self.set_role(StandbyRole.MASTER)
-                    logger.info("Successfully became master controller with TTL %ds", self.lock_ttl)
+                    logger.info("Successfully became master with TTL %ds", self.lock_ttl)
                     return True
                 else:
-                    # Lock is held by another controller, remain standby
+                    # Lock is held by another pod, remain standby
                     self.set_role(StandbyRole.STANDBY)
                     return False
 

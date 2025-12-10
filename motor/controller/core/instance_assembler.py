@@ -135,6 +135,11 @@ class InstanceAssembler(ThreadSafeSingleton):
 
         logger.info("InstanceAssembler stopped.")
 
+    def is_alive(self) -> bool:
+        """Check if the instance_assembler threads are alive"""
+        return (self.assemble_instance_thread is not None and self.assemble_instance_thread.is_alive() and
+                 self.start_command_thread is not None and self.start_command_thread.is_alive())
+
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the instance assembler"""
         # Update config fields

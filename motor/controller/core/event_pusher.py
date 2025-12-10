@@ -121,6 +121,11 @@ class EventPusher(Observer):
         self.heart_client.close()
         logger.info("EventPusher stopped.")
 
+    def is_alive(self) -> bool:
+        """Check if the event_pusher threads are alive"""
+        return (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive() and
+                 self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
+
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the event pusher"""
         # Update config fields

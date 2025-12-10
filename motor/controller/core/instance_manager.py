@@ -154,6 +154,10 @@ class InstanceManager(ThreadSafeSingleton):
             self.instances_management_thread.join()
         logger.info("InstanceManager stopped.")
 
+    def is_alive(self) -> bool:
+        """Check if the instances_management threads are alive"""
+        return self.instances_management_thread is not None and self.instances_management_thread.is_alive()
+
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the instance manager"""
         # Update config fields

@@ -1,21 +1,23 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-import os
 import asyncio
-import threading
 import logging
+import os
+import threading
 from contextlib import asynccontextmanager
-import uvicorn
-from fastapi import FastAPI, Request
+from typing import Any
 
-from motor.controller.api_client import NodeManagerApiClient
+import uvicorn
+from fastapi import FastAPI, Request, HTTPException
+
+from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
+from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.config.controller import ControllerConfig
-from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
+from motor.controller.api_client import NodeManagerApiClient
+from motor.controller.api_server import om_api
 from motor.controller.core import InstanceAssembler, InstanceManager
-from motor.controller.api_server import probe_api, om_api
-
 
 logger = get_logger(__name__)
 
@@ -32,10 +34,12 @@ def validate_cert_and_key(cert_path: str, key_path: str):
 
 
 class ControllerAPI:
-    def __init__(self, config: ControllerConfig | None = None, host: str = None, port: int = None):
+    def __init__(self, config: ControllerConfig | None = None, modules: dict[str, Any] | None = None,
+                 host: str = None, port: int = None):
         if config is None:
             config = ControllerConfig()
         self.config = config
+        self.modules = modules
         self.host = host if host is not None else config.api_config.controller_api_host
         self.port = port if port is not None else config.api_config.controller_api_port
         self.server = None
@@ -108,13 +112,16 @@ class ControllerAPI:
         logging.getLogger("uvicorn.access").addFilter(ApiAccessFilter(api_filters))
 
         # Register routes
-        POST_METHODS = ["POST"]
-        app.add_api_route("/controller/heartbeat", self._heartbeat, methods=POST_METHODS)
-        app.add_api_route("/controller/register", self._register, methods=POST_METHODS)
-        app.add_api_route("/controller/reregister", self._reregister, methods=POST_METHODS)
-        app.add_api_route("/controller/terminate_instance", self._terminate_instance, methods=["POST"])
+        post_methods = ["POST"]
+        get_methods = ["GET"]
+        app.add_api_route("/controller/heartbeat", self._heartbeat, methods=post_methods)
+        app.add_api_route("/controller/register", self._register, methods=post_methods)
+        app.add_api_route("/controller/reregister", self._reregister, methods=post_methods)
+        app.add_api_route("/controller/terminate_instance", self._terminate_instance, methods=post_methods)
 
-        app.include_router(probe_api.router)
+        app.add_api_route("/startup", self._startup, methods=get_methods)
+        app.add_api_route("/readiness", self._readiness, methods=get_methods)
+        app.add_api_route("/liveness", self._liveness, methods=get_methods)
         app.include_router(om_api.router)
 
         return app
@@ -199,3 +206,91 @@ class ControllerAPI:
         for node_mgr in instance.get_node_managers():
             NodeManagerApiClient.stop(node_mgr)
         return {"result": "Terminate instance succeed!"}
+
+    async def _readiness(self) -> dict:
+        """
+        Readiness probe - returns result base on deploy mode and role:
+
+        STANDALONE: returns 200 if overall healthy.
+                    Otherwise, returns 503.
+
+        MASTER_STANDBY: returns 200 only when role is master and overall healthy.
+                        Otherwise, returns 503.
+
+        """
+        status = self._get_controller_status()
+        msg = "message"
+        reason = "reason"
+        if status.get("overall_healthy") is False:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    msg: "Controller is not ready",
+                    reason: "Overall not healthy"
+                }
+            )
+
+        if status.get("deploy_mode") == "master_standby":
+            if status.get("role") != StandbyRole.MASTER.value:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        msg: "Controller is not ready",
+                        reason: "Not master"
+                    }
+                )
+        return {msg: "Controller is ready"}
+
+    def _get_controller_status(self) -> dict:
+        """
+        Get controller status including:
+        - deploy mode: "master_standby" or "standalone"
+        - role(Optional): "master" or "standby"
+        - overall health of all modules
+        """
+        status = {}
+
+        # Check module health
+        unhealthy_modules = []
+        for name, module in self.modules.items():
+            if not hasattr(module, 'is_alive'):
+                continue
+            alive = module.is_alive()
+            if not alive:
+                unhealthy_modules.append(name)
+
+        if unhealthy_modules:
+            status["overall_healthy"] = False
+            logger.error("Unhealthy modules: %s", unhealthy_modules)
+        else:
+            status["overall_healthy"] = True
+
+        # Set deploy mode and role
+        if self.config.standby_config.enable_master_standby:
+            status["deploy_mode"] = "master_standby"
+            # Get singleton instance (assumes it has been initialized)
+            status["role"] = "master" if StandbyManager().is_master() else "standby"
+        else:
+            status["deploy_mode"] = "standalone"
+
+        return status
+
+    async def _startup(self) -> dict:
+        return {"message": "Controller startup"}
+
+    async def _liveness(self) -> dict:
+        """Liveness probe - returns 200 as long as the process is running"""
+        status = self._get_controller_status()
+
+        # For liveness, we just check if the process is responsive
+        # Even standby controllers should be considered alive
+        if status.get("overall_healthy") is False:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Controller is not alive",
+                    "reason": "Overall not healthy"
+                }
+            )
+        else:
+            return {"message": "Controller is alive"}

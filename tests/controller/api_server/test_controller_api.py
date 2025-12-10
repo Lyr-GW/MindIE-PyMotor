@@ -2,8 +2,10 @@ import os
 import pytest
 import threading
 import logging
+
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
 
 import motor.controller.api_server.controller_api as controller_api
 
@@ -21,6 +23,16 @@ def client():
     config = ControllerConfig()
     api_instance = controller_api.ControllerAPI(config)
     return TestClient(api_instance.app)
+
+
+@pytest.fixture
+def api_instance():
+    from motor.config.controller import ControllerConfig
+    config = ControllerConfig()
+    config.standby_config = MagicMock()
+    module = {}
+    return controller_api.ControllerAPI(config, module)
+
 
 def test_validate_cert_and_key_success(tmp_path) -> None:
     cert_file = tmp_path / "server.crt"
@@ -65,6 +77,297 @@ def test_heartbeat_invalid(mock_heartbeat_msg, client) -> None:
     response = client.post('/controller/heartbeat', json=data)
     assert response.status_code == 200
     assert response.json()['error'] == 'Invalid HeartbeatMsg format'
+
+
+def test_get_controller_status_standalone_healthy(api_instance) -> None:
+    # case1: standalone + all healthy (is_alive return true)
+    api_instance.config.standby_config.enable_master_standby = False
+
+    healthy_module = MagicMock()
+    healthy_module.is_alive.return_value = True
+    api_instance.modules = {"module_a": healthy_module, "module_b": healthy_module}
+
+    status = api_instance._get_controller_status()
+
+    assert status['deploy_mode'] == 'standalone'
+    assert status["overall_healthy"] is True
+    assert "role" not in status
+
+
+def test_get_controller_status_standalone_unhealthy(api_instance) -> None:
+    # case2: standalone + some healthy (is_alive return true or false)
+    api_instance.config.standby_config.enable_master_standby = False
+
+    healthy_module = MagicMock()
+    healthy_module.is_alive.return_value = True
+    unhealthy_module = MagicMock()
+    unhealthy_module.is_alive.return_value = False
+    api_instance.modules = {"module_a": healthy_module, "module_b": unhealthy_module}
+
+    status = api_instance._get_controller_status()
+
+    assert status['deploy_mode'] == 'standalone'
+    assert status["overall_healthy"] is False
+    assert "role" not in status
+
+
+def test_get_controller_status_master_healthy(api_instance, monkeypatch) -> None:
+    # case3: master_standby + master + all healthy (not have is_alive)
+    api_instance.config.standby_config.enable_master_standby = True
+
+    with patch("motor.controller.api_server.controller_api.StandbyManager") as mock_standby_cls:
+        mock_standby_instance = MagicMock()
+        mock_standby_cls.return_value = mock_standby_instance
+
+        mock_standby_instance.is_master.return_value = True
+
+        healthy_module = MagicMock()
+        del healthy_module.is_alive
+        api_instance.modules = {"module_a": healthy_module}
+
+        status = api_instance._get_controller_status()
+
+        assert status['deploy_mode'] == 'master_standby'
+        assert status["overall_healthy"] is True
+        assert status["role"] == "master"
+
+def test_get_controller_status_standby_unhealthy(api_instance) -> None:
+    # case4: master_standby + standby + all unhealthy (is_alive return false)
+    api_instance.config.standby_config.enable_master_standby = True
+
+    with patch("motor.controller.api_server.controller_api.StandbyManager") as mock_standby_cls:
+        mock_standby_instance = MagicMock()
+        mock_standby_cls.return_value = mock_standby_instance
+
+        mock_standby_instance.is_master.return_value = False
+
+        unhealthy_module = Mock()
+        unhealthy_module.is_alive.return_value = False
+        api_instance.modules = {"module_a": unhealthy_module}
+
+        status = api_instance._get_controller_status()
+
+        assert status["deploy_mode"] == "master_standby"
+        assert status["overall_healthy"] is False
+        assert status["role"] == "standby"
+
+
+@pytest.mark.asyncio
+async def test_readiness_standalone_healthy(client, api_instance):
+    """Test readiness in standalone mode with healthy modules"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "standalone",
+        "overall_healthy": True
+    })
+
+    # Test the function directly - should not raise exception for healthy case
+    result = await api_instance._readiness()
+    # readiness() should return success message for successful case (200 status)
+    assert result == {"message": "Controller is ready"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_standalone_unhealthy(api_instance):
+    """Test readiness in standalone mode with unhealthy modules"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "standalone",
+        "overall_healthy": False,
+    })
+
+    # Test the function directly - should raise HTTPException for unhealthy case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._readiness()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["message"] == "Controller is not ready"
+    assert exc_info.value.detail["reason"] == "Overall not healthy"
+
+
+@pytest.mark.asyncio
+async def test_readiness_master_standby_master_healthy(api_instance):
+    """Test readiness in master_standby mode as master with healthy modules"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "master_standby",
+        "role": "master",
+        "overall_healthy": True
+    })
+
+    # Test the function directly - should not raise exception for healthy master case
+    result = await api_instance._readiness()
+    assert result == {"message": "Controller is ready"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_master_standby_master_unhealthy(api_instance):
+    """Test readiness in master_standby mode as master with unhealthy modules"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "master_standby",
+        "overall_healthy": False
+    })
+
+    # Test the function directly - should raise HTTPException for unhealthy case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._readiness()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["message"] == "Controller is not ready"
+    assert exc_info.value.detail["reason"] == "Overall not healthy"
+
+
+@pytest.mark.asyncio
+async def test_readiness_master_standby_standby_healthy(api_instance):
+    """Test readiness in master_standby mode as standby with healthy modules"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "master_standby",
+        "overall_healthy": True
+    })
+
+    # Test the function directly - should raise HTTPException for healthy standby case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._readiness()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["message"] == "Controller is not ready"
+    assert "Not master" in exc_info.value.detail["reason"]
+
+
+@pytest.mark.asyncio
+async def test_readiness_master_standby_standby_unhealthy(api_instance):
+    """Test readiness in master_standby mode as standby with unhealthy modules"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "master_standby",
+        "overall_healthy": False
+    })
+
+    # Test the function directly - should raise HTTPException for unhealthy case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._readiness()
+
+    # When unhealthy, it should return unhealthy reason first
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["reason"] == "Overall not healthy"
+
+
+@pytest.mark.asyncio
+async def test_readiness_master_standby_invalid_role(api_instance):
+    """Test readiness in master_standby mode with invalid role"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "master_standby",
+        "overall_healthy": True
+    })
+
+    # Test the function directly - should raise HTTPException for invalid role case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._readiness()
+
+    assert exc_info.value.status_code == 503
+    assert "Not master" in exc_info.value.detail["reason"]
+
+
+@pytest.mark.asyncio
+async def test_readiness_missing_overall_healthy(api_instance):
+    """Test readiness when overall_healthy key is missing"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "standalone"
+        # missing overall_healthy
+    })
+
+    # Test the function directly - should not raise exception when overall_healthy is missing (treated as healthy)
+    result = await api_instance._readiness()
+    assert result == {"message": "Controller is ready"}
+
+
+@pytest.mark.asyncio
+async def test_readiness_missing_deploy_mode(api_instance):
+    """Test readiness when deploy_mode key is missing"""
+    api_instance._get_controller_status = Mock(return_value={
+        "overall_healthy": True
+        # missing deploy_mode
+    })
+
+    # Test the function directly - should not raise exception when deploy_mode is missing
+    result = await api_instance._readiness()
+    assert result == {"message": "Controller is ready"}
+
+@pytest.mark.asyncio
+async def test_startup_endpoint(api_instance):
+    """Test startup endpoint returns correct message"""
+    # Test the function directly instead of through HTTP
+    result = await api_instance._startup()
+    assert result == {"message": "Controller startup"}
+
+@pytest.mark.asyncio
+async def test_liveness_healthy(api_instance):
+    """Test liveness when controller is healthy"""
+    api_instance._get_controller_status = Mock(return_value={
+        "overall_healthy": True,
+        "deploy_mode": "standalone",
+    })
+
+    # Test the function directly - should return result for healthy case
+    result = await api_instance._liveness()
+    assert result == {"message": "Controller is alive"}
+
+
+@pytest.mark.asyncio
+async def test_liveness_unhealthy(api_instance):
+    """Test liveness when controller is unhealthy"""
+    api_instance._get_controller_status = Mock(return_value={
+        "overall_healthy": False,
+        "deploy_mode": "standalone",
+    })
+
+    # Test the function directly - should raise HTTPException for unhealthy case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._liveness()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["message"] == "Controller is not alive"
+    assert exc_info.value.detail["reason"] == "Overall not healthy"
+
+
+@pytest.mark.asyncio
+async def test_liveness_standby_mode(api_instance):
+    """Test liveness in standby mode (should still be alive)"""
+    api_instance._get_controller_status = Mock(return_value={
+        "overall_healthy": True,
+        "deploy_mode": "master_standby",
+    })
+
+    # Test the function directly - should return result for healthy standby case
+    result = await api_instance._liveness()
+    assert result == {"message": "Controller is alive"}
+
+
+@pytest.mark.asyncio
+async def test_liveness_standby_unhealthy(api_instance):
+    """Test liveness in standby mode when unhealthy"""
+    api_instance._get_controller_status = Mock(return_value={
+        "overall_healthy": False,
+        "deploy_mode": "master_standby",
+    })
+
+    # Test the function directly - should raise HTTPException for unhealthy case
+    with pytest.raises(HTTPException) as exc_info:
+        await api_instance._liveness()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["message"] == "Controller is not alive"
+    assert exc_info.value.detail["reason"] == "Overall not healthy"
+
+
+@pytest.mark.asyncio
+async def test_liveness_missing_overall_healthy(api_instance):
+    """Test liveness when overall_healthy key is missing"""
+    api_instance._get_controller_status = Mock(return_value={
+        "deploy_mode": "standalone"
+        # missing overall_healthy
+    })
+
+    # Test the function directly - should return result when overall_healthy is missing (treated as healthy)
+    result = await api_instance._liveness()
+    assert result == {"message": "Controller is alive"}
+
 
 @patch('motor.controller.api_server.controller_api.RegisterMsg')
 @patch('motor.controller.api_server.controller_api.InstanceAssembler')

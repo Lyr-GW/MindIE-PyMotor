@@ -106,13 +106,13 @@ observers_list = {
 def init_all_modules() -> None:
     """Initialize all modules but don't start them yet"""
 
-    global config
+    global config, modules
     if config is None:
         config = ControllerConfig()
 
     modules["InstanceAssembler"] = InstanceAssembler(config)
     modules["EventPusher"] = EventPusher(config)
-    modules["ControllerAPI"] = ControllerAPI(config)
+    modules["ControllerAPI"] = ControllerAPI(config, modules)
     if config.fault_tolerance_config.enable_fault_tolerance:
         from motor.controller.ft.fault_manager import FaultManager
         modules["FaultManager"] = FaultManager(config)
