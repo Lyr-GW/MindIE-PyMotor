@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from motor.common.resources.http_msg_spec import HeartbeatMsg
 from motor.common.utils.logger import get_logger
 from motor.common.resources.instance import Instance, InsStatus, InsConditionEvent, ReadOnlyInstance
+from motor.common.resources.endpoint import EndpointStatus
 from motor.controller.core import Observer, ObserverEvent
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
@@ -314,6 +315,19 @@ class InstanceManager(ThreadSafeSingleton):
                 logger.error("Instance %s(id:%d) already exists.", ins.job_name, ins.id)
                 return
             self.instances[ins.id] = ins
+
+            # Refresh heartbeat for all endpoints with initial status
+            timestamp = time.time()
+            for pod_ip in ins.endpoints.keys():
+                # Create initial status dict for all endpoints in this pod
+                initial_status = {endpoint.id: EndpointStatus.INITIAL for endpoint in ins.endpoints[pod_ip].values()}
+                if ins.update_heartbeat(pod_ip, timestamp, initial_status):
+                    logger.debug("Refreshed heartbeat for pod_ip %s in instance %s(id:%d) with initial status",
+                                pod_ip, ins.job_name, ins.id)
+                else:
+                    logger.warning("Failed to refresh heartbeat for pod_ip %s in instance %s(id:%d)",
+                                  pod_ip, ins.job_name, ins.id)
+
             logger.info("Instance %s(id:%d) role:%s added.", ins.job_name, ins.id, ins.role)
 
     def del_instance(self, ins_id: int):

@@ -86,10 +86,10 @@ class ParallelConfig(BaseModel):
         ep_val = ep_size if ep_size is not None else (ep if ep is not None else 1)
         pp_val = pp_size if pp_size is not None else (pp if pp is not None else 1)
         world_size_val = world_size if world_size is not None else 0
-        
+
         if world_size_val == 0:
             world_size_val = dp_val * cp_val * tp_val * pp_val
-            
+
         super().__init__(
             dp_size=dp_val,
             cp_size=cp_val,
@@ -251,7 +251,6 @@ class Instance(BaseModel):
             else:
                 logger.error(f"Instance {self.id} not found endpoints for pod_ip {ip}")
                 return False
-
 
     def get_endpoints_num(self) -> int:
         with self._lock:
