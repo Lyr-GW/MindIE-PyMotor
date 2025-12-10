@@ -27,6 +27,12 @@ MODEL_CONFIG = 'model_config'
 ENGINE_CONFIG = 'engine_config'
 PREFILL = 'prefill'
 DECODE = 'decode'
+STANDBY_CONFIG = 'standby_config'
+ENABLE_MASTER_STANDBY = 'enable_master_standby'
+MOTOR_DEPLOY_CONFIG = 'motor_deploy_config'
+COORDINATOR_BACKUP_CFG = 'coordinator_backup_cfg'
+CONTROLLER_BACKUP_CFG = 'controller_backup_cfg'
+FUNCTION_ENABLE = 'function_enable'
 AIGW = 'aigw'
 ID = 'id'
 MOTOR_ENGINE_PREFILL_CONFIG = 'motor_engine_prefill_config'
@@ -146,9 +152,13 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
             if config_key == ConfigKey.MOTOR_CONTROLLER.value:
                 updated_config[API_CONFIG][CONTROLLER_API_HOST] = os.getenv('POD_IP')
                 updated_config[API_CONFIG][COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
+                updated_config[STANDBY_CONFIG][ENABLE_MASTER_STANDBY] = \
+                    user_config_data[MOTOR_DEPLOY_CONFIG][CONTROLLER_BACKUP_CFG][FUNCTION_ENABLE]
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
                 updated_config[HTTP_CONFIG][COORDINATOR_API_HOST] = os.getenv('POD_IP')
                 updated_config[HEALTH_CHECK_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
+                updated_config[STANDBY_CONFIG][ENABLE_MASTER_STANDBY] = \
+                    user_config_data[MOTOR_DEPLOY_CONFIG][COORDINATOR_BACKUP_CFG][FUNCTION_ENABLE]
                 if AIGW in updated_config:
                     update_aigw_config(updated_config, user_config_data)
             elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:

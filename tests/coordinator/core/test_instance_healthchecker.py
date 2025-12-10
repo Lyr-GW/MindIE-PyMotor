@@ -142,6 +142,7 @@ class TestInstanceHealthChecker:
             
             # Create instance
             checker = InstanceHealthChecker()
+            checker.start()
             
             # Verify thread was created with correct parameters
             mock_thread_class.assert_called_once_with(

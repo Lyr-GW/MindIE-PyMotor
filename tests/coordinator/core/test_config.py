@@ -58,6 +58,12 @@ COMPLETE_CONFIG = {
         "coordinator_api_infer_port": 1025,
         "coordinator_api_mgmt_port": 1026
     },
+    "etcd_config": {
+        "etcd_host": "test_etcd",
+        "etcd_port": 2380,
+        "etcd_timeout": 10,
+        "enable_etcd_persistence": True
+    }
 }
 
 @pytest.fixture
@@ -328,6 +334,105 @@ class TestCoordinatorConfig:
         assert coordinator.http_config.coordinator_api_host == "127.0.0.1"
         assert coordinator.http_config.coordinator_api_infer_port == 1025
         assert coordinator.http_config.coordinator_api_mgmt_port == 1026
+
+    @pytest.mark.usefixtures("reset_singleton")
+    def test_load_etcd_success(self):
+        """Test successful load etcd"""
+        config = COMPLETE_CONFIG.copy()
+        coordinator = create_coordinator_with_config(config)
+
+        assert coordinator.etcd_config is not None
+        assert coordinator.etcd_config.etcd_host == 'test_etcd'
+        assert coordinator.etcd_config.etcd_port == 2380
+        assert coordinator.etcd_config.etcd_timeout == 10
+        assert coordinator.etcd_config.enable_etcd_persistence is True
+
+
+    @pytest.mark.usefixtures("reset_singleton")
+    def test_load_etcd_port_fail(self):
+        config = {
+            "scheduler_config": {
+                "deploy_mode": "single_node",
+                "scheduler_type": "load_balance"
+            },
+            "etcd_config": {
+                "etcd_host": "test_etcd",
+                "etcd_port": 0,
+                "etcd_timeout": 10,
+                "enable_etcd_persistence": True
+            }
+        }
+        coordinator, exception = create_coordinator_with_invalid_config(config)
+        assert coordinator is None
+        assert exception is not None
+        assert "Etcd port must be an integer between 1 and 65535" in str(exception)
+
+    @pytest.mark.usefixtures("reset_singleton")
+    def test_load_etcd_filed_type_fail(self):
+        config = {
+            "scheduler_config": {
+                "deploy_mode": "single_node",
+                "scheduler_type": "load_balance"
+            },
+            "etcd_config": {
+                "etcd_host": "test_etcd",
+                "etcd_port": 1,
+                "etcd_timeout": 10,
+                "enable_etcd_persistence": "abc"
+            }
+        }
+        coordinator, exception = create_coordinator_with_invalid_config(config)
+        assert coordinator is None
+        assert exception is not None
+        assert "Etcd config field 'enable_etcd_persistence' must be of type <class 'bool'>" in str(exception)
+
+    @pytest.mark.usefixtures("reset_singleton")
+    def test_load_etcd_tls_success(self):
+        config = {
+            "tls_config": {
+                "request_server_tls_enable": False,
+                "request_server_tls_items": {
+                    "ca_cert": "./security/request/security/certs/ca.pem",
+                    "tls_cert": "./security/request/security/certs/cert.pem",
+                    "tls_key": "./security/request/security/keys/cert.key.pem",
+                    "tls_passwd": "./security/request/security/pass/key_pwd.txt",
+                    "kmcKsfMaster": "./security/request/tools/pmt/master/ksfa",
+                    "kmcKsfStandby": "./security/request/tools/pmt/standby/ksfb",
+                    "tls_crl": ""
+                },
+                "etcd_client_tls_enable": True,
+                "etcd_client_tls_items": {
+                    "ca_cert": "./test/ca.pem",
+                    "tls_cert": "./test/cert.pem",
+                    "tls_key": "./test/cert.key.pem",
+                    "tls_passwd": "./test/key_pwd.txt",
+                    "kmcKsfMaster": "./test/ksfa",
+                    "kmcKsfStandby": "./test/ksfb",
+                    "tls_crl": "test"
+                }
+            },
+            "scheduler_config": {
+                "deploy_mode": "single_node",
+                "scheduler_type": "load_balance"
+            },
+            "etcd_config": {
+                "etcd_host": "test_etcd",
+                "etcd_port": 1,
+                "etcd_timeout": 10,
+                "enable_etcd_persistence": True
+            }
+        }
+        coordinator = create_coordinator_with_config(config)
+        assert coordinator is not None
+        assert coordinator.request_server_tls.tls_enable is False
+        assert coordinator.etcd_client_tls.tls_enable is True
+        assert coordinator.etcd_client_tls.items["ca_cert"] == "./test/ca.pem"
+        assert coordinator.etcd_client_tls.items["tls_cert"] == "./test/cert.pem"
+        assert coordinator.etcd_client_tls.items["tls_key"] == "./test/cert.key.pem"
+        assert coordinator.etcd_client_tls.items["tls_passwd"] == "./test/key_pwd.txt"
+        assert coordinator.etcd_client_tls.items["kmcKsfMaster"] == "./test/ksfa"
+        assert coordinator.etcd_client_tls.items["kmcKsfStandby"] == "./test/ksfb"
+        assert coordinator.etcd_client_tls.items["tls_crl"] == "test"
 
     @pytest.mark.usefixtures("reset_singleton")
     def test_invalid_deploy_mode(self):

@@ -9,6 +9,7 @@ from enum import Enum
 
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.logger import LoggingConfig, reconfigure_logging, get_logger
+from motor.config.etcd_config import EtcdConfig
 from motor.config.standby import StandbyConfig
 
 logger = get_logger(__name__)
@@ -182,11 +183,13 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.exception_config = ExceptionConfig()
         self.scheduler_config = SchedulerConfig()
         self.request_server_tls = TlsItems()
+        self.etcd_client_tls = TlsItems()
         self.health_check_config = HealthCheckConfig()
         self.timeout_config = TimeoutConfig()
         self.api_key_config = APIKeyConfig()
         self.rate_limit_config = RateLimitConfig()
         self.standby_config = StandbyConfig()
+        self.etcd_config = EtcdConfig()
         self.http_config = HttpConfig()
         self.aigw_model: dict[str, Any] | None = None
         
@@ -254,6 +257,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
             self._load_scheduler_config,
             self._load_health_check_config,
             self._load_standby_config,
+            self._load_etcd_config,
             self._load_http_config,
             self._load_timeout_config,
             self._load_api_key_config,
@@ -342,6 +346,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
         
         tls_components = [
             ("request_server_tls_enable", "request_server_tls_items", self.request_server_tls),
+            ("etcd_client_tls_enable", "etcd_client_tls_items", self.etcd_client_tls),
         ]
         
         for enable_field, items_field, tls_obj in tls_components:
@@ -353,6 +358,8 @@ class CoordinatorConfig(ThreadSafeSingleton):
                     tls_obj.check_files = self.check_mounted_files
                 else:
                     raise ValueError(f"Invalid TLS configuration for {enable_field}")
+            else:
+                tls_obj.tls_enable = False
 
     def _validate_tls_items(self, items: dict[str, str]) -> bool:
         """Validate TLS configuration items."""
@@ -462,6 +469,29 @@ class CoordinatorConfig(ThreadSafeSingleton):
                 setattr(self.standby_config, field, value)
             else:
                 logger.warning(f"Invalid type for Standby config field '{field}', using default")
+
+    def _load_etcd_config(self) -> None:
+        """Load etcd configuration section."""
+        config = self.config.get("etcd_config", {})
+
+        etcd_mappings = {
+            "etcd_host": (str, EtcdConfig.etcd_host),
+            "etcd_port": (int, EtcdConfig.etcd_port),
+            "etcd_timeout": (int, 5),
+            "enable_etcd_persistence": (bool, False)
+        }
+
+        for field, (field_type, default) in etcd_mappings.items():
+            value = config.get(field, default)
+            if isinstance(value, field_type):
+                setattr(self.etcd_config, field, value)
+            else:
+                raise ValueError(f"Etcd config field '{field}' must be of type {field_type}")
+        etcd_port = config.get("etcd_port", EtcdConfig.etcd_port)
+        if 1 <= etcd_port <= 65535:
+            self.etcd_config.etcd_port = etcd_port
+        else:
+            raise ValueError("Etcd port must be an integer between 1 and 65535")
 
     def _load_http_config(self) -> None:
         """Load HTTP configuration section."""

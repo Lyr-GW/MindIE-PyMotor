@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from fastapi.responses import JSONResponse
 from unittest.mock import patch, MagicMock, AsyncMock
 
+from motor.common.standby.standby_manager import StandbyRole, StandbyManager
 from motor.coordinator.api_server.coordinator_server import (
     CoordinatorServer
 )
@@ -90,6 +91,7 @@ class TestCoordinatorServer:
         self._handle_request_patcher.start()
 
         coordinator_config = CoordinatorConfig()
+        self.coordinator_config = coordinator_config
         
         # Create CoordinatorServer instance (only pass unified configuration)
         coordinator_server = CoordinatorServer(
@@ -152,6 +154,74 @@ class TestCoordinatorServer:
         assert response.status_code == 200, f"Metrics endpoint failed: {response.status_code}"
         data = response.json()
         assert data == {}, "Instance metrics response should be empty"
+
+    def test_readiness_endpoints_fail_when_instance_manager_not_ready(self):
+        """Test readiness endpoints"""
+        self._im_patcher = patch('motor.coordinator.api_server.coordinator_server.InstanceManager')
+        im_mock_cls = self._im_patcher.start()
+        im_instance = MagicMock()
+        im_instance.is_available.return_value = False
+        im_instance.refresh_instances.return_value = None
+        im_mock_cls.return_value = im_instance
+
+        # Test /readiness
+        response = self.mgmt_client.get("/readiness")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "Coordinator is not ready"
+
+    def test_readiness_endpoints_fail_when_enable_standby_is_master_but_instance_not_ready(self):
+        """Test readiness endpoints"""
+        self._im_patcher = patch('motor.coordinator.api_server.coordinator_server.InstanceManager')
+        im_mock_cls = self._im_patcher.start()
+        im_instance = MagicMock()
+        im_instance.is_available.return_value = False
+        im_instance.refresh_instances.return_value = None
+        im_mock_cls.return_value = im_instance
+
+        CoordinatorConfig().standby_config.enable_master_standby = True
+        standby_manager = StandbyManager(self.coordinator_config)
+        standby_manager.current_role = StandbyRole.MASTER
+
+        # Test /readiness
+        response = self.mgmt_client.get("/readiness")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "Coordinator is master but is not ready"
+
+    def test_readiness_endpoints_fail_when_enable_standby_is_standby(self):
+        """Test readiness endpoints"""
+        CoordinatorConfig().standby_config.enable_master_standby = True
+        standby_manager = StandbyManager(self.coordinator_config)
+        standby_manager.current_role = StandbyRole.STANDBY
+
+        # Test /readiness
+        response = self.mgmt_client.get("/readiness")
+        assert response.status_code == 503, f"Readiness check failed: {response.status_code}"
+        data = response.json()
+        assert data["detail"] == "Coordinator is not master"
+
+    def test_readiness_endpoints_fail_when_enable_standby_is_master(self):
+        """Test readiness endpoints"""
+        CoordinatorConfig().standby_config.enable_master_standby = True
+        standby_manager = StandbyManager(self.coordinator_config)
+        standby_manager.current_role = StandbyRole.MASTER
+
+        # Test /readiness
+        response = self.mgmt_client.get("/readiness")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "ok"
+        assert data["message"] == "Coordinator is master and is ready"
+
+    def test_root_endpoints(self):
+        """Test root endpoints"""
+        # Test /
+        response = self.mgmt_client.get("/")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["service"] == "Motor Coordinator Server"
+        assert data["version"] == "1.0.0"
     
     def test_openai_completions_api(self):
         """Test OpenAI Completions API"""

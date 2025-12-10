@@ -35,12 +35,14 @@ class InstanceHealthChecker(ThreadSafeSingleton):
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         
         self._dummy_request_util = DummyRequestUtil()
-        
-        # Start monitoring thread automatically
-        self._start_monitoring_thread()
-        
+
+        self._monitoring_thread = threading.Thread(
+            target=self._monitoring_loop,
+            name="InstanceHealthChecker",
+            daemon=True
+        )
         self._initialized = True
-        logger.info("InstanceHealthChecker initialized and started")
+        logger.info("InstanceHealthChecker initialized")
     
     def stop(self):
         """Stop the health checker"""
@@ -118,14 +120,9 @@ class InstanceHealthChecker(ThreadSafeSingleton):
             # In case of exception, assume no available instances
             return False
 
-    def _start_monitoring_thread(self):
+    def start(self):
         """Start the health checker monitoring thread"""
         self._shutdown_event.clear()
-        self._monitoring_thread = threading.Thread(
-            target=self._monitoring_loop,
-            name="InstanceHealthChecker",
-            daemon=True
-        )
         self._monitoring_thread.start()
         logger.info("InstanceHealthChecker monitoring thread started")
             

@@ -23,7 +23,7 @@
       "function_enable": false
     },
     "controller_backup_cfg": {
-      "function_sw": false
+      "function_enable": false
     },
     "deploy_mount_path": {
       "ms_controller_mount": {

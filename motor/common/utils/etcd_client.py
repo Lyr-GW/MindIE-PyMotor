@@ -89,7 +89,7 @@ class EtcdClient:
 
                 lease = self._leases[lock_key]
                 lease.refresh()
-                logger.debug("Renewed lease for lock %s", lock_key)
+                logger.info("Renewed lease for lock %s", lock_key)
                 return True
 
         except Exception as e:

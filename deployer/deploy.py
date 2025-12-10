@@ -29,6 +29,7 @@ NAME = "name"
 ENV = "env"
 SPEC = "spec"
 TEMPLATE = "template"
+REPLICAS = "replicas"
 LABELS = "labels"
 APP = "app"
 VALUE = "value"
@@ -177,6 +178,17 @@ def modify_controller_or_coordinator_yaml(data, deploy_config):
         container[ENV].extend([
             {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service}
         ])
+    modify_coordinator_or_controller_replicas(data[0], deploy_config, role)
+
+
+def modify_coordinator_or_controller_replicas(data, deploy_config, role):
+    #  Modify replicas bases on backup_cfg
+    if role == CONTROLLER:
+        if "controller_backup_cfg" in deploy_config and deploy_config["controller_backup_cfg"]["function_enable"]:
+            data[SPEC][REPLICAS] = 2
+    elif role == COORDINATOR:
+        if "coordinator_backup_cfg" in deploy_config and deploy_config["coordinator_backup_cfg"]["function_enable"]:
+            data[SPEC][REPLICAS] = 2
 
 
 def modify_sp_block_num(data, pd_flag, config):

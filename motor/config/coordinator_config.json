@@ -29,6 +29,16 @@
             "kmcKsfMaster": "./security/request/tools/pmt/master/ksfa",
             "kmcKsfStandby": "./security/request/tools/pmt/standby/ksfb",
             "tls_crl": ""
+        },
+        "etcd_client_tls_enable": true,
+        "etcd_client_tls_items": {
+            "ca_cert": "./security/etcd/security/certs/ca.pem",
+            "tls_cert": "./security/etcd/security/certs/cert.pem",
+            "tls_key": "./security/etcd/security/keys/cert.key.pem",
+            "tls_passwd": "./security/etcd/security/pass/key_pwd.txt",
+            "kmcKsfMaster": "./security/etcd/tools/pmt/master/ksfa",
+            "kmcKsfStandby": "./security/etcd/tools/pmt/standby/ksfb",
+            "tls_crl": ""
         }
     },
     "health_check_config": {
@@ -102,10 +112,16 @@
     "standby_config": {
         "enable_master_standby": false,
         "master_standby_check_interval": 5,
-        "master_lock_ttl": 60,
+        "master_lock_ttl": 20,
         "master_lock_retry_interval": 5,
         "master_lock_max_failures": 3,
         "master_lock_key": "/coordinator/master_lock"
+    },
+    "etcd_config": {
+        "etcd_host": "etcd.default.svc.cluster.local",
+        "etcd_port": 2379,
+        "etcd_timeout": 5,
+        "enable_etcd_persistence": false
     },
     "aigw": {
         "id": "model-id-0",

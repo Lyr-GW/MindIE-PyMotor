@@ -21,6 +21,7 @@ from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
+from motor.common.standby.standby_manager import StandbyManager
 from motor.common.utils.config_watcher import ConfigWatcher
 from motor.common.utils.logger import get_logger
 
@@ -33,6 +34,24 @@ modules: dict[str, Any] = {}
 config_watcher: ConfigWatcher | None = None
 
 
+def start_all_modules(exclude_modules: set[str] | None = None) -> None:
+    """Start all modules gracefully, optionally excluding some modules"""
+    logger.info("Starting all modules...")
+    if exclude_modules is None:
+        exclude_modules = set()
+
+    for module_name, module in modules.items():
+        if module_name in exclude_modules:
+            continue
+        if hasattr(module, 'start'):
+            logger.info(f"Starting {module_name}...")
+            try:
+                module.start()
+            except Exception as e:
+                logger.error(f"Error starting {module_name}: {e}")
+    logger.info("All modules started.")
+
+
 def stop_all_modules() -> None:
     """Stop all modules gracefully"""
     for module_name, module in modules.items():
@@ -43,6 +62,22 @@ def stop_all_modules() -> None:
             except Exception as e:
                 logger.error(f"Error stopping {module_name}: {e}")
     logger.info("All modules stopped.")
+
+
+def on_become_master() -> None:
+    """Callback when becoming master - start all modules"""
+    logger.info("Becoming master, starting all modules...")
+    # Start all modules
+    if not modules:
+        initialize_components()
+    start_all_modules()
+
+
+def on_become_standby() -> None:
+    """Callback when becoming standby - stop all modules"""
+    logger.info("Becoming standby, stopping all modules...")
+    # Stop all modules
+    stop_all_modules()
 
 
 def initialize_components():
@@ -100,6 +135,17 @@ async def main():
             )
             config_watcher.start()
             logger.info("Configuration file watcher started")
+
+        if coordinator_config.standby_config.enable_master_standby:
+            logger.info("Master/standby feature is enabled, running in master-standby mode")
+            standby_manager = StandbyManager(coordinator_config)
+            standby_manager.start(
+                on_become_master=on_become_master,
+                on_become_standby=on_become_standby
+            )
+        else:
+            logger.info("Master/standby feature is disabled, running in standalone mode")
+            start_all_modules()
 
         coordinator_server = modules.get("CoordinatorServer")
 

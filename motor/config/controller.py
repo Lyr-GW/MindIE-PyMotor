@@ -7,6 +7,7 @@ from typing import Any
 from pathlib import Path
 
 from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
+from motor.config.etcd_config import EtcdConfig
 from motor.config.standby import StandbyConfig
 
 
@@ -81,24 +82,6 @@ class FaultToleranceConfig:
     # scale and recovery configuration
     enable_scale_p2d: bool = True  # Enable/disable scale p2d strategy
     enable_lingqu_network_recover: bool = True  # Enable/disable lingqu network recovery strategy
-
-
-@dataclass
-class EtcdConfig:
-    """ETCD configuration class"""
-
-    # ETCD connection configuration
-    etcd_host: str = 'localhost'
-    etcd_port: int = 2379
-    etcd_timeout: int = 5
-
-    # ETCD certificate configuration
-    etcd_ca_cert: str | None = None
-    etcd_cert_key: str | None = None
-    etcd_cert_cert: str | None = None
-
-    # ETCD persistence configuration
-    enable_etcd_persistence: bool = False  # Enable/disable ETCD persistence and restoration
 
 
 @dataclass

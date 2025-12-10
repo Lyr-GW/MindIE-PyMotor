@@ -67,9 +67,17 @@ class MetricsCollector(ThreadSafeSingleton):
             daemon=True,
             name="MetricsUpdate"
         )
-        self._metrics_update_thread.start()
 
         self._initialized = True
+        logger.info("MetricsCollector initialized.")
+
+    def start(self) -> None:
+        """
+        Start update metrics thread.
+
+        :returns:
+        """
+        self._metrics_update_thread.start()
         logger.info("MetricsCollector started.")
 
     def stop(self) -> None:

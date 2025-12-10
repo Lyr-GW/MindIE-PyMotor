@@ -16,6 +16,7 @@ from fastapi.responses import PlainTextResponse
 import uvicorn
 
 from motor.common.resources.http_msg_spec import InsEventMsg
+from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.common.utils.cert_util import CoordinatorCertUtil
 from motor.coordinator.core.instance_manager import InstanceManager
@@ -92,6 +93,11 @@ class SSLConfig:
         self.check_hostname = True
 
 
+def build_ok_response(message: str):
+    """Construct OK response."""
+    return {"status": "ok", "message": message}
+
+
 class CoordinatorServer:
     
     def __init__(
@@ -105,7 +111,7 @@ class CoordinatorServer:
         self._create_apps()
         self._setup_cors_middleware()
         self._register_routes()
-    
+
     @staticmethod
     def _openai_is_stream(body_json: dict[str, Any]) -> bool:
         if FIELD_STREAM in body_json:
@@ -632,7 +638,7 @@ class CoordinatorServer:
             "created": self._service_start_timestamp,
         }
         return [enriched_model]
-    
+
     def _timeout_handler(self, timeout_seconds: Optional[float] = None):
         def decorator(func):
             @wraps(func)
@@ -678,21 +684,41 @@ class CoordinatorServer:
         @self.management_app.get("/startup")
         async def startup_probe():
             logger.debug("Received startup probe request")
-            return {"status": "ok", "message": "Coordinator is starting up"}
+            return build_ok_response("Coordinator is starting up")
         
         @self.management_app.get("/health")
         async def health_check():
             logger.debug("Received health check request, Coordinator is healthy")
-            return {"status": "ok", "message": "Coordinator is healthy"}
+            return build_ok_response("Coordinator is healthy")
         
         @self.management_app.get("/readiness")
         async def readiness_check():
+            is_ready = True
             if not InstanceManager().is_available():
-                raise HTTPException(
-                    status_code=HTTP_STATUS_SERVICE_UNAVAILABLE,
-                    detail="Service is not ready"
-                )
-            return {"status": "ok", "message": "Coordinator is ready"}
+                logger.debug("Received readiness check request, "
+                             "Coordinator is not ready because Instance is not available")
+                is_ready = False
+            if self.coordinator_config.standby_config.enable_master_standby:
+                # when standby is enabled, coordinator is ok only when it is master, then only master can be call
+                if StandbyManager().current_role == StandbyRole.MASTER:
+                    logger.debug("Received readiness check request, "
+                                 "This coordinator is ready and is master")
+                    if is_ready:
+                        return build_ok_response("Coordinator is master and is ready")
+                    else:
+                        return build_ok_response("Coordinator is master but is not ready")
+                else:
+                    logger.debug("Received readiness check request, This coordinator is not master")
+                    raise HTTPException(
+                        status_code=HTTP_STATUS_SERVICE_UNAVAILABLE,
+                        detail="Coordinator is not master"
+                    )
+            else:
+                # when standby is disabled, coordinator is always ok, otherwise request will be rejected by k8s
+                if is_ready:
+                    return build_ok_response("Coordinator is ready")
+                else:
+                    return build_ok_response("Coordinator is not ready")
         
         @self.management_app.get("/metrics")
         async def get_metrics():
