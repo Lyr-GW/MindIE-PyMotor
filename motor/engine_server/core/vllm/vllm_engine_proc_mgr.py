@@ -2,6 +2,7 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
+import time
 import argparse
 from multiprocessing.process import BaseProcess
 from multiprocessing import connection
@@ -26,6 +27,8 @@ from motor.engine_server.constants import constants
 
 logger = get_logger("engine_server")
 
+INIT_TIME = 10
+
 
 class ProcManager:
     def __init__(self, args: argparse.Namespace):
@@ -42,6 +45,8 @@ class ProcManager:
 
     def run(self):
         self._run_multi_server()
+        # this is temporary, should be removed after official solution is ready
+        time.sleep(INIT_TIME)
         self.status = constants.NORMAL_STATUS
 
     def join(self):
