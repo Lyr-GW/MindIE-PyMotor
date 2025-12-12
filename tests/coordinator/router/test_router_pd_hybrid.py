@@ -130,8 +130,7 @@ class TestRouterPDHybrid:
             req_id="test-id",
             req_data=request_json.copy(),
             req_len=req_len,
-            api="v1/chat/completions",
-            state=ReqState.ARRIVE
+            api="v1/chat/completions"
         )
         
         # Test the PD hybrid forwarding function
@@ -177,8 +176,7 @@ class TestRouterPDHybrid:
             req_id="test-id",
             req_data=request_json.copy(),
             req_len=req_len,
-            api="v1/chat/completions",
-            state=ReqState.ARRIVE
+            api="v1/chat/completions"
         )
         
         # Mock the stream request function to fail in PDHybridRouter

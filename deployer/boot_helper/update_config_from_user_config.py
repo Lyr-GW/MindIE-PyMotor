@@ -48,6 +48,7 @@ D_MAX_SEQLEN = 'd_max_seqlen'
 SLO_TTFT = 'slo_ttft'
 SLO_TPOT = 'slo_tpot'
 
+
 class ConfigKey(Enum):
     MOTOR_CONTROLLER = "motor_controller_config"
     MOTOR_COORDINATOR = "motor_coordinator_config"
@@ -166,8 +167,7 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
                 role = os.getenv('ROLE')
                 if role == PREFILL:
                     updated_config[BASIC_CONFIG][PARALLEL_CONFIG] = \
-                        user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value]\
-                            [MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
+                        user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value][MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
                 elif role == DECODE:
                     updated_config[BASIC_CONFIG][PARALLEL_CONFIG] = \
                         user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value][MODEL_CONFIG][DECODE_PARALLEL_CONFIG]

@@ -11,6 +11,8 @@ from argparse import ArgumentParser
 from typing import Dict, Any
 from enum import Enum
 
+SERVER_LIST = 'server_list'
+
 
 class HardwareType(Enum):
     A2 = 'd802'
@@ -124,7 +126,7 @@ def main():
     except Exception as e:
         logging.error(f"Failed to get device_ip or super_device_id, error: {e}")
 
-    hccn_table = {'version': '1.0', 'server_count': '1', 'server_list': []}
+    hccn_table = {'version': '1.0', 'server_count': '1', SERVER_LIST: []}
     device_list = []
     rank_id = 0
     for rank_id, device_id in enumerate(visible_devices):
@@ -137,14 +139,14 @@ def main():
         logging.info('rank_id: %s, device_id: %s, device_ip: %s', rank_id, device_id, device_ip)
         device_list.append(device)
 
-    hccn_table['server_list'].append({
+    hccn_table[SERVER_LIST].append({
         'server_id': host_ip,
         'container_ip': pod_ip,
         'device': device_list
     })
 
     if hardware_type == HardwareType.A3:
-        hccn_table['super_pod_list'] = [{"super_pod_id": "0", "server_list": [{"server_id": host_ip}]}]
+        hccn_table['super_pod_list'] = [{"super_pod_id": "0", SERVER_LIST: [{"server_id": host_ip}]}]
 
     hccn_table['status'] = 'completed'
 

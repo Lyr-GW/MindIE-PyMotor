@@ -8,9 +8,6 @@ from motor.coordinator.models.request import ReqState
 from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.models.request import ScheduledResource
 from motor.common.resources.instance import PDRole
-from motor.common.utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 
 class PDHybridRouter(BaseRouter):
@@ -27,7 +24,7 @@ class PDHybridRouter(BaseRouter):
             return StreamingResponse(self.__forward_pd_hybrid_request(resource),
                                      media_type="application/json")
         except Exception as e:
-            logger.error("Error occurred while forwarding PD hybrid request: %s", e)
+            self.logger.error("Error occurred while forwarding PD hybrid request: %s", e)
             raise e
         finally:
             self.release_all(resource)
@@ -38,7 +35,7 @@ class PDHybridRouter(BaseRouter):
             # For PD hybrid instances, we forward the original request directly
             req_data = self.req_info.req_data.copy()
             
-            logger.info(f"PD hybrid request data: {req_data}")
+            self.logger.info(f"PD hybrid request data: {req_data}")
             
             release_kv = False
             async for chunk in self.forward_stream_request(req_data=req_data, resource=resource):
@@ -47,10 +44,10 @@ class PDHybridRouter(BaseRouter):
                     self.release_kv(resource)
                 yield chunk
         except Exception as e:
-            logger.error("Error occurred while forwarding PD hybrid request: %s", e)
+            self.logger.error("Error occurred while forwarding PD hybrid request: %s", e)
             raise e
         
         # Release tokens after streaming is complete
         self.req_info.update_state(ReqState.DECODE_END)
         self.release_tokens(resource)
-        logger.info(f"Completed streaming for PD hybrid request {self.req_info.req_id}")
+        self.logger.info(f"Completed streaming for PD hybrid request {self.req_info.req_id}")

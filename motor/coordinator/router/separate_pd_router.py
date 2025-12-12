@@ -10,9 +10,6 @@ from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.router.base_router import BaseRouter
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import PDRole
-from motor.common.utils.logger import get_logger
-
-logger = get_logger(__name__)
 
 
 class SeparatePDRouter(BaseRouter):
@@ -38,9 +35,9 @@ class SeparatePDRouter(BaseRouter):
                     prefill_resource = self.prepare_resource(PDRole.ROLE_P)
                     # Forward P request
                     p_resp_json = await self.__forward_p_request(prefill_resource)
-                    logger.debug("Prefill response received: %s", p_resp_json)
+                    self.logger.debug("Prefill response received: %s", p_resp_json)
                 except Exception as e:
-                    logger.error("Error occurred while forwarding P request: %s", e)
+                    self.logger.error("Error occurred while forwarding P request: %s", e)
                     if isinstance(e, HTTPException):
                         error_response = {
                             "status_code": e.status_code,
@@ -59,7 +56,7 @@ class SeparatePDRouter(BaseRouter):
                     if prefill_resource and self.req_info.state != ReqState.PREFILL_END:
                         # When forwarding fails, releases p tokens and kvcache
                         if not self.release_all(prefill_resource):
-                            logger.warning(f"Fail to release prefill resource, \
+                            self.logger.warning(f"Fail to release prefill resource, \
                                 instance id: {prefill_resource.instance.id}, \
                                 endpoint id: {prefill_resource.endpoint.id}, \
                                 req state: {self.req_info.state}")
@@ -72,12 +69,13 @@ class SeparatePDRouter(BaseRouter):
                     async for chunk in self.__forward_d_request(p_resp_json, prefill_resource, decode_resource):
                         yield chunk
                 except Exception as e:
-                    logger.error("Error occurred while forwarding Decode request: %s", e)
+                    self.logger.error("Error occurred while forwarding Decode request: %s", e)
                     raise e
                 finally:
                     # After streaming done or error occurred, release tokens
                     if decode_resource and not self.release_tokens(decode_resource):
-                        logger.warning(f"Fail to release decode resource, instance id: {decode_resource.instance.id}, \
+                        self.logger.warning(f"Fail to release decode resource, \
+                            instance id: {decode_resource.instance.id}, \
                             endpoint id: {decode_resource.endpoint.id}, \
                             req state: {self.req_info.state}")
         return StreamingResponse(generate_stream(),
@@ -134,7 +132,7 @@ class SeparatePDRouter(BaseRouter):
                 
             self.req_info.update_state(ReqState.DECODE_END)
             self.release_tokens(decode_resource)
-            logger.info(f"Completed streaming for request {self.req_info}")
+            self.logger.info(f"Completed streaming for request {self.req_info}")
         except Exception as e:
             self.__handle_stream_error(prefill_resource, e)
             if isinstance(e, HTTPException):
@@ -226,7 +224,7 @@ class SeparatePDRouter(BaseRouter):
         try:
             chunk_str = chunk.decode("utf-8").strip()
         except UnicodeDecodeError:
-            logger.debug("Skipping chunk: %s", chunk)
+            self.logger.debug("Skipping chunk: %s", chunk)
             return None
             
         if not chunk_str:
@@ -238,7 +236,7 @@ class SeparatePDRouter(BaseRouter):
         try:
             return json.loads(chunk_str)
         except json.JSONDecodeError:
-            logger.debug("Skipping chunk str: %s", chunk_str)
+            self.logger.debug("Skipping chunk str: %s", chunk_str)
             return None
 
     def __extract_content_from_choice(self, choice: dict) -> str:
@@ -305,7 +303,7 @@ class SeparatePDRouter(BaseRouter):
         self.req_info.req_len = len(json.dumps(req_data).encode("utf-8"))
         self.req_info.req_data = req_data
         
-        logger.info("Recomputing request %s, retry count: %d, new req_info: %s",
+        self.logger.info("Recomputing request %s, retry count: %d, new req_info: %s",
                     self.req_info.req_id, self.retry_count, self.req_info)
 
     def __handle_stream_error(self, prefill_resource: ScheduledResource, error: Exception):
@@ -313,5 +311,5 @@ class SeparatePDRouter(BaseRouter):
         if not self.first_chunk_sent:
             self.release_kv(prefill_resource)
         
-        logger.error("Error during streaming from decoder %s, aborted request %s, error: %s",
+        self.logger.error("Error during streaming from decoder %s, aborted request %s, error: %s",
                     self.req_info.api, self.req_info.req_id, str(error))

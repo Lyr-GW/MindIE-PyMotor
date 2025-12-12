@@ -8,3 +8,8 @@ CHAT_COMPLETION_PREFIX = "chatcmpl-"
 # /v1/completions: cmpl-xxx-0
 COMPLETION_PREFIX = "cmpl-"
 COMPLETION_SUFFIX = "-0"
+
+DEFAULT_REQUEST_ID = "unknown"
+REQUEST_ID_KEY = "req_id"
+REQUEST_DATA_KEY = "req_data"
+RESOURCE_KEY = "resource"

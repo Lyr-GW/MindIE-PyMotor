@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from typing import Any
 import logging
 import time
 
@@ -11,6 +12,7 @@ from fastapi.responses import StreamingResponse
 import httpx
 
 from motor.config.coordinator import CoordinatorConfig
+from motor.coordinator.models.contants import REQUEST_ID_KEY, DEFAULT_REQUEST_ID
 from motor.coordinator.models.request import RequestInfo, ReqState, ScheduledResource
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.router.request_error_handler import handle_request_errors
@@ -18,7 +20,15 @@ from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import PDRole
 from motor.common.utils.logger import get_logger
 
-logger = get_logger(__name__, None, logging.INFO)
+logger = get_logger(__name__)
+
+
+class RequestLoggerAdapter(logging.LoggerAdapter):
+    """logger adaptor add req_id as prefix"""
+    
+    def process(self, msg: str, kwargs: Any) -> tuple[str, Any]:
+        req_id = self.extra.get(REQUEST_ID_KEY, DEFAULT_REQUEST_ID) if self.extra else DEFAULT_REQUEST_ID
+        return f"[{req_id}] {msg}", kwargs
 
 
 class BaseRouter(ABC):
@@ -32,6 +42,10 @@ class BaseRouter(ABC):
         """
         self.req_info = req_info
         self.first_chunk_sent = False
+        self.logger = RequestLoggerAdapter(
+            logger, 
+            extra={REQUEST_ID_KEY: req_info.req_id}
+        )
     
     @abstractmethod
     async def handle_request(self) -> StreamingResponse:
@@ -58,12 +72,12 @@ class BaseRouter(ABC):
 
         for i in range(CoordinatorConfig().exception_config.max_retry):
             result = Scheduler().select_instance_and_endpoint(role)
-            logger.debug("Scheduling attempt %d for role %s", i + 1, role)
+            self.logger.debug("Scheduling attempt %d for role %s", i + 1, role)
             # Check return value, ensure it's iterable with two elements
             if isinstance(result, (tuple, list)) and len(result) == 2 and all(result):
                 ins, endpoint = result
                 break
-            logger.warning("Scheduling failed, role: %s, retrying %d/%d, result: %s", role, i + 1, 
+            self.logger.warning("Scheduling failed, role: %s, retrying %d/%d, result: %s", role, i + 1, 
                            CoordinatorConfig().exception_config.max_retry, result)
             if i == CoordinatorConfig().exception_config.max_retry - 1:
                 self.req_info.update_state(ReqState.EXCEPTION)
@@ -71,7 +85,7 @@ class BaseRouter(ABC):
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
                     detail=f"Scheduling failed, role:{role}"
                 )
-        logger.debug("[%s] Scheduled instance: %s, role: %s", self.req_info.req_id, ins.job_name, role)
+        self.logger.debug("Scheduled instance: %s, role: %s", ins.job_name, role)
 
         # If scheduler returns normally, it means allocation was successful
         self.req_info.update_state(ReqState.P_ALLOCATED if role == PDRole.ROLE_P else ReqState.D_ALLOCATED)
@@ -82,7 +96,7 @@ class BaseRouter(ABC):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 detail=f"Allocation failed, role:{role}"
             )
-        logger.debug("[%s] Allocated instance: %s, role: %s", self.req_info.req_id, ins.job_name, role)
+        self.logger.debug("Allocated instance: %s, role: %s", ins.job_name, role)
         return ScheduledResource(instance=ins, endpoint=endpoint)
     
     @handle_request_errors(stream=True)
@@ -102,7 +116,7 @@ class BaseRouter(ABC):
             'X-Request-Id': self.req_info.req_id
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
-        logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
+        self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
                      base_url, self.req_info.api, headers, req_data, 
                      CoordinatorConfig().exception_config.first_token_timeout)
         timeout = CoordinatorConfig().exception_config.first_token_timeout \
@@ -143,7 +157,7 @@ class BaseRouter(ABC):
             'X-Request-Id': self.req_info.req_id
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
-        logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
+        self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
                      base_url, self.req_info.api, headers, req_data, 
                      CoordinatorConfig().exception_config.first_token_timeout)
         timeout = CoordinatorConfig().exception_config.infer_timeout \
@@ -179,7 +193,7 @@ class BaseRouter(ABC):
             The result of update
         """
         if not(resource and isinstance(resource, ScheduledResource) and resource.instance and resource.endpoint):
-            logger.warning("Resource is empty")
+            self.logger.warning("Resource is empty")
             return False
         
         return Scheduler().update_workload(resource.instance, resource.endpoint, 
@@ -187,9 +201,7 @@ class BaseRouter(ABC):
 
     def _log_request_details(self):
         current_time = time.time()
-        cost_time = current_time - self.req_info.start_time
-        logger.debug("Request ID: %s, API: %s, Length: %d, State: %s, Start Time: %s, Prefill End Time: %s, " +
-                     "Decode End Time: %s, Current Time: %s, Cost Time: %s",
-                     self.req_info.req_id, self.req_info.api, self.req_info.req_len, self.req_info.state, 
-                     self.req_info.start_time, self.req_info.prefill_end_time, self.req_info.decode_end_time, 
-                     current_time, cost_time)
+        cost_time = current_time - self.req_info.status[ReqState.ARRIVE]
+        self.logger.debug("API: %s, Length: %d, State: %s, Cost Time: %s, All status Time: %s",
+                     self.req_info.api, self.req_info.req_len, self.req_info.state, 
+                     cost_time, self.req_info.status)

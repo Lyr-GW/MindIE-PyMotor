@@ -39,28 +39,16 @@ class RequestInfo(BaseModel):
     req_data: dict = Field(..., description="Request json content")
     req_len: int = Field(..., description="Request body length")
     api: str = Field(..., description="API need to be forwarded")
-    state: ReqState = Field(default=ReqState.INVALID, description="Request status")
-    start_time: float = Field(default=None, description="Request start time")
-    p_scheduled_time: float = Field(default=None, description="P instance scheduled time")
-    prefill_end_time: float = Field(default=None, description="Prefill end time")
-    d_scheduled_time: float = Field(default=None, description="D instance scheduled time")
-    first_token_time: float = Field(default=None, description="First token decoded time")
-    decode_end_time: float = Field(default=None, description="Decode end time")
-    input_tokens: int = Field(default=0, description="Input tokens")
-    output_tokens: int = Field(default=0, description="Output tokens")
+    state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
+    status: dict[ReqState, float] = Field(default={}, description="Request status time")
     
+    def __init__(self, **data):
+        super().__init__(**data)
+        self.status[ReqState.ARRIVE] = time.time()
+
     def update_state(self, new_state: ReqState):
         self.state = new_state
-        if new_state == ReqState.P_ALLOCATED:
-            self.p_scheduled_time = time.time()
-        elif new_state == ReqState.PREFILL_END:
-            self.prefill_end_time = time.time()
-        elif new_state == ReqState.D_ALLOCATED:
-            self.d_scheduled_time = time.time()
-        elif new_state == ReqState.FIRST_TOKEN_FINISH:
-            self.first_token_time = time.time()
-        elif new_state == ReqState.DECODE_END:
-            self.decode_end_time = time.time()
+        self.status[new_state] = time.time()
 
 
 class ScheduledResource(BaseModel):

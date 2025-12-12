@@ -131,7 +131,5 @@ async def __create_request_info(raw_request: Request, metaserver_request: bool =
         req_id=req_id,
         req_data=request_json.copy(),
         api=api,
-        req_len=req_len,
-        state=ReqState.ARRIVE,
-        start_time=time.time()
+        req_len=req_len
     )

@@ -224,11 +224,11 @@ class TestRouterCDPSeparation:
             
             # Check request state and metrics
             assert req_info.state == ReqState.DECODE_END
-            assert req_info.d_scheduled_time >= req_info.start_time
-            assert req_info.p_scheduled_time >= req_info.d_scheduled_time
-            assert req_info.prefill_end_time >= req_info.p_scheduled_time
-            assert req_info.first_token_time >= req_info.prefill_end_time
-            assert req_info.decode_end_time >= req_info.first_token_time
+            assert req_info.status[ReqState.D_ALLOCATED] >= req_info.status[ReqState.ARRIVE]
+            assert req_info.status[ReqState.P_ALLOCATED] >= req_info.status[ReqState.D_ALLOCATED]
+            assert req_info.status[ReqState.PREFILL_END] >= req_info.status[ReqState.P_ALLOCATED]
+            assert req_info.status[ReqState.FIRST_TOKEN_FINISH] >= req_info.status[ReqState.PREFILL_END]
+            assert req_info.status[ReqState.DECODE_END] >= req_info.status[ReqState.FIRST_TOKEN_FINISH]
 
     @pytest.mark.asyncio
     async def test_engine_server_decode_4xx_status_code(self, client, monkeypatch: MonkeyPatch, setup_cdp_separation):

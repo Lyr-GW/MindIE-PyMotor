@@ -174,9 +174,7 @@ async def create_mock_request_info(api = "/v1/chat/completions", max_tokens = 10
         req_id="test-id",
         req_data=request_json.copy(),
         req_len=req_len,
-        api=api,
-        state=ReqState.ARRIVE,
-        start_time=time.time()
+        api=api
     )
     
     return req_info

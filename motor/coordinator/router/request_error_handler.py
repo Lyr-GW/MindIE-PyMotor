@@ -2,20 +2,21 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 import asyncio
 import functools
-import logging
 
 from fastapi import status, HTTPException
 import httpx
 
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.request import ReqState, ScheduledResource
+from motor.coordinator.models.contants import REQUEST_DATA_KEY, RESOURCE_KEY
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
-from motor.common.utils.logger import get_logger
 
-logger = get_logger(__name__, None, logging.INFO)
+# Import only for type checking to avoid runtime circular dependencies
+if TYPE_CHECKING:
+    from motor.coordinator.router.base_router import BaseRouter
 
 
 def handle_request_errors(stream=True):
@@ -44,12 +45,13 @@ def handle_request_errors(stream=True):
 
 def __check_request_params(args: tuple, kwargs: dict) -> bool:
     """Check if required request parameters are present and valid"""
+    from motor.coordinator.router.base_router import BaseRouter
     request_params = [
-        ['resource', ScheduledResource],
-        ['req_data', dict]
+        [RESOURCE_KEY, ScheduledResource],
+        [REQUEST_DATA_KEY, dict]
     ]
     
-    if not args or len(args) == 0:
+    if not args or len(args) == 0 or not isinstance(args[0], BaseRouter):
         return False
         
     for param_name, param_type in request_params:
@@ -71,11 +73,10 @@ async def __execute_without_retry(func: Callable, stream: bool, *args, **kwargs)
 async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
     """Execute function with retry logic and error handling"""
     last_exc = None
-    self_instance = args[0] if args else None
-    resource = kwargs['resource']
-    req_id = self_instance.req_info.req_id
-    logger.debug("Forwarding request to instance at %s:%s with data: %s", \
-        resource.endpoint.ip, resource.endpoint.business_port, kwargs['req_data'])
+    self_instance: 'BaseRouter' = args[0]
+    resource: ScheduledResource = kwargs[RESOURCE_KEY]
+    self_instance.logger.debug("Forwarding request to instance at %s:%s with data: %s", \
+        resource.endpoint.ip, resource.endpoint.business_port, kwargs[REQUEST_DATA_KEY])
     
     for attempt in range(CoordinatorConfig().exception_config.max_retry):
         try:
@@ -86,14 +87,14 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
             last_exc = e 
             await __handle_execution_exception(e, self_instance, resource)
         except asyncio.CancelledError as ce:
-            logger.debug("Request [%s] was cancelled", req_id)
+            self_instance.logger.debug("Request was cancelled")
             return
         except BaseException as be:
-            logger.warning(f"Request [{req_id}] occurred unknown critical error: {str(be)}", exc_info=True)
+            self_instance.logger.warning(f"Request occurred unknown critical error: {str(be)}", exc_info=True)
             raise be
             
         if last_exc and attempt == CoordinatorConfig().exception_config.max_retry - 1:
-            __handle_final_failure(self_instance, last_exc)
+            __handle_final_failure(last_exc, self_instance)
             if isinstance(last_exc, HTTPException):
                 raise last_exc
             raise HTTPException(
@@ -101,7 +102,7 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
                 detail=str(last_exc)
             )
         
-        await __handle_retry_delay(attempt)
+        await __handle_retry_delay(attempt, self_instance)
     
 
 async def __try_execute_function(func: Callable, stream: bool, *args, **kwargs):
@@ -114,7 +115,9 @@ async def __try_execute_function(func: Callable, stream: bool, *args, **kwargs):
         yield result
 
 
-async def __handle_execution_exception(exception: Exception, self_instance, resource: ScheduledResource) -> Exception:
+async def __handle_execution_exception(exception: Exception, 
+                                       self_instance: 'BaseRouter', 
+                                       resource: ScheduledResource) -> Exception:
     """Handle exceptions during function execution
     
     Returns:
@@ -128,11 +131,11 @@ async def __handle_execution_exception(exception: Exception, self_instance, reso
         return __handle_general_exception(exception, self_instance)
 
 
-async def __handle_http_status_error(error: httpx.HTTPStatusError, self_instance):
+async def __handle_http_status_error(error: httpx.HTTPStatusError, self_instance: 'BaseRouter'):
     """Handle HTTP status errors"""
     if hasattr(error, 'response') and hasattr(error.response, 'status_code'):
         status_code = error.response.status_code
-        logger.warning(f"HTTP error, status code: {status_code}")
+        self_instance.logger.warning(f"HTTP error, status code: {status_code}")
         
         # 4XX: Client request error, return directly
         if __is_client_error(status_code):
@@ -142,7 +145,7 @@ async def __handle_http_status_error(error: httpx.HTTPStatusError, self_instance
                 detail=error.response.text
             )
     else:
-        logger.warning(f"HTTP error, but fail to parse status code: {error}")
+        self_instance.logger.warning(f"HTTP error, but fail to parse status code: {error}")
 
 
 def __is_client_error(status_code: int) -> bool:
@@ -151,7 +154,7 @@ def __is_client_error(status_code: int) -> bool:
             status_code < status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-def __handle_request_error(error: httpx.RequestError, self_instance, resource: ScheduledResource):
+def __handle_request_error(error: httpx.RequestError, self_instance: 'BaseRouter', resource: ScheduledResource):
     """Handle HTTP request errors"""
     self_instance.req_info.update_state(ReqState.EXCEPTION)
     
@@ -159,25 +162,25 @@ def __handle_request_error(error: httpx.RequestError, self_instance, resource: S
         InstanceHealthChecker().push_exception_instance(resource.instance, resource.endpoint)
     
     if isinstance(error, httpx.NetworkError):
-        logger.warning("Network error: %s", str(error))
+        self_instance.logger.warning("Network error: %s", str(error))
     elif isinstance(error, httpx.TimeoutException):
-        logger.warning("Timeout error: %s", str(error))
+        self_instance.logger.warning("Timeout error: %s", str(error))
         self_instance.req_info.update_state(ReqState.TIMEOUT)
     else:
-        logger.warning(f"Unknown request error: {str(error)}")
+        self_instance.logger.warning(f"Unknown request error: {str(error)}")
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
         detail=str(error)
     )
 
 
-def __handle_general_exception(error: Exception, self_instance):
+def __handle_general_exception(error: Exception, self_instance: 'BaseRouter'):
     """Handle general exceptions"""
-    logger.warning(f"Failed for forwarding /{self_instance.req_info.api}, error: {str(error)}")
+    self_instance.logger.warning(f"Failed for forwarding /{self_instance.req_info.api}, error: {str(error)}")
     
     # If any chunk has been sent, do not retry
     if self_instance.first_chunk_sent:
-        logger.error(f"Streaming to client interrupted after response started: {str(error)}")
+        self_instance.logger.error(f"Streaming to client interrupted after response started: {str(error)}")
         self_instance.req_info.update_state(ReqState.EXCEPTION)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -185,15 +188,15 @@ def __handle_general_exception(error: Exception, self_instance):
         )
 
 
-async def __handle_retry_delay(attempt: int):
+async def __handle_retry_delay(attempt: int, self_instance: 'BaseRouter'):
     """Handle delay between retry attempts"""
     config = CoordinatorConfig().exception_config
-    logger.warning("Attempt failed, retrying %d/%d", attempt + 1, config.max_retry)
+    self_instance.logger.warning("Attempt failed, retrying %d/%d", attempt + 1, config.max_retry)
     await asyncio.sleep(config.retry_delay * (2 ** (attempt - 1)))
 
 
-def __handle_final_failure(self_instance, exception: Exception):
+def __handle_final_failure(exception: Exception, self_instance: 'BaseRouter'):
     """Handle final failure after all retries exhausted"""
     config = CoordinatorConfig().exception_config
-    logger.error("Stream request forwarding failed, reach max retries %d", config.max_retry)
+    self_instance.logger.error("Stream request forwarding failed, reach max retries %d", config.max_retry)
     self_instance.req_info.update_state(ReqState.EXCEPTION)

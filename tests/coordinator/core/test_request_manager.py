@@ -170,8 +170,7 @@ class TestRequestManager:
             req_id=req_id,
             req_data={"test": "data"},
             req_len=100,
-            api="/test/api",
-            state=ReqState.ARRIVE
+            api="/test/api"
         )
         
         # Test add_req_info
@@ -202,8 +201,7 @@ class TestRequestManager:
                     req_id=req_id,
                     req_data={"worker_id": worker_id, "test": "data"},
                     req_len=100,
-                    api=f"/test/api/{worker_id}",
-                    state=ReqState.ARRIVE
+                    api=f"/test/api/{worker_id}"
                 )
                 
                 # Add request
@@ -247,8 +245,7 @@ class TestRequestManager:
                 req_id=req_id,
                 req_data={"index": i, "test": "data"},
                 req_len=100,
-                api=f"/test/api/{i}",
-                state=ReqState.ARRIVE
+                api=f"/test/api/{i}"
             )
             manager.add_req_info(req_info)
             req_ids.append(req_id)
