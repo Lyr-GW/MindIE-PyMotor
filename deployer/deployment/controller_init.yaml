@@ -30,14 +30,29 @@ spec:
               drop: ["ALL"]
             seccompProfile:
               type: "RuntimeDefault"
+          startupProbe:
+            exec:
+              command:
+              - bash
+              - -c
+              - "$CONFIGMAP_PATH/probe.sh startup"
+            periodSeconds: 5
+            failureThreshold: 100
           readinessProbe:
-            httpGet:
-              path: /readiness
-              port: 57675
-              scheme: HTTP
-            initialDelaySeconds: 20   #启动 20s 后开始检测
-            periodSeconds: 5          #探测周期5s
-            successThreshold: 1       #连续1次成功，即就绪
+            exec:
+              command:
+              - bash
+              - -c
+              - "$CONFIGMAP_PATH/probe.sh readiness"
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+              - bash
+              - -c
+              - "$CONFIGMAP_PATH/probe.sh liveness"
+            periodSeconds: 5
+            timeoutSeconds: 4
           env:
             - name: POD_IP
               valueFrom:
@@ -68,6 +83,15 @@ spec:
             - name: update-config-script
               mountPath: /mnt/configmap/update_config_from_user_config.py
               subPath: update_config_from_user_config.py
+            - name: probe-script
+              mountPath: /mnt/configmap/probe.sh
+              subPath: probe.sh
+            - name: probe-status-check-script
+              mountPath: /mnt/configmap/probe_status_check.py
+              subPath: probe_status_check.py
+            - name: get-mgmt-port-script
+              mountPath: /mnt/configmap/get_mgmt_port.py
+              subPath: get_mgmt_port.py
             - name: user-config
               mountPath: /mnt/configmap/user_config.json
               subPath: user_config.json
@@ -84,6 +108,18 @@ spec:
           configMap:
             name: update-config-script
             defaultMode: 0640
+        - name: probe-script
+          configMap:
+            name: probe-script
+            defaultMode: 0550
+        - name: probe-status-check-script
+          configMap:
+            name: probe-status-check-script
+            defaultMode: 0550
+        - name: get-mgmt-port-script
+          configMap:
+            name: get-mgmt-port-script
+            defaultMode: 0550
         - name: user-config
           configMap:
             name: user-config
@@ -111,6 +147,7 @@ spec:
   selector:
     app: mindie-ms-controller
   sessionAffinity: None
+  publishNotReadyAddresses: true
   type: ClusterIP
 status:
   loadBalancer: {}
