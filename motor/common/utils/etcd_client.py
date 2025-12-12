@@ -103,7 +103,8 @@ class EtcdClient:
                 return True
 
         except Exception as e:
-            logger.error("Error renewing lease for lock %s: %s", lock_key, e)
+            logger.error("Error renewing lease for lock %s: %s, will release", lock_key, e)
+            self.release_lock(lock_key)
             return False
 
     def release_lock(self, lock_key: str) -> bool:
@@ -123,6 +124,7 @@ class EtcdClient:
 
         except Exception as e:
             logger.error("Error releasing lock %s: %s", lock_key, e)
+            del self._leases[lock_key]
             return False
 
     def put_json(

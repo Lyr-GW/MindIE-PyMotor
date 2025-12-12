@@ -2,8 +2,14 @@
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
 import os
+from enum import Enum
 from typing import Any
 import requests
+
+
+class ConnectionMode(Enum):
+    SHORT = "short"
+    LONG = "long"
 
 
 class SafeHTTPSClient:
@@ -12,6 +18,7 @@ class SafeHTTPSClient:
                  cert_file: str | None = None,
                  key_file: str | None = None,
                  ca_file: str | None = None,
+                 mode: ConnectionMode = ConnectionMode.SHORT,
                  timeout: float = 5):
 
         self.base_url = base_url.rstrip('/')
@@ -36,6 +43,8 @@ class SafeHTTPSClient:
         self.session.headers.update({
             'User-Agent': 'Secure-HTTPS-Client/1.0',
             'Accept': 'application/json',
+            # Default: close = short connection; else keep alive = long connection
+            'Connection': 'close' if mode == ConnectionMode.SHORT else 'Keep-Alive',
             'Content-Type': 'application/json'
         })
 

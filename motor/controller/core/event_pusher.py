@@ -176,7 +176,7 @@ class EventPusher(Observer):
 
         while not self.stop_event.is_set():
             try:
-                response = self.heart_client.get("/health", params={"status": "normal"})
+                response = self.heart_client.get("/readiness", params={"status": "normal"})
                 # Mark that we've successfully connected to coordinator at least once
                 if not self.is_first_heartbeat_success:
                     self.is_first_heartbeat_success = True
@@ -189,6 +189,11 @@ class EventPusher(Observer):
                     self.event_queue.put(event)
                     self.is_coordinator_reset = False
                     hb_loss_cnt = 0
+                else:
+                    if response is None or response.get("ready") is None or not response.get("ready"):
+                        # When coordinator is not ready, controller will reset coordinator,
+                        logger.info("Coordinator is not ready.")
+                        self.is_coordinator_reset = True
 
             except Exception as e:
                 # Only count heartbeat loss after we've successfully connected at least once

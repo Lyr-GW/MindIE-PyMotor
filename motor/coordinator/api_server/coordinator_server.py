@@ -93,11 +93,6 @@ class SSLConfig:
         self.check_hostname = True
 
 
-def build_ok_response(message: str):
-    """Construct OK response."""
-    return {"status": "ok", "message": message}
-
-
 class CoordinatorServer:
     
     def __init__(
@@ -120,6 +115,16 @@ class CoordinatorServer:
                 return stream_value.lower() in ("true", "1", "yes")
             return bool(stream_value)
         return False
+
+    @staticmethod
+    def _build_ok_response(message: str):
+        """Construct OK response."""
+        return {"status": "ok", "message": message}
+
+    @staticmethod
+    def _build_readiness_response(message: str, ready: bool):
+        """Construct readiness response, include ready info."""
+        return {"status": "ok", "message": message, "ready": ready}
     
     @staticmethod
     def _validate_openai_request(body_json: dict[str, Any], request_type: RequestType):
@@ -684,12 +689,12 @@ class CoordinatorServer:
         @self.management_app.get("/startup")
         async def startup_probe():
             logger.debug("Received startup probe request")
-            return build_ok_response("Coordinator is starting up")
+            return self._build_ok_response("Coordinator is starting up")
         
         @self.management_app.get("/health")
         async def health_check():
             logger.debug("Received health check request, Coordinator is healthy")
-            return build_ok_response("Coordinator is healthy")
+            return self._build_ok_response("Coordinator is healthy")
         
         @self.management_app.get("/readiness")
         async def readiness_check():
@@ -702,11 +707,8 @@ class CoordinatorServer:
                 # when standby is enabled, coordinator is ok only when it is master, then only master can be call
                 if StandbyManager().current_role == StandbyRole.MASTER:
                     logger.debug("Received readiness check request, "
-                                 "This coordinator is ready and is master")
-                    if is_ready:
-                        return build_ok_response("Coordinator is master and is ready")
-                    else:
-                        return build_ok_response("Coordinator is master but is not ready")
+                                 "This coordinator is master")
+                    return self._build_readiness_response("Coordinator is master", is_ready)
                 else:
                     logger.debug("Received readiness check request, This coordinator is not master")
                     raise HTTPException(
@@ -715,10 +717,7 @@ class CoordinatorServer:
                     )
             else:
                 # when standby is disabled, coordinator is always ok, otherwise request will be rejected by k8s
-                if is_ready:
-                    return build_ok_response("Coordinator is ready")
-                else:
-                    return build_ok_response("Coordinator is not ready")
+                return self._build_readiness_response("Coordinator is ok", is_ready)
         
         @self.management_app.get("/metrics")
         async def get_metrics():

@@ -168,7 +168,24 @@ class TestCoordinatorServer:
         response = self.mgmt_client.get("/readiness")
         assert response.status_code == 200
         data = response.json()
-        assert data["message"] == "Coordinator is not ready"
+        assert data["message"] == "Coordinator is ok"
+        assert data["ready"] is False
+
+    def test_readiness_endpoints_fail_when_instance_manager_ready(self):
+        """Test readiness endpoints"""
+        self._im_patcher = patch('motor.coordinator.api_server.coordinator_server.InstanceManager')
+        im_mock_cls = self._im_patcher.start()
+        im_instance = MagicMock()
+        im_instance.is_available.return_value = True
+        im_instance.refresh_instances.return_value = None
+        im_mock_cls.return_value = im_instance
+
+        # Test /readiness
+        response = self.mgmt_client.get("/readiness")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"] == "Coordinator is ok"
+        assert data["ready"] is True
 
     def test_readiness_endpoints_fail_when_enable_standby_is_master_but_instance_not_ready(self):
         """Test readiness endpoints"""
@@ -187,7 +204,8 @@ class TestCoordinatorServer:
         response = self.mgmt_client.get("/readiness")
         assert response.status_code == 200
         data = response.json()
-        assert data["message"] == "Coordinator is master but is not ready"
+        assert data["message"] == "Coordinator is master"
+        assert data["ready"] is False
 
     def test_readiness_endpoints_fail_when_enable_standby_is_standby(self):
         """Test readiness endpoints"""
@@ -212,7 +230,8 @@ class TestCoordinatorServer:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
-        assert data["message"] == "Coordinator is master and is ready"
+        assert data["message"] == "Coordinator is master"
+        assert data["ready"] is True
 
     def test_root_endpoints(self):
         """Test root endpoints"""
