@@ -81,6 +81,7 @@ class TestMetrics:
                 # Reset initialization flag to allow re-initialization
                 if hasattr(collector, '_initialized'):
                     delattr(collector, '_initialized')
+
             # Reset the singleton instance to ensure clean state for next test
             with MetricsCollector._lock:
                 if MetricsCollector in MetricsCollector._instances:
@@ -368,53 +369,6 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
                     )
 
     @_test_without_background_thread
-    def test_check_metric_format(self):
-        metric_collector = MetricsCollector()
-
-        # create 4-type metric
-        _, metric_gauge = self.load_test_gauge_metric()
-        _, metric_counter = self.load_test_counter_metric()
-        _, metric_histogram = self.load_test_histogram_metric()
-        _, metric_summary = self.load_test_summary_metric()
-
-        # check function normal: full same
-        assert metric_collector._check_metric_format(metric_gauge, metric_gauge)
-        assert metric_collector._check_metric_format(metric_counter, metric_counter)
-        assert metric_collector._check_metric_format(metric_histogram, metric_histogram)
-        assert metric_collector._check_metric_format(metric_summary, metric_summary)
-
-        # check function abnormal: different name
-        test_metric = copy.deepcopy(metric_gauge)
-        test_metric.name = "test"
-        assert not metric_collector._check_metric_format(metric_gauge, test_metric)
-
-        # check function abnormal: different help
-        test_metric = copy.deepcopy(metric_gauge)
-        test_metric.help = "test"
-        assert not metric_collector._check_metric_format(metric_gauge, test_metric)
-
-        # check function abnormal: different type
-        test_metric = copy.deepcopy(metric_gauge)
-        test_metric.type = MetricType.COUNTER
-        assert not metric_collector._check_metric_format(metric_gauge, test_metric)
-
-        # check function abnormal: different label length
-        test_metric = copy.deepcopy(metric_gauge)
-        test_metric.label.append("test")
-        test_metric.value.append(0)
-        assert not metric_collector._check_metric_format(metric_gauge, test_metric)
-
-        # check function abnormal: different label content
-        test_metric = copy.deepcopy(metric_gauge)
-        test_metric.label[0] = "test"
-        assert not metric_collector._check_metric_format(metric_gauge, test_metric)
-
-        # check function abnormal: different value
-        test_metric = copy.deepcopy(metric_gauge)
-        test_metric.value[0] = 0
-        assert metric_collector._check_metric_format(metric_gauge, test_metric)
-
-    @_test_without_background_thread
     def test_aggregate_metrics_by_instance(self):
         # ensure MetricsCollector clean
         self.clean_instances()
@@ -549,6 +503,201 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         # Just check basic structure (skip detailed comparisons due to threading state issues)
         assert isinstance(aggregate, list)
         assert len(aggregate) == 4
+
+    def show_metrics_detail(self, metrics: list[SingleMetric]):
+        for metric in metrics:
+            print(metric.name, metric.type, metric.label, metric.value)
+
+    @_test_without_background_thread
+    def test_aggregate_metric_by_sum(self):
+        # ensure MetricsCollector clean
+        self.clean_instances()
+        metric_collector = MetricsCollector()
+
+        metric_a = SingleMetric()
+        metric_a.name = "test"
+        metric_a.type = MetricType.COUNTER
+        metric_a.help = "test"
+        metric_b = SingleMetric()
+        metric_b.name = "test"
+        metric_b.type = MetricType.COUNTER
+        metric_b.help = "test"
+        metric_c = SingleMetric()
+        metric_c.name = "test"
+        metric_c.type = MetricType.COUNTER
+        metric_c.help = "test"
+
+        metric_a.label = ["a", "b", "c"]
+        metric_a.value = [1.0, 2.0, 3.0]
+        metric_b.label = ["a", "b", "c"]
+        metric_b.value = [1.0, 2.0, 3.0]
+        metric_c.label = ["a", "b", "c"]
+        metric_c.value = [2.0, 4.0, 6.0]
+        metric_sum = metric_collector._aggregate_metric_by_sum([metric_a, metric_b])
+        assert self.check_metrics_equel([metric_sum], [metric_c])
+
+        metric_a.label = ["a"]
+        metric_a.value = [1.0]
+        metric_b.label = ["a", "b", "c"]
+        metric_b.value = [1.0, 2.0, 3.0]
+        metric_c.label = ["a", "b", "c"]
+        metric_c.value = [2.0, 2.0, 3.0]
+        metric_sum = metric_collector._aggregate_metric_by_sum([metric_a, metric_b])
+        assert self.check_metrics_equel([metric_sum], [metric_c])
+
+
+        metric_a.label = ["a", "b", "c"]
+        metric_a.value = [1.0, 2.0, 3.0]
+        metric_b.label = ["a", "b"]
+        metric_b.value = [1.0, 2.0]
+        metric_c.label = ["a", "b", "c"]
+        metric_c.value = [2.0, 4.0, 3.0]
+        metric_sum = metric_collector._aggregate_metric_by_sum([metric_a, metric_b])
+        assert self.check_metrics_equel([metric_sum], [metric_c])
+
+
+    def load_test_format_diff_metric(self):
+        # metric text
+        metrics_str_a = """# HELP http_request_duration_highr_seconds_created Latency with many buckets but no API specific labels. Made for more accurate percentile calculations.
+# TYPE http_request_duration_highr_seconds_created gauge
+http_request_duration_highr_seconds_created 1.765001778333063e+09
+# HELP http_request_duration_seconds Latency with only few buckets by handler. Made to be only used if aggregation by handler is important.
+# TYPE http_request_duration_seconds histogram"""
+        metrics_str_b = """# HELP http_request_duration_highr_seconds_created Latency with many buckets but no API specific labels. Made for more accurate percentile calculations.
+# TYPE http_request_duration_highr_seconds_created gauge
+http_request_duration_highr_seconds_created 1.765019286626281e+09
+# HELP http_request_duration_seconds Latency with only few buckets by handler. Made to be only used if aggregation by handler is important.
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="0.1",method="POST"} 1.0
+http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="0.5",method="POST"} 1.0
+http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="1.0",method="POST"} 1.0
+http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="+Inf",method="POST"} 1.0
+http_request_duration_seconds_count{handler="/v1/chat/completions",method="POST"} 1.0
+http_request_duration_seconds_sum{handler="/v1/chat/completions",method="POST"} 0.00824622018262744
+# HELP http_request_duration_seconds_created Latency with only few buckets by handler. Made to be only used if aggregation by handler is important.
+# TYPE http_request_duration_seconds_created gauge
+http_request_duration_seconds_created{handler="/v1/chat/completions",method="POST"} 1.7650211184341915e+09"""
+
+        # metric format
+        metrics_a = []
+        metrics_a.append(SingleMetric())
+        metrics_a[0].name = "http_request_duration_highr_seconds_created"
+        metrics_a[0].help = "Latency with many buckets but no API specific labels. Made for more accurate percentile calculations."
+        metrics_a[0].type = MetricType.GAUGE
+        metrics_a[0].label = [
+            'http_request_duration_highr_seconds_created'
+        ]
+        metrics_a[0].value = [1.765001778333063e+09]
+        metrics_a.append(SingleMetric())
+        metrics_a[1].name = "http_request_duration_seconds"
+        metrics_a[1].help = "Latency with only few buckets by handler. Made to be only used if aggregation by handler is important."
+        metrics_a[1].type = MetricType.HISTOGRAM
+        metrics_a[1].label = []
+        metrics_a[1].value = []
+
+        metrics_b = []
+        metrics_b.append(SingleMetric())
+        metrics_b[0].name = "http_request_duration_highr_seconds_created"
+        metrics_b[0].help = "Latency with many buckets but no API specific labels. Made for more accurate percentile calculations."
+        metrics_b[0].type = MetricType.GAUGE
+        metrics_b[0].label = [
+            'http_request_duration_highr_seconds_created'
+        ]
+        metrics_b[0].value = [1.765019286626281e+09]
+        metrics_b.append(SingleMetric())
+        metrics_b[1].name = "http_request_duration_seconds"
+        metrics_b[1].help = "Latency with only few buckets by handler. Made to be only used if aggregation by handler is important."
+        metrics_b[1].type = MetricType.HISTOGRAM
+        metrics_b[1].label = [
+            'http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="0.1",method="POST"}',
+            'http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="0.5",method="POST"}',
+            'http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="1.0",method="POST"}',
+            'http_request_duration_seconds_bucket{handler="/v1/chat/completions",le="+Inf",method="POST"}',
+            'http_request_duration_seconds_count{handler="/v1/chat/completions",method="POST"}',
+            'http_request_duration_seconds_sum{handler="/v1/chat/completions",method="POST"}'
+        ]
+        metrics_b[1].value = [1.0, 1.0, 1.0, 1.0, 1.0, 0.00824622018262744]
+        metrics_b.append(SingleMetric())
+        metrics_b[2].name = "http_request_duration_seconds_created"
+        metrics_b[2].help = "Latency with only few buckets by handler. Made to be only used if aggregation by handler is important."
+        metrics_b[2].type = MetricType.GAUGE
+        metrics_b[2].label = [
+            'http_request_duration_seconds_created{handler="/v1/chat/completions",method="POST"}'
+        ]
+        metrics_b[2].value = [1.7650211184341915e+09]
+
+        return metrics_str_a.strip(), copy.deepcopy(metrics_a), metrics_str_b.strip(), copy.deepcopy(metrics_b)
+
+    @_test_without_background_thread
+    def test_aggregate_metrics_by_instance_diff_format(self):
+        # ensure MetricsCollector clean
+        self.clean_instances()
+        metric_collector = MetricsCollector()
+        metric_collector._instance_metrics_cached = {}
+
+        # create different format metric
+        _, metrics_a, _, metrics_b = self.load_test_format_diff_metric()
+
+        # check function: empty collects
+        collects = {}
+        assert metric_collector._aggregate_metrics_by_instance(collects)
+        assert collects == {}
+        assert len(metric_collector._instance_metrics_cached) == 0
+
+        # check function: cache is empty
+        collects = {
+            0: {
+                "endpoints": {
+                    0: {
+                        "metrics": [
+                            metrics_a[0],
+                            metrics_a[1]
+                        ]
+                    },
+                    1: {
+                        "metrics": [
+                            metrics_b[0],
+                            metrics_b[1],
+                            metrics_b[2]
+                        ]
+                    },
+                }
+            },
+        }
+
+        assert len(metric_collector._instance_metrics_cached) == 0
+        assert metric_collector._aggregate_metrics_by_instance(collects)
+        assert len(collects) == 1
+        assert "endpoints" not in collects[0]
+        assert "metrics" in collects[0]
+        assert self.check_metrics_equel(collects[0]["metrics"], [
+            self.metric_add(metrics_a[0], metrics_b[0]),
+            metrics_b[1],
+            metrics_b[2]
+        ])
+        assert len(metric_collector._instance_metrics_cached) == 1
+
+        # check function: cache is not empty
+        collects = {
+            1: {
+                "endpoints": {
+                    2: {
+                        "metrics": [
+                            metrics_a[0],
+                            metrics_a[1]
+                        ]
+                    },
+                }
+            },
+        }
+
+        assert len(metric_collector._instance_metrics_cached) == 1
+        assert metric_collector._aggregate_metrics_by_instance(collects)
+        assert len(collects) == 1
+        assert "endpoints" not in collects[1]
+        assert "metrics" in collects[1]
+        assert self.check_metrics_equel(collects[1]["metrics"], metrics_a)
+        assert len(metric_collector._instance_metrics_cached) == 2
 
     @_test_without_background_thread
     def test_get_serialize_metrics(self):

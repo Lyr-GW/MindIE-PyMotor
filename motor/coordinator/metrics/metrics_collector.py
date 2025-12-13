@@ -374,7 +374,6 @@ class MetricsCollector(ThreadSafeSingleton):
         if not collects:
             return True
 
-        metric_count = 0
         for instance_id in collects.keys():
             if not isinstance(collects[instance_id], dict) or \
                 not collects[instance_id] or "endpoints" not in collects[instance_id]:
@@ -387,43 +386,70 @@ class MetricsCollector(ThreadSafeSingleton):
                     logger.error("[Metrics] Invalid 'metrics_str' in pod metrics JSON file.")
                     return False
                 parsed_metric = self._parse_metric_text(pod_info["metrics_str"])
-                if metric_count == 0:
-                    metric_count = len(parsed_metric)
-                elif metric_count != len(parsed_metric):
-                    parsed_metric = {}
                 if not parsed_metric:
                     logger.error("[Metrics] Parse metric text failed.")
                     return False
                 pod_info[self.METRICS_KEY] = parsed_metric
         return True
 
-    def _aggregate_metric_by_sum(
-        self,
-        endpoints: dict[int, dict[str, list[SingleMetric]]],
-        single_metric: SingleMetric,
-        index: int
-    ) -> None:
+    def _aggregate_metric_by_sum(self, metric_list: list[SingleMetric]) -> SingleMetric:
         """
-        Aggregate the index-th metric of all pods in single instance.
+        Aggregate single metric using rule sum.
 
-        :param endpoints:
-            endpoints format:
-            {
-                endpoint_id0: {
-                    "metrics": metrics_value # the type of metrics_value: list[SingleMetric]
-                },
-                endpoint_id1: ...
-            }
-        :param single_metric: aggregate result save to single_metric
-        :param index: the position in list[SingleMetric]
+        :param metric_list: the same metric from different pods or instances
         :returns:
         """
-        first_pod = next(iter(endpoints.values()))
-        value_num = len(first_pod[self.METRICS_KEY][index].value)
-        single_metric.value = [0.0] * value_num
-        for i in range(value_num):
-            for pod_info in endpoints.values():
-                single_metric.value[i] += pod_info[self.METRICS_KEY][index].value[i]
+
+        aggregate = {}
+        for metric in metric_list:
+            for i, label in enumerate(metric.label):
+                if label not in aggregate:
+                    aggregate[label] = 0.0
+                aggregate[label] += metric.value[i]
+
+        metric_aggregate = SingleMetric()
+        metric_aggregate.name = metric_list[0].name
+        metric_aggregate.help = metric_list[0].help
+        metric_aggregate.type = metric_list[0].type
+        metric_aggregate.label = []
+        metric_aggregate.value = []
+        for label, value in aggregate.items():
+            metric_aggregate.label.append(label)
+            metric_aggregate.value.append(value)
+        return metric_aggregate
+
+    def _aggregate_metrics_by_sum(self, metrics_list: list[list[SingleMetric]]) -> list[SingleMetric]:
+        """
+        Aggregate metrics using rule sum.
+
+        :param metrics_list:
+        :returns:
+        """
+
+        # 1. find longest metrics as aggregate format
+        max_index = 0
+        max_length = len(metrics_list[max_index])
+        for i, metrics in enumerate(metrics_list):
+            if len(metrics) > max_length:
+                max_index = i
+                max_length = len(metrics)
+
+        # 2. insert metric.name sequence by sequence
+        aggr_input = {}
+        for metric in metrics_list[max_index]:
+            aggr_input[metric.name] = []
+
+        # 3. prepare input metric data to be aggregated
+        for metrics in metrics_list:
+            for metric in metrics:
+                aggr_input[metric.name].append(metric)
+
+        # 4. aggregate all metrics
+        metrics_aggregate = []
+        for value in aggr_input.values():
+            metrics_aggregate.append(self._aggregate_metric_by_sum(value))
+
+        return metrics_aggregate
 
     def _aggregate_metrics_by_instance(
         self,
@@ -460,98 +486,18 @@ class MetricsCollector(ThreadSafeSingleton):
             if not endpoints:
                 continue
 
-            first_pod = next(iter(endpoints.values()))
-            aggregate = []
-            metric_count = len(first_pod[self.METRICS_KEY])
-            for i in range(metric_count):
-                single_metric = SingleMetric(first_pod[self.METRICS_KEY][i])
-                self._aggregate_metric_by_sum(endpoints, single_metric, i)
-                aggregate.append(single_metric)
-            collects[instance_id][self.METRICS_KEY] = aggregate
+            aggr_input = []
+            for pod in endpoints.values():
+                aggr_input.append(pod[self.METRICS_KEY])
+            collects[instance_id][self.METRICS_KEY] = self._aggregate_metrics_by_sum(aggr_input)
             del collects[instance_id]["endpoints"]
 
-            if not self._check_and_update_metrics_cached(instance_id, collects[instance_id][self.METRICS_KEY]):
-                logger.error("[Metrics] Update metrics state failed.")
-                return False
+            # update cache
+            self._instance_metrics_cached[instance_id] = {
+                self.METRICS_KEY: collects[instance_id][self.METRICS_KEY]
+            }
 
         return True
-
-    def _check_metric_format(self, base_metric: SingleMetric, single_metric: SingleMetric) -> bool:
-        """
-        Check metric format.
-
-        :param base_metric:
-        :param single_metric:
-        :returns:
-        """
-
-        if base_metric.name != single_metric.name:
-            return False
-        if base_metric.help != single_metric.help:
-            return False
-        if base_metric.type != single_metric.type:
-            return False
-        if base_metric.label != single_metric.label:
-            return False
-        return True
-
-    def _check_and_update_metrics_cached(self, instance_id: int, instance_metrics: list[SingleMetric]) -> bool:
-        """
-        Check metrics format and add/update cache.
-
-        :param instance_id: instance id
-        :param instance_metrics: instance metrics
-        :returns:
-        """
-
-        # check metrics format
-        if not isinstance(instance_metrics, list) or not instance_metrics:
-            return False
-
-        if self._instance_metrics_cached:
-            base_metrics = next(iter(self._instance_metrics_cached.values()))[self.METRICS_KEY]
-            if len(base_metrics) != len(instance_metrics):
-                return False
-
-            for i, base_metric in enumerate(base_metrics):
-                if not self._check_metric_format(base_metric, instance_metrics[i]):
-                    return False
-
-        # update cache
-        self._instance_metrics_cached[instance_id] = {
-            self.METRICS_KEY: instance_metrics
-        }
-        return True
-
-    def _aggregate_instance_metric_by_sum(
-        self,
-        collects: dict[int, dict[str, list[SingleMetric]]],
-        single_metric: SingleMetric,
-        index: int
-    ) -> None:
-        """
-        Aggregate the index-th metric of all instance.
-
-        :param collects:
-        :param single_metric: aggregate result save to single_metric
-        :param index: the position in list[SingleMetric]
-        :returns:
-        """
-
-        if not self._instance_metrics_cached:
-            return
-
-        first_instance = next(iter(self._instance_metrics_cached.values()))
-        value_num = len(first_instance[self.METRICS_KEY][index].value)
-        for ins_id in self._instance_metrics_cached:
-            # gauge type only aggregate active instances
-            if single_metric.type == MetricType.GAUGE and ins_id not in collects:
-                continue
-
-            for i in range(value_num):
-                single_metric.value[i] += self._instance_metrics_cached[ins_id][self.METRICS_KEY][index].value[i]
-                if self._inactive_instance_metrics_aggregate:
-                    single_metric.value[i] += self._inactive_instance_metrics_aggregate[index].value[i]
 
     def _aggregate_metrics_all_instance(self, collects: dict[int, dict[str, list[SingleMetric]]]) -> list[SingleMetric]:
         """
@@ -564,13 +510,27 @@ class MetricsCollector(ThreadSafeSingleton):
         if not self._instance_metrics_cached:
             return []
 
-        first_instance = next(iter(self._instance_metrics_cached.values()))
-        aggregate = []
-        metric_count = len(first_instance[self.METRICS_KEY])
-        for i in range(metric_count):
-            single_metric = SingleMetric(first_instance[self.METRICS_KEY][i])
-            self._aggregate_instance_metric_by_sum(collects, single_metric, i)
-            aggregate.append(single_metric)
+        aggr_input = []
+        # 1. add cache data to input data
+        for ins_id, ins_info in self._instance_metrics_cached.items():
+            aggr_input_single = []
+            for metric in ins_info[self.METRICS_KEY]:
+                # gauge type only aggregate active instances
+                if metric.type == MetricType.GAUGE and ins_id not in collects:
+                    new_metric = SingleMetric(metric)
+                    aggr_input_single.append(new_metric)
+                else:
+                    aggr_input_single.append(metric)
+            aggr_input.append(aggr_input_single)
+
+        # 2. add history metric to input data
+        aggr_input_single = []
+        for metric in self._inactive_instance_metrics_aggregate:
+            aggr_input_single.append(metric)
+        aggr_input.append(aggr_input_single)
+
+        # 3. excute aggregate
+        aggregate = self._aggregate_metrics_by_sum(aggr_input)
 
         return aggregate
 
@@ -623,28 +583,37 @@ class MetricsCollector(ThreadSafeSingleton):
         return instance_metrics
 
     def _clear_inactive_metrics(self, unavailable_pool: dict[int, Instance]) -> None:
+        # 1. get instance list to clear
         clear_ins_list = []
         for ins_id in unavailable_pool.keys():
             if ins_id in self._instance_metrics_cached:
                 clear_ins_list.append(ins_id)
-        
+
+        # 2. add clear cache data to input data
+        aggr_input = []
         for ins_id in clear_ins_list:
             metrics = self._instance_metrics_cached[ins_id][self.METRICS_KEY]
-
-            # initialize self._inactive_instance_metrics_aggregate
-            if not self._inactive_instance_metrics_aggregate:
-                for metric in metrics:
-                    aggregate_metric = SingleMetric(metric)
-                    self._inactive_instance_metrics_aggregate.append(aggregate_metric)
-
-            # aggregate metrics[index] to self._inactive_instance_metrics_aggregate
-            for index, metric in enumerate(metrics):
+            aggr_input_single = []
+            for metric in metrics:
+                # gauge type only aggregate active instances
                 if metric.type == MetricType.GAUGE:
-                    continue
-                for i, value in enumerate(metric.value):
-                    self._inactive_instance_metrics_aggregate[index].value[i] += value
+                    new_metric = SingleMetric(metric)
+                    aggr_input_single.append(new_metric)
+                else:
+                    aggr_input_single.append(metric)
+            aggr_input.append(aggr_input_single)
 
-            # remove ins_id from cache
+        # 3. add history metric to input data
+        aggr_input_single = []
+        for metric in self._inactive_instance_metrics_aggregate:
+            aggr_input_single.append(metric)
+        aggr_input.append(aggr_input_single)
+
+        # 4. excute aggregate and update history metric
+        self._inactive_instance_metrics_aggregate = self._aggregate_metrics_by_sum(aggr_input)
+
+        # 5. remove ins_id from cache
+        for ins_id in clear_ins_list:
             del self._instance_metrics_cached[ins_id]
 
 
