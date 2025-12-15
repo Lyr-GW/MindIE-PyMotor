@@ -25,12 +25,13 @@ class CoordinatorApiClient:
             response_text = response.get("text")
 
             if event_msg.instances and len(event_msg.instances) > 0:
-                job_name = event_msg.instances[0].job_name
-                logger.info("Event pushed type: %s, job name: %s, response: %s",
-                           event_msg.event, job_name, response_text)
+                job_names = [instance.job_name for instance in event_msg.instances]
+                job_names_str = ", ".join(job_names)
+                logger.info("Event pushed type: %s, job names: [%s], response: %s",
+                            event_msg.event, job_names_str, response_text)
             else:
                 logger.info("Event pushed type: %s, push all instances, response: %s",
-                           event_msg.event, response_text)
+                            event_msg.event, response_text)
         except Exception as e:
             is_succeed = False
             logger.error("Exception occurred while pushing event: %s", e)

@@ -33,7 +33,7 @@
 
   "event_config": {
     "event_consumer_sleep_interval": 1.0,
-    "coordinator_heartbeat_interval": 1.0
+    "coordinator_heartbeat_interval": 5.0
   },
 
   "fault_tolerance_config": {

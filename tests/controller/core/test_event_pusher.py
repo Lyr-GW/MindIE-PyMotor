@@ -157,10 +157,17 @@ def test_event_consumer_del_event(event_pusher, mock_http_client):
 
 def test_event_consumer_set_event(event_pusher, mock_http_client):
     """test event consumer set event"""
-    # add multi instance
-    for i in range(3):
-        job_name = "test_job" + str(i)
+    # add multi instance - ensure we have both prefill and decode instances
+    for i in range(2):
+        # Add prefill instance
+        job_name = "test_prefill_job" + str(i)
         test_instance = Instance(job_name=job_name, model_name="test_model", id=i, role="prefill")
+        readonly_instance = ReadOnlyInstance(test_instance)
+        event_pusher.instances[job_name] = readonly_instance
+
+        # Add decode instance
+        job_name = "test_decode_job" + str(i)
+        test_instance = Instance(job_name=job_name, model_name="test_model", id=i+10, role="decode")
         readonly_instance = ReadOnlyInstance(test_instance)
         event_pusher.instances[job_name] = readonly_instance
 
@@ -186,6 +193,80 @@ def test_event_consumer_set_event(event_pusher, mock_http_client):
 
         # check send_instance_refresh is called
         mock_http_client.assert_called_once()
+
+def test_event_consumer_set_event_skip_missing_prefill(event_pusher, mock_http_client):
+    """test event consumer set event is skipped when missing prefill instance"""
+    # add only decode instances
+    for i in range(2):
+        job_name = "test_decode_job" + str(i)
+        test_instance = Instance(job_name=job_name, model_name="test_model", id=i, role="decode")
+        readonly_instance = ReadOnlyInstance(test_instance)
+        event_pusher.instances[job_name] = readonly_instance
+
+    test_event = Event(
+        event_type=EventType.SET,
+        instance=None
+    )
+
+    event_pusher.event_queue.put(test_event)
+    event_pusher.event_queue.put(None)
+
+    # Call the event consumer
+    def mock_sleep(seconds):
+        if event_pusher.event_queue.qsize() > 0:
+            raise StopIteration
+
+    with patch('motor.controller.core.event_pusher.logger') as mock_logger:
+        with patch('motor.controller.core.event_pusher.time') as mock_time:
+            mock_time.sleep.side_effect = mock_sleep
+            try:
+                event_pusher._event_consumer()
+            except StopIteration:
+                pass
+
+            # check send_instance_refresh is NOT called due to missing prefill instance
+            mock_http_client.assert_not_called()
+            # check debug log is called with correct message
+            mock_logger.debug.assert_called_once_with(
+                "SET event skipped: requires at least one prefill and one decode instance, "
+                "current instances: prefill=%s, decode=%s", False, True)
+
+def test_event_consumer_set_event_skip_missing_decode(event_pusher, mock_http_client):
+    """test event consumer set event is skipped when missing decode instance"""
+    # add only prefill instances
+    for i in range(2):
+        job_name = "test_prefill_job" + str(i)
+        test_instance = Instance(job_name=job_name, model_name="test_model", id=i, role="prefill")
+        readonly_instance = ReadOnlyInstance(test_instance)
+        event_pusher.instances[job_name] = readonly_instance
+
+    test_event = Event(
+        event_type=EventType.SET,
+        instance=None
+    )
+
+    event_pusher.event_queue.put(test_event)
+    event_pusher.event_queue.put(None)
+
+    # Call the event consumer
+    def mock_sleep(seconds):
+        if event_pusher.event_queue.qsize() > 0:
+            raise StopIteration
+
+    with patch('motor.controller.core.event_pusher.logger') as mock_logger:
+        with patch('motor.controller.core.event_pusher.time') as mock_time:
+            mock_time.sleep.side_effect = mock_sleep
+            try:
+                event_pusher._event_consumer()
+            except StopIteration:
+                pass
+
+            # check send_instance_refresh is NOT called due to missing decode instance
+            mock_http_client.assert_not_called()
+            # check debug log is called with correct message
+            mock_logger.debug.assert_called_once_with(
+                "SET event skipped: requires at least one prefill and one decode instance, "
+                "current instances: prefill=%s, decode=%s", True, False)
 
 def test_event_consumer_exception_handling(event_pusher, mock_http_client):
     """test event consumer exception handling"""

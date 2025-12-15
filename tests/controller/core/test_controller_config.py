@@ -59,7 +59,7 @@ def test_default_config_initialization():
     assert config.api_config.controller_api_host == '127.0.0.1'
     assert config.api_config.controller_api_port == 8000
     assert config.event_config.event_consumer_sleep_interval == 1.0
-    assert config.event_config.coordinator_heartbeat_interval == 0.5
+    assert config.event_config.coordinator_heartbeat_interval == 5.0
     assert config.tls_config.enable_tls is False
     assert config.tls_config.cert_path == 'security/controller/cert/server.crt'
     assert config.tls_config.key_path == 'security/controller/keys/server.key'
@@ -402,7 +402,7 @@ def test_config_partial_json_loading():
         assert config.instance_config.instance_assemble_timeout == 300
         # Other fields should be default values
         assert config.api_config.controller_api_host == '127.0.0.1'
-        assert config.event_config.coordinator_heartbeat_interval == 0.5
+        assert config.event_config.coordinator_heartbeat_interval == 5.0
         assert config.tls_config.enable_tls is False
         assert config.tls_config.cert_path == 'security/controller/cert/server.crt'
         assert config.tls_config.key_path == 'security/controller/keys/server.key'
@@ -587,7 +587,7 @@ def create_test_config(config_path: str, log_level: str = "INFO"):
         },
         "event_config": {
             "event_consumer_sleep_interval": 1.0,
-            "coordinator_heartbeat_interval": 0.5
+            "coordinator_heartbeat_interval": 5.0
         },
         "instance_config": {
             "instance_assemble_timeout": 600,

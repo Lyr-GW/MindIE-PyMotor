@@ -161,15 +161,27 @@ class EventPusher(Observer):
                     event_msg = InsEventMsg(event=event_type, instances=[event.instance])
                 elif event_type == EventType.SET:
                     with self.lock:
-                        event_msg = InsEventMsg(
-                            event=event_type,
-                            instances=[instance.to_instance() for instance in self.instances.values()]
-                        )
+                        instances = list(self.instances.values())
+                        # Check if we have at least one prefill and one decode instance
+                        has_prefill = any(inst.role == "prefill" for inst in instances)
+                        has_decode = any(inst.role == "decode" for inst in instances)
+
+                        if has_prefill and has_decode:
+                            event_msg = InsEventMsg(
+                                event=event_type,
+                                instances=[instance.to_instance() for instance in instances]
+                            )
+                        else:
+                            logger.debug("SET event skipped: requires at least one prefill and one "
+                                         "decode instance, current instances: prefill=%s, decode=%s",
+                                         has_prefill, has_decode)
+                            event_msg = None
                 else:
                     logger.error("Unknown event type: %s", event_type)
                     continue
 
-                CoordinatorApiClient.send_instance_refresh(self.base_url, event_msg)
+                if event_msg is not None:
+                    CoordinatorApiClient.send_instance_refresh(self.base_url, event_msg)
 
             with self.config_lock:
                 sleep_interval = self.event_consumer_sleep_interval

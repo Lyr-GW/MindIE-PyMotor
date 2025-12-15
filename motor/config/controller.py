@@ -66,7 +66,7 @@ class EventPusherConfig:
     event_consumer_sleep_interval: float = 1.0  # 1 second
 
     # coordinator heartbeat configuration
-    coordinator_heartbeat_interval: float = 0.5  # 0.5 seconds
+    coordinator_heartbeat_interval: float = 5.0  # 5 seconds
 
 
 @dataclass
