@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock, Mock
 
 import motor.controller.api_server.controller_api as controller_api
+from motor.config.controller import ControllerConfig
 
 
 @pytest.fixture(autouse=True)
@@ -81,7 +82,9 @@ def test_heartbeat_invalid(mock_heartbeat_msg, client) -> None:
 
 def test_get_controller_status_standalone_healthy(api_instance) -> None:
     # case1: standalone + all healthy (is_alive return true)
-    api_instance.config.standby_config.enable_master_standby = False
+    standalone_config = ControllerConfig()
+    standalone_config.standby_config.enable_master_standby = False
+    api_instance.update_config(standalone_config)
 
     healthy_module = MagicMock()
     healthy_module.is_alive.return_value = True
@@ -96,7 +99,9 @@ def test_get_controller_status_standalone_healthy(api_instance) -> None:
 
 def test_get_controller_status_standalone_unhealthy(api_instance) -> None:
     # case2: standalone + some healthy (is_alive return true or false)
-    api_instance.config.standby_config.enable_master_standby = False
+    standalone_config = ControllerConfig()
+    standalone_config.standby_config.enable_master_standby = False
+    api_instance.update_config(standalone_config)
 
     healthy_module = MagicMock()
     healthy_module.is_alive.return_value = True
@@ -113,7 +118,9 @@ def test_get_controller_status_standalone_unhealthy(api_instance) -> None:
 
 def test_get_controller_status_master_healthy(api_instance, monkeypatch) -> None:
     # case3: master_standby + master + all healthy (not have is_alive)
-    api_instance.config.standby_config.enable_master_standby = True
+    master_config = ControllerConfig()
+    master_config.standby_config.enable_master_standby = True
+    api_instance.update_config(master_config)
 
     with patch("motor.controller.api_server.controller_api.StandbyManager") as mock_standby_cls:
         mock_standby_instance = MagicMock()
@@ -133,7 +140,9 @@ def test_get_controller_status_master_healthy(api_instance, monkeypatch) -> None
 
 def test_get_controller_status_standby_unhealthy(api_instance) -> None:
     # case4: master_standby + standby + all unhealthy (is_alive return false)
-    api_instance.config.standby_config.enable_master_standby = True
+    standby_config = ControllerConfig()
+    standby_config.standby_config.enable_master_standby = True
+    api_instance.update_config(standby_config)
 
     with patch("motor.controller.api_server.controller_api.StandbyManager") as mock_standby_cls:
         mock_standby_instance = MagicMock()
@@ -623,25 +632,29 @@ def test_api_access_filter_default_config() -> None:
 
 
 def test_update_config():
-    """Test update_config method updates configuration reference"""
+    """Test update_config method updates configuration fields"""
     from motor.config.controller import ControllerConfig
 
     # Create ControllerAPI instance
     config = ControllerConfig()
     api_instance = controller_api.ControllerAPI(config)
 
-    # Store original config
-    original_config = api_instance.config
+    # Store original values
+    original_master_standby = api_instance.enable_master_standby
+    original_tls_enabled = api_instance.tls_config.enable_tls
 
     # Create new config with different settings
     new_config = ControllerConfig()
-    new_config.api_config.controller_api_port = 9090
-    new_config.api_config.controller_api_dns = "new-api.example.com"
+    new_config.standby_config.enable_master_standby = True
+    new_config.tls_config.enable_tls = True
+    new_config.tls_config.cert_path = "/new/cert.pem"
+    new_config.tls_config.key_path = "/new/key.pem"
 
     # Update config
     api_instance.update_config(new_config)
 
-    # Verify config reference was updated
-    assert api_instance.config is new_config
-    assert api_instance.config.api_config.controller_api_port == 9090
-    assert api_instance.config.api_config.controller_api_dns == "new-api.example.com"
+    # Verify config fields were updated
+    assert api_instance.enable_master_standby is True
+    assert api_instance.tls_config.enable_tls is True
+    assert api_instance.tls_config.cert_path == "/new/cert.pem"
+    assert api_instance.tls_config.key_path == "/new/key.pem"

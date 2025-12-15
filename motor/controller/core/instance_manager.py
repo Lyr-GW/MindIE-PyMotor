@@ -67,10 +67,6 @@ class InstanceManager(ThreadSafeSingleton):
         if config is None:
             config = ControllerConfig()
 
-        # Extract required config fields
-        self.etcd_config = config.etcd_config
-        self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
-
         self.instances: dict[int, Instance] = {}
         self.observers: list[Observer] = []
 
@@ -80,19 +76,26 @@ class InstanceManager(ThreadSafeSingleton):
 
         self.stop_event = threading.Event()
         self.ins_lock = threading.Lock()
+        self.config_lock = threading.RLock()
+
+        # Extract required config fields
+        with self.config_lock:
+            self.etcd_config = config.etcd_config
+            self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
 
         # Version control for data persistence
         self._data_version = 0
         self._version_lock = threading.Lock()
 
-        self.etcd_client = EtcdClient(
-            host=self.etcd_config.etcd_host,
-            port=self.etcd_config.etcd_port,
-            ca_cert=self.etcd_config.etcd_ca_cert,
-            cert_key=self.etcd_config.etcd_cert_key,
-            cert_cert=self.etcd_config.etcd_cert_cert,
-            timeout=self.etcd_config.etcd_timeout
-        )
+        with self.config_lock:
+            self.etcd_client = EtcdClient(
+                host=self.etcd_config.etcd_host,
+                port=self.etcd_config.etcd_port,
+                ca_cert=self.etcd_config.etcd_ca_cert,
+                cert_key=self.etcd_config.etcd_cert_key,
+                cert_cert=self.etcd_config.etcd_cert_cert,
+                timeout=self.etcd_config.etcd_timeout
+            )
 
         """
         self.states: dict[InsStatus, Callable]: State handle function mapping
@@ -135,7 +138,9 @@ class InstanceManager(ThreadSafeSingleton):
 
         # Try to restore data from ETCD, if failed,
         # it will start with empty state.
-        if self.etcd_config.enable_etcd_persistence:
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if enable_persistence:
             self.restore_data()
 
         # Create instance heartbeat timeout management thread
@@ -160,20 +165,21 @@ class InstanceManager(ThreadSafeSingleton):
 
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the instance manager"""
-        # Update config fields
-        self.etcd_config = config.etcd_config
-        self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
+        with self.config_lock:
+            # Update config fields
+            self.etcd_config = config.etcd_config
+            self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
 
-        # Update ETCD client with new configuration
-        self.etcd_client = EtcdClient(
-            host=self.etcd_config.etcd_host,
-            port=self.etcd_config.etcd_port,
-            ca_cert=self.etcd_config.etcd_ca_cert,
-            cert_key=self.etcd_config.etcd_cert_key,
-            cert_cert=self.etcd_config.etcd_cert_cert,
-            timeout=self.etcd_config.etcd_timeout
-        )
-        logger.info("InstanceManager configuration updated")
+            # Update ETCD client with new configuration
+            self.etcd_client = EtcdClient(
+                host=self.etcd_config.etcd_host,
+                port=self.etcd_config.etcd_port,
+                ca_cert=self.etcd_config.etcd_ca_cert,
+                cert_key=self.etcd_config.etcd_cert_key,
+                cert_cert=self.etcd_config.etcd_cert_cert,
+                timeout=self.etcd_config.etcd_timeout
+            )
+            logger.info("InstanceManager configuration updated")
 
     def attach(self, observer: Observer) -> None:
         # For observer pattern
@@ -211,7 +217,7 @@ class InstanceManager(ThreadSafeSingleton):
                 success = self.etcd_client.persist_data("/controller/instances", persistent_states)
                 if success:
                     logger.info("Successfully persisted %d instances with version %d",
-                              len(persistent_states), next_version)
+                                len(persistent_states), next_version)
                 return success
 
         except Exception as e:
@@ -271,7 +277,7 @@ class InstanceManager(ThreadSafeSingleton):
                             continue
 
                 logger.info("Successfully restored %d valid instances, %d invalid instances skipped",
-                          valid_instances, invalid_instances)
+                            valid_instances, invalid_instances)
                 return True
 
         except Exception as e:
@@ -324,13 +330,16 @@ class InstanceManager(ThreadSafeSingleton):
             timestamp = time.time()
             for pod_ip in ins.endpoints.keys():
                 # Create initial status dict for all endpoints in this pod
-                initial_status = {endpoint.id: EndpointStatus.INITIAL for endpoint in ins.endpoints[pod_ip].values()}
+                initial_status = {
+                    endpoint.id: EndpointStatus.INITIAL 
+                    for endpoint in ins.endpoints[pod_ip].values()
+                }
                 if ins.update_heartbeat(pod_ip, timestamp, initial_status):
                     logger.debug("Refreshed heartbeat for pod_ip %s in instance %s(id:%d) with initial status",
-                                pod_ip, ins.job_name, ins.id)
+                                 pod_ip, ins.job_name, ins.id)
                 else:
                     logger.warning("Failed to refresh heartbeat for pod_ip %s in instance %s(id:%d)",
-                                  pod_ip, ins.job_name, ins.id)
+                                   pod_ip, ins.job_name, ins.id)
 
             logger.info("Instance %s(id:%d) role:%s added.", ins.job_name, ins.id, ins.role)
 
@@ -388,7 +397,7 @@ class InstanceManager(ThreadSafeSingleton):
                     self.notify(instance, ObserverEvent.INSTANCE_SEPERATED)
 
                 logger.info("Successfully separated instance %s (id:%d)",
-                          instance.job_name, instance.id)
+                            instance.job_name, instance.id)
             else:
                 logger.warning("No instance found for instance ID %d", instance_id)
         except Exception as e:
@@ -409,10 +418,10 @@ class InstanceManager(ThreadSafeSingleton):
                 with self.ins_lock:
                     self.forced_separated_instances.discard(instance.id)
                 logger.info("Successfully recovered instance %s (id:%d)",
-                          instance.job_name, instance.id)
+                            instance.job_name, instance.id)
             elif instance is not None:
                 logger.warning("Instance %s (id:%d) is not in forced separated list, no need to recover",
-                             instance.job_name, instance.id)
+                               instance.job_name, instance.id)
             else:
                 logger.warning("No instance found for instance ID %d", instance_id)
         except Exception as e:
@@ -498,7 +507,9 @@ class InstanceManager(ThreadSafeSingleton):
                 if state_handler:
                     state_handler(from_state, event, instance)
 
-            time.sleep(self.instance_manager_check_internal)
+            with self.config_lock:
+                check_interval = self.instance_manager_check_internal
+            time.sleep(check_interval)
 
     def _handle_initial(
         self,
@@ -514,7 +525,7 @@ class InstanceManager(ThreadSafeSingleton):
             with self.ins_lock:
                 self.forced_separated_instances.discard(instance.id)
             logger.info("Instance %d (%s) re-initializing, removed from forced separated set",
-                       instance.id, instance.job_name)
+                        instance.id, instance.job_name)
         return
 
     def _handle_active(
@@ -594,9 +605,11 @@ class InstanceManager(ThreadSafeSingleton):
             state_handler(from_state, event, instance)
 
             # Active persistence on state change
-            if from_state != to_state and self.etcd_config.enable_etcd_persistence:
+            with self.config_lock:
+                enable_persistence = self.etcd_config.enable_etcd_persistence
+            if from_state != to_state and enable_persistence:
                 logger.debug("Instance %d state changed from %s to %s, triggering persistence",
-                            instance.id, from_state, to_state)
+                             instance.id, from_state, to_state)
                 self.persist_data()
 
             # Remove from forced separated set if transitioning to DELETED
@@ -616,7 +629,7 @@ class InstanceManager(ThreadSafeSingleton):
                 for endpoint in endpoints.values():
                     endpoint.hb_timestamp = timestamp
             logger.debug("Refreshed heartbeat timestamp for instance %d (%s) to %f",
-                        instance.id, instance.job_name, timestamp)
+                         instance.id, instance.job_name, timestamp)
         except Exception as e:
             logger.error("Error refreshing heartbeat for instance %d: %s", instance.id, e)
 

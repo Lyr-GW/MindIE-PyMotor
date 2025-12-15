@@ -1,21 +1,9 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 import time
 import queue
 import threading
-import copy
 from dataclasses import dataclass
 
 from motor.config.controller import ControllerConfig
@@ -25,6 +13,7 @@ from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.utils.logger import get_logger
 from motor.controller.core import Observer, ObserverEvent
 from motor.controller.api_client.coordinator_api_client import CoordinatorApiClient
+
 
 logger = get_logger(__name__)
 
@@ -42,38 +31,35 @@ class EventPusher(Observer):
         if config is None:
             config = ControllerConfig()
 
-        # Extract required config fields
-        self.coordinator_api_dns = config.api_config.coordinator_api_dns
-        self.coordinator_api_port = config.api_config.coordinator_api_port
-        self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
-        self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
-
         self.is_coordinator_reset = False
         self.is_first_heartbeat_success = False  # Track if we've ever successfully connected to coordinator
         self.event_queue = queue.Queue()
         self.instances: dict[str, Instance] = {}
         self.lock = threading.Lock()
+        self.config_lock = threading.RLock()
         self.stop_event = threading.Event()
-        self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
-        logger.info("Coordinator API URL: %s", self.base_url)
 
-        self.heart_client = SafeHTTPSClient(
-            base_url=self.base_url,
-            cert_file=None,
-            key_file=None,
-            ca_file=None,
-            timeout=0.5
-        )
-        self.event_consumer_thread = threading.Thread(
-            target=self._event_consumer,
-            daemon=True,
-            name="EventConsumer"
-        )
-        self.heartbeat_detector_thread = threading.Thread(
-            target=self._coordinator_heartbeat_detector,
-            daemon=True,
-            name="HeartbeatDetector"
-        )
+        # Extract required config fields
+        with self.config_lock:
+            self.coordinator_api_dns = config.api_config.coordinator_api_dns
+            self.coordinator_api_port = config.api_config.coordinator_api_port
+            self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
+            self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
+
+        with self.config_lock:
+            self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
+            logger.info("Coordinator API URL: %s", self.base_url)
+
+            self.heart_client = SafeHTTPSClient(
+                base_url=self.base_url,
+                cert_file=None,
+                key_file=None,
+                ca_file=None,
+                timeout=0.5
+            )
+
+        self.event_consumer_thread = None
+        self.heartbeat_detector_thread = None
 
         logger.info("EventPusher initialized.")
 
@@ -104,6 +90,22 @@ class EventPusher(Observer):
 
     def start(self) -> None:
         """Start the event pusher threads"""
+        # Reset stop_event if it was previously set (for singleton reuse)
+        if self.stop_event.is_set():
+            self.stop_event.clear()
+
+        # Create event pusher threads
+        self.event_consumer_thread = threading.Thread(
+            target=self._event_consumer,
+            daemon=True,
+            name="EventConsumer"
+        )
+        self.heartbeat_detector_thread = threading.Thread(
+            target=self._coordinator_heartbeat_detector,
+            daemon=True,
+            name="HeartbeatDetector"
+        )
+
         self.event_consumer_thread.start()
         self.heartbeat_detector_thread.start()
         logger.info("EventPusher started.")
@@ -123,27 +125,30 @@ class EventPusher(Observer):
 
     def is_alive(self) -> bool:
         """Check if the event_pusher threads are alive"""
-        return (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive() and
-                 self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
+        return (
+            (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive())
+            and (self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
+        )
 
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the event pusher"""
-        # Update config fields
-        self.coordinator_api_dns = config.api_config.coordinator_api_dns
-        self.coordinator_api_port = config.api_config.coordinator_api_port
-        self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
-        self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
+        with self.config_lock:
+            # Update config fields
+            self.coordinator_api_dns = config.api_config.coordinator_api_dns
+            self.coordinator_api_port = config.api_config.coordinator_api_port
+            self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
+            self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
 
-        # Update base URL and HTTP client if API config changed
-        self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
-        self.heart_client = SafeHTTPSClient(
-            base_url=self.base_url,
-            cert_file=None,
-            key_file=None,
-            ca_file=None,
-            timeout=0.5
-        )
-        logger.info("EventPusher configuration updated, new coordinator URL: %s", self.base_url)
+            # Update base URL and HTTP client if API config changed
+            self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
+            self.heart_client = SafeHTTPSClient(
+                base_url=self.base_url,
+                cert_file=None,
+                key_file=None,
+                ca_file=None,
+                timeout=0.5
+            )
+            logger.info("EventPusher configuration updated, new coordinator URL: %s", self.base_url)
 
     def _event_consumer(self) -> None:
         while not self.stop_event.is_set():
@@ -165,8 +170,10 @@ class EventPusher(Observer):
                     continue
 
                 CoordinatorApiClient.send_instance_refresh(self.base_url, event_msg)
-                
-            time.sleep(self.event_consumer_sleep_interval)
+
+            with self.config_lock:
+                sleep_interval = self.event_consumer_sleep_interval
+            time.sleep(sleep_interval)
 
     def _coordinator_heartbeat_detector(self) -> None:
         """detect coordinator heartbeat"""
@@ -215,4 +222,6 @@ class EventPusher(Observer):
                         logger.info("Coordinator not yet available, waiting for first successful heartbeat.")
                         log_counter = 0
 
-            time.sleep(self.coordinator_heartbeat_interval)
+            with self.config_lock:
+                heartbeat_interval = self.coordinator_heartbeat_interval
+            time.sleep(heartbeat_interval)

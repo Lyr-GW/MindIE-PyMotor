@@ -222,7 +222,7 @@ class TestRouterPDSeparation:
             nonlocal exec_release
             exec_release += 1
             return True
-        monkeypatch.setattr(BaseRouter, "_BaseRouter__update_workload", mock_update_workload)
+        monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
         
         # Create a mock response with 4XX status code
         mock_response_fail = MagicMock()
@@ -268,7 +268,7 @@ class TestRouterPDSeparation:
             nonlocal exec_release
             exec_release += 1
             return True
-        monkeypatch.setattr(BaseRouter, "_BaseRouter__update_workload", mock_update_workload)
+        monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
         
         # Create a mock response with 5XX status code
         mock_response_fail = MagicMock()

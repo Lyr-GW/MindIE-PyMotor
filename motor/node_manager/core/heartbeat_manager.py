@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
@@ -13,6 +12,7 @@ from motor.common.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
 from motor.common.utils.http_client import SafeHTTPSClient
 from motor.config.node_manager import NodeManagerConfig
 
+
 logger = get_logger(__name__)
 
 
@@ -22,6 +22,7 @@ class HeartbeatManager(ThreadSafeSingleton):
             return
 
         self._endpoint_lock = threading.Lock()
+        self.config_lock = threading.RLock()
         self.stop_event = threading.Event()
 
         if config is None:
@@ -62,6 +63,21 @@ class HeartbeatManager(ThreadSafeSingleton):
             self._thread_started = True
         else:
             logger.info("Heartbeat thread has been started...")
+
+    def update_config(self, config: NodeManagerConfig) -> None:
+        """Update configuration for the heartbeat manager"""
+        with self.config_lock:
+            # Update config fields
+            self.heartbeat_interval_seconds = config.basic_config.heartbeat_interval_seconds
+            self.controller_api_dns = config.api_config.controller_api_dns
+            self.controller_api_port = config.api_config.controller_api_port
+            self.pod_ip = config.api_config.pod_ip
+
+            # Update controller API URL
+            self.controller_api_url = (
+                f"http://{self.controller_api_dns}:{self.controller_api_port}"
+            )
+            logger.info("HeartbeatManager configuration updated")
 
     def update_endpoint(self, node_manager_info: StartCmdMsg) -> None:
         with self._endpoint_lock:
@@ -114,24 +130,26 @@ class HeartbeatManager(ThreadSafeSingleton):
                         detected_status = EndpointStatus(status_value)
                         if detected_status != original_status:
                             logger.info(
-                                f"Engine Server rank {item.id}, status change to "
-                                f"{detected_status} from {original_status}"
+                                "Engine Server rank %d, status change to %s from %s",
+                                item.id, detected_status, original_status
                             )
                     except ValueError:
                         logger.error(
-                            f"Invalid status value '{status_value}' from Engine Server "
-                            f"{item.id}: {engine_server_base_url}"
+                            "Invalid status value '%s' from Engine Server %d: %s",
+                            status_value, item.id, engine_server_base_url
                         )
                         detected_status = EndpointStatus.ABNORMAL
                 else:
                     logger.error(
-                        f"Invalid response format from Engine Server{item.id}: {engine_server_base_url}: {response}"
+                        "Invalid response format from Engine Server%d: %s: %s",
+                        item.id, engine_server_base_url, response
                     )
                     detected_status = EndpointStatus.ABNORMAL
             except Exception as e:
                 if not self._is_within_grace_period:
                     logger.error(
-                        f"Failed to get engine server status from {engine_server_base_url}: {e}"
+                        "Failed to get engine server status from %s: %s",
+                        engine_server_base_url, e
                     )
                 detected_status = EndpointStatus.ABNORMAL
             finally:
@@ -139,7 +157,7 @@ class HeartbeatManager(ThreadSafeSingleton):
                     try:
                         client.close()
                     except Exception as e:
-                        logger.error(f"Failed to close client: {e}")
+                        logger.error("Failed to close client: %s", e)
 
             # If within grace period and abnormal status detected, do not update status
             if (
@@ -147,8 +165,9 @@ class HeartbeatManager(ThreadSafeSingleton):
                 and detected_status == EndpointStatus.ABNORMAL
             ):
                 logger.debug(
-                    f"Engine server {engine_server_base_url} status is abnormal "
-                    f"within grace period, keeping original status: {original_status}"
+                    "Engine server %s status is abnormal within grace period, "
+                    "keeping original status: %s",
+                    engine_server_base_url, original_status
                 )
                 item.status = original_status
             else:
@@ -179,14 +198,21 @@ class HeartbeatManager(ThreadSafeSingleton):
                             for item in self._endpoints
                         }
 
+                # Read config values under lock protection
+                with self.config_lock:
+                    controller_api_dns = self.controller_api_dns
+                    controller_api_port = self.controller_api_port
+                    pod_ip = self.pod_ip
+
+                # Build message and send request outside of lock
                 heartbeat_msg = HeartbeatMsg(
                     job_name=self._job_name,
                     ins_id=self._instance_id,
-                    ip=self.pod_ip,
+                    ip=pod_ip,
                     status=endpoint_status_list,
                 )
                 with SafeHTTPSClient(
-                    base_url=f"http://{self.controller_api_dns}:{self.controller_api_port}",
+                    base_url=f"http://{controller_api_dns}:{controller_api_port}",
                     timeout=0.5,
                 ) as client:
                     _ = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
@@ -195,12 +221,14 @@ class HeartbeatManager(ThreadSafeSingleton):
                     logger.warning("Received 503, maybe controller has been restarted, reregistering...")
                     self._reregister()
                 else:
-                    logger.error(
-                        "Exception occurred while reporting endpoint status to controller at %s ",
-                        self.controller_api_url,
-                    )
+                    with self.config_lock:
+                        logger.error(
+                            "Exception occurred while reporting endpoint status to controller at %s ",
+                            self.controller_api_url,
+                        )
 
-            time.sleep(self.heartbeat_interval_seconds)
+            with self.config_lock:
+                time.sleep(self.heartbeat_interval_seconds)
 
     def _reregister(self) -> None:
         ret = EngineManager().post_reregister_msg()

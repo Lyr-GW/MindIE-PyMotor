@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
@@ -25,7 +24,7 @@ logger = get_logger(__name__)
 
 class RequestLoggerAdapter(logging.LoggerAdapter):
     """logger adaptor add req_id as prefix"""
-    
+
     def process(self, msg: str, kwargs: Any) -> tuple[str, Any]:
         req_id = self.extra.get(REQUEST_ID_KEY, DEFAULT_REQUEST_ID) if self.extra else DEFAULT_REQUEST_ID
         return f"[{req_id}] {msg}", kwargs
@@ -33,10 +32,10 @@ class RequestLoggerAdapter(logging.LoggerAdapter):
 
 class BaseRouter(ABC):
     """Base router class for handling requests with different instance configurations"""
-    
+
     def __init__(self, req_info: RequestInfo):
         """Initialize the base router with request information
-        
+
         Args:
             req_info: Request information object containing request details
         """
@@ -46,25 +45,25 @@ class BaseRouter(ABC):
             logger, 
             extra={REQUEST_ID_KEY: req_info.req_id}
         )
-    
+
     @abstractmethod
     async def handle_request(self) -> StreamingResponse:
         """Handle the request based on specific implementation
-        
+
         Returns:
             StreamingResponse: The response stream for the request
         """
         pass
-    
+
     def prepare_resource(self, role: PDRole) -> ScheduledResource:
         """Prepare resource for the given role by scheduling an instance
-        
+
         Args:
             role: The role (PDRole) to prepare resource for
-            
+
         Returns:
             tuple: A tuple containing the scheduled instance and endpoint
-            
+
         Raises:
             Exception: If scheduling fails after maximum retry attempts
         """
@@ -78,7 +77,7 @@ class BaseRouter(ABC):
                 ins, endpoint = result
                 break
             self.logger.warning("Scheduling failed, role: %s, retrying %d/%d, result: %s", role, i + 1, 
-                           CoordinatorConfig().exception_config.max_retry, result)
+                                CoordinatorConfig().exception_config.max_retry, result)
             if i == CoordinatorConfig().exception_config.max_retry - 1:
                 self.req_info.update_state(ReqState.EXCEPTION)
                 raise HTTPException(
@@ -98,15 +97,15 @@ class BaseRouter(ABC):
             )
         self.logger.debug("Allocated instance: %s, role: %s", ins.job_name, role)
         return ScheduledResource(instance=ins, endpoint=endpoint)
-    
+
     @handle_request_errors(stream=True)
     async def forward_stream_request(self, req_data: dict, resource: ScheduledResource):
         """Forward streaming request to the given endpoint
-        
+
         Args:
             req_data: The request data to forward
             resource: The scheduled resource containing the endpoint
-            
+
         Yields:
             Bytes of the response stream
         """
@@ -117,19 +116,23 @@ class BaseRouter(ABC):
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
         self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                     base_url, self.req_info.api, headers, req_data, 
-                     CoordinatorConfig().exception_config.first_token_timeout)
+                          base_url, self.req_info.api, headers, req_data, 
+                          CoordinatorConfig().exception_config.first_token_timeout)
         timeout = CoordinatorConfig().exception_config.first_token_timeout \
             if CoordinatorConfig().exception_config.first_token_timeout != 0 else None
-        
-        async with httpx.AsyncClient(timeout=timeout,
-                                    base_url=base_url,
-                                    verify=False) as client:
+
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            base_url=base_url,
+            verify=False
+        ) as client:
             self.first_chunk_sent = False
-            async with client.stream("POST",
-                                        f"/{self.req_info.api}",
-                                        json=req_data,
-                                        headers=headers) as response:
+            async with client.stream(
+                "POST",
+                f"/{self.req_info.api}",
+                json=req_data,
+                headers=headers
+            ) as response:
                 if not response.is_success:
                     await response.aread()
                     response.raise_for_status()
@@ -143,11 +146,11 @@ class BaseRouter(ABC):
     @handle_request_errors(stream=False)
     async def forward_post_request(self, req_data: dict, resource: ScheduledResource) -> httpx.Response:
         """Forward non-streaming request to the given resource
-        
+
         Args:
             req_data: The request data to forward
             resource: The scheduled resource containing the endpoint
-            
+
         Returns:
             The response from the endpoint
         """
@@ -158,50 +161,60 @@ class BaseRouter(ABC):
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
         self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                     base_url, self.req_info.api, headers, req_data, 
-                     CoordinatorConfig().exception_config.first_token_timeout)
+                          base_url, self.req_info.api, headers, req_data, 
+                          CoordinatorConfig().exception_config.first_token_timeout)
         timeout = CoordinatorConfig().exception_config.infer_timeout \
             if CoordinatorConfig().exception_config.infer_timeout != 0 else None
-        
+
         async with httpx.AsyncClient(timeout=timeout,
-                                    base_url=base_url,
-                                    verify=False) as client:
+                                     base_url=base_url,
+                                     verify=False) as client:
 
             response = await client.post(f"/{self.req_info.api}",
-                                            json=req_data,
-                                            headers=headers)
+                                         json=req_data,
+                                         headers=headers)
             response.raise_for_status()
             return response
 
     def release_all(self, resource: ScheduledResource):
-        return self.__update_workload(resource, WorkloadAction.RELEASE_TOKENS) and \
-            self.__update_workload(resource, WorkloadAction.RELEASE_KV)
-    
+        return self._update_workload(resource, WorkloadAction.RELEASE_TOKENS) and \
+            self._update_workload(resource, WorkloadAction.RELEASE_KV)
+
     def release_tokens(self, resource: ScheduledResource):
-        return self.__update_workload(resource, WorkloadAction.RELEASE_TOKENS)
-    
+        return self._update_workload(resource, WorkloadAction.RELEASE_TOKENS)
+
     def release_kv(self, resource: ScheduledResource):
-        return self.__update_workload(resource, WorkloadAction.RELEASE_KV)
-        
-    def __update_workload(self, resource: ScheduledResource, action: WorkloadAction):
+        return self._update_workload(resource, WorkloadAction.RELEASE_KV)
+
+    def _update_workload(self, resource: ScheduledResource, action: WorkloadAction):
         """Update the given resource's workload
-        
+
         Args:
             resource: The scheduled resource to update
-            
+
         Returns:
             The result of update
         """
-        if not(resource and isinstance(resource, ScheduledResource) and resource.instance and resource.endpoint):
+        if not (
+            resource 
+            and isinstance(resource, ScheduledResource)
+            and resource.instance
+            and resource.endpoint
+        ):
             self.logger.warning("Resource is empty")
             return False
-        
-        return Scheduler().update_workload(resource.instance, resource.endpoint, 
-                                           self.req_info.req_id, action, self.req_info.req_len) 
+
+        return Scheduler().update_workload(
+            resource.instance,
+            resource.endpoint, 
+            self.req_info.req_id,
+            action,
+            self.req_info.req_len
+        ) 
 
     def _log_request_details(self):
         current_time = time.time()
         cost_time = current_time - self.req_info.status[ReqState.ARRIVE]
         self.logger.debug("API: %s, Length: %d, State: %s, Cost Time: %s, All status Time: %s",
-                     self.req_info.api, self.req_info.req_len, self.req_info.state, 
-                     cost_time, self.req_info.status)
+                          self.req_info.api, self.req_info.req_len, self.req_info.state, 
+                          cost_time, self.req_info.status)

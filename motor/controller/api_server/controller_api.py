@@ -19,6 +19,7 @@ from motor.controller.api_client import NodeManagerApiClient
 from motor.controller.api_server import om_api
 from motor.controller.core import InstanceAssembler, InstanceManager
 
+
 logger = get_logger(__name__)
 
 
@@ -32,14 +33,18 @@ def validate_cert_and_key(cert_path: str, key_path: str):
                 raise ValueError(f"{desc} file format is nor correct: {path}")
 
 
-
 class ControllerAPI:
     def __init__(self, config: ControllerConfig | None = None, modules: dict[str, Any] | None = None,
                  host: str = None, port: int = None):
         if config is None:
             config = ControllerConfig()
-        self.config = config
+
+        # Extract required config fields for TLS and standby mode
+        self.enable_master_standby = config.standby_config.enable_master_standby
+        self.tls_config = config.tls_config
+
         self.modules = modules
+        self.config_lock = threading.RLock()
         self.host = host if host is not None else config.api_config.controller_api_host
         self.port = port if port is not None else config.api_config.controller_api_port
         self.server = None
@@ -47,7 +52,7 @@ class ControllerAPI:
         self.app = self._create_app()
         self.api_server_thread = None
         logger.info("ControllerAPI initialized.")
-        
+
     def start(self) -> None:
         # Create API server thread
         self.api_server_thread = threading.Thread(
@@ -76,15 +81,19 @@ class ControllerAPI:
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the controller API"""
         # Note: API server configuration cannot be updated while running
-        # Only update the config reference for future use
-        self.config = config
-        logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
+        # Only update the extracted config fields for future use
+        with self.config_lock:
+            self.enable_master_standby = config.standby_config.enable_master_standby
+            self.tls_config = config.tls_config
+            logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
 
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI):
-        if self.config.tls_config.enable_tls:
-            cert_path = self.config.tls_config.cert_path
-            key_path = self.config.tls_config.key_path
+        with self.config_lock:
+            enable_tls = self.tls_config.enable_tls
+            cert_path = self.tls_config.cert_path
+            key_path = self.tls_config.key_path
+        if enable_tls:
             try:
                 validate_cert_and_key(cert_path, key_path)
                 logger.info("Cert and key validate pass: %s, %s", cert_path, key_path)
@@ -161,14 +170,17 @@ class ControllerAPI:
             return {"error": "Instance already registered"}
         else:
             return {"result": ret}
-    
+
     def _run_api_server(self) -> None:
         try:
             enable_tls = os.environ.get("ENABLE_TLS", "0").lower() in ("1", "true", "yes")
             logger.info("Starting API server on %s:%d TLS=%s", self.host, self.port, enable_tls)
             if enable_tls:
-                cert_path = os.environ.get("CERT_PATH", self.config.tls_config.cert_path)
-                key_path = os.environ.get("KEY_PATH", self.config.tls_config.key_path)
+                with self.config_lock:
+                    default_cert_path = self.tls_config.cert_path
+                    default_key_path = self.tls_config.key_path
+                cert_path = os.environ.get("CERT_PATH", default_cert_path)
+                key_path = os.environ.get("KEY_PATH", default_key_path)
                 server_config = uvicorn.Config(
                     self.app,
                     host=self.host, 
@@ -266,7 +278,9 @@ class ControllerAPI:
             status["overall_healthy"] = True
 
         # Set deploy mode and role
-        if self.config.standby_config.enable_master_standby:
+        with self.config_lock:
+            enable_master_standby = self.enable_master_standby
+        if enable_master_standby:
             status["deploy_mode"] = "master_standby"
             # Get singleton instance (assumes it has been initialized)
             status["role"] = "master" if StandbyManager().is_master() else "standby"

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
@@ -20,7 +19,7 @@ class DeployMode(Enum):
     PD_SEPARATE = "pd_separate"
     CDP_SEPARATE = "cdp_separate"
     CPCD_SEPARATE = "cpcd_separate"
-    
+
     @classmethod
     def from_string(cls, value: str) -> Optional['DeployMode']:
         """Convert string to DeployMode enum."""
@@ -93,7 +92,7 @@ class HealthCheckConfig:
         self.alarm_endpoint: str = '/v1/alarm/coordinator'
         self.alarm_timeout: float = 5.
         self.terminate_instance_endpoint: str = '/controller/terminate_instance'
-        
+
         self.thread_join_timeout: float = 5.0
         self.error_retry_interval: float = 1.0
 
@@ -175,7 +174,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.config_file_path_env = "MOTOR_COORDINATOR_CONFIG_PATH"
         self.config_file_path = None  # Store the actual config file path
         self.check_mounted_files = True
-        
+
         # Configuration objects
         self.config = {}
         self.logging_config = LoggingConfig()
@@ -192,7 +191,7 @@ class CoordinatorConfig(ThreadSafeSingleton):
         self.etcd_config = EtcdConfig()
         self.http_config = HttpConfig()
         self.aigw_model: dict[str, Any] | None = None
-        
+
         try:
             self.config_file_path = os.getenv(self.config_file_path_env, self.default_config_file_path)
             self.check_mounted_files = self._get_check_files()

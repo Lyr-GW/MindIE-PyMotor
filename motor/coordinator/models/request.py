@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
@@ -41,7 +40,7 @@ class RequestInfo(BaseModel):
     api: str = Field(..., description="API need to be forwarded")
     state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
-    
+
     def __init__(self, **data):
         super().__init__(**data)
         self.status[ReqState.ARRIVE] = time.time()

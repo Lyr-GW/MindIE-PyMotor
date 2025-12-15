@@ -18,17 +18,17 @@ from motor.coordinator.models.contants import CHAT_COMPLETION_PREFIX, COMPLETION
 
 
 class SeparateCDPRouter(BaseRouter):
-    
+
     async def handle_request(self) -> StreamingResponse:
-        
-        req_data = self.__gen_d_request()
+
+        req_data = self._gen_d_request()
         try:
             # Schedule D instance
             decode_resource = self.prepare_resource(PDRole.ROLE_D)
         except Exception as e:
             self.logger.error("Error occurred while scheduling Decode resource: %s", e)
             raise e
-        
+
         async def generate_stream():
             self.logger.debug("Handling streaming Decode request")
             RequestManager().add_req_info(self.req_info)
@@ -60,7 +60,7 @@ class SeparateCDPRouter(BaseRouter):
                         endpoint id: {decode_resource.endpoint.id}, \
                         req state: {self.req_info.state}")
                 self._log_request_details()
-                
+
         async def generate_post():
             self.logger.debug("Handling non-streaming Decode request")
             RequestManager().add_req_info(self.req_info)
@@ -81,15 +81,15 @@ class SeparateCDPRouter(BaseRouter):
                         endpoint id: {decode_resource.endpoint.id}, \
                         req state: {self.req_info.state}")
                 self._log_request_details()
-        
+
         if self.req_info.req_data.get("stream", False):
             return StreamingResponse(generate_stream(), media_type="text/event-stream")
         else:
             return await generate_post()
-    
+
     async def handle_metaserver_request(self) -> httpx.Response:
         prefill_resource: ScheduledResource = None
-        req_data = self.__gen_p_request()
+        req_data = self._gen_p_request()
         try:
             # Schedule P instance
             prefill_resource = self.prepare_resource(PDRole.ROLE_P)
@@ -108,15 +108,15 @@ class SeparateCDPRouter(BaseRouter):
                 self.logger.warning(f"Fail to release decode resource, instance id: {prefill_resource.instance.id}, \
                     endpoint id: {prefill_resource.endpoint.id}, \
                     req state: {self.req_info.state}")
-                
+
         return resp_json
-    
-    def __gen_d_request(self) -> dict:
+
+    def _gen_d_request(self) -> dict:
         """Generate D request parameters"""
         # read management http config
         host = CoordinatorConfig().http_config.coordinator_api_host
         port = CoordinatorConfig().http_config.coordinator_api_mgmt_port
-        
+
         req_data = self.req_info.req_data.copy()
         req_data['kv_transfer_params'] = {
             "do_remote_decode": False,
@@ -124,13 +124,13 @@ class SeparateCDPRouter(BaseRouter):
             "metaserver": f"http://{host}:{port}/v1/metaserver"
         }
         return req_data
-    
-    def __gen_p_request(self) -> dict:
+
+    def _gen_p_request(self) -> dict:
         """Generate P request parameters"""
         kv_transfer_params = self.req_info.req_data.copy()
-        
+
         # get origin req_info reference for update request state
-        self.req_info = self.__get_origin_request_info(kv_transfer_params)
+        self.req_info = self._get_origin_request_info(kv_transfer_params)
 
         # Copy req_data before modify
         req_data = self.req_info.req_data.copy()
@@ -143,7 +143,7 @@ class SeparateCDPRouter(BaseRouter):
 
         return req_data
 
-    def __get_origin_request_info(self, kv_transfer_params: dict):
+    def _get_origin_request_info(self, kv_transfer_params: dict):
         def trim_request_id_prefix(vllm_request_id: str) -> None:
             original_id = vllm_request_id
             if vllm_request_id.startswith(CHAT_COMPLETION_PREFIX):
@@ -162,5 +162,5 @@ class SeparateCDPRouter(BaseRouter):
         # update real req_id as prefix for logger adaptor
         if isinstance(self.logger.extra, dict):
             self.logger.extra[REQUEST_ID_KEY] = req_info.req_id
-        
+
         return req_info

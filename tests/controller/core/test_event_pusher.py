@@ -59,11 +59,41 @@ def test_init(event_pusher):
     assert isinstance(event_pusher.event_queue, queue.Queue)
     assert event_pusher.instances == {}
 
-    # check thread is alive
-    assert event_pusher.event_consumer_thread.is_alive()
-    assert event_pusher.heartbeat_detector_thread.is_alive()
-    assert event_pusher.event_consumer_thread.daemon
-    assert event_pusher.heartbeat_detector_thread.daemon
+    # check threads are None before start() is called
+    assert event_pusher.event_consumer_thread is None
+    assert event_pusher.heartbeat_detector_thread is None
+
+
+def test_start():
+    """test start method creates and starts threads"""
+    with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:
+        with patch('threading.Thread') as mock_thread_class:
+            mock_thread = MagicMock()
+            mock_thread_class.return_value = mock_thread
+
+            mock_client = Mock()
+            mock_client_class.return_value = mock_client
+
+            # Create EventPusher instance
+            config = ControllerConfig()
+            event_pusher = EventPusher(config)
+
+            # Before start, threads should be None
+            assert event_pusher.event_consumer_thread is None
+            assert event_pusher.heartbeat_detector_thread is None
+
+            # Call start
+            event_pusher.start()
+
+            # After start, threads should be created and started
+            assert event_pusher.event_consumer_thread is not None
+            assert event_pusher.heartbeat_detector_thread is not None
+            assert event_pusher.event_consumer_thread.daemon
+            assert event_pusher.heartbeat_detector_thread.daemon
+
+            # Verify threads were started
+            mock_thread.start.assert_called()
+            assert mock_thread.start.call_count == 2
 
 def test_event_consumer_add_event(event_pusher, mock_http_client):
     """test event consumer add event"""

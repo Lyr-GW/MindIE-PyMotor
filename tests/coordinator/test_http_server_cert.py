@@ -230,7 +230,7 @@ def create_other_ca():
 # Fixtures
 # ============================================================================
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def test_certificates():
     """Fixture to create and clean up test certificates"""
     test_certs = create_test_certificates()

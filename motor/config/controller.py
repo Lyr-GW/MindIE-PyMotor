@@ -303,7 +303,7 @@ class ControllerConfig:
         if not save_path:
             logger.error("Save path not specified")
             return False
-        
+
         try:
             config_dict = self.to_dict()
             with open(save_path, 'w', encoding='utf-8') as f:
@@ -344,12 +344,12 @@ def find_config_file():
     # If path override is set, use it
     if CONFIG_PATH_OVERRIDE:
         return CONFIG_PATH_OVERRIDE
-    
+
     # First try configuration file in current package directory
     package_config = os.path.join(os.path.dirname(__file__), 'controller_config.json')
     if os.path.exists(package_config):
         return package_config
-    
+
     # If not in package, try configuration file in project root directory
     # Find project root directory by searching upward
     current_dir = os.path.dirname(__file__)
@@ -358,7 +358,7 @@ def find_config_file():
         if os.path.exists(project_config):
             return project_config
         current_dir = os.path.dirname(current_dir)
-    
+
     # Finally return package path (even if file does not exist)
     return package_config
 

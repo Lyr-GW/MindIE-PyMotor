@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 class HardwareType(str, Enum):
     TYPE_800I_A2 = "800I-A2"
     TYPE_800I_A3 = "800I-A3"
-    
+
     def __repr__(self) -> str:
         return str.__repr__(self.value)
 
@@ -104,7 +104,6 @@ class NodeManagerConfig:
     config_path: str = field(init=False)
     hccl_path: str = field(init=False)
     last_modified: float | None = field(default=None, init=False)
-
 
     def __post_init__(self):
         """Validate configuration after initialization"""
@@ -275,7 +274,7 @@ class NodeManagerConfig:
             logger.info("Role from environment: %s", role)
             logger.info("Role from config: %s", config.basic_config.role)
         except ValueError as e:
-            raise ValueError(f"Invalid role value from environment") from e
+            raise ValueError("Invalid role value from environment") from e
 
     @classmethod
     def _update_from_hccl_data(cls, config: 'NodeManagerConfig', data: dict[str, Any]):

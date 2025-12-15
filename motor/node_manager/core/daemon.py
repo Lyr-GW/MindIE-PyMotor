@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
@@ -34,10 +33,9 @@ class Daemon(ThreadSafeSingleton):
         # related config
         self.parallel_config = config.basic_config.parallel_config
         self.device_num = config.basic_config.device_num
-        
+
         self._initialized = True
         self._pids_lock = threading.Lock()
-
 
     @staticmethod
     def _check_params(params: Endpoint) -> bool:
@@ -79,7 +77,7 @@ class Daemon(ThreadSafeSingleton):
             device_size = self.device_num
             for i, endpoint in enumerate(endpoints_info):
                 if not self._check_params(endpoint):
-                    raise ValueError(f"Invalid endpoint parameters")
+                    raise ValueError("Invalid endpoint parameters")
                 start_device_id = i * local_world_size % device_size
                 end_device_id = start_device_id + local_world_size
                 if end_device_id > device_size:
@@ -125,4 +123,3 @@ class Daemon(ThreadSafeSingleton):
             except Exception as e:
                 logger.error(f"Failed to kill process {pid}: {e}")
         return
-

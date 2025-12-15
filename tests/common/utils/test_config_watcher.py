@@ -218,12 +218,12 @@ def test_watcher_with_config_update_integration():
             watcher.start()
 
             # Simulate file modification
-            time.sleep(0.1)  # Small delay to ensure watcher is ready
+            time.sleep(0.01)  # Reduced delay to ensure watcher is ready
             with open(config_file, 'w') as f:
                 json.dump(updated_config, f)
 
             # Wait for watcher to detect change
-            time.sleep(0.2)
+            time.sleep(0.05)  # Reduced wait time
 
             # Stop watcher
             watcher.stop()

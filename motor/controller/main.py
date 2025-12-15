@@ -1,5 +1,6 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
+
 import os
 import sys
 import signal
@@ -332,6 +333,7 @@ def main() -> None:
         logger.info("Configuration file watcher stopped")
 
     logger.info("Controller shutdown complete")
-    
+
+
 if __name__ == '__main__':
     main()

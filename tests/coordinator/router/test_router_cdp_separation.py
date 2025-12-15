@@ -58,7 +58,7 @@ class MockAsyncClient:
         pass
     
     async def post(self, url, json=None, headers=None):
-        logger.info(f"----------req_data_from_metaserver:{json}")
+        # logger.info(f"----------req_data_from_metaserver:{json}")
         self.post_count += 1
         if self.post_exc and self.post_fail_count < self.post_fail_times:
             self.post_fail_count += 1
@@ -79,7 +79,7 @@ class MockAsyncClient:
     
     def stream(self, method, url, json=None, headers=None):
         self.stream_count += 1
-        logger.info(f"----------req_data_from_coordinator:{json}")
+        # logger.info(f"----------req_data_from_coordinator:{json}")
         if self.stream_exc and self.stream_fail_count < self.stream_fail_times:
             self.stream_fail_count += 1
             return MockStreamResponse(json or {}, recomputed=False, exc=self.stream_exc)
@@ -262,7 +262,7 @@ class TestRouterCDPSeparation:
                 if action == WorkloadAction.RELEASE_TOKENS:
                     release_d_tokens += 1
             return True
-        monkeypatch.setattr(BaseRouter, "_BaseRouter__update_workload", mock_update_workload)
+        monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
         
@@ -305,7 +305,7 @@ class TestRouterCDPSeparation:
             nonlocal exec_release
             exec_release += 1
             return True
-        monkeypatch.setattr(BaseRouter, "_BaseRouter__update_workload", mock_update_workload)
+        monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparateCDPRouter(req_info)

@@ -72,31 +72,55 @@ class InstanceAssembler(ThreadSafeSingleton):
         if config is None:
             config = ControllerConfig()
 
-        # Extract required config fields
-        self.etcd_config = config.etcd_config
-        self.instance_assemble_timeout = config.instance_config.instance_assemble_timeout
-        self.instance_assembler_check_internal = config.instance_config.instance_assembler_check_internal
-        self.instance_assembler_cmd_send_internal = config.instance_config.instance_assembler_cmd_send_internal
-        self.send_cmd_retry_times = config.instance_config.send_cmd_retry_times
-
         self.ins_id_cnt = 1
         self.instances: dict[str, AssembleInstanceMetadata] = {}
 
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
+        self.config_lock = threading.RLock()
+
+        # Extract required config fields
+        with self.config_lock:
+            self.etcd_config = config.etcd_config
+            self.instance_assemble_timeout = config.instance_config.instance_assemble_timeout
+            self.instance_assembler_check_internal = config.instance_config.instance_assembler_check_internal
+            self.instance_assembler_cmd_send_internal = config.instance_config.instance_assembler_cmd_send_internal
+            self.send_cmd_retry_times = config.instance_config.send_cmd_retry_times
 
         # Version control for data persistence
         self._data_version = 0
         self._version_lock = threading.Lock()
 
-        self.etcd_client = EtcdClient(
-            host=self.etcd_config.etcd_host,
-            port=self.etcd_config.etcd_port,
-            ca_cert=self.etcd_config.etcd_ca_cert,
-            cert_key=self.etcd_config.etcd_cert_key,
-            cert_cert=self.etcd_config.etcd_cert_cert,
-            timeout=self.etcd_config.etcd_timeout
-        )
+        with self.config_lock:
+            self.etcd_client = EtcdClient(
+                host=self.etcd_config.etcd_host,
+                port=self.etcd_config.etcd_port,
+                ca_cert=self.etcd_config.etcd_ca_cert,
+                cert_key=self.etcd_config.etcd_cert_key,
+                cert_cert=self.etcd_config.etcd_cert_cert,
+                timeout=self.etcd_config.etcd_timeout
+            )
+
+        self.assemble_instance_thread = None
+        self.start_command_thread = None
+
+        self._initialized = True
+        logger.info("InstanceAssembler initialized.")
+
+    def start(self) -> None:
+        """Start the instance assembler threads"""
+        # Reset stop_event if it was previously set (for singleton reuse)
+        if self.stop_event.is_set():
+            self.stop_event.clear()
+
+        # Try to restore data from ETCD, if failed,
+        # it will start with empty state.
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if enable_persistence:
+            self.restore_data()
+
+        # Create instance assembler threads
         self.assemble_instance_thread = threading.Thread(
             target=self._instances_assembler_loop,
             daemon=True,
@@ -107,15 +131,6 @@ class InstanceAssembler(ThreadSafeSingleton):
             daemon=True,
             name="StartCommandSender"
         )
-        self._initialized = True
-        logger.info("InstanceAssembler initialized.")
-
-    def start(self) -> None:
-        """Start the instance assembler threads"""
-        # Try to restore data from ETCD, if failed,
-        # it will start with empty state.
-        if self.etcd_config.enable_etcd_persistence:
-            self.restore_data()
 
         self.assemble_instance_thread.start()
         self.start_command_thread.start()
@@ -137,28 +152,31 @@ class InstanceAssembler(ThreadSafeSingleton):
 
     def is_alive(self) -> bool:
         """Check if the instance_assembler threads are alive"""
-        return (self.assemble_instance_thread is not None and self.assemble_instance_thread.is_alive() and
-                 self.start_command_thread is not None and self.start_command_thread.is_alive())
+        return (
+            (self.assemble_instance_thread is not None and self.assemble_instance_thread.is_alive())
+            and (self.start_command_thread is not None and self.start_command_thread.is_alive())
+        )
 
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the instance assembler"""
-        # Update config fields
-        self.etcd_config = config.etcd_config
-        self.instance_assemble_timeout = config.instance_config.instance_assemble_timeout
-        self.instance_assembler_check_internal = config.instance_config.instance_assembler_check_internal
-        self.instance_assembler_cmd_send_internal = config.instance_config.instance_assembler_cmd_send_internal
-        self.send_cmd_retry_times = config.instance_config.send_cmd_retry_times
+        with self.config_lock:
+            # Update config fields
+            self.etcd_config = config.etcd_config
+            self.instance_assemble_timeout = config.instance_config.instance_assemble_timeout
+            self.instance_assembler_check_internal = config.instance_config.instance_assembler_check_internal
+            self.instance_assembler_cmd_send_internal = config.instance_config.instance_assembler_cmd_send_internal
+            self.send_cmd_retry_times = config.instance_config.send_cmd_retry_times
 
-        # Update ETCD client with new configuration
-        self.etcd_client = EtcdClient(
-            host=self.etcd_config.etcd_host,
-            port=self.etcd_config.etcd_port,
-            ca_cert=self.etcd_config.etcd_ca_cert,
-            cert_key=self.etcd_config.etcd_cert_key,
-            cert_cert=self.etcd_config.etcd_cert_cert,
-            timeout=self.etcd_config.etcd_timeout
-        )
-        logger.info("InstanceAssembler configuration updated")
+            # Update ETCD client with new configuration
+            self.etcd_client = EtcdClient(
+                host=self.etcd_config.etcd_host,
+                port=self.etcd_config.etcd_port,
+                ca_cert=self.etcd_config.etcd_ca_cert,
+                cert_key=self.etcd_config.etcd_cert_key,
+                cert_cert=self.etcd_config.etcd_cert_cert,
+                timeout=self.etcd_config.etcd_timeout
+            )
+            logger.info("InstanceAssembler configuration updated")
 
     def register(self, msg: RegisterMsg) -> int:
         """
@@ -207,7 +225,9 @@ class InstanceAssembler(ThreadSafeSingleton):
         logger.info("Endpoints added for instance %s from pod %s.", msg.job_name, msg.host_ip)
 
         # Persist data on state change
-        if self.etcd_config.enable_etcd_persistence:
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if enable_persistence:
             self.persist_data()
 
         return 0
@@ -258,7 +278,9 @@ class InstanceAssembler(ThreadSafeSingleton):
         logger.info("Recovery instance assembler's info, current ins_id_idx is %d.", self.ins_id_cnt)
 
         # Persist data on state change
-        if self.etcd_config.enable_etcd_persistence:
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if enable_persistence:
             self.persist_data()
 
         return 0
@@ -286,14 +308,15 @@ class InstanceAssembler(ThreadSafeSingleton):
                 for job_name, metadata in self.instances.items():
                     # Create persistent state for metadata
                     role_value = (metadata.instance.role.value
-                                if hasattr(metadata.instance.role, 'value')
-                                else str(metadata.instance.role))
+                                  if hasattr(metadata.instance.role, 'value')
+                                  else str(metadata.instance.role))
                     parallel_config_data = (metadata.instance.parallel_config.model_dump()
-                                          if hasattr(metadata.instance.parallel_config, 'model_dump')
-                                          else metadata.instance.parallel_config)
-                    endpoints_data = {pod_ip: {eid: endpoint.model_dump()
-                                             for eid, endpoint in endpoints.items()}
-                                    for pod_ip, endpoints in metadata.instance.endpoints.items()}
+                                            if hasattr(metadata.instance.parallel_config, 'model_dump')
+                                            else metadata.instance.parallel_config)
+                    endpoints_data = {
+                        pod_ip: {eid: endpoint.model_dump() for eid, endpoint in endpoints.items()}
+                        for pod_ip, endpoints in metadata.instance.endpoints.items()
+                    }
 
                     metadata_data = {
                         "job_name": metadata.instance.job_name,
@@ -302,8 +325,9 @@ class InstanceAssembler(ThreadSafeSingleton):
                         "role": role_value,
                         "parallel_config": parallel_config_data,
                         "endpoints": endpoints_data,
-                        "node_managers": [(nm.pod_ip, nm.host_ip, nm.port)
-                                        for nm in metadata.instance.node_managers],
+                        "node_managers": [
+                            (nm.pod_ip, nm.host_ip, nm.port) for nm in metadata.instance.node_managers
+                        ],
                         "register_status": metadata.register_status.value,
                         "start_command_send_times": metadata.start_command_send_times,
                         "register_timestamp": metadata.register_timestamp,
@@ -321,7 +345,7 @@ class InstanceAssembler(ThreadSafeSingleton):
                 success = self.etcd_client.persist_data("/controller/instance_assembler", persistent_states)
                 if success:
                     logger.info("Successfully persisted %d instance assembler states with version %d",
-                              len(persistent_states), next_version)
+                                len(persistent_states), next_version)
                 return success
 
         except Exception as e:
@@ -398,7 +422,7 @@ class InstanceAssembler(ThreadSafeSingleton):
 
                                 self.instances[key] = metadata
                                 logger.info("Restored instance assembler state for %s (v%d)",
-                                          key, persistent_state.version)
+                                            key, persistent_state.version)
 
                             # Update data version
                             with self._version_lock:
@@ -445,32 +469,38 @@ class InstanceAssembler(ThreadSafeSingleton):
                         if metadata.register_status != RegisterStatus.ASSEMBLED:
                             continue
 
+                with self.config_lock:
+                    enable_persistence = self.etcd_config.enable_etcd_persistence
+                    max_retry_times = self.send_cmd_retry_times
+
                 if self._send_start_command(metadata):
                     logger.info("Start command sent for instance %s successfully.", job_name)
                     with self.lock:
                         self.instances.pop(job_name, None)
                     # Persist data on state change (instance removed after successful start command)
-                    if self.etcd_config.enable_etcd_persistence:
+                    if enable_persistence:
                         self.persist_data()
                 else:
                     retry_times = metadata.start_command_send_times + 1
-                    if retry_times < self.send_cmd_retry_times:
+                    if retry_times < max_retry_times:
                         logger.warning("Failed to send start command to instance %s with (%d/%d) times.",
-                                        job_name, retry_times, self.send_cmd_retry_times)
+                                       job_name, retry_times, max_retry_times)
                         metadata.start_command_send_times = retry_times
                         # Persist data on state change (retry count updated)
-                        if self.etcd_config.enable_etcd_persistence:
+                        if enable_persistence:
                             self.persist_data()
                     else:
                         logger.error("Failed to send start command to instance %s with (%d/%d) times, "
-                                     "abort it.", job_name, retry_times, self.send_cmd_retry_times)
+                                     "abort it.", job_name, retry_times, max_retry_times)
                         with self.lock:
                             self.instances.pop(job_name, None)
                         # Persist data on state change (instance removed after max retries)
-                        if self.etcd_config.enable_etcd_persistence:
+                        if enable_persistence:
                             self.persist_data()
 
-            time.sleep(self.instance_assembler_cmd_send_internal)
+            with self.config_lock:
+                sleep_interval = self.instance_assembler_cmd_send_internal
+            time.sleep(sleep_interval)
 
     def _send_start_command(self, metadata: AssembleInstanceMetadata) -> bool:
         ins_ranktable = build_ins_ranktable(metadata.instance)
@@ -512,7 +542,9 @@ class InstanceAssembler(ThreadSafeSingleton):
 
                 self._assemble_instance(metadata)
 
-            time.sleep(self.instance_assembler_check_internal)
+            with self.config_lock:
+                check_interval = self.instance_assembler_check_internal
+            time.sleep(check_interval)
 
     def _assemble_instance(self, metadata: AssembleInstanceMetadata) -> None:
         job_name = metadata.instance.job_name
@@ -536,15 +568,19 @@ class InstanceAssembler(ThreadSafeSingleton):
                     # No need to persist for new registration until start command is sent
         else:
             # Assembling... check if this instance registration is timeout
+            with self.config_lock:
+                assemble_timeout = self.instance_assemble_timeout
             with metadata.lock:
-                if time.time() - metadata.register_timestamp > self.instance_assemble_timeout:
+                if time.time() - metadata.register_timestamp > assemble_timeout:
                     with self.lock:
                         self.instances.pop(job_name, None)
                     need_persist = True
                     logger.warning("Instance %s registration timed out and removed.", job_name)
 
         # Persist data on state change
-        if need_persist and self.etcd_config.enable_etcd_persistence:
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if need_persist and enable_persistence:
             self.persist_data()
 
     def _get_next_version(self) -> int:
