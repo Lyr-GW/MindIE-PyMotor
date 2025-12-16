@@ -21,9 +21,14 @@ logger = logging.getLogger(__name__)
 def send_http_request(ip: str, port: str, url_path: str) -> bool:
     url = f"http://{ip}:{port}{url_path}"
     
+    headers = {
+        'User-Agent': 'sh-probe',
+        'Content-Type': 'application/json'
+    }
     try:
         response = requests.get(
             url,
+            headers=headers,
             timeout=TIMEOUT
         )
         

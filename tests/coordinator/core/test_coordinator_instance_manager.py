@@ -220,6 +220,35 @@ class TestInstanceManager:
         unknown_instances = self.instance_manager.get_available_instances("unknown")
         assert unknown_instances == {}
 
+    def test_stop_instance(self):
+        """Test stop  method"""
+        # Add instances to pools
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        self.instance_manager._add_instance_to_available_pool(self.hybrid_instance)
+
+        # Test getting prefill instances
+        prefill_instances = self.instance_manager.get_available_instances(PDRole.ROLE_P)
+        assert prefill_instances[1] == self.prefill_instance
+
+        # Test getting decode instances
+        decode_instances = self.instance_manager.get_available_instances(PDRole.ROLE_D)
+        assert decode_instances[2] == self.decode_instance
+
+        # Test getting hybrid instances
+        hybrid_instances = self.instance_manager.get_available_instances(PDRole.ROLE_U)
+        assert hybrid_instances[3] == self.hybrid_instance
+
+        assert self.instance_manager.is_available() is True
+
+        # Stop instance, delete all info
+        self.instance_manager.stop()
+
+        assert self.instance_manager.is_available() is False
+        assert self.instance_manager.get_available_instances(PDRole.ROLE_D) == {}
+        assert self.instance_manager.get_available_instances(PDRole.ROLE_P) == {}
+        assert self.instance_manager.get_available_instances(PDRole.ROLE_U) == {}
+
     def test_get_all_instances(self):
         """Test get_all_instances method"""
         # Add instances to pools

@@ -112,7 +112,7 @@
     "standby_config": {
         "enable_master_standby": false,
         "master_standby_check_interval": 5,
-        "master_lock_ttl": 20,
+        "master_lock_ttl": 10,
         "master_lock_retry_interval": 5,
         "master_lock_max_failures": 3,
         "master_lock_key": "/coordinator/master_lock"
