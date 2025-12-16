@@ -66,6 +66,25 @@ class InstanceManager(ThreadSafeSingleton):
             logger.error(f"Unknown deploy mode: {deploy_mode}, while checking availability")
             return False
 
+    def stop(self) -> None:
+        """
+        Stop instance_manager, delete all info.
+
+        :returns:
+        """
+        with self._lock:
+            self._available_pool = {}
+            self._unavailable_pool = {}
+            self._prefill_pool = {}
+            self._decode_pool = {}
+            self._hybrid_pool = {}
+            self._available_role_pools = {
+                PDRole.ROLE_P: self._prefill_pool,
+                PDRole.ROLE_D: self._decode_pool,
+                PDRole.ROLE_U: self._hybrid_pool
+            }
+        logger.info("InstanceManager stopped.")
+
     def get_available_instances(self, role: PDRole) -> dict[int, Instance]:
         # no need to lock here, asynchrony is acceptable
         instance_pool = self._available_role_pools.get(role)

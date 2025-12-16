@@ -697,12 +697,15 @@ class CoordinatorServer:
             return self._build_ok_response("Coordinator is healthy")
         
         @self.management_app.get("/readiness")
-        async def readiness_check():
+        async def readiness_check(request: Request):
             is_ready = True
             if not InstanceManager().is_available():
                 logger.debug("Received readiness check request, "
                              "Coordinator is not ready because Instance is not available")
                 is_ready = False
+            if "sh-probe" in request.headers.get("User-Agent", "unknown").lower():
+                # when k8s readiness call me, print readiness status
+                logger.info("Coordinator readiness status is %s", is_ready)
             if self.coordinator_config.standby_config.enable_master_standby:
                 # when standby is enabled, coordinator is ok only when it is master, then only master can be call
                 if StandbyManager().current_role == StandbyRole.MASTER:
