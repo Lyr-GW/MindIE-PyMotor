@@ -49,6 +49,7 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
     if [ -f "$CONFIGMAP_PATH/hccl_tools.py" ]; then
         echo "Using hccl_tools.py to generate ranktable.json..."
         export HCCL_PATH="$CONFIG_PATH/hccl.json"
+        export PATH="/usr/local/Ascend/driver/tools:$PATH"
         PYTHONUNBUFFERED=1 python3 "$CONFIGMAP_PATH/hccl_tools.py" --hccl_path "$HCCL_PATH"
         # ranktable output path, use by NodeManager
         export RANKTABLE_PATH="$CONFIG_PATH/ranktable.json"

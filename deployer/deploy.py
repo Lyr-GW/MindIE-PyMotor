@@ -262,6 +262,14 @@ def modify_server_yaml(deployment_data, deploy_config, index, node_type):
     elif hardware_type == "800I_A3":
         deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-a3-16"
 
+    weight_mount_path = deploy_config.get("weight_mount_path", "/mnt/weight")
+    for volume in deployment_data[SPEC][TEMPLATE][SPEC]["volumes"]:
+        if volume["name"] == "weight-mount":
+            volume["hostPath"]["path"] = weight_mount_path
+    for volume_mount in container["volumeMounts"]:
+        if volume_mount["name"] == "weight-mount":
+            volume_mount["mountPath"] = weight_mount_path
+
 
 def obtain_server_instance_total(deploy_config):
     p_instances = int(deploy_config.get(P_INSTANCES_NUM, 1))
@@ -326,7 +334,7 @@ def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, depl
                                     "." + deploy_config[CONFIG_JOB_ID] + ".svc.cluster.local")
 
 
-def exec_all_kubectl_multi(deploy_config, out_path):
+def exec_all_kubectl_multi(deploy_config, out_path, user_config_path):
     job_id = deploy_config[CONFIG_JOB_ID]
     out_deploy_yaml_path = os.path.join(out_path, 'deployment')
     
@@ -342,7 +350,8 @@ def exec_all_kubectl_multi(deploy_config, out_path):
                   + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap get-mgmt-port-script --from-file=./probe/get_mgmt_port.py"
                   + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap user-config --from-file=./user_config.json" + NAME_FLAG + job_id)
+    safe_exec_cmd(f"kubectl create configmap user-config --from-file=user_config.json={user_config_path}"
+                  + NAME_FLAG + job_id)
     
     # Apply YAML files
     controller_yaml = os.path.join(out_deploy_yaml_path, 'mindie_ms_controller.yaml')
@@ -361,8 +370,8 @@ def exec_all_kubectl_multi(deploy_config, out_path):
         safe_exec_cmd(f"kubectl apply -f {server_yaml} -n {job_id}")
 
 
-def set_env_to_shell(conf_path):
-    env_config_path = os.path.join(conf_path, 'env.json')
+def set_env_to_shell(deploy_config):
+    env_config_path = deploy_config.get("env_path", "./conf/env.json")
     if os.path.exists(env_config_path):
         env_config = read_json(env_config_path)
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_common_env", "set_common_env")
@@ -380,7 +389,6 @@ def parse_arguments():
         default="./user_config.json",
         help="Path of user config"
     )
-    parser.add_argument('--conf_path', type=str, default='./conf', help="Path of conf")
     parser.add_argument("--deploy_yaml_path", type=str, default='./deployment', help="Path of yaml")
     parser.add_argument("--output_path", type=str, default="./output", help="Path of output")
     return parser.parse_args()
@@ -389,7 +397,6 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
-    input_conf_root_path = args.conf_path
     deploy_yaml_root_path = args.deploy_yaml_path
     output_root_path = args.output_path
     user_config_path = args.user_config_path
@@ -411,14 +418,14 @@ def main():
     user_config = read_json(user_config_path)
     deploy_config = user_config["motor_deploy_config"]
     
-    set_env_to_shell(input_conf_root_path)
+    set_env_to_shell(deploy_config)
 
     # Generate YAML files - pass user_config instead of user_config_path
     init_service_domain_name(controller_input_yaml, coordinator_input_yaml, deploy_config)
     generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, deploy_config)
     generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, deploy_config)
     generate_yaml_server(server_input_yaml, server_output_yaml, deploy_config)
-    exec_all_kubectl_multi(deploy_config, output_root_path)
+    exec_all_kubectl_multi(deploy_config, output_root_path, user_config_path)
 
     logger.info("all deploy end.")
 

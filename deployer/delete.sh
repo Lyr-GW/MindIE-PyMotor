@@ -1,7 +1,17 @@
 #!/bin/bash
 echo -e "NOW EXECUTING [kubectl delete] COMMANDS. THE RESULT IS: \n\n"
 
-NAME_SPACE=mindie-pymotor
+DEFAULT_NAME_SPACE="mindie-pymotor"
+USER_CONFIG_FILE="./user_config.json"
+
+if [ -f "$USER_CONFIG_FILE" ] && [ -r "$USER_CONFIG_FILE" ]; then
+    JOB_ID=$(grep -o '"job_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$USER_CONFIG_FILE" | sed -E 's/"job_id"[[:space:]]*:[[:space:]]*"([^"]*)"/\1/')
+    if [ -n "$JOB_ID" ]; then
+        DEFAULT_NAME_SPACE="$JOB_ID"
+    fi
+fi
+
+NAME_SPACE="$DEFAULT_NAME_SPACE"
 if [ -n "$1" ]; then
     NAME_SPACE="$1"
 fi

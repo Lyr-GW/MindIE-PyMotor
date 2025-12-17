@@ -7,39 +7,16 @@
     "single_d_instance_pod_num": 1,
     "p_pod_npu_num": 16,
     "d_pod_npu_num": 16,
-    "p_instances_scale_num": 0,
-    "d_instances_scale_num": 0,
-    "model_id": "",
-    "prefill_distribute_enable": 0,
-    "decode_distribute_enable": 1,
     "image_name": "mindie-motor-vllm:dev-2.2.RC1.B153-800I-A3-py311-Ubuntu24.04-lts-aarch64",
     "job_id": "mindie-pymotor",
     "hardware_type": "800I_A3",
-    "mindie_env_path": "./conf/mindie_env.json",
-    "mindie_host_log_path": "/root/log/ascend_log",
-    "mindie_container_log_path": "/root/mindie",
-    "weight_mount_path": "/mnt/mindie_data/deepseek_diff_level/deepseek_r1_w8a8_ep_level2",
+    "env_path": "./conf/env.json",
+    "weight_mount_path": "/mnt/weight/",
     "coordinator_backup_cfg": {
       "function_enable": false
     },
     "controller_backup_cfg": {
       "function_enable": false
-    },
-    "deploy_mount_path": {
-      "ms_controller_mount": {
-        "${user_define_host_path}": "${user_define_container_path}"
-      },
-      "ms_coordinator_mount": {
-        "${user_define_host_path}": "${user_define_container_path}"
-      },
-      "prefill_server_mount": {
-        "${user_define_host_path1}": "${user_define_container_path}",
-        "${user_define_host_path2}": "${user_define_container_path}"
-      },
-      "decode_server_mount": {
-        "${user_define_host_path1}": "${user_define_container_path}",
-        "${user_define_host_path2}": "${user_define_container_path}"
-      }
     },
     "tls_config": {
       "tls_enable": true,
@@ -83,17 +60,7 @@
   },
   "motor_controller_config": {},
   "motor_nodemanger_config": {},
-  "motor_coordinator_config": {
-      "request_limit": {
-      "single_node_max_requests": 4096,
-      "max_requests": 10000
-    },
-    "exception_config": {
-      "first_token_timeout": 600,
-      "schedule_timeout": 600,
-      "infer_timeout": 3600
-    }
-  },
+  "motor_coordinator_config": {},
   "motor_engine_prefill_config": {
     "engine_type": "vllm",
     "model_config": {
