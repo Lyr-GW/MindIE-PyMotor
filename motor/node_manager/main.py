@@ -5,6 +5,7 @@
 import signal
 import time
 import os
+import sys
 from typing import Optional
 
 from motor.common.utils.logger import get_logger
@@ -69,7 +70,26 @@ def signal_handler(sig, frame) -> None:
     stop_all_modules()
 
 
-def main() -> None:
+def suicide_procedure() -> None:
+    """
+    Suicide procedure: stop all node_manager modules, kill engine servers,
+    and exit the program with return code -1.
+    """
+    logger.error("Starting suicide procedure...")
+    
+    global config_watcher
+    if config_watcher:
+        try:
+            config_watcher.stop()
+            logger.info("Config watcher stopped")
+        except Exception as e:
+            logger.error(f"Failed to stop config watcher: {e}")
+    
+    # Stop all other modules
+    stop_all_modules()
+
+
+def main() -> int:
     global _should_exit, config_watcher, config
 
     # Register signal handlers
@@ -93,6 +113,12 @@ def main() -> None:
     logger.info("Press Ctrl+C or type 'stop' to exit.")
     try:
         while not _should_exit:
+            # Check if suicide is needed
+            if HeartbeatManager().should_suicide():
+                logger.error("Detected suicide flag from HeartbeatManager")
+                suicide_procedure()
+                return -1
+            
             try:
                 user_input = input().strip().lower()
                 if user_input == 'stop':
@@ -113,6 +139,8 @@ def main() -> None:
 
         stop_all_modules()
 
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

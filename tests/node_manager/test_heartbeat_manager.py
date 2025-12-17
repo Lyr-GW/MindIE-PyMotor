@@ -456,3 +456,209 @@ class TestHeartBeatManager:
         heart_beat_manager.stop()
         
         assert heart_beat_manager.stop_event.is_set() is True
+
+    def test_initial_suicide_flag(self, heart_beat_manager):
+        """test that suicide flag is initially False"""
+        assert heart_beat_manager.should_suicide() is False
+        assert heart_beat_manager._consecutive_abnormal_count == 0
+
+    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
+    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
+    def test_consecutive_abnormal_heartbeat_counting(self, mock_client_class, mock_sleep, heart_beat_manager):
+        """test that consecutive abnormal heartbeats are counted correctly"""
+        call_count = {"count": 0}
+        
+        def mock_stop_sleep(seconds):
+            call_count["count"] += 1
+            if call_count["count"] >= 6:  # Run 6 times to test 5 consecutive abnormal
+                heart_beat_manager.stop_event.set()
+        
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = {}
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = None
+        mock_client_class.return_value = mock_client_instance
+
+        # Set endpoint info with abnormal status
+        heart_beat_manager._job_name = "test_job"
+        heart_beat_manager._instance_id = 1
+        heart_beat_manager._is_within_grace_period = False  # Ensure we're past grace period
+        heart_beat_manager.stop_event.clear()
+        
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
+            ]
+
+        mock_sleep.side_effect = mock_stop_sleep
+
+        # Run the heartbeat loop
+        heart_beat_manager._report_heartbeat_loop()
+
+        # After 5 consecutive abnormal heartbeats, suicide flag should be set
+        assert heart_beat_manager.should_suicide() is True
+        assert heart_beat_manager._consecutive_abnormal_count >= 5
+
+    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
+    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
+    def test_abnormal_count_reset_on_normal_status(self, mock_client_class, mock_sleep, heart_beat_manager):
+        """test that abnormal count resets when status returns to normal"""
+        call_count = {"count": 0}
+        
+        def mock_stop_sleep(seconds):
+            call_count["count"] += 1
+            # Change status to normal after first iteration
+            if call_count["count"] == 1:
+                with heart_beat_manager._endpoint_lock:
+                    if heart_beat_manager._endpoints:
+                        heart_beat_manager._endpoints[0].status = EndpointStatus.NORMAL
+            if call_count["count"] >= 3:
+                heart_beat_manager.stop_event.set()
+        
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = {}
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = None
+        mock_client_class.return_value = mock_client_instance
+
+        heart_beat_manager._job_name = "test_job"
+        heart_beat_manager._instance_id = 1
+        heart_beat_manager._is_within_grace_period = False
+        heart_beat_manager.stop_event.clear()
+        
+        # Start with abnormal status
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
+            ]
+
+        mock_sleep.side_effect = mock_stop_sleep
+
+        heart_beat_manager._report_heartbeat_loop()
+
+        # After status returns to normal, count should be reset
+        assert heart_beat_manager._consecutive_abnormal_count == 0
+        assert heart_beat_manager.should_suicide() is False
+
+    def test_update_endpoint_resets_abnormal_count(self, heart_beat_manager, sample_start_cmd_msg):
+        """test that updating endpoint resets abnormal count and suicide flag"""
+        # Set abnormal count and suicide flag first
+        with heart_beat_manager._abnormal_count_lock:
+            heart_beat_manager._consecutive_abnormal_count = 5
+        with heart_beat_manager._suicide_lock:
+            heart_beat_manager._should_suicide = True
+        
+        # Update endpoint should reset both
+        heart_beat_manager.update_endpoint(sample_start_cmd_msg)
+        
+        assert heart_beat_manager._consecutive_abnormal_count == 0
+        assert heart_beat_manager.should_suicide() is False
+
+    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
+    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
+    def test_suicide_flag_set_after_five_abnormal_heartbeats(self, mock_client_class, mock_sleep, heart_beat_manager):
+        """test that suicide flag is set exactly after 5 consecutive abnormal heartbeats"""
+        call_count = {"count": 0}
+        
+        def mock_stop_sleep(seconds):
+            call_count["count"] += 1
+            if call_count["count"] >= 5:
+                heart_beat_manager.stop_event.set()
+        
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = {}
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = None
+        mock_client_class.return_value = mock_client_instance
+
+        heart_beat_manager._job_name = "test_job"
+        heart_beat_manager._instance_id = 1
+        heart_beat_manager._is_within_grace_period = False
+        heart_beat_manager.stop_event.clear()
+        
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
+            ]
+
+        mock_sleep.side_effect = mock_stop_sleep
+
+        # Initially suicide flag should be False
+        assert heart_beat_manager.should_suicide() is False
+
+        heart_beat_manager._report_heartbeat_loop()
+
+        # After 5 consecutive abnormal heartbeats, suicide flag should be True
+        assert heart_beat_manager.should_suicide() is True
+        assert heart_beat_manager._consecutive_abnormal_count == 5
+
+    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
+    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
+    def test_multiple_endpoints_abnormal_triggers_suicide(self, mock_client_class, mock_sleep, heart_beat_manager):
+        """test that if any endpoint is abnormal, it counts towards suicide"""
+        call_count = {"count": 0}
+        
+        def mock_stop_sleep(seconds):
+            call_count["count"] += 1
+            if call_count["count"] >= 5:
+                heart_beat_manager.stop_event.set()
+        
+        mock_client_instance = MagicMock()
+        mock_client_instance.post.return_value = {}
+        mock_client_instance.__enter__.return_value = mock_client_instance
+        mock_client_instance.__exit__.return_value = None
+        mock_client_class.return_value = mock_client_instance
+
+        heart_beat_manager._job_name = "test_job"
+        heart_beat_manager._instance_id = 1
+        heart_beat_manager._is_within_grace_period = False
+        heart_beat_manager.stop_event.clear()
+        
+        # Set multiple endpoints, one abnormal
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL),
+                Endpoint(id=2, ip="192.168.1.2", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+            ]
+
+        mock_sleep.side_effect = mock_stop_sleep
+
+        heart_beat_manager._report_heartbeat_loop()
+
+        # Even with one endpoint abnormal, suicide should be triggered after 5 consecutive reports
+        assert heart_beat_manager.should_suicide() is True
+
+    @patch('motor.node_manager.core.heartbeat_manager.threading.Thread')
+    def test_should_suicide_thread_safety(self, mock_thread_class, heart_beat_manager):
+        """test that should_suicide method is thread-safe"""
+        import threading
+        
+        # Set suicide flag
+        with heart_beat_manager._suicide_lock:
+            heart_beat_manager._should_suicide = True
+        
+        # Verify flag is set
+        assert heart_beat_manager.should_suicide() is True
+        
+        # Test that the lock protects the flag correctly
+        # We'll test by calling should_suicide multiple times and verifying consistency
+        results = []
+        for _ in range(10):
+            results.append(heart_beat_manager.should_suicide())
+        
+        # All calls should get the same result (True)
+        assert len(results) == 10
+        assert all(results), f"All results should be True, got {results}"
+        
+        # Test concurrent access simulation by checking lock behavior
+        # Reset flag and test again
+        with heart_beat_manager._suicide_lock:
+            heart_beat_manager._should_suicide = False
+        
+        results2 = []
+        for _ in range(10):
+            results2.append(heart_beat_manager.should_suicide())
+        
+        # All calls should get False now
+        assert len(results2) == 10
+        assert all(r is False for r in results2), f"All results should be False, got {results2}"

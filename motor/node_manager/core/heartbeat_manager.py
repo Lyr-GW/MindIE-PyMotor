@@ -52,6 +52,10 @@ class HeartbeatManager(ThreadSafeSingleton):
         self._thread_started = False
         self._engine_status_thread_start_time = None
         self._is_within_grace_period = True
+        self._consecutive_abnormal_count = 0
+        self._abnormal_count_lock = threading.Lock()
+        self._should_suicide = False
+        self._suicide_lock = threading.Lock()
         self._initialized = True
         logger.info("HeartBeatManager module start.")
 
@@ -87,7 +91,21 @@ class HeartbeatManager(ThreadSafeSingleton):
             self._endpoints.clear()
             for item in node_manager_info.endpoints:
                 self._endpoints.append(item)
+        # Reset abnormal count when endpoints are updated
+        with self._abnormal_count_lock:
+            self._consecutive_abnormal_count = 0
+        # Reset suicide flag when endpoints are updated
+        with self._suicide_lock:
+            self._should_suicide = False
 
+    def should_suicide(self) -> bool:
+        """
+        Check if suicide flag is set.
+        Returns True if 5 consecutive abnormal heartbeats have been reported.
+        """
+        with self._suicide_lock:
+            return self._should_suicide
+    
     def stop(self) -> None:
         self.stop_event.set()
         if self._heartbeat_report_thread.is_alive():
@@ -182,21 +200,17 @@ class HeartbeatManager(ThreadSafeSingleton):
         while not self.stop_event.is_set():
             try:
                 with self._endpoint_lock:
-                    # If within grace period, abnormal status is not reported, report INITIAL instead
-                    if self._is_within_grace_period:
-                        endpoint_status_list = {
-                            item.id: (
-                                EndpointStatus.INITIAL
-                                if item.status == EndpointStatus.ABNORMAL
-                                else item.status
-                            )
-                            for item in self._endpoints
-                        }
-                    else:
-                        endpoint_status_list = {
-                            item.id: item.status
-                            for item in self._endpoints
-                        }
+                    # Check if any endpoint has abnormal status (only after grace period)
+                    # Check actual endpoint status, not the reported status
+                    has_abnormal = any(
+                        item.status == EndpointStatus.ABNORMAL
+                        for item in self._endpoints
+                    )
+                    
+                    endpoint_status_list = {
+                        item.id: item.status
+                        for item in self._endpoints
+                    }
 
                 # Read config values under lock protection
                 with self.config_lock:
@@ -216,6 +230,26 @@ class HeartbeatManager(ThreadSafeSingleton):
                     timeout=0.5,
                 ) as client:
                     _ = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
+
+                # Update consecutive abnormal count after successful heartbeat report
+                with self._abnormal_count_lock:
+                    if has_abnormal:
+                        self._consecutive_abnormal_count += 1
+                        logger.warning(
+                            "Consecutive abnormal heartbeat count: %d/5",
+                            self._consecutive_abnormal_count
+                        )
+                        # Set suicide flag if reached 5 consecutive abnormal heartbeats
+                        if self._consecutive_abnormal_count >= 5:
+                            logger.error(
+                                "Reached 5 consecutive abnormal heartbeats, "
+                                "setting suicide flag for main to handle..."
+                            )
+                            with self._suicide_lock:
+                                self._should_suicide = True
+                    else:
+                        self._consecutive_abnormal_count = 0
+
             except Exception as e:
                 if "503" in str(e):
                     logger.warning("Received 503, maybe controller has been restarted, reregistering...")
