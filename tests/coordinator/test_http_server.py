@@ -241,6 +241,22 @@ class TestCoordinatorServer:
         data = response.json()
         assert data["service"] == "Motor Coordinator Server"
         assert data["version"] == "1.0.0"
+
+    def test_list_models_exception(self):
+        """Test list_models endpoints"""
+        response = self.openai_client.get("/v1/models")
+        assert response.status_code == 503
+
+    def test_list_models_ok(self):
+        """Test list_models endpoints"""
+        CoordinatorConfig().aigw_model = {"k": "v"}
+
+        response = self.openai_client.get("/v1/models")
+        assert response.status_code == 200
+        print(response.json()['data'][0])
+        assert response.json()["data"] is not None
+        assert response.json()["data"][0]["p_instances_num"] == 0
+        assert response.json()["data"][0]["d_instances_num"] == 0
     
     def test_openai_completions_api(self):
         """Test OpenAI Completions API"""

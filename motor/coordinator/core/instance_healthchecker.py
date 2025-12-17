@@ -36,11 +36,6 @@ class InstanceHealthChecker(ThreadSafeSingleton):
         
         self._dummy_request_util = DummyRequestUtil()
 
-        self._monitoring_thread = threading.Thread(
-            target=self._monitoring_loop,
-            name="InstanceHealthChecker",
-            daemon=True
-        )
         self._initialized = True
         logger.info("InstanceHealthChecker initialized")
     
@@ -122,7 +117,13 @@ class InstanceHealthChecker(ThreadSafeSingleton):
 
     def start(self):
         """Start the health checker monitoring thread"""
-        self._shutdown_event.clear()
+        if self._shutdown_event.is_set():
+            self._shutdown_event.clear()
+        self._monitoring_thread = threading.Thread(
+            target=self._monitoring_loop,
+            name="InstanceHealthChecker",
+            daemon=True
+        )
         self._monitoring_thread.start()
         logger.info("InstanceHealthChecker monitoring thread started")
             

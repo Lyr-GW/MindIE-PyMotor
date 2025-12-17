@@ -62,11 +62,7 @@ class MetricsCollector(ThreadSafeSingleton):
         self._reuse_time: int = CoordinatorConfig().prometheus_metrics_config.reuse_time
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-        self._metrics_update_thread = threading.Thread(
-            target=self._update_metrics_thread,
-            daemon=True,
-            name="MetricsUpdate"
-        )
+        self._metrics_update_thread = None
 
         self._initialized = True
         logger.info("MetricsCollector initialized.")
@@ -77,6 +73,13 @@ class MetricsCollector(ThreadSafeSingleton):
 
         :returns:
         """
+        if self._stop_event.is_set():
+            self._stop_event.clear()
+        self._metrics_update_thread = threading.Thread(
+            target=self._update_metrics_thread,
+            daemon=True,
+            name="MetricsUpdate"
+        )
         self._metrics_update_thread.start()
         logger.info("MetricsCollector started.")
 
@@ -88,7 +91,8 @@ class MetricsCollector(ThreadSafeSingleton):
         """
 
         self._stop_event.set()
-        self._metrics_update_thread.join()
+        if self._metrics_update_thread and self._metrics_update_thread.is_alive():
+            self._metrics_update_thread.join()
         logger.info("MetricsCollector stopped.")
 
     def prometheus_instance_metrics_handler(self):
