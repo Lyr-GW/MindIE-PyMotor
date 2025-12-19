@@ -90,7 +90,6 @@ def update_dict(original, modified):
             # Add simple values
             else:
                 original[key] = modified[key]
-    return original
 
 
 def update_aigw_config(updated_config, user_config_data):
@@ -147,7 +146,8 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
         update_data = user_config_data[config_key]
         
         # Update the configuration
-        updated_config = update_dict(config_data, update_data)
+        update_dict(config_data, update_data)
+        updated_config = config_data
 
         try:
             if config_key == ConfigKey.MOTOR_CONTROLLER.value:

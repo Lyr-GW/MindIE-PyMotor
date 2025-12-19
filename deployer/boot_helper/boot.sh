@@ -1,5 +1,4 @@
 #!/bin/bash
-set -x
 set_common_env
 
 echo "Current node role: ROLE=$ROLE"

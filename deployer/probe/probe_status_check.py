@@ -6,11 +6,9 @@ import logging
 import requests
 
 
-"""
-Set the timeout to 600s, which is sufficiently long. 
-In probe detection, the timeout for the instance is managed
-by the failureThreshold parameter,which defaults to 1s if not configured.
-"""
+# Set the timeout to 600s, which is sufficiently long. 
+# In probe detection, the timeout for the instance is managed
+# by the failureThreshold parameter,which defaults to 1s if not configured.
 TIMEOUT = 600
 
 # Set up logging

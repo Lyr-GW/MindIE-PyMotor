@@ -76,14 +76,13 @@ def load_yaml(input_yaml, single_doc):
 def exec_cmd(command):
     """Execute command"""
     logger.info(f"Executing command: {command}")
-    return os.popen(command).read()
+    os.popen(command).read()
 
 
 def safe_exec_cmd(command):
     """Safely execute command"""
     try:
-        result = exec_cmd(command)
-        return result
+        exec_cmd(command)
     except Exception as e:
         logger.warning(f"Command execution failed: {e}")
         raise
@@ -340,18 +339,18 @@ def exec_all_kubectl_multi(deploy_config, out_path, user_config_path):
     
     # Create base configmaps
     safe_exec_cmd("kubectl create configmap boot-bash-script --from-file=./boot_helper/boot.sh"
-                  + NAME_FLAG + job_id)
+                + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap hccl-tools-script --from-file=./boot_helper/hccl_tools.py"
-                  + NAME_FLAG + job_id)
+                + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap update-config-script "
-                  "--from-file=./boot_helper/update_config_from_user_config.py" + NAME_FLAG + job_id)
+                "--from-file=./boot_helper/update_config_from_user_config.py" + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap probe-script --from-file=./probe/probe.sh" + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap probe-status-check-script --from-file=./probe/probe_status_check.py"
-                  + NAME_FLAG + job_id)
+                + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap get-mgmt-port-script --from-file=./probe/get_mgmt_port.py"
-                  + NAME_FLAG + job_id)
+                + NAME_FLAG + job_id)
     safe_exec_cmd(f"kubectl create configmap user-config --from-file=user_config.json={user_config_path}"
-                  + NAME_FLAG + job_id)
+                + NAME_FLAG + job_id)
     
     # Apply YAML files
     controller_yaml = os.path.join(out_deploy_yaml_path, 'mindie_ms_controller.yaml')

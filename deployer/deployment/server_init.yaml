@@ -34,8 +34,6 @@ spec:
           name: mindie-server
           securityContext:
             allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
             seccompProfile:
               type: "RuntimeDefault"
           env:
