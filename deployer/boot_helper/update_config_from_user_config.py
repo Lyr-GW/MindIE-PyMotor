@@ -12,14 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Constants
 ENCODING_UTF8 = 'utf-8'
-HEALTH_CHECK_CONFIG = 'health_check_config'
-HTTP_CONFIG = 'http_config'
-API_CONFIG = 'api_config'
 BASIC_CONFIG = 'basic_config'
-CONTROLLER_API_HOST = 'controller_api_host'
-COORDINATOR_API_DNS = 'coordinator_api_dns'
-COORDINATOR_API_HOST = 'coordinator_api_host'
-CONTROLLER_API_DNS = 'controller_api_dns'
 PARALLEL_CONFIG = 'parallel_config'
 PREFILL_PARALLEL_CONFIG = 'prefill_parallel_config'
 DECODE_PARALLEL_CONFIG = 'decode_parallel_config'
@@ -27,12 +20,7 @@ MODEL_CONFIG = 'model_config'
 ENGINE_CONFIG = 'engine_config'
 PREFILL = 'prefill'
 DECODE = 'decode'
-STANDBY_CONFIG = 'standby_config'
-ENABLE_MASTER_STANDBY = 'enable_master_standby'
 MOTOR_DEPLOY_CONFIG = 'motor_deploy_config'
-COORDINATOR_BACKUP_CFG = 'coordinator_backup_cfg'
-CONTROLLER_BACKUP_CFG = 'controller_backup_cfg'
-FUNCTION_ENABLE = 'function_enable'
 AIGW = 'aigw'
 ID = 'id'
 MOTOR_ENGINE_PREFILL_CONFIG = 'motor_engine_prefill_config'
@@ -47,6 +35,7 @@ P_MAX_SEQLEN = 'p_max_seqlen'
 D_MAX_SEQLEN = 'd_max_seqlen'
 SLO_TTFT = 'slo_ttft'
 SLO_TPOT = 'slo_tpot'
+HARDWARE_TYPE = 'hardware_type'
 
 
 class ConfigKey(Enum):
@@ -117,19 +106,10 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
     :param config_key: Field name in user_config.json to use for updating
     """
     try:
-        # Check if config file exists, create if not
-        if not os.path.exists(config_file):
-            logging.info(f"Configuration file does not exist, creating: {config_file}")
-            # Create directory if needed
-            os.makedirs(os.path.dirname(config_file), exist_ok=True)
-            # Create empty config file
-            with open(config_file, 'w', encoding=ENCODING_UTF8) as file:
-                json.dump({}, file, indent=4, ensure_ascii=False)
-            config_data = {}
-        else:
-            # Read existing config file
-            with open(config_file, 'r', encoding=ENCODING_UTF8) as file:
-                config_data = json.load(file)
+        # Create directory if needed
+        os.makedirs(os.path.dirname(config_file), exist_ok=True)
+        # Always start with empty config
+        config_data = {}
         
         with open(user_config_file, 'r', encoding=ENCODING_UTF8) as file:
             user_config_data = json.load(file)
@@ -150,21 +130,25 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
         updated_config = config_data
 
         try:
+            # For controller and coordinator, write config directly without merge
             if config_key == ConfigKey.MOTOR_CONTROLLER.value:
-                updated_config[API_CONFIG][CONTROLLER_API_HOST] = os.getenv('POD_IP')
-                updated_config[API_CONFIG][COORDINATOR_API_DNS] = os.getenv('COORDINATOR_SERVICE')
-                updated_config[STANDBY_CONFIG][ENABLE_MASTER_STANDBY] = \
-                    user_config_data[MOTOR_DEPLOY_CONFIG][CONTROLLER_BACKUP_CFG][FUNCTION_ENABLE]
+                updated_config = user_config_data[config_key]
+                logging.info("Controller configuration will be written directly")
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
-                updated_config[HTTP_CONFIG][COORDINATOR_API_HOST] = os.getenv('POD_IP')
-                updated_config[HEALTH_CHECK_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
-                updated_config[STANDBY_CONFIG][ENABLE_MASTER_STANDBY] = \
-                    user_config_data[MOTOR_DEPLOY_CONFIG][COORDINATOR_BACKUP_CFG][FUNCTION_ENABLE]
-                if AIGW in updated_config:
-                    update_aigw_config(updated_config, user_config_data)
+                updated_config = user_config_data[config_key]
+                logging.info("Coordinator configuration will be written directly")
             elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:
-                updated_config[API_CONFIG][CONTROLLER_API_DNS] = os.getenv('CONTROLLER_SERVICE')
                 role = os.getenv('ROLE')
+                # Ensure basic_config exists
+                if BASIC_CONFIG not in updated_config:
+                    updated_config[BASIC_CONFIG] = {}
+                # Set model_name in basic_config
+                updated_config[BASIC_CONFIG][MODEL_NAME] = \
+                    user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value][MODEL_CONFIG][MODEL_NAME]
+                # Set hardware_type in basic_config
+                updated_config[BASIC_CONFIG][HARDWARE_TYPE] = \
+                    user_config_data[MOTOR_DEPLOY_CONFIG][HARDWARE_TYPE]
+                # Set parallel_config based on role
                 if role == PREFILL:
                     updated_config[BASIC_CONFIG][PARALLEL_CONFIG] = \
                         user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value][MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
@@ -183,7 +167,7 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
         # Write the updated configuration back to the file
         with open(config_file, 'w', encoding=ENCODING_UTF8) as file:
             json.dump(updated_config, file, indent=4, ensure_ascii=False)
-        
+
         logging.info(f"Configuration file updated successfully: {config_file}")
         return True
         
@@ -202,21 +186,22 @@ def main():
         logging.info("  - motor_engine_decode_config: Update motor_engine_decode.json")
         logging.info("  - motor_nodemanger_config: Update motor_nodemanger.json")
         sys.exit(1)
-    
+
     config_file = sys.argv[1]
     user_config_file = sys.argv[2]
     config_key = sys.argv[3]
-    
+
     if not os.path.exists(user_config_file):
         logging.error(f"user_config.json file does not exist: {user_config_file}")
         sys.exit(1)
-    
+
     if not ConfigKey.is_valid(config_key):
         logging.error(f"Unsupported config_key: {config_key}. Supported config_key: {ConfigKey.get_supported_keys()}")
         sys.exit(1)
-    
+
     success = update_config_from_user_config(config_file, user_config_file, config_key)
     sys.exit(0 if success else 1)
+
 
 if __name__ == "__main__":
     main()

@@ -14,7 +14,7 @@
 
 ### 3.1 环境准备
 
-本文档以Atlas 800I A2 推理服务器和Qwen3-0.6B模型为例，让开发者快速开始使用MindIE-pyMotor进行大模型PD分离部署和推理流程。
+本文档以Atlas 800I A2 推理服务器和Qwen3-8B模型为例，让开发者快速开始使用MindIE-pyMotor进行大模型PD分离部署和推理流程。
 
 #### 前提条件
 
@@ -35,7 +35,6 @@
   | --- | --- |
   | Atlas 800I A2 | 《Atlas A2 中心推理和训练硬件 24.1.0 NPU驱动和固件安装指南》中的“[物理机安装与卸载](https://support.huawei.com/enterprise/zh/doc/EDOC1100438838/b1977c97)”章节 |
   
-  
 - 执行以下命令查看K8s集群是否就绪。
   
   ```bash
@@ -47,6 +46,7 @@
   ```bash
   NAME         STATUS   ROLES                         AGE   VERSION
   ```
+
 - 执行以下命令查看Docker是否已安装并启动。
   
   ```bash
@@ -61,9 +61,9 @@
 
 #### 获取模型权重
 
-1. 请先下载权重，这里以Qwen3-0.6B为例，请到官方下载权重文件并将权重文件上传至服务器任意目录（如/mnt/weight）。
+1. 请先下载权重，这里以Qwen3-8B为例，请到官方下载权重文件并将权重文件上传至服务器任意目录（如`/mnt/weight`）。
 2. 执行以下命令，修改权重文件权限：
-   
+
    ```bash
    chmod -R 755 /mnt/weight
    ```
@@ -78,56 +78,88 @@
 
 1. **将本代码仓的deployer目录上传至K8s集群的master服务器上**
 2. **配置服务化参数**
-   
-   - 打开“user_config.json”文件
-     
+
+   - 打开`user_config.json`文件
+
      ```bash
      cd deployer
      vim user_config.json
      ```
-   - 按“i”进入编辑模式，根据实际情况修改“user_config.json”中的配置参数。（以下已Qwen3-0.6B为例）
-     
-     ```
-     {
+
+   - 根据实际情况修改`user_config.json`中的配置参数。（以下以Qwen3-8B为例）
+
+      ```json
+      {
         "version": "v2.0",
         "motor_deploy_config": {
           "p_instances_num": 1,
           "d_instances_num": 1,
           "single_p_instance_pod_num": 1,
           "single_d_instance_pod_num": 1,
-          "p_pod_npu_num": 1,
-          "d_pod_npu_num": 1,
-          "image_name": "vllm-ascend:b150_motor",
+          "p_pod_npu_num": 4,
+          "d_pod_npu_num": 4,
+          "image_name": "mindie-motor-vllm:dev-2.2.RC1.B153-800I-A3-py311-Ubuntu24.04-lts-aarch64",
           "job_id": "mindie-pymotor",
-          "hardware_type": "800I_A2"
+          "hardware_type": "800I_A2",
+          "env_path": "./conf/env.json",
+          "weight_mount_path": "/mnt/weight/",
         },
-        "motor_controller_config": {},
-        "motor_nodemanger_config": {},
-        "motor_coordinator_config": {},
+        "motor_controller_config": {
+          "standby_config": {
+            "enable_master_standby": false
+          },
+          "fault_tolerance_config": {
+            "enable_fault_tolerance": true,
+            "enable_scale_p2d": true,
+            "enable_lingqu_network_recover": true
+          }
+        },
+        "motor_coordinator_config": {
+          "standby_config": {
+            "enable_master_standby": false
+          },
+          "request_limit": {
+            "single_node_max_requests": 4096,
+            "max_requests": 10000
+          }
+        },
+        "motor_nodemanger_config": {
+        },
         "motor_engine_prefill_config": {
           "engine_type": "vllm",
           "model_config": {
-            "model_name": "qwen3",
-            "model_path": "/mnt/mindie_data/weight/Qwen3-0.6B",
+            "model_name": "qwen3-8B",
+            "model_path": "/mnt/weight/qwen3_8B",
             "npu_mem_utils": 0.9,
             "prefill_parallel_config": {
-              "dp_size": 1,
-              "tp_size": 1,
+              "dp_size": 2,
+              "tp_size": 2,
               "pp_size": 1,
               "enable_ep": false,
               "dp_rpc_port": 9000
             }
           },
           "engine_config": {
+            "enforce-eager": true,
+            "max_model_len": 2048,
             "kv_transfer_config": {
               "kv_connector": "MooncakeLayerwiseConnector",
               "kv_buffer_device": "npu",
               "kv_role": "kv_producer",
+              "kv_parallel_size": 1,
+              "kv_port": "20001",
+              "engine_id": "0",
+              "kv_rank": 0,
               "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
               "kv_connector_extra_config": {
-                "use_ascend_direct": true,
-                "prefill": {},
-                "decode": {}
+                "prefill": {
+                  "dp_size": 2,
+                  "tp_size": 2
+                },
+                "decode": {
+                  "dp_size": 2,
+                  "tp_size": 2
+                }
               }
             }
           }
@@ -135,36 +167,46 @@
         "motor_engine_decode_config": {
           "engine_type": "vllm",
           "model_config": {
-            "model_name": "qwen3",
-            "model_path": "/mnt/mindie_data/weight/Qwen3-0.6B",
+            "model_name": "qwen3-8B",
+            "model_path": "/mnt/weight/qwen3_8B",
             "npu_mem_utils": 0.9,
             "decode_parallel_config": {
-              "dp_size": 1,
-              "tp_size": 1,
+              "dp_size": 2,
+              "tp_size": 2,
               "pp_size": 1,
               "enable_ep": false,
               "dp_rpc_port": 9000
             }
           },
           "engine_config": {
+            "max_model_len": 2048,
             "kv_transfer_config": {
               "kv_connector": "MooncakeLayerwiseConnector",
               "kv_buffer_device": "npu",
-              "kv_role": "kv_consumer",
+              "kv_role": "kv_producer",
+              "kv_parallel_size": 1,
+              "kv_port": "20001",
+              "engine_id": "0",
+              "kv_rank": 0,
               "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
               "kv_connector_extra_config": {
-                "use_ascend_direct": true,
-                "prefill": {},
-                "decode": {}
+                "prefill": {
+                  "dp_size": 2,
+                  "tp_size": 2
+                },
+                "decode": {
+                  "dp_size": 2,
+                  "tp_size": 2
+                }
               }
             }
           }
         }
       }
-     ```
-     
+      ```
+
      如上的参数说明如下：
-     
+
      | 配置项 | 取值类型 | 取值范围 | 配置说明 |
      | --- | --- | --- | --- |
      | version | string | v2.0 | 配置文件版本 |
@@ -177,7 +219,9 @@
      | image_name | string | 字符串 | docker加载的镜像名称，例如“vllm-ascend:b150_motor” |
      | job_id | string | 字符串 | PD分离部署任务名称，例如“mindie-pymotor” |
      | hardware_type | string | [800I_A2, 800I_A3] | 服务器硬件类型 |
-     | api_key_config.enabled | bool | [true, false] | 推理接口是否校验key |
+     | motor_controller_config | dict | controller组件配置 | 在此处可以进行任意特定配置项的设置 |
+     | motor_coordinator_config | dict | coordinator组件配置 | 在此处可以进行任意特定配置项的设置 |
+     | motor_nodemanager_config | dict | nodemanager组件配置 | 在此处可以进行任意特定配置项的设置 |
      | engine_type | string | 字符串 | 对接的推理引擎类型，例如“vllm” |
      | model_name | string | 字符串 | 模型名称，例如“qwen3_8B” |
      | model_path | string | 文件路径 | 模型权重文件所在路径 |
@@ -187,24 +231,61 @@
      | prefill_parallel_config.pp_size | int | ≥1 | 流水线并行参数 |
      | prefill_parallel_config.enable_ep | bool | [true, false] | 专家并行开关 |
      | prefill_parallel_config.dp_rpc_port | int | 有效端口范围 | RPC通信的端口号 |
-     | engine_config | json | 推理引擎原生参数 | 推理引擎原生参数，参考对应推理引擎的说明，直接已json对象形式填写 |
-     
-     
-   - 配置k8s的namespace，配置namespace值为“user_config.json”中的“job_id”。
-     
-     ```
+     | engine_config |dict | 推理引擎原生参数 | 参考对应推理引擎的说明，直接已json对象形式填写 |
+
+     #### 对于`Controller`、`Coordinator`和`node_manager`的专项配置
+
+      deployer套件会将`user_config.json`中`controller`和`coordinator`以及`node_manager`的子配置写入对于的json文件，然后在模块拉起时先使用python代码默认的配置值进行实例化配置。然后读取组件配置块中用户特定修改的配置项进行刷新。
+      以开启`controller`主备为例，我们只需把对应字段改为`true`即可。
+
+      ```json
+      "motor_controller_config": {
+        "standby_config": {
+          "enable_master_standby": true
+        },
+        ......
+      },
+      ```
+
+     在`deployer/`文件夹中会配备`controller`，`coordinator`以及`node_manager`的全量配置json，您可以根据自己的需要进行修改。同时我们也支持运行时动态修改配置，此时您需要修改运行组件监控的json文件，写入你需要修改的配置项即可。
+
+     #### 对于`engine_config`的专项配置
+
+     由于需要对接多个推理引擎，不同引擎的特定配置参数难以统一，若是全部强行统一也会对用户提出较高的学习成本，故我们仅将一部分通俗易懂的配置进行统一化（如并行配置，最大HBM内存使用量，模型名称等）。其余配置我们统一放在`engine_config`内，这样不同引擎的用户可以直接快速迁移。
+
+      特别说明：
+      以下配置中的prefill和decode的dp_size、tp_size不需要用户手动配置，deployer。用户仅需要配置`prefill_parallel_config`中的并行配置即可，Motor在拉起服务时会自动刷新对应的`extra_config`。（该处config主要用于PD分离场景下二者`Tensor Parallel`数不一致时的特殊处理）
+
+      ```json
+      "kv_connector_extra_config": {
+        "prefill": {
+          "dp_size": 2,
+          "tp_size": 2
+        },
+        "decode": {
+          "dp_size": 2,
+          "tp_size": 2
+        }
+      }
+      ```
+
+   - 配置k8s的namespace，配置namespace值为`user_config.json`中的`job_id`。
+
+     ```bash
      kubectl create ns mindie-pymotor
      ```
-3. **配置环境变量配置**
-   
-   - 打开“env.json”文件
-     
+
+1. **配置环境变量配置**
+
+   - 打开`env.json`文件
+
      ```bash
      cd deployer/conf
      vim env.json
      ```
-   - 按“i”进入编辑模式，根据实际情况修改“env.json”中的配置参数。
-     
+
+   - 根据实际情况修改`env.json`中的配置参数。
+
      ```bash
      {
         "version": "2.0.0",
@@ -217,20 +298,21 @@
         "motor_engine_decode_env": {}
      }
      ```
-4. **启动服务**
+
+2. **启动服务**
   
    执行以下命令：
-   
-   ```
+
+   ```bash
    cd deployer
    python3 deploy.py
    ```
-   
-5. **发送请求**
+
+3. **发送请求**
   
    执行以下命令：
-   
-   ```
+
+   ```bash
    curl -X POST http://127.0.0.1:31015/v1/chat/completions \
    -H "Content-Type: application/json" \
    -d '{
@@ -249,16 +331,16 @@
    "stream":true
    }'
    ```
-   
+
    返回结果如果如下，则说明尚未启动就绪：
-   
-   ```
+
+   ```json
    {"detail":"Service is not available"}
    ```
-   
+
    等待一段时间后再次尝试。回显类似如下内容说明推理服务已就绪
-   
-   ```
+
+   ```json
    data: {"id":"17658563046856100000c836403d","object":"chat.completion.chunk","created":1765856304,"model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"prompt_token_ids":null}
    
    data: {"id":"17658563046856100000c836403d","object":"chat.completion.chunk","created":1765856304,"model":"qwen3","choices":[{"index":0,"delta":{"content":"<think>"},"logprobs":null,"finish_reason":null,"token_ids":null}]}

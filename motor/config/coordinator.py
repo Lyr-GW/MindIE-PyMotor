@@ -3,15 +3,58 @@
 
 import os
 import json
+import re
+import ipaddress
 from typing import Optional, Any
 from enum import Enum
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
 
-from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.logger import LoggingConfig, reconfigure_logging, get_logger
-from motor.config.etcd_config import EtcdConfig
+from motor.common.utils.env import Env
+from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig
 
 logger = get_logger(__name__)
+
+
+def _default_skip_paths() -> set[str]:
+    return {
+        "/", "/startup", "/readiness", "/liveness", "/metrics",
+        "/instances/refresh", "/docs", "/redoc", "/openapi.json", "/favicon.ico"
+    }
+
+
+def _default_rate_limit_skip_paths() -> list[str]:
+    return [
+        "/liveness", "/readiness", "/metrics",
+        "/docs", "/redoc", "/openapi.json",
+        "/favicon.ico", "/startup"
+    ]
+
+
+def _default_dummy_request_body() -> dict:
+    return {
+        'model': 'test-model',
+        'prompt': 'Health check. Please respond with OK only.',
+        'message': "[{'role': 'user', 'content': 'hi'}]",
+        'max_tokens': 3,
+        'temperature': 0.1,
+        'top_p': 0.9,
+        'stream': False,
+    }
+
+
+def _default_tls_items() -> dict[str, str]:
+    return {
+        "ca_cert": "",
+        "tls_cert": "",
+        "tls_key": "",
+        "tls_passwd": "",
+        "tls_crl": "",
+        "kmcKsfMaster": "",
+        "kmcKsfStandby": ""
+    }
 
 
 class DeployMode(Enum):
@@ -44,673 +87,514 @@ class SchedulerType(Enum):
             return None
 
 
-class PrometheusMetricsConfig:
-    def __init__(self):
-        self.reuse_time = 3
-
-
-class ExceptionConfig:
-    def __init__(self):
-        self.max_retry = 5
-        self.retry_delay = 0.2
-        self.first_token_timeout = 60
-        self.infer_timeout = 300
-
-
-class TlsItems:
-    def __init__(self):
-        self.tls_enable = False
-        self.items = {
-            "ca_cert": "",
-            "tls_cert": "",
-            "tls_key": "",
-            "tls_passwd": "",
-            "tls_crl": "",
-            "kmcKsfMaster": "",
-            "kmcKsfStandby": ""
-        }
-        self.check_files = True
-
-
-class HealthCheckConfig:
-    def __init__(self):
-        self.dummy_request_interval: float = 5.0
-        self.max_consecutive_failures: int = 3
-        self.dummy_request_timeout: float = 10.0
-        self.controller_api_dns: str = "mindie-ms-controller-service.mindie.svc.cluster.local"
-        self.controller_api_port: int = 57675
-        self.dummy_request_endpoint: str = '/v1/completions'         
-        self.dummy_request_body: dict = {
-            'model': 'test-model', 
-            'prompt': 'Health check. Please respond with OK only.',
-            'message': "[{'role': 'user', 'content': 'hi'}]",
-            'max_tokens': 3,
-            'temperature': 0.1,
-            'top_p': 0.9,
-            'stream': False,
-        }
-        self.alarm_endpoint: str = '/v1/alarm/coordinator'
-        self.alarm_timeout: float = 5.
-        self.terminate_instance_endpoint: str = '/controller/terminate_instance'
-
-        self.thread_join_timeout: float = 5.0
-        self.error_retry_interval: float = 1.0
-
-
+@dataclass
 class SchedulerConfig:
-    def __init__(self) -> None:
-        self.deploy_mode = DeployMode.PD_SEPARATE
-        self.scheduler_type = SchedulerType.LOAD_BALANCE
+    deploy_mode: DeployMode = field(default=DeployMode.PD_SEPARATE)
+    scheduler_type: SchedulerType = field(default=SchedulerType.LOAD_BALANCE)
 
 
+@dataclass
+class PrometheusMetricsConfig:
+    """Prometheus metrics configuration class"""
+
+    reuse_time: int = 3
+
+
+@dataclass
+class ExceptionConfig:
+    """Exception handling configuration class"""
+
+    max_retry: int = 5
+    retry_delay: float = 0.2
+    first_token_timeout: int = 600  # 10 minutes
+    infer_timeout: int = 600  # 10 minutes
+
+
+@dataclass
+class TLSConfig:
+    enable_tls: bool = False
+    items: dict[str, str] = field(default_factory=_default_tls_items)
+    check_files: bool = True
+
+
+@dataclass
+class HealthCheckConfig:
+    dummy_request_interval: float = 5.0
+    max_consecutive_failures: int = 3
+    dummy_request_timeout: float = 10.0
+    controller_api_dns: str = "mindie-ms-controller-service.mindie.svc.cluster.local"
+    controller_api_port: int = 1026
+    dummy_request_endpoint: str = '/v1/completions'
+    dummy_request_body: dict = field(default_factory=_default_dummy_request_body)
+    alarm_endpoint: str = '/v1/alarm/coordinator'
+    alarm_timeout: float = 5.0
+    terminate_instance_endpoint: str = '/controller/terminate_instance'
+    thread_join_timeout: float = 5.0
+    error_retry_interval: float = 1.0
+
+
+@dataclass
 class TimeoutConfig:
-    def __init__(self):
-        self.request_timeout = 30
-        self.connection_timeout = 10
-        self.read_timeout = 15
-        self.write_timeout = 15
-        self.keep_alive_timeout = 60
+    request_timeout: int = 30
+    connection_timeout: int = 10
+    read_timeout: int = 15
+    write_timeout: int = 15
+    keep_alive_timeout: int = 60
 
 
+@dataclass
 class APIKeyConfig:
-    def __init__(self):
-        self.enabled = True
-        self.valid_keys = set()
-        self.header_name = "Authorization"
-        self.key_prefix = "Bearer "
-        self.skip_paths = set(["/", "/startup", "/readiness", "/liveness", "/health", "/metrics", 
-                               "/instances/refresh",
-                               "/docs", "/redoc", "/openapi.json", "/favicon.ico"])
+    enable_api_key: bool = False
+    valid_keys: set[str] = field(default_factory=set)
+    header_name: str = "Authorization"
+    key_prefix: str = "Bearer "
+    skip_paths: set[str] = field(default_factory=_default_skip_paths)
 
 
+@dataclass
 class HttpConfig:
-    def __init__(self):
-        self.combined_mode = False
-        self.coordinator_api_host: str = CoordinatorConfig.DEFAULT_HOST
-        self.coordinator_api_infer_port: int = CoordinatorConfig.DEFAULT_INFERENCE_PORT
-        self.coordinator_api_mgmt_port: int = CoordinatorConfig.DEFAULT_MGMT_PORT
+    """HTTP configuration class"""
+
+    combined_mode: bool = False
+    coordinator_api_host: str = field(default_factory=lambda: Env.pod_ip or "127.0.0.1")
+    coordinator_api_infer_port: int = 1025
+    coordinator_api_mgmt_port: int = 1026
 
 
+@dataclass
 class RateLimitConfig:
-    def __init__(self):
-        self.enabled = True
-        self.max_requests = 1000
-        self.window_size = 60
-        self.scope = "global"
-        self.skip_paths = [
-            "/health", "/readiness", "/metrics",
-            "/docs", "/redoc", "/openapi.json",
-            "/favicon.ico", "/startup"
-        ]
-        self.error_message = "too many requests, please try again later"
-        self.error_status_code = 429
+    """Rate limiting configuration class"""
+
+    enable_rate_limit: bool = False
+    max_requests: int = 1000
+    window_size: int = 60
+    scope: str = "global"
+    skip_paths: list[str] = field(default_factory=_default_rate_limit_skip_paths)
+    error_message: str = "too many requests, please try again later"
+    error_status_code: int = 429
 
 
-class CoordinatorConfig(ThreadSafeSingleton):
+@dataclass
+class CoordinatorConfig:
+    """Coordinator configuration class with validation, reload and error handling support"""
 
-    DEFAULT_HOST = "127.0.0.1"
-    DEFAULT_MGMT_PORT = 1025
-    DEFAULT_INFERENCE_PORT = 1026
-    ENABLED_KEY = "enabled"
-    VALID_KEY = "valid_keys"
-    HEADER_NAME_KEY = "header_name"
-    PREFIX_KEY = "key_prefix"
-    SKIP_PATHS_KEY = "skip_paths"
-    MAX_REQUESTS_KEY = "max_requests"
-    WINDOW_SIZE_KEY = "window_size"
-    SCOPE_KEY = "scope"
-    ERROR_MESSAGE_KEY = "error_message"
-    ERROR_STATUS_CODE_KEY = "error_status_code"
+    logging_config: LoggingConfig = field(default_factory=LoggingConfig)
+    prometheus_metrics_config: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
+    exception_config: ExceptionConfig = field(default_factory=ExceptionConfig)
+    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    tls_config: TLSConfig = field(default_factory=TLSConfig)
+    health_check_config: HealthCheckConfig = field(default_factory=HealthCheckConfig)
+    timeout_config: TimeoutConfig = field(default_factory=TimeoutConfig)
+    api_key_config: APIKeyConfig = field(default_factory=APIKeyConfig)
+    rate_limit_config: RateLimitConfig = field(default_factory=RateLimitConfig)
+    standby_config: StandbyConfig = field(default_factory=StandbyConfig)
+    etcd_config: EtcdConfig = field(default_factory=EtcdConfig)
+    http_config: HttpConfig = field(default_factory=HttpConfig)
+    aigw_model: dict[str, Any] | None = None
 
-    def __init__(self):
-        # Prevent re-initialization in singleton
-        if hasattr(self, '_initialized'):
-            return
+    # internal fields
+    config_path: str | None = field(default=None, init=False)
+    last_modified: float | None = field(default=None, init=False)
 
-        self._initialized = False
-        self.default_config_file_path = os.path.join(
-            os.path.dirname(__file__), 'coordinator_config.json'
-        )
-        self.config_file_path_env = "MOTOR_COORDINATOR_CONFIG_PATH"
-        self.config_file_path = None  # Store the actual config file path
-        self.check_mounted_files = True
+    def __post_init__(self):
+        """Validate configuration after initialization"""
+        # Refresh master lock key with coordinator prefix
+        if self.standby_config.master_lock_key == "/master_lock":
+            self.standby_config.master_lock_key = "/coordinator" + self.standby_config.master_lock_key
+        self.validate_config()
 
-        # Configuration objects
-        self.config = {}
-        self.logging_config = LoggingConfig()
-        self.prometheus_metrics_config = PrometheusMetricsConfig()
-        self.exception_config = ExceptionConfig()
-        self.scheduler_config = SchedulerConfig()
-        self.request_server_tls = TlsItems()
-        self.etcd_client_tls = TlsItems()
-        self.health_check_config = HealthCheckConfig()
-        self.timeout_config = TimeoutConfig()
-        self.api_key_config = APIKeyConfig()
-        self.rate_limit_config = RateLimitConfig()
-        self.standby_config = StandbyConfig()
-        self.etcd_config = EtcdConfig()
-        self.http_config = HttpConfig()
-        self.aigw_model: dict[str, Any] | None = None
+    @classmethod
+    def from_json(cls, json_path: str = None) -> 'CoordinatorConfig':
+        """Load configuration from JSON file"""
+        if json_path is None:
+            # Read from environment variable
+            json_path = os.getenv("MOTOR_COORDINATOR_CONFIG_PATH")
+
+        config_path = Path(json_path) if json_path else None
+
+        cfg = {}
+        try:
+            if config_path and config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:  # Only parse if file is not empty
+                        cfg = json.loads(content)
+        except json.JSONDecodeError as e:
+            # If JSON parsing fails, use default configuration
+            logger.warning(f"Configuration file {json_path} format error: {e}, using default configuration")
+        except Exception as e:
+            # If any other error occurs, use default configuration
+            logger.warning(f"Unable to read configuration file {json_path}: {e}, using default configuration")
 
         try:
-            self.config_file_path = os.getenv(self.config_file_path_env, self.default_config_file_path)
-            self.check_mounted_files = self._get_check_files()
+            config = cls()
 
-            if not os.path.exists(self.config_file_path):
-                logger.error(f"Configuration file not found: {self.config_file_path}")
-                raise FileNotFoundError(f"Configuration file not found: {self.config_file_path}")
+            def update_config_from_dict(config_obj, config_dict, special_handlers=None):
+                """Update configuration object fields from dictionary, only for existing keys"""
+                for key, value in config_dict.items():
+                    if special_handlers and key in special_handlers:
+                        special_handlers[key](config_obj, key, value)
+                    elif hasattr(config_obj, key):
+                        setattr(config_obj, key, value)
 
-            with open(self.config_file_path, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
+            def set_enum_field(obj, key, value, enum_class):
+                """Set enum field value from string"""
+                if isinstance(value, str):
+                    enum_value = enum_class.from_string(value)
+                    if enum_value is not None:
+                        setattr(obj, key, enum_value)
 
-            self._load_all_configs()
-            self._initialized = True
-            logger.info("Coordinator configuration initialized successfully")
+            scheduler_handlers = {
+                'deploy_mode': lambda obj, key, value: set_enum_field(obj, key, value, DeployMode),
+                'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType)
+            }
+
+            # Update configuration sections if they exist in JSON
+            config_mappings = [
+                ('logging_config', config.logging_config, None),
+                ('prometheus_metrics_config', config.prometheus_metrics_config, None),
+                ('exception_config', config.exception_config, None),
+                ('scheduler_config', config.scheduler_config, scheduler_handlers),
+                ('health_check_config', config.health_check_config, None),
+                ('timeout_config', config.timeout_config, None),
+                ('api_key_config', config.api_key_config, None),
+                ('rate_limit_config', config.rate_limit_config, None),
+                ('standby_config', config.standby_config, None),
+                ('etcd_config', config.etcd_config, None),
+                ('http_config', config.http_config, None),
+            ]
+
+            for section_name, config_obj, special_handlers in config_mappings:
+                if section_name in cfg:
+                    update_config_from_dict(config_obj, cfg[section_name], special_handlers)
+
+            # Handle TLS config separately due to its special structure
+            if 'tls_config' in cfg:
+                tls_config = cfg['tls_config']
+                if 'request_server_tls_enable' in tls_config and tls_config['request_server_tls_enable']:
+                    config.tls_config.enable_tls = True
+                    if 'request_server_tls_items' in tls_config:
+                        config.tls_config.items.update(tls_config['request_server_tls_items'])
+                    config.tls_config.check_files = config.check_mounted_files
+
+                if 'etcd_client_tls_enable' in tls_config and tls_config['etcd_client_tls_enable']:
+                    config.etcd_client_tls.enable_tls = True
+                    if 'etcd_client_tls_items' in tls_config:
+                        config.etcd_client_tls.items.update(tls_config['etcd_client_tls_items'])
+                    config.etcd_client_tls.check_files = config.check_mounted_files
+
+            if 'aigw' in cfg:
+                config.aigw_model = dict(cfg['aigw'])
+
+            # Set internal fields
+            if config_path:
+                config.config_path = str(config_path)
+                if config_path.exists():
+                    config.last_modified = config_path.stat().st_mtime
+            else:
+                config.config_path = None
+
+            # Configure logging for this module with the loaded configuration
+            from motor.common.utils.logger import set_logging_config_for_module
+            set_logging_config_for_module(
+                'motor.config.coordinator',
+                log_config=config.logging_config
+            )
+
+            # Now it's safe to log after logging configuration is set
+            if config_path:
+                logger.info(f"Loading configuration file: {config_path}")
+                if config_path.exists():
+                    logger.info(f"Successfully loaded configuration file: {config_path}")
+                else:
+                    logger.warning(f"Configuration file does not exist, using default configuration: {config_path}")
+            else:
+                logger.info("No configuration file specified, using default configuration")
+            logger.info("Configuration loading completed")
+
+            return config
 
         except Exception as e:
-            logger.error(f"Failed to initialize coordinator configuration: {e}")
+            logger.error(f"Failed to create configuration instance: {e}")
             raise
+
+    def validate_config(self) -> None:
+        """Validate the validity of configuration values"""
+        self._errors = []
+
+        # Validate logging configuration
+        valid_log_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR']
+        if self.logging_config.log_level.upper() not in valid_log_levels:
+            self._errors.append(f"log_level must be one of: {', '.join(valid_log_levels)}")
+
+        self._validate_positive_number(self.logging_config.log_max_line_length, "log_max_line_length")
+
+        # Validate timeout configuration
+        self._validate_positive_number(self.timeout_config.request_timeout, "request_timeout")
+        self._validate_positive_number(self.timeout_config.connection_timeout, "connection_timeout")
+        self._validate_positive_number(self.timeout_config.read_timeout, "read_timeout")
+        self._validate_positive_number(self.timeout_config.write_timeout, "write_timeout")
+        self._validate_positive_number(self.timeout_config.keep_alive_timeout, "keep_alive_timeout")
+
+        # Validate exception configuration
+        self._validate_positive_number(self.exception_config.max_retry, "max_retry", allow_zero=True)
+        self._validate_positive_number(self.exception_config.retry_delay, "retry_delay")
+        self._validate_positive_number(self.exception_config.first_token_timeout, "first_token_timeout")
+        self._validate_positive_number(self.exception_config.infer_timeout, "infer_timeout")
+
+        # Validate health check configuration
+        self._validate_positive_number(self.health_check_config.dummy_request_interval,
+                                       "dummy_request_interval")
+        self._validate_positive_number(self.health_check_config.max_consecutive_failures,
+                                       "max_consecutive_failures")
+        self._validate_positive_number(self.health_check_config.dummy_request_timeout,
+                                       "dummy_request_timeout")
+        self._validate_port_range(self.health_check_config.controller_api_port, "controller_api_port")
+
+        # Validate DNS hostname
+        self._validate_ip_or_hostname(self.health_check_config.controller_api_dns, "controller_api_dns")
+
+        # Validate endpoint paths
+        self._validate_endpoint_path(self.health_check_config.dummy_request_endpoint,
+                                     "dummy_request_endpoint")
+        self._validate_endpoint_path(self.health_check_config.alarm_endpoint, "alarm_endpoint")
+        self._validate_endpoint_path(self.health_check_config.terminate_instance_endpoint,
+                                     "terminate_instance_endpoint")
+
+        self._validate_positive_number(self.health_check_config.alarm_timeout, "alarm_timeout")
+        self._validate_positive_number(self.health_check_config.thread_join_timeout, "thread_join_timeout")
+        self._validate_positive_number(self.health_check_config.error_retry_interval, "error_retry_interval")
+
+        # Validate HTTP configuration
+        self._validate_port_range(self.http_config.coordinator_api_infer_port, "coordinator_api_infer_port")
+        self._validate_port_range(self.http_config.coordinator_api_mgmt_port, "coordinator_api_mgmt_port")
+
+        # Validate host address
+        self._validate_ip_or_hostname(self.http_config.coordinator_api_host, "coordinator_api_host")
+
+        # Validate rate limit configuration
+        self._validate_positive_number(self.rate_limit_config.max_requests, "max_requests")
+        self._validate_positive_number(self.rate_limit_config.window_size, "window_size")
+
+        if not (100 <= self.rate_limit_config.error_status_code <= 599):
+            self._errors.append("error_status_code must be in range 100-599")
+
+        # Validate Prometheus metrics configuration
+        self._validate_positive_number(self.prometheus_metrics_config.reuse_time, "reuse_time")
+
+        # Validate standby configuration
+        self._validate_positive_number(self.standby_config.master_standby_check_interval,
+                                       "master_standby_check_interval")
+        self._validate_positive_number(self.standby_config.master_lock_ttl, "master_lock_ttl")
+        self._validate_positive_number(self.standby_config.master_lock_retry_interval,
+                                       "master_lock_retry_interval")
+        self._validate_positive_number(self.standby_config.master_lock_max_failures,
+                                       "master_lock_max_failures",
+                                       allow_zero=True)
+
+        # Validate master lock key path
+        self._validate_endpoint_path(self.standby_config.master_lock_key, "master_lock_key")
+
+        # Validate ETCD configuration
+        self._validate_port_range(self.etcd_config.etcd_port, "etcd_port")
+        self._validate_positive_number(self.etcd_config.etcd_timeout, "etcd_timeout")
+        self._validate_ip_or_hostname(self.etcd_config.etcd_host, "etcd_host")
+
+        # Note: TLS certificate file validation is handled by the TLS configuration's check_files flag
+        # and is performed during TLS handshake, not during configuration validation
+
+        # Validate API key configuration
+        if self.api_key_config.enable_api_key:
+            if not self.api_key_config.valid_keys:
+                self._errors.append("valid_keys cannot be empty when api_key authentication is enabled")
+            if not self.api_key_config.header_name:
+                self._errors.append("header_name cannot be empty when api_key authentication is enabled")
+            if not self.api_key_config.key_prefix:
+                self._errors.append("key_prefix cannot be empty when api_key authentication is enabled")
+
+        if self._errors:
+            error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in self._errors)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
 
     def get_aigw_models(self) -> Optional[dict[str, Any]]:
         """Return configured AIGW model."""
         return self.aigw_model
 
     def reload(self) -> bool:
-        """Reload configuration from file"""
+        """Reload configuration file"""
+        if not self.config_path or not os.path.exists(self.config_path):
+            logger.warning("Configuration file path does not exist, cannot reload")
+            return False
+
         try:
-            if not self.config_file_path or not os.path.exists(self.config_file_path):
-                logger.error("Configuration file path does not exist, cannot reload")
-                return False
+            # Check if file has been modified
+            current_mtime = os.path.getmtime(self.config_path)
+            if self.last_modified and current_mtime <= self.last_modified:
+                logger.debug("Configuration file not modified, skipping reload")
+                return True
 
-            logger.info(f"Reloading configuration from: {self.config_file_path}")
+            logger.info("Configuration file change detected, reloading...")
+            new_config = self.from_json(self.config_path)
 
-            # Re-read the configuration file
-            with open(self.config_file_path, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
+            # Update current configuration
+            for field_name in self.__dataclass_fields__:
+                if not field_name.startswith('_'):
+                    setattr(self, field_name, getattr(new_config, field_name))
 
-            # Re-initialize all configuration objects
-            self._load_all_configs()
+            self.last_modified = current_mtime
+
+            # Reconfigure logging for this module with new settings
+            from motor.common.utils.logger import set_logging_config_for_module
+            set_logging_config_for_module(
+                'motor.config.coordinator',
+                log_config=self.logging_config
+            )
 
             # Reconfigure logging with new settings
             reconfigure_logging(self.logging_config)
 
-            logger.info("Coordinator configuration reloaded successfully")
+            logger.info("Configuration reload successful")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to reload coordinator configuration: {e}")
+            logger.error(f"Configuration reload failed: {e}")
             return False
 
-    def _get_check_files(self) -> bool:
-        """Get file permission check setting from environment."""
-        check_files_env = os.getenv("MINDIE_CHECK_INPUTFILES_PERMISSION", "1")
-        return check_files_env != "0"
+    def to_dict(self) -> dict[str, Any]:
+        """Convert configuration to dictionary with grouped structure"""
 
-    def _load_all_configs(self) -> None:
-        """Load all configuration sections."""
-        config_loaders = [
-            self._load_logging_config,
-            self._load_prometheus_metrics_config,
-            self._load_exception_config,
-            self._load_tls_config,
-            self._load_scheduler_config,
-            self._load_health_check_config,
-            self._load_standby_config,
-            self._load_etcd_config,
-            self._load_http_config,
-            self._load_timeout_config,
-            self._load_api_key_config,
-            self._load_rate_limit_config,
-            self._load_aigw_models_config
-        ]
-        
-        for loader in config_loaders:
-            try:
-                loader()
-            except Exception as e:
-                logger.error(f"Failed to load configuration section {loader.__name__}: {e}")
-                raise
+        # Use dataclasses.asdict to automatically serialize all config objects
+        config_dict = asdict(self)
 
-    def _load_logging_config(self) -> None:
-        """Load logging configuration section."""
-        config = self.config.get("logging_config", {})
+        # Remove internal fields that shouldn't be in the output
+        config_dict.pop('config_path', None)
+        config_dict.pop('last_modified', None)
 
-        # Load log level
-        log_level = config.get("log_level", "INFO")
-        if isinstance(log_level, str):
-            self.logging_config.log_level = log_level
-        else:
-            raise ValueError("log_level must be a string")
+        # Convert enums to their string values for JSON serialization
+        if 'scheduler_config' in config_dict:
+            scheduler_config = config_dict['scheduler_config']
+            if 'deploy_mode' in scheduler_config and isinstance(scheduler_config['deploy_mode'], DeployMode):
+                scheduler_config['deploy_mode'] = scheduler_config['deploy_mode'].value
+            if 'scheduler_type' in scheduler_config and isinstance(scheduler_config['scheduler_type'], SchedulerType):
+                scheduler_config['scheduler_type'] = scheduler_config['scheduler_type'].value
 
-        # Load max line length
-        max_length = config.get("log_max_line_length", 8192)
-        if isinstance(max_length, int) and max_length > 0:
-            self.logging_config.log_max_line_length = max_length
-        else:
-            raise ValueError("log_max_line_length must be a positive integer")
+        # Convert sets to lists for JSON serialization
+        if 'api_key_config' in config_dict:
+            api_key_config = config_dict['api_key_config']
+            if 'valid_keys' in api_key_config and isinstance(api_key_config['valid_keys'], set):
+                api_key_config['valid_keys'] = list(api_key_config['valid_keys'])
+            if 'skip_paths' in api_key_config and isinstance(api_key_config['skip_paths'], set):
+                api_key_config['skip_paths'] = list(api_key_config['skip_paths'])
 
-        # Load log file
-        log_file = config.get("log_file", None)
-        if log_file is None or isinstance(log_file, str):
-            self.logging_config.log_file = log_file
-        else:
-            raise ValueError("log_file must be a string or null")
+        return config_dict
 
-        # Load log format
-        log_format = config.get("log_format",
-                                '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d]  %(message)s')
-        if isinstance(log_format, str):
-            self.logging_config.log_format = log_format
-        else:
-            raise ValueError("log_format must be a string")
+    def save_to_json(self, json_path: str | None = None) -> bool:
+        """Save configuration to JSON file"""
+        save_path = json_path or self.config_path
+        if not save_path:
+            logger.error("Save path not specified")
+            return False
 
-        # Load date format
-        date_format = config.get("log_date_format", '%Y-%m-%d %H:%M:%S')
-        if isinstance(date_format, str):
-            self.logging_config.log_date_format = date_format
-        else:
-            raise ValueError("log_date_format must be a string")
+        try:
+            config_dict = self.to_dict()
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            logger.info(f"Configuration saved to: {save_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save configuration: {e}")
+            return False
 
-    def _load_prometheus_metrics_config(self) -> None:
-        """Load Prometheus metrics configuration section."""
-        config = self.config.get("prometheus_metrics_config", {})
+    def get_config_summary(self) -> str:
+        """Get configuration summary information"""
+        separator = "=" * 80
+        title = " " * 20 + "Coordinator Configuration Summary"
+        etcd_host = self.etcd_config.etcd_host
+        etcd_port = self.etcd_config.etcd_port
+        etcd_timeout = self.etcd_config.etcd_timeout
+        master_standby_check_interval = self.standby_config.master_standby_check_interval
+        master_lock_ttl = self.standby_config.master_lock_ttl
+        master_lock_key = self.standby_config.master_lock_key
+        return (
+            f"{separator}\n"
+            f"{title}\n"
+            f"{separator}\n"
+            "  Logging Configuration:\n"
+            f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
+            "\n"
+            "  Network Configuration:\n"
+            f"    ├─ HTTP Pod IP:         {self.http_config.coordinator_api_host}\n"
+            f"    ├─ Inference Port:      {self.http_config.coordinator_api_infer_port}\n"
+            f"    ├─ Management Port:     {self.http_config.coordinator_api_mgmt_port}\n"
+            f"    └─ Combined Mode:       {'Enabled' if self.http_config.combined_mode else 'Disabled'}\n"
+            "\n"
+            "  Scheduler Configuration:\n"
+            f"    ├─ Deploy Mode:         {self.scheduler_config.deploy_mode.value}\n"
+            f"    └─ Scheduler Type:      {self.scheduler_config.scheduler_type.value}\n"
+            "\n"
+            "  Security:\n"
+            f"    ├─ TLS:                 {'Enabled' if self.tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ API Key Auth:        {'Enabled' if self.api_key_config.enable_api_key else 'Disabled'}\n"
+            f"    └─ Rate Limiting:       {'Enabled' if self.rate_limit_config.enable_rate_limit else 'Disabled'}\n"
+            "\n"
+            "  High Availability:\n"
+            f"    ├─ ETCD:\n"
+            f"    │   ├─ Persistence:       {'Enabled' if self.etcd_config.enable_etcd_persistence else 'Disabled'}\n"
+            f"    │   ├─ Host:              {etcd_host}\n"
+            f"    │   ├─ Port:              {etcd_port}\n"
+            f"    │   └─ Timeout:           {etcd_timeout} seconds\n"
+            f"    └─ Master/Standby:      {'Enabled' if self.standby_config.enable_master_standby else 'Disabled'}\n"
+            f"        ├─ Check Interval:   {master_standby_check_interval} seconds\n"
+            f"        ├─ Lock TTL:         {master_lock_ttl} seconds\n"
+            f"        └─ Lock Key:         {master_lock_key}\n"
+            "\n"
+            "  Configuration:\n"
+            f"    └─ Config Path:         {self.config_path or 'Not set'}\n"
+            f"{separator}"
+        )
 
-        value = config.get("reuse_time", 3)
-        if isinstance(value, int):
-            self.prometheus_metrics_config.reuse_time = value
-        else:
-            raise ValueError("Invalid type for Prometheus metrics config field 'reuse_time': expected int")
+    def _validate_positive_number(
+        self,
+        value: float | int,
+        field_name: str,
+        allow_zero: bool = False
+    ) -> None:
+        """Validate that a number is positive (optionally allow zero)"""
+        if allow_zero and value < 0:
+            self._errors.append(f"{field_name} cannot be negative")
+        elif not allow_zero and value <= 0:
+            self._errors.append(f"{field_name} must be greater than 0")
 
-    def _load_exception_config(self) -> None:
-        """Load exception handling configuration section."""
-        config = self.config.get("exception_config", {})
-        
-        exception_mappings = {
-            "max_retry": (int, 5),
-            "retry_delay": (float, 0.2),
-            "first_token_timeout": (int, 60),
-            "infer_timeout": (int, 300)
-        }
-        
-        for field, (field_type, default) in exception_mappings.items():
-            value = config.get(field, default)
-            if isinstance(value, field_type):
-                setattr(self.exception_config, field, value)
-            else:
-                raise ValueError(f"Invalid type for Exception config field '{field}': expected {field_type}")
+    def _validate_port_range(self, port: int, field_name: str) -> None:
+        """Validate that a port number is in valid range (1-65535)"""
+        if not (1 <= port <= 65535):
+            self._errors.append(f"{field_name} must be in range 1-65535")
 
-    def _load_tls_config(self) -> None:
-        """Load TLS configuration section."""
-        config = self.config.get("tls_config", {})
-        
-        tls_components = [
-            ("request_server_tls_enable", "request_server_tls_items", self.request_server_tls),
-            ("etcd_client_tls_enable", "etcd_client_tls_items", self.etcd_client_tls),
-        ]
-        
-        for enable_field, items_field, tls_obj in tls_components:
-            if config.get(enable_field, False):
-                items = config.get(items_field, {})
-                if self._validate_tls_items(items):
-                    tls_obj.tls_enable = True
-                    tls_obj.items = items
-                    tls_obj.check_files = self.check_mounted_files
-                else:
-                    raise ValueError(f"Invalid TLS configuration for {enable_field}")
-            else:
-                tls_obj.tls_enable = False
-
-    def _validate_tls_items(self, items: dict[str, str]) -> bool:
-        """Validate TLS configuration items."""
-        required_items = [
-            "ca_cert", "tls_cert", "tls_key", "tls_passwd", 
-            "kmcKsfMaster", "kmcKsfStandby"
-        ]
-        
-        return all(item in items for item in required_items)
-
-    def _load_scheduler_config(self) -> None:
-        """Load scheduler configuration section."""
-        config = self.config.get("scheduler_config", {})
-
-        deploy_mode_str = config.get("deploy_mode", "")
-        if not isinstance(deploy_mode_str, str):
-            raise ValueError("deploy_mode must be a string")
-        deploy_mode = DeployMode.from_string(deploy_mode_str)
-        if deploy_mode is None:
-            raise ValueError(f"Invalid deploy_mode: {deploy_mode_str}")
-        self.scheduler_config.deploy_mode = deploy_mode
-
-        scheduler_type_str = config.get("scheduler_type", "")
-        if not isinstance(scheduler_type_str, str):
-            raise ValueError("scheduler_type must be a string")
-        scheduler_type = SchedulerType.from_string(scheduler_type_str)
-        if scheduler_type is None:
-            raise ValueError(f"Invalid scheduler_type: {scheduler_type_str}")
-        self.scheduler_config.scheduler_type = scheduler_type
-
-    def _load_health_check_config(self) -> None:
-        """Load health check configuration section."""
-        config = self.config.get("health_check_config", {})
-
-        health_check_mappings = {
-            "dummy_request_interval": (float, 5.0, lambda x: x > 0),
-            "max_consecutive_failures": (int, 3, lambda x: x > 0),
-            "dummy_request_timeout": (float, 10.0, lambda x: x > 0),
-            "controller_api_dns": (str, "mindie-ms-controller-service.mindie.svc.cluster.local", None),
-            "controller_api_port": (int, 57675, lambda x: 1 <= x <= 65535),
-            "dummy_request_endpoint": (str, '/v1/completions', lambda x: x.startswith('/')),
-            "dummy_request_body": (dict, {
-                "model": "test-model",
-                "prompt": "Health check. Please respond with OK only.",
-                "message": [{'role': 'user', 'content': 'hi'}],
-                "max_tokens": 3,
-                "temperature": 0.1,
-                "top_p": 0.9,
-                "stream": False
-            }, lambda x: isinstance(x, dict)),
-            "alarm_endpoint": (str, "/v1/alarm/coordinator", lambda x: x.startswith('/')),
-            "alarm_timeout": (float, 5.0, lambda x: x > 0),
-            "terminate_instance_endpoint": (str, "/controller/terminate_instance", lambda x: x.startswith('/')),
-            "thread_join_timeout": (float, 5.0, lambda x: x > 0),
-            "error_retry_interval": (float, 1.0, lambda x: x > 0)
-        }
-        
-        for field, (field_type, default, validator) in health_check_mappings.items():
-            value = config.get(field)
-            
-            if value is None:
-                setattr(self.health_check_config, field, default)
-                logger.debug("Health Check config field '%s' not found, using default", field)
-                continue
-            
-            converted_value = None
-            try:
-                if isinstance(value, field_type):
-                    converted_value = value
-                elif field_type == dict and isinstance(value, str):
-                    converted_value = json.loads(value)
-                elif field_type == int and isinstance(value, (int, float)):
-                    converted_value = int(value)
-                elif field_type == float and isinstance(value, (int, float)):
-                    converted_value = float(value)
-                else:
-                    raise TypeError(f"Cannot convert {type(value).__name__} to {field_type.__name__}")
-                
-                if not isinstance(converted_value, field_type):
-                    raise TypeError(f"Conversion failed: {type(converted_value).__name__} is not {field_type.__name__}")
-                
-                setattr(self.health_check_config, field, converted_value)
-                
-            except (TypeError, ValueError) as e:
-                logger.warning(
-                    f"Invalid value for Health Check config field '{field}': {e}, "
-                    f"using default: {default}"
-                )
-                setattr(self.health_check_config, field, default)
-
-    def _load_standby_config(self) -> None:
-        """Load standby configuration section."""
-        config = self.config.get("standby_config", {})
-
-        standby_mappings = {
-            "enable_master_standby": (bool, StandbyConfig.enable_master_standby),
-            "master_standby_check_interval": (int, StandbyConfig.master_standby_check_interval),
-            "master_lock_ttl": (int, StandbyConfig.master_lock_ttl),
-            "master_lock_retry_interval": (int, StandbyConfig.master_lock_retry_interval),
-            "master_lock_max_failures": (int, StandbyConfig.master_lock_max_failures),
-            "master_lock_key": (str, StandbyConfig.master_lock_key)
-        }
-
-        for field, (field_type, default) in standby_mappings.items():
-            value = config.get(field, default)
-            if isinstance(value, field_type):
-                setattr(self.standby_config, field, value)
-            else:
-                logger.warning(f"Invalid type for Standby config field '{field}', using default")
-
-    def _load_etcd_config(self) -> None:
-        """Load etcd configuration section."""
-        config = self.config.get("etcd_config", {})
-
-        etcd_mappings = {
-            "etcd_host": (str, EtcdConfig.etcd_host),
-            "etcd_port": (int, EtcdConfig.etcd_port),
-            "etcd_timeout": (int, 5),
-            "enable_etcd_persistence": (bool, False)
-        }
-
-        for field, (field_type, default) in etcd_mappings.items():
-            value = config.get(field, default)
-            if isinstance(value, field_type):
-                setattr(self.etcd_config, field, value)
-            else:
-                raise ValueError(f"Etcd config field '{field}' must be of type {field_type}")
-        etcd_port = config.get("etcd_port", EtcdConfig.etcd_port)
-        if 1 <= etcd_port <= 65535:
-            self.etcd_config.etcd_port = etcd_port
-        else:
-            raise ValueError("Etcd port must be an integer between 1 and 65535")
-
-    def _load_http_config(self) -> None:
-        """Load HTTP configuration section."""
-        config = self.config.get("http_config", {})
-
-        combined_mode = config.get("combined_mode", False)
-        if isinstance(combined_mode, bool):
-            self.http_config.combined_mode = combined_mode
-        else:
-            raise ValueError("combined_mode must be a boolean")
-
-        coordinator_api_host = config.get("coordinator_api_host", CoordinatorConfig.DEFAULT_HOST)
-        if isinstance(coordinator_api_host, str):
-            self.http_config.coordinator_api_host = coordinator_api_host
-        else:
-            raise ValueError("coordinator_api_host must be a string")
-
-        coordinator_api_infer_port = config.get("coordinator_api_infer_port", CoordinatorConfig.DEFAULT_INFERENCE_PORT)
-        if isinstance(coordinator_api_infer_port, int) and 1 <= coordinator_api_infer_port <= 65535:
-            self.http_config.coordinator_api_infer_port = coordinator_api_infer_port
-        else:
-            raise ValueError("coordinator_api_infer_port must be an integer between 1 and 65535")
-
-        coordinator_api_mgmt_port = config.get("coordinator_api_mgmt_port", CoordinatorConfig.DEFAULT_MGMT_PORT)
-        if isinstance(coordinator_api_mgmt_port, int) and 1 <= coordinator_api_mgmt_port <= 65535:
-            self.http_config.coordinator_api_mgmt_port = coordinator_api_mgmt_port
-        else:
-            raise ValueError("coordinator_api_mgmt_port must be an integer between 1 and 65535")
-
-    def _load_timeout_config(self) -> None:
-        """Load timeout configuration section."""
-        config = self.config.get("timeout_config", {})
-        
-        if config:
-            timeout_fields = {
-                "request_timeout": int,
-                "connection_timeout": int,
-                "read_timeout": int,
-                "write_timeout": int,
-                "keep_alive_timeout": int
-            }
-
-            for field, field_type in timeout_fields.items():
-                if field not in config:
-                    continue
-                
-                if not isinstance(config[field], field_type):
-                    logger.error(f"Invalid timeout configuration parameter: {field}, expected {field_type.__name__}")
-                    raise ValueError(f"Invalid timeout configuration parameter: {field}")
-                
-                setattr(self.timeout_config, field, config[field])
-
-        env_mappings = [
-            ("TIMEOUT_REQUEST", "request_timeout", 30),
-            ("TIMEOUT_CONNECTION", "connection_timeout", 10),
-            ("TIMEOUT_READ", "read_timeout", 15),
-            ("TIMEOUT_WRITE", "write_timeout", 15),
-            ("TIMEOUT_KEEP_ALIVE", "keep_alive_timeout", 60)
-        ]
-        
-        for env_var, attr_name, _ in env_mappings:
-            env_value = os.getenv(env_var)
-            if env_value is None:
-                continue
-                
-            try:
-                setattr(self.timeout_config, attr_name, int(env_value))
-            except ValueError:
-                logger.error(f"Invalid {env_var} value: {env_value}")
-
-    def _load_api_key_config(self) -> None:
-        """Load API key configuration section."""
-        config = self.config.get("api_key_config", {})
-        
-        if config:
-            if self.ENABLED_KEY in config:
-                if isinstance(config[self.ENABLED_KEY], bool):
-                    self.api_key_config.enabled = config[self.ENABLED_KEY]
-                else:
-                    logger.error("api_key_config.enabled must be a boolean")
-                    raise ValueError("api_key_config.enabled must be a boolean")
-            
-            if self.VALID_KEY in config:
-                if isinstance(config[self.VALID_KEY], list):
-                    self.api_key_config.valid_keys = set(config[self.VALID_KEY])
-                else:
-                    logger.error("api_key_config.valid_keys must be a list")
-                    raise ValueError("api_key_config.valid_keys must be a list")
-            
-            if self.HEADER_NAME_KEY in config:
-                if isinstance(config[self.HEADER_NAME_KEY], str):
-                    self.api_key_config.header_name = config[self.HEADER_NAME_KEY]
-                else:
-                    logger.error("api_key_config.header_name must be a string")
-                    raise ValueError("api_key_config.header_name must be a string")
-            
-            if self.PREFIX_KEY in config:
-                if isinstance(config[self.PREFIX_KEY], str):
-                    self.api_key_config.key_prefix = config[self.PREFIX_KEY]
-                else:
-                    logger.error("api_key_config.key_prefix must be a string")
-                    raise ValueError("api_key_config.key_prefix must be a string")
-            
-            if self.SKIP_PATHS_KEY in config:
-                if isinstance(config[self.SKIP_PATHS_KEY], list):
-                    self.api_key_config.skip_paths = set(config[self.SKIP_PATHS_KEY])
-                else:
-                    logger.error("api_key_config.skip_paths must be a list")
-                    raise ValueError("api_key_config.skip_paths must be a list")
-
-        # Handle environment variable overrides
-        if os.getenv("API_KEY_ENABLED") is not None:
-            self.api_key_config.enabled = os.getenv("API_KEY_ENABLED", "true").lower() in ("true", "1", "yes")
-        
-        if os.getenv("API_KEY_VALID_KEYS") is not None:
-            valid_keys_str = os.getenv("API_KEY_VALID_KEYS", "")
-            if valid_keys_str:
-                self.api_key_config.valid_keys = \
-                    set([key.strip() for key in valid_keys_str.split(",") if key.strip()])
-        
-        if os.getenv("API_KEY_SKIP_PATHS") is not None:
-            skip_paths_str = os.getenv("API_KEY_SKIP_PATHS", "")
-            if skip_paths_str:
-                self.api_key_config.skip_paths = \
-                    set([path.strip() for path in skip_paths_str.split(",") if path.strip()])
-
-        if self.api_key_config.enabled and not self.api_key_config.valid_keys:
-            logger.warning("API Key validation enabled but no valid keys configured!")
-
-    def _load_rate_limit_config(self) -> None:
-        """Load rate limiting configuration section."""
-        config = self.config.get("rate_limit_config", {})
-        
-        if config:
-            if self.ENABLED_KEY in config:
-                if isinstance(config[self.ENABLED_KEY], bool):
-                    self.rate_limit_config.enabled = config[self.ENABLED_KEY]
-                else:
-                    logger.error("rate_limit_config.enabled must be a boolean")
-                    raise ValueError("rate_limit_config.enabled must be a boolean")
-            
-            if self.MAX_REQUESTS_KEY in config:
-                if isinstance(config[self.MAX_REQUESTS_KEY], int):
-                    self.rate_limit_config.max_requests = config[self.MAX_REQUESTS_KEY]
-                else:
-                    logger.error("rate_limit_config.max_requests must be an integer")
-                    raise ValueError("rate_limit_config.max_requests must be an integer")
-            
-            if self.WINDOW_SIZE_KEY in config:
-                if isinstance(config[self.WINDOW_SIZE_KEY], int):
-                    self.rate_limit_config.window_size = config[self.WINDOW_SIZE_KEY]
-                else:
-                    logger.error("rate_limit_config.window_size must be an integer")
-                    raise ValueError("rate_limit_config.window_size must be an integer")
-            
-            if self.SCOPE_KEY in config:
-                if isinstance(config[self.SCOPE_KEY], str):
-                    self.rate_limit_config.scope = config[self.SCOPE_KEY]
-                else:
-                    logger.error("rate_limit_config.scope must be a string")
-                    raise ValueError("rate_limit_config.scope must be a string")
-            
-            if self.SKIP_PATHS_KEY in config:
-                if isinstance(config[self.SKIP_PATHS_KEY], list):
-                    self.rate_limit_config.skip_paths = config[self.SKIP_PATHS_KEY]
-                else:
-                    logger.error("rate_limit_config.skip_paths must be a list")
-                    raise ValueError("rate_limit_config.skip_paths must be a list")
-            
-            if self.ERROR_MESSAGE_KEY in config:
-                if isinstance(config[self.ERROR_MESSAGE_KEY], str):
-                    self.rate_limit_config.error_message = config[self.ERROR_MESSAGE_KEY]
-                else:
-                    logger.error("rate_limit_config.error_message must be a string")
-                    raise ValueError("rate_limit_config.error_message must be a string")
-            
-            if self.ERROR_STATUS_CODE_KEY in config:
-                if isinstance(config[self.ERROR_STATUS_CODE_KEY], int):
-                    self.rate_limit_config.error_status_code = config[self.ERROR_STATUS_CODE_KEY]
-                else:
-                    logger.error("rate_limit_config.error_status_code must be an integer")
-                    raise ValueError("rate_limit_config.error_status_code must be an integer")
-
-        # Handle environment variable overrides
-        if os.getenv("RATE_LIMIT_ENABLED") is not None:
-            self.rate_limit_config.enabled = os.getenv("RATE_LIMIT_ENABLED", "true").lower() in ("true", "1", "yes")
-        
-        rate_limit_value = os.getenv("RATE_LIMIT_MAX_REQUESTS")
-        if rate_limit_value is not None:
-            rate_limit_value = rate_limit_value.strip()
-            if rate_limit_value != "":
-                try:
-                    self.rate_limit_config.max_requests = int(rate_limit_value)
-                except ValueError:
-                    logger.error(f"Invalid RATE_LIMIT_MAX_REQUESTS value: {rate_limit_value}")
-
-        rate_limit_window_size = os.getenv("RATE_LIMIT_WINDOW_SIZE")
-        if rate_limit_window_size is not None:
-            try:
-                self.rate_limit_config.window_size = int(rate_limit_window_size)
-            except ValueError:
-                logger.error(f"Invalid RATE_LIMIT_WINDOW_SIZE value: {os.getenv('RATE_LIMIT_WINDOW_SIZE')}")
-        
-        rate_limit_scope = os.getenv("RATE_LIMIT_SCOPE")
-        if rate_limit_scope is not None:
-            self.rate_limit_config.scope = rate_limit_scope
-        
-        if os.getenv("RATE_LIMIT_SKIP_PATHS") is not None:
-            skip_paths_str = os.getenv("RATE_LIMIT_SKIP_PATHS", "")
-            if skip_paths_str:
-                self.rate_limit_config.skip_paths = [path.strip() for path in skip_paths_str.split(",") if path.strip()]
-
-    def _load_aigw_models_config(self) -> None:
-        """Load AIGW model metadata configuration."""
-        config = self.config.get("aigw")
-        if config is None:
-            self.aigw_model = None
+    def _validate_ip_or_hostname(self, value: str, field_name: str) -> None:
+        """Validate that a string is a valid IP address or hostname"""
+        if not value or not isinstance(value, str):
+            self._errors.append(f"{field_name} cannot be empty")
             return
 
-        if not isinstance(config, dict):
-            raise ValueError("AIGW configuration must be a dictionary")
+        # Try to parse as IP address first
+        try:
+            ipaddress.ip_address(value)
+            return
+        except ValueError:
+            pass
 
-        self.aigw_model = dict(config)
+        # If not IP, validate as hostname (basic validation)
+        if not re.match(
+            r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$',
+            value
+        ):
+            self._errors.append(f"{field_name} must be a valid IP address or hostname")
+
+    def _validate_endpoint_path(self, path: str, field_name: str) -> None:
+        """Validate that an endpoint path starts with '/' and is not empty"""
+        if not path or not isinstance(path, str):
+            self._errors.append(f"{field_name} cannot be empty")
+        elif not path.startswith('/'):
+            self._errors.append(f"{field_name} must start with '/'")

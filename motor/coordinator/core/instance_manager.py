@@ -23,10 +23,15 @@ class UpdateInstanceMode(str, Enum):
 
 
 class InstanceManager(ThreadSafeSingleton):
-    def __init__(self):
+    def __init__(self, config: CoordinatorConfig | None = None):
         # If the instance manager is already initialized, return.
         if hasattr(self, '_initialized'):
             return
+
+        if config is None:
+            config = CoordinatorConfig()
+        self._scheduler_config = config.scheduler_config
+        self._config_lock = threading.RLock()
 
         self._lock = threading.Lock()
         self._available_pool: dict[int, Instance] = {}
@@ -39,7 +44,7 @@ class InstanceManager(ThreadSafeSingleton):
 
         self._available_role_pools = {
             PDRole.ROLE_P: self._prefill_pool,
-            PDRole.ROLE_D: self._decode_pool, 
+            PDRole.ROLE_D: self._decode_pool,
             PDRole.ROLE_U: self._hybrid_pool
         }
 
@@ -47,12 +52,13 @@ class InstanceManager(ThreadSafeSingleton):
         logger.info("InstanceManager started.")
 
     def is_available(self) -> bool:
-        scheduler_config = CoordinatorConfig().scheduler_config
+        with self._config_lock:
+            scheduler_config = self._scheduler_config
         if not scheduler_config:
-            logger.error(f"Scheduler config not found in coordinator config, while checking availability")
+            logger.error("Scheduler config not found in coordinator config, while checking availability")
             return False
         deploy_mode = scheduler_config.deploy_mode
-        
+
         # no need to lock here, asynchrony is acceptable
         if deploy_mode in (
             DeployMode.CDP_SEPARATE,
@@ -85,6 +91,12 @@ class InstanceManager(ThreadSafeSingleton):
             }
         logger.info("InstanceManager stopped.")
 
+    def update_config(self, config: CoordinatorConfig) -> None:
+        """Update configuration for the instance manager"""
+        with self._config_lock:
+            self._scheduler_config = config.scheduler_config
+        logger.info("InstanceManager configuration updated")
+
     def get_available_instances(self, role: PDRole) -> dict[int, Instance]:
         # no need to lock here, asynchrony is acceptable
         instance_pool = self._available_role_pools.get(role)
@@ -108,7 +120,7 @@ class InstanceManager(ThreadSafeSingleton):
             
             instance.gathered_workload += workload_change
             endpoint.workload += workload_change
-            logger.debug(f"Updated workload for instance ID {instance_id}, endpoint ID {endpoint.id}: " \
+            logger.debug(f"Updated workload for instance ID {instance_id}, endpoint ID {endpoint.id}: "
                          f"Instance workload: {instance.gathered_workload}, Endpoint workload: {endpoint.workload}")
 
     def delete_unavailable_instance(self, instance_id: int) -> None:
@@ -159,13 +171,10 @@ class InstanceManager(ThreadSafeSingleton):
             logger.info(f"Refresh instances with event type: {event_type}, number of instances: {len(instances)}")
             if event_type == EventType.ADD:
                 self._add_instances(instances)
-                logger.info(f"Add instances end")
             elif event_type == EventType.DEL:
                 self._delete_instances(instances)
-                logger.info(f"Delete instances end")
             elif event_type == EventType.SET:
                 self._set_instances(instances)
-                logger.info(f"Set instances end")
             else:
                 logger.error(f"Unknown event type: {event_type}, cannot refresh instances")
 
@@ -180,11 +189,14 @@ class InstanceManager(ThreadSafeSingleton):
         # This is a private method that should only be called within locked contexts
         for instance in instances:
             if instance.id in self._unavailable_pool:
-                logger.warning(f"Instance ID {instance.id} already exists in unavailable pool, "
-                               f"cannot add instance again")
+                logger.warning("Instance ID %d (role: %s, job_name: %s) already exists in unavailable pool, "
+                               "cannot add instance again",
+                               instance.id, instance.role, instance.job_name)
                 continue
             if not self._add_instance_to_available_pool(instance):
-                logger.warning(f"Failed to add instance ID {instance.id} to available pool, while adding instance")
+                logger.warning("Failed to add instance ID %d (role: %s, job_name: %s) "
+                               "to available pool, while adding instance",
+                               instance.id, instance.role, instance.job_name)
                 continue
 
             # Initialize workload info
@@ -193,47 +205,55 @@ class InstanceManager(ThreadSafeSingleton):
                 for ep in endpoint.values():
                     ep.workload = Workload()
 
-            logger.info(f"Added instance ID {instance.id} to available pool successfully")
+            logger.info("Added instance ID %d (role: %s, job_name: %s) to available pool successfully",
+                        instance.id, instance.role, instance.job_name)
 
     def _delete_instances(self, instances: list[Instance]) -> None:
         # This is a private method that should only be called within locked contexts
         for instance in instances:
             if instance.id in self._unavailable_pool:
                 del self._unavailable_pool[instance.id]
-                logger.info(f"Deleted instance ID {instance.id} from unavailable pool successfully")
+                logger.info("Deleted instance ID %d (role: %s, job_name: %s) from unavailable pool successfully",
+                            instance.id, instance.role, instance.job_name)
                 continue
 
             if not self._delete_instance_from_available_pool(instance.id):
-                logger.warning(f"Instance ID {instance.id} not found in instance pool, "
-                               f"cannot delete instance")
+                logger.warning("Instance ID %d (role: %s, job_name: %s) not found in instance pool, "
+                               "cannot delete instance",
+                               instance.id, instance.role, instance.job_name)
 
-            logger.info(f"Deleted instance ID {instance.id} from available pool successfully")
+            logger.info("Deleted instance ID %d (role: %s, job_name: %s) from available pool successfully",
+                        instance.id, instance.role, instance.job_name)
     
     def _set_instances(self, instances: list[Instance]) -> None:
         # This is a private method that should only be called within locked contexts
         if any(len(pool) > 0 for pool in self._available_role_pools.values()) or len(self._unavailable_pool) > 0:
             logger.error("Cannot set instance pools when there are existing instances in pools")
             return
-            
+
         for instance in instances:
             self._add_instance_to_available_pool(instance)
-            logger.info(f"Added instance ID {instance.id} to available pool successfully")
+            logger.info("Added instance ID %d (role: %s, job_name: %s) to available pool successfully",
+                        instance.id, instance.role, instance.job_name)
 
     def _add_instance_to_available_pool(self, instance: Instance) -> bool:
         # This is a private method that should only be called within locked contexts
         update_pool = self._available_role_pools.get(instance.role)
         if update_pool is None:
-            logger.error(f"Unknown role for instance ID {instance.id}, cannot add instance")
+            logger.error("Unknown role for instance ID %d (role: %s, job_name: %s), cannot add instance",
+                         instance.id, instance.role, instance.job_name)
             return False
         if instance.id in update_pool:
-            logger.warning(f"Instance ID {instance.id} already exists in available pool, "
-                           f"cannot add instance again")
+            logger.warning("Instance ID %d (role: %s, job_name: %s) already exists in available pool, "
+                           "cannot add instance again",
+                           instance.id, instance.role, instance.job_name)
             return False
 
         update_pool[instance.id] = instance
         self._available_pool[instance.id] = instance
 
-        logger.debug(f"Instance ID {instance.id} added to available pool successfully")
+        logger.debug("Instance ID %d (role: %s, job_name: %s) added to available pool successfully",
+                     instance.id, instance.role, instance.job_name)
         return True
 
     def _delete_instance_from_available_pool(self, instance_id: int) -> bool:

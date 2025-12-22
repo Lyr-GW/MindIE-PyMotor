@@ -138,8 +138,9 @@ def test_get_controller_status_master_healthy(api_instance, monkeypatch) -> None
         assert status["overall_healthy"] is True
         assert status["role"] == "master"
 
-def test_get_controller_status_standby_unhealthy(api_instance) -> None:
+def test_get_controller_status_standby_healthy(api_instance) -> None:
     # case4: master_standby + standby + all unhealthy (is_alive return false)
+    # Standby nodes should report healthy even if modules are not alive, since they don't run modules
     standby_config = ControllerConfig()
     standby_config.standby_config.enable_master_standby = True
     api_instance.update_config(standby_config)
@@ -157,7 +158,7 @@ def test_get_controller_status_standby_unhealthy(api_instance) -> None:
         status = api_instance._get_controller_status()
 
         assert status["deploy_mode"] == "master_standby"
-        assert status["overall_healthy"] is False
+        assert status["overall_healthy"] is True  # Standby should always report healthy
         assert status["role"] == "standby"
 
 

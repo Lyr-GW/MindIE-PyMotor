@@ -107,6 +107,11 @@ class StandbyManager(ThreadSafeSingleton):
                 logger.info("Master/standby manager thread stopped successfully")
 
         self.is_running = False
+
+        # Close etcd client
+        if hasattr(self, 'etcd_client'):
+            self.etcd_client.close()
+
         # Reset callbacks for singleton reuse (but keep stop_event set)
         self.on_become_master = None
         self.on_become_standby = None
@@ -119,9 +124,9 @@ class StandbyManager(ThreadSafeSingleton):
     def set_role(self, role: StandbyRole) -> None:
         """Set current pod role"""
         with self.role_lock:
-            old_role = self.current_role
-            self.current_role = role
-            logger.info("Role changed from %s to %s", old_role.value, role.value)
+            if self.current_role != role:
+                self.current_role = role
+                logger.info("Role changed from %s to %s", self.current_role.value, role.value)
 
     def _master_standby_loop(self) -> None:
         """Master/standby management loop"""
@@ -198,8 +203,10 @@ class StandbyManager(ThreadSafeSingleton):
                              consecutive_failures, self.max_lock_failures, e)
 
                 if consecutive_failures < self.max_lock_failures:
-                    # Wait before retrying
-                    time.sleep(self.lock_retry_interval)
+                    # Wait before retrying, but allow interruption by stop_event
+                    if self.stop_event.wait(self.lock_retry_interval):
+                        # stop_event was set, exit the loop
+                        break
                 else:
                     logger.error("Max consecutive failures reached, giving up master acquisition")
                     self.set_role(StandbyRole.STANDBY)

@@ -1,16 +1,14 @@
-import threading
-import time
-import pytest
-from unittest.mock import patch, MagicMock
+# coding=utf-8
+# Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
+import threading
+
+from motor.common.resources import Instance, PDRole, Workload, Endpoint, EventType
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.core.instance_manager import (
     InstanceManager, UpdateInstanceMode
 )
-
-from motor.common.resources.instance import Instance, PDRole, Workload
-from motor.common.resources.endpoint import Endpoint
-from motor.common.resources.http_msg_spec import EventType
-from motor.config.coordinator import CoordinatorConfig, DeployMode
 
 
 class TestInstanceManager:
@@ -18,12 +16,19 @@ class TestInstanceManager:
 
     def setup_method(self):
         """Setup for each test method"""
-        # Clear singleton instance before each test
-        if hasattr(InstanceManager, '_instances') and InstanceManager in InstanceManager._instances:
-            del InstanceManager._instances[InstanceManager]
-        
+        # Clear singleton instance completely
+        if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
+            instance = ThreadSafeSingleton._instances[InstanceManager]
+            # Clear all instance attributes
+            for attr in list(instance.__dict__.keys()):
+                delattr(instance, attr)
+            del ThreadSafeSingleton._instances[InstanceManager]
+
+        # Create config for testing
+        self.config = CoordinatorConfig()
+
         # Create a fresh instance manager for each test
-        self.instance_manager = InstanceManager()
+        self.instance_manager = InstanceManager(self.config)
         
         # Test data
         self.prefill_instance = Instance(
@@ -70,126 +75,94 @@ class TestInstanceManager:
 
     def test_is_available_cdp_separate(self):
         """Test is_available method in cdp_separate mode"""
-        # Mock CoordinatorConfig to return cdp_separate mode
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
-        
-        mock_coordinator_config = MagicMock()
-        mock_coordinator_config.scheduler_config = mock_scheduler_config
-        
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as MockCoordinatorConfig:
-            MockCoordinatorConfig.return_value = mock_coordinator_config
-            
-            self.instance_manager = InstanceManager()
-            
-            # Initially should be False
-            assert self.instance_manager.is_available() == False
-            
-            # Add prefill instance
-            self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-            assert self.instance_manager.is_available() == False  # Still need decode instance
-            
-            # Add decode instance
-            self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-            assert self.instance_manager.is_available() == True  # Now should be True
+        # Modify the config used by setup_method
+        self.config.scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
+
+        # Create a new instance manager with the modified config
+        self.instance_manager = InstanceManager(self.config)
+
+        # Initially should be False
+        assert self.instance_manager.is_available() == False
+
+        # Add prefill instance
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        assert self.instance_manager.is_available() == False  # Still need decode instance
+
+        # Add decode instance
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        assert self.instance_manager.is_available() == True  # Now should be True
 
     def test_is_available_pd_separate(self):
-        """Test is_available method in pd_separate mode"""
-        # Mock CoordinatorConfig to return pd_separate mode
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.PD_SEPARATE
-        
-        mock_coordinator_config = MagicMock()
-        mock_coordinator_config.scheduler_config = mock_scheduler_config
-        
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as MockCoordinatorConfig:
-            MockCoordinatorConfig.return_value = mock_coordinator_config
-            
-            self.instance_manager = InstanceManager()
-            
-            # Initially should be False
-            self.instance_manager.is_available() == False
-            
-            # Add prefill instance
-            self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-            assert self.instance_manager.is_available() == False  # Still need decode instance
-            
-            # Add decode instance
-            self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-            assert self.instance_manager.is_available() == True  # Now should be True
+        """Test is_available method in pd_separate mode (default)"""
+        # Use the default config from setup_method (already PD_SEPARATE)
+
+        # Initially should be False
+        assert self.instance_manager.is_available() == False
+
+        # Add prefill instance
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        assert self.instance_manager.is_available() == False  # Still need decode instance
+
+        # Add decode instance
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        assert self.instance_manager.is_available() == True  # Now should be True
 
     def test_is_available_cpcd_separate(self):
         """Test is_available method in pd_disaggregation_single_container mode"""
-        # Mock CoordinatorConfig to return pd_disaggregation_single_container mode
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
-        
-        mock_coordinator_config = MagicMock()
-        mock_coordinator_config.scheduler_config = mock_scheduler_config
-        
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as MockCoordinatorConfig:
-            MockCoordinatorConfig.return_value = mock_coordinator_config
-            
-            self.instance_manager = InstanceManager()
-            
-            # Initially should be False
-            assert self.instance_manager.is_available() == False
-            
-            # Add prefill instance
-            self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-            assert self.instance_manager.is_available() == False  # Still need decode instance
-            
-            # Add decode instance
-            self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-            assert self.instance_manager.is_available() == True  # Now should be True
+        # Modify the config used by setup_method
+        self.config.scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
+
+        # Create a new instance manager with the modified config
+        self.instance_manager = InstanceManager(self.config)
+
+        # Initially should be False
+        assert self.instance_manager.is_available() == False
+
+        # Add prefill instance
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        assert self.instance_manager.is_available() == False  # Still need decode instance
+
+        # Add decode instance
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        assert self.instance_manager.is_available() == True  # Now should be True
 
     def test_is_available_single_node(self):
         """Test is_available method in single_node mode"""
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
-        
-        mock_coordinator_config = MagicMock()
-        mock_coordinator_config.scheduler_config = mock_scheduler_config
-        
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as MockCoordinatorConfig:
-            MockCoordinatorConfig.return_value = mock_coordinator_config
-            
-            self.instance_manager = InstanceManager()
-            
-            # Initially should be False
-            assert self.instance_manager.is_available() == False
-            
-            # Add hybrid instance
-            self.instance_manager._add_instance_to_available_pool(self.hybrid_instance)
-            assert self.instance_manager.is_available() == True 
+        # Modify the config used by setup_method
+        self.config.scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
+
+        # Create a new instance manager with the modified config
+        self.instance_manager = InstanceManager(self.config)
+
+        # Initially should be False
+        assert self.instance_manager.is_available() == False
+
+        # Add hybrid instance
+        result = self.instance_manager._add_instance_to_available_pool(self.hybrid_instance)
+        assert result == True
+        assert self.instance_manager.is_available() == True
 
     def test_is_available_unknown_mode(self):
         """Test is_available method with unknown deploy mode"""
-        # Mock CoordinatorConfig to return unknown mode
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.from_string("unknow_mode")
-        
-        mock_coordinator_config = MagicMock()
-        mock_coordinator_config.scheduler_config = mock_scheduler_config
-        
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as MockCoordinatorConfig:
-            MockCoordinatorConfig.return_value = mock_coordinator_config
-            
-            self.instance_manager = InstanceManager()
-            
-            # Should return False for unknown mode
-            assert self.instance_manager.is_available() == False
+        # Modify the config used by setup_method
+        self.config.scheduler_config.deploy_mode = None  # Simulate unknown mode
+
+        # Create a new instance manager with the modified config
+        self.instance_manager = InstanceManager(self.config)
+
+        # Should return False for unknown mode
+        assert self.instance_manager.is_available() == False
 
     def test_is_available_no_config(self):
         """Test is_available method when scheduler_config is missing"""
-        # Mock CoordinatorConfig with no scheduler_config
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as mock_config_new:
-            mock_config_instance = MagicMock()
-            mock_config_instance.config = {}
-            mock_config_new.return_value = mock_config_instance
-            
-            # Should return False when scheduler_config is missing
-            assert self.instance_manager.is_available() == False
+        # Modify the config used by setup_method
+        self.config.scheduler_config = None
+
+        # Create a new instance manager with the modified config
+        self.instance_manager = InstanceManager(self.config)
+
+        # Should return False when scheduler_config is missing
+        assert self.instance_manager.is_available() == False
 
     def test_get_available_instances(self):
         """Test get_available_instances method"""
@@ -444,8 +417,8 @@ class TestInstanceManager:
         assert self.instance_manager._prefill_pool[1] == self.prefill_instance
         assert 2 in self.instance_manager._decode_pool
         assert self.instance_manager._decode_pool[2] == self.decode_instance
-        assert "Added instance ID 1 to available pool successfully" in caplog.text
-        assert "Added instance ID 2 to available pool successfully" in caplog.text
+        assert "Added instance ID 1 (role: prefill, job_name: test-prefill) to available pool successfully" in caplog.text
+        assert "Added instance ID 2 (role: decode, job_name: test-decode) to available pool successfully" in caplog.text
 
     def test_refresh_instances_add_duplicate_in_available_pool(self, caplog):
         """Test refresh_instances method with ADD event for duplicate instance in available pool"""
@@ -457,7 +430,7 @@ class TestInstanceManager:
         self.instance_manager.refresh_instances(EventType.ADD, instances)
         
         # Verify warning was logged
-        assert "Instance ID 1 already exists in available pool" in caplog.text
+        assert "Instance ID 1 (role: prefill, job_name: test-prefill) already exists in available pool" in caplog.text
 
     def test_refresh_instances_add_duplicate_in_unavailable_pool(self, caplog):
         """Test refresh_instances method with ADD event for duplicate instance in unavailable pool"""
@@ -469,7 +442,7 @@ class TestInstanceManager:
         self.instance_manager.refresh_instances(EventType.ADD, instances)
         
         # Verify warning was logged
-        assert "Instance ID 1 already exists in unavailable pool" in caplog.text
+        assert "Instance ID 1 (role: prefill, job_name: test-prefill) already exists in unavailable pool" in caplog.text
 
     def test_refresh_instances_add_unknown_role(self, caplog):
         """Test refresh_instances method with ADD event for instance with unknown role"""
@@ -502,7 +475,7 @@ class TestInstanceManager:
         # Verify instance was deleted
         assert 1 not in self.instance_manager._prefill_pool
         assert 2 in self.instance_manager._decode_pool
-        assert "Deleted instance ID 1 from available pool successfully" in caplog.text
+        assert "Deleted instance ID 1 (role: prefill, job_name: test-prefill) from available pool successfully" in caplog.text
 
     def test_refresh_instances_del_from_unavailable(self, caplog):
         """Test refresh_instances method with DEL event for unavailable instance"""
@@ -515,7 +488,7 @@ class TestInstanceManager:
         
         # Verify instance was deleted from unavailable pool
         assert 1 not in self.instance_manager._unavailable_pool
-        assert "Deleted instance ID 1 from unavailable pool successfully" in caplog.text
+        assert "Deleted instance ID 1 (role: prefill, job_name: test-prefill) from unavailable pool successfully" in caplog.text
 
     def test_refresh_instances_del_not_found(self, caplog):
         """Test refresh_instances method with DEL event for non-existent instance"""
@@ -524,7 +497,7 @@ class TestInstanceManager:
         self.instance_manager.refresh_instances(EventType.DEL, instances)
         
         # Verify warning was logged
-        assert "Instance ID 1 not found in instance pool" in caplog.text
+        assert "Instance ID 1 (role: prefill, job_name: test-prefill) not found in instance pool" in caplog.text
 
     def test_refresh_instances_set_success(self, caplog):
         """Test refresh_instances method with SET event"""
@@ -552,7 +525,8 @@ class TestInstanceManager:
         assert len(self.instance_manager._decode_pool) == 1
         assert 10 in self.instance_manager._prefill_pool
         assert 20 in self.instance_manager._decode_pool
-        assert "Set instances end" in caplog.text
+        assert "Added instance ID 10 (role: prefill, job_name: new-prefill) to available pool successfully" in caplog.text
+        assert "Added instance ID 20 (role: decode, job_name: new-decode) to available pool successfully" in caplog.text
 
     def test_refresh_instances_set_with_existing_instances(self, caplog):
         """Test refresh_instances method with SET event when pools already have instances"""
@@ -624,13 +598,20 @@ class TestInstanceManagerThreadSafety:
 
     def setup_method(self):
         """Setup for each test method"""
-        # Clear singleton instance before each test
-        if hasattr(InstanceManager, '_instances') and InstanceManager in InstanceManager._instances:
-            del InstanceManager._instances[InstanceManager]
-        
+        # Clear singleton instance completely
+        if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
+            instance = ThreadSafeSingleton._instances[InstanceManager]
+            # Clear all instance attributes
+            for attr in list(instance.__dict__.keys()):
+                delattr(instance, attr)
+            del ThreadSafeSingleton._instances[InstanceManager]
+
+        # Create config for testing
+        self.config = CoordinatorConfig()
+
         # Create a fresh instance manager for each test
-        self.instance_manager = InstanceManager()
-        
+        self.instance_manager = InstanceManager(self.config)
+
         # Test data
         self.prefill_instance = Instance(
             job_name="test-prefill",
@@ -896,32 +877,24 @@ class TestInstanceManagerThreadSafety:
 
     def test_concurrent_is_available_calls(self):
         """Test concurrent is_available calls under different conditions with enhanced concurrency"""
-        # Mock CoordinatorConfig to return cdp_separate mode
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
-        
-        mock_coordinator_config = MagicMock()
-        mock_coordinator_config.scheduler_config = mock_scheduler_config
-        
-        with patch.object(CoordinatorConfig, '__new__', return_value=MagicMock()) as MockCoordinatorConfig:
-            MockCoordinatorConfig.return_value = mock_coordinator_config
-            
-            self.instance_manager = InstanceManager()
-            
-            # Thread-safe counter for tracking results
-            results = []
-            lock = threading.Lock()
-            
-            def check_availability_task(iteration):
-                try:
-                    result = self.instance_manager.is_available()
-                    with lock:
-                        results.append((iteration, result))
-                except Exception as e:
-                    with lock:
-                        results.append((iteration, f"error: {str(e)}"))
-            
-            # Run multiple concurrent availability checks when not available
+        # Use config with cdp_separate deploy mode
+        self.config.scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
+        self.instance_manager = InstanceManager(self.config)
+
+        # Thread-safe counter for tracking results
+        results = []
+        lock = threading.Lock()
+
+        def check_availability_task(iteration):
+            try:
+                result = self.instance_manager.is_available()
+                with lock:
+                    results.append((iteration, result))
+            except Exception as e:
+                with lock:
+                    results.append((iteration, f"error: {str(e)}"))
+
+        # Run multiple concurrent availability checks when not available
             threads = []
             # Start 8 threads, each performing 20 iterations
             for i in range(8):
@@ -1243,3 +1216,22 @@ class TestInstanceManagerThreadSafety:
         total_instances = available_count + unavailable_count
         assert total_instances >= 0, f"Invalid instance count: {total_instances}"
         assert total_instances <= 300, f"Unexpectedly high instance count: {total_instances}"
+
+    def test_update_config(self):
+        """Test InstanceManager update_config method"""
+        # Create initial config
+        initial_config = CoordinatorConfig()
+        initial_config.scheduler_config.deploy_mode = "single_node"
+
+        # Create instance manager with initial config
+        instance_manager = InstanceManager(initial_config)
+
+        # Create new config with different values
+        new_config = CoordinatorConfig()
+        new_config.scheduler_config.deploy_mode = "pd_separate"
+
+        # Update config
+        instance_manager.update_config(new_config)
+
+        # Verify config was updated (check internal state)
+        assert instance_manager._scheduler_config.deploy_mode == "pd_separate"

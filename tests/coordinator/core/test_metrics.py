@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from motor.common.resources.instance import Instance, PDRole, Endpoint
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.metrics.metrics_collector import MetricsCollector, MetricType, SingleMetric
+from motor.config.coordinator import CoordinatorConfig
 from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -21,6 +22,10 @@ class MockResponse:
 
 class TestMetrics:
     def setup_method(self):
+        # Create config for testing
+        self.config = CoordinatorConfig()
+        self.instance_manager = InstanceManager(self.config)
+
         ep0 = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
         ep1 = Endpoint(id=1, ip="127.0.0.1", business_port="8001", mgmt_port="8001")
         ep2 = Endpoint(id=2, ip="127.0.0.1", business_port="8002", mgmt_port="8002")
@@ -70,7 +75,7 @@ class TestMetrics:
 
     def clean_instances(self):
         try:
-            collector = MetricsCollector()
+            collector = MetricsCollector(self.config)
             if hasattr(collector, '_initialized'):
                 collector.stop()
                 # Clear all cached state
@@ -260,7 +265,7 @@ http_request_size_bytes_sum{handler="/v1/chat/completions"} 268.0"""
 
     @_test_without_background_thread
     def test_parse_metrics_text_normal(self):
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # load test metric data
         metric_list = [
@@ -283,7 +288,7 @@ http_request_size_bytes_sum{handler="/v1/chat/completions"} 268.0"""
             assert self.check_metrics_equel(result, [metric])
 
         # check _parse_metric_text use full metric data
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
         result = metric_collector._parse_metric_text(self.metrics_template)
         assert isinstance(result, list)
         assert len(result) > 0
@@ -305,7 +310,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
 # TYPE vllm:num_requests_running illegal_type
 vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruct"} -1.0"""
 
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
         result = metric_collector._parse_metric_text(metrics_str_type_error)
         assert isinstance(result, list)
         assert len(result) == 0
@@ -322,7 +327,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
     def test_clear_inactive_metrics(self):
         # ensure MetricsCollector clean
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # create 4-type metric
         _, metric_gauge = self.load_test_gauge_metric()
@@ -372,7 +377,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
     def test_aggregate_metrics_by_instance(self):
         # ensure MetricsCollector clean
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # create 4-type metric
         _, metric_gauge = self.load_test_gauge_metric()
@@ -453,7 +458,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
     def test_aggregate_metrics_all_instance(self):
         # ensure MetricsCollector clean
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # create 4-type metric
         _, metric_gauge = self.load_test_gauge_metric()
@@ -512,7 +517,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
     def test_aggregate_metric_by_sum(self):
         # ensure MetricsCollector clean
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         metric_a = SingleMetric()
         metric_a.name = "test"
@@ -632,7 +637,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
     def test_aggregate_metrics_by_instance_diff_format(self):
         # ensure MetricsCollector clean
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
         metric_collector._instance_metrics_cached = {}
 
         # create different format metric
@@ -701,7 +706,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
 
     @_test_without_background_thread
     def test_get_serialize_metrics(self):
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # create 4-type metric
         metric_str_gauge, metric_gauge = self.load_test_gauge_metric()
@@ -763,7 +768,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
 
     def test_prometheus_metrics_handler(self):
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # Test with None _last_metrics (initial state)
         result = metric_collector.prometheus_metrics_handler()
@@ -788,7 +793,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
 
     def test_prometheus_metrics_handler_abnormal(self):
         self.clean_instances()
-        metric_collector = MetricsCollector()
+        metric_collector = MetricsCollector(self.config)
 
         # Test with empty _last_metrics
         with metric_collector._lock:

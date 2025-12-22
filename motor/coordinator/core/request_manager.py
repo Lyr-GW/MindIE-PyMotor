@@ -6,6 +6,7 @@ import time
 import uuid
 import threading
 from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.request import RequestInfo
 from motor.common.utils.logger import get_logger
 
@@ -14,17 +15,22 @@ logger = get_logger(__name__)
 
 class RequestManager(ThreadSafeSingleton):
 
-    def __init__(self):
+    def __init__(self, config: CoordinatorConfig | None = None):
         if hasattr(self, '_initialized'):
             return
-            
+
+        if config is None:
+            config = CoordinatorConfig()
+        self._rate_limit_config = config.rate_limit_config
+        self._config_lock = threading.RLock()
+
         # Thread-safe counter state
         self._counter = 0
         self._last_timestamp = 0
         self._lock = threading.Lock()  # Protects counter state
         
         self._req_info_dict: dict[str, RequestInfo] = {}
-        
+
         self._initialized = True
         logger.info("RequestManager initialized")
 
@@ -89,3 +95,9 @@ class RequestManager(ThreadSafeSingleton):
         except Exception as e:
             logger.error(f"Failed to delete request info for ID {req_id}: {e}")
             return False
+
+    def update_config(self, config: CoordinatorConfig) -> None:
+        """Update configuration for the request manager"""
+        with self._config_lock:
+            self._rate_limit_config = config.rate_limit_config
+        logger.info("RequestManager configuration updated")

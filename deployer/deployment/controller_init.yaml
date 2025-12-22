@@ -83,15 +83,12 @@ spec:
             - name: update-config-script
               mountPath: /mnt/configmap/update_config_from_user_config.py
               subPath: update_config_from_user_config.py
-            - name: probe-script
+            - name: probe-shell-script
               mountPath: /mnt/configmap/probe.sh
               subPath: probe.sh
-            - name: probe-status-check-script
-              mountPath: /mnt/configmap/probe_status_check.py
-              subPath: probe_status_check.py
-            - name: get-mgmt-port-script
-              mountPath: /mnt/configmap/get_mgmt_port.py
-              subPath: get_mgmt_port.py
+            - name: probe-python-script
+              mountPath: /mnt/configmap/probe.py
+              subPath: probe.py
             - name: user-config
               mountPath: /mnt/configmap/user_config.json
               subPath: user_config.json
@@ -108,17 +105,13 @@ spec:
           configMap:
             name: update-config-script
             defaultMode: 0640
-        - name: probe-script
+        - name: probe-shell-script
           configMap:
-            name: probe-script
+            name: probe-shell-script
             defaultMode: 0550
-        - name: probe-status-check-script
+        - name: probe-python-script
           configMap:
-            name: probe-status-check-script
-            defaultMode: 0550
-        - name: get-mgmt-port-script
-          configMap:
-            name: get-mgmt-port-script
+            name: probe-python-script
             defaultMode: 0550
         - name: user-config
           configMap:
@@ -141,9 +134,9 @@ metadata:
   namespace: mindie
 spec:
   ports:
-  - port: 57675
+  - port: 1026
     protocol: TCP
-    targetPort: 57675
+    targetPort: 1026
   selector:
     app: mindie-ms-controller
   sessionAffinity: None

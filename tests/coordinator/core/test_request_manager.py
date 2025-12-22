@@ -4,24 +4,27 @@ import threading
 from unittest.mock import patch
 from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
+from motor.config.coordinator import CoordinatorConfig
 
 
 class TestRequestManager:
     """Test cases for RequestManager class"""
     
-    def test_singleton_pattern(self):
-        """Test that RequestManager follows singleton pattern"""
+    def test_singleton_behavior(self):
+        """Test that RequestManager is a singleton"""
+        config = CoordinatorConfig()
         # Create two instances
-        manager1 = RequestManager()
-        manager2 = RequestManager()
-        
-        # Both should be the same instance
+        manager1 = RequestManager(config)
+        manager2 = RequestManager(config)
+
+        # Both should be the same instance (singleton)
         assert manager1 is manager2
         assert id(manager1) == id(manager2)
     
     def test_generate_request_id_format(self):
         """Test that generated ID has correct format"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         request_id = manager.generate_request_id()
         
         # Should be a string
@@ -33,7 +36,8 @@ class TestRequestManager:
     
     def test_generate_request_id_uniqueness(self):
         """Test that generated IDs are unique"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         
         # Generate multiple IDs
         ids = set()
@@ -48,7 +52,8 @@ class TestRequestManager:
     
     def test_generate_request_id_thread_safety(self):
         """Test ID generation in multi-threaded environment"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         generated_ids = set()
         lock = threading.Lock()
         
@@ -76,7 +81,8 @@ class TestRequestManager:
     @patch('motor.coordinator.core.request_manager.uuid.uuid4')
     def test_fallback_uuid_generation(self, mock_uuid):
         """Test fallback to UUID when main algorithm fails"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         
         # Mock uuid4 to return a predictable value
         mock_uuid.return_value.hex = 'fallback1234567890abcdef1234567890'
@@ -91,7 +97,8 @@ class TestRequestManager:
     
     def test_id_structure(self):
         """Test the structural components of generated ID"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         request_id = manager.generate_request_id()
         
         # Extract components
@@ -116,7 +123,8 @@ class TestRequestManager:
     
     def test_consecutive_ids_increment_counter(self):
         """Test that counter increments for same timestamp"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         
         # Mock time to return same timestamp
         fixed_time = 1691234567890123
@@ -142,7 +150,8 @@ class TestRequestManager:
     
     def test_counter_reset_on_new_timestamp(self):
         """Test that counter resets when timestamp changes"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         
         # First call with timestamp T1
         with patch('motor.coordinator.core.request_manager.time.time') as mock_time:
@@ -162,7 +171,8 @@ class TestRequestManager:
         assert id1[:16] != id2[:16]
 
     def test_add_req_info_and_del_req_info(self):
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         
         # Create a RequestInfo object
         req_id = manager.generate_request_id()
@@ -190,7 +200,8 @@ class TestRequestManager:
 
     def test_concurrent_access(self):
         """Test concurrent access to add_req_info and del_req_info methods"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         def worker(worker_id, results):
             try:
                 # Generate request ID
@@ -236,7 +247,8 @@ class TestRequestManager:
             
     def test_request_persistence(self):
         """Test that requests persist in the dictionary until deleted"""
-        manager = RequestManager()
+        config = CoordinatorConfig()
+        manager = RequestManager(config)
         # Add multiple requests
         req_ids = []
         for i in range(5):
@@ -269,14 +281,33 @@ class TestRequestManager:
 @pytest.fixture
 def request_manager():
     """Fixture to provide RequestManager instance"""
-    return RequestManager()
+    config = CoordinatorConfig()
+    return RequestManager(config)
 
 
 def test_with_fixture(request_manager):
     """Test using pytest fixture"""
     id1 = request_manager.generate_request_id()
     id2 = request_manager.generate_request_id()
-    
+
     assert isinstance(id1, str)
     assert isinstance(id2, str)
     assert id1 != id2
+
+def test_update_config():
+    """Test RequestManager update_config method"""
+    # Create initial config
+    initial_config = CoordinatorConfig()
+
+    # Create request manager with initial config
+    request_manager = RequestManager(initial_config)
+
+    # Create new config with different values
+    new_config = CoordinatorConfig()
+    new_config.rate_limit_config.max_requests = 1000
+
+    # Update config
+    request_manager.update_config(new_config)
+
+    # Verify config was updated
+    assert request_manager._rate_limit_config.max_requests == 1000

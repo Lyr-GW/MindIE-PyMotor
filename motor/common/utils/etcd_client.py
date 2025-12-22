@@ -16,7 +16,7 @@ from motor.common.utils.logger import get_logger
 
 T = TypeVar('T', bound=BaseModel)
 
-namespace = os.getenv("POD_NAMESPACE")
+namespace = os.getenv("POD_NAMESPACE", "")
 logger = get_logger(__name__)
 UTF8_ENCODING = "utf-8"
 RB = 'rb'
@@ -103,7 +103,7 @@ class EtcdClient:
                     logger.info("Acquired lock %s with lease %s", lock_key, lock.lease_id)
                     return str(lock.uuid)
                 else:
-                    logger.error("Failed to acquire lock %s", lock_key)
+                    logger.debug("Failed to acquire lock %s", lock_key)
                     return None
         except Exception as e:
             logger.error("Failed to acquire lock %s: %s", lock_key, e)
@@ -134,7 +134,7 @@ class EtcdClient:
                 if new_ttl <= 0:
                     # If the returned TTL is <= 0, it means the lease has already expired.
                     raise Exception("Lease expired (TTL=%s) during renewal", new_ttl)
-                logger.info("Renewed lease for lock %s. New TTL: %s", lock_key, new_ttl)
+                logger.debug("Renewed lease for lock %s. New TTL: %s", lock_key, new_ttl)
                 return True
         except Exception as e:
             logger.error("Failed to renew lease for lock  %s: %s, will release", lock_key, e)
@@ -153,7 +153,7 @@ class EtcdClient:
                 lease_id = self._leases[lock_key]
                 self.lease_stub.LeaseRevoke(rpc_pb2.LeaseRevokeRequest(ID=lease_id), timeout=self.timeout)
                 del self._leases[lock_key]
-                logger.info("Released lock for lock %s", lock_key)
+                logger.debug("Released lock for lock %s", lock_key)
                 return True
         except Exception as e:
             logger.error("Failed to release lock %s: %s", lock_key, e)

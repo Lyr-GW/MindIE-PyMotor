@@ -7,8 +7,7 @@ import threading
 from dataclasses import dataclass
 
 from motor.config.controller import ControllerConfig
-from motor.common.resources.instance import Instance, ReadOnlyInstance
-from motor.common.resources.http_msg_spec import InsEventMsg, EventType
+from motor.common.resources import Instance, ReadOnlyInstance, InsEventMsg, EventType
 from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.utils.logger import get_logger
 from motor.controller.core import Observer, ObserverEvent
@@ -112,15 +111,24 @@ class EventPusher(Observer):
 
     def stop(self) -> None:
         self.stop_event.set()
-        if self.event_queue.qsize() == 0:
+        if hasattr(self, 'event_queue') and self.event_queue.qsize() == 0:
             # Put a element into queue to make thread exit.
             self.event_queue.put(None)
         # Only join threads that have been started
-        if self.event_consumer_thread.is_alive():
+        if (
+            hasattr(self, 'event_consumer_thread')
+            and self.event_consumer_thread is not None
+            and self.event_consumer_thread.is_alive()
+        ):
             self.event_consumer_thread.join()
-        if self.heartbeat_detector_thread.is_alive():
+        if (
+            hasattr(self, 'heartbeat_detector_thread')
+            and self.heartbeat_detector_thread is not None
+            and self.heartbeat_detector_thread.is_alive()
+        ):
             self.heartbeat_detector_thread.join()
-        self.heart_client.close()
+        if hasattr(self, 'heart_client'):
+            self.heart_client.close()
         logger.info("EventPusher stopped.")
 
     def is_alive(self) -> bool:

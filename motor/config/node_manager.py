@@ -52,13 +52,15 @@ class BasicConfig:
 class APIConfig:
     """API configuration class"""
     # http config
-    pod_ip: str | None = "127.0.0.1"
-    host_ip: str | None = "127.0.0.1"
-    node_manager_port: int = 1027
+    pod_ip: str | None = field(default_factory=lambda: Env.pod_ip or "127.0.0.1")
+    # default host ip will be set to pod ip first, when perform initialize config
+    # will read hccl.json to update host ip.
+    host_ip: str | None = field(default_factory=lambda: Env.pod_ip or "127.0.0.1")
+    node_manager_port: int = 1026
 
     # Controller API configuration
-    controller_api_dns: str | None = "127.0.0.1"
-    controller_api_port: int | None = 57675
+    controller_api_dns: str | None = field(default_factory=lambda: Env.controller_service or "127.0.0.1")
+    controller_api_port: int | None = 1026
 
 
 @dataclass
@@ -215,19 +217,6 @@ class NodeManagerConfig:
                 log_config=config.logging_config
             )
 
-            logger.info(
-                "[NodeManagerConfig] Loaded: "
-                "job_name=%s, "
-                "role=%s, "
-                "controller=%s:%s, "
-                "NM_port=%s",
-                config.basic_config.job_name,
-                config.basic_config.role,
-                config.api_config.controller_api_dns,
-                config.api_config.controller_api_port,
-                config.api_config.node_manager_port
-            )
-
             logger.info("Configuration loading completed")
             return config
 
@@ -290,17 +279,6 @@ class NodeManagerConfig:
             devices = server.get("device") or []
             device_count = len(devices)
             config.basic_config.device_num = device_count
-
-            # Determine hardware type based on device count
-            if device_count == 8:
-                hardware_type = HardwareType.TYPE_800I_A2
-            elif device_count == 16:
-                hardware_type = HardwareType.TYPE_800I_A3
-            else:
-                logger.info("Device count: %d", device_count)
-                hardware_type = HardwareType.TYPE_800I_A2  # Default to A2
-
-            config.basic_config.hardware_type = hardware_type
 
     @classmethod
     def _generate_endpoint_ports(cls, config: 'NodeManagerConfig'):
@@ -448,17 +426,37 @@ class NodeManagerConfig:
 
     def get_config_summary(self) -> str:
         """Get configuration summary information"""
-        return f"""
-                NodeManager Configuration Summary:
-                  Controller API: {self.api_config.controller_api_dns}:{self.api_config.controller_api_port}
-                  Node Manager Port: {self.api_config.node_manager_port}
-                  Role: {self.basic_config.role}
-                  Model: {self.basic_config.model_name}
-                  Device Count: {self.basic_config.device_num}
-                  Hardware Type: {self.basic_config.hardware_type}
-                  Endpoint Count: {self.endpoint_config.endpoint_num}
-                  Pod IP: {self.api_config.pod_ip}
-                  Host IP: {self.api_config.host_ip}
-                  Parallel Config: TP={getattr(self.basic_config.parallel_config, 'tp_size', 'N/A')}, \
-                      PP={getattr(self.basic_config.parallel_config, 'pp_size', 'N/A')}
-                """
+        separator = "=" * 80
+        title = " " * 22 + "NodeManager Configuration Summary"
+        return (
+            f"{separator}\n"
+            f"{title}\n"
+            f"{separator}\n"
+            "  Logging Configuration:\n"
+            f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
+            "\n"
+            "  Network Configuration:\n"
+            f"    ├─ Controller API:      {self.api_config.controller_api_dns}:{self.api_config.controller_api_port}\n"
+            f"    ├─ Node Manager Port:   {self.api_config.node_manager_port}\n"
+            f"    ├─ Pod IP:              {self.api_config.pod_ip}\n"
+            f"    ├─ Host IP:             {self.api_config.host_ip}\n"
+            f"    └─ TLS:                 {'Enabled' if self.tls_config.enable_tls else 'Disabled'}\n"
+            "\n"
+            "  Basic Configuration:\n"
+            f"    ├─ Job Name:            {self.basic_config.job_name}\n"
+            f"    ├─ Role:                {self.basic_config.role}\n"
+            f"    ├─ Model:               {self.basic_config.model_name}\n"
+            f"    ├─ Device Count:        {self.basic_config.device_num}\n"
+            f"    ├─ Endpoint Count:      {self.endpoint_config.endpoint_num}\n"
+            f"    └─ Hardware Type:       {self.basic_config.hardware_type}\n"
+            "\n"
+            "  Parallel Configuration:\n"
+            f"    ├─ TP Size:          TP={self.basic_config.parallel_config.tp_size}\n"
+            f"    ├─ PP Size:          PP={self.basic_config.parallel_config.pp_size}\n"
+            f"    ├─ DP Size:          DP={self.basic_config.parallel_config.dp_size}\n"
+            f"    ├─ EP Size:          EP={self.basic_config.parallel_config.ep_size}\n"
+            f"    ├─ SP Size:          SP={self.basic_config.parallel_config.sp_size}\n"
+            f"    └─ World Size:       World Size={self.basic_config.parallel_config.world_size}\n"
+            f"{separator}"
+        )

@@ -9,14 +9,14 @@ from dataclasses import dataclass
 from typing import Any
 from fastapi import HTTPException
 
-from motor.common.resources.http_msg_spec import HeartbeatMsg
+from motor.config.controller import ControllerConfig
 from motor.common.utils.logger import get_logger
-from motor.common.resources.instance import Instance, InsStatus, InsConditionEvent, ReadOnlyInstance
-from motor.common.resources.endpoint import EndpointStatus
 from motor.controller.core import Observer, ObserverEvent
 from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.config.controller import ControllerConfig
 from motor.common.utils.etcd_client import EtcdClient
+from motor.common.resources import (HeartbeatMsg, Instance, InsStatus,
+                                    InsConditionEvent, ReadOnlyInstance, EndpointStatus)
+
 
 logger = get_logger(__name__)
 

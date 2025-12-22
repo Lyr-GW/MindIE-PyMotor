@@ -91,11 +91,14 @@ class TestCoordinatorServer:
         self._handle_request_patcher.start()
 
         coordinator_config = CoordinatorConfig()
+        # Enable API key validation for this test
+        coordinator_config.api_key_config.enable_api_key = True
+        coordinator_config.api_key_config.valid_keys = {"sk-test123456789", "sk-coordinator2024"}
         self.coordinator_config = coordinator_config
         
         # Create CoordinatorServer instance (only pass unified configuration)
         coordinator_server = CoordinatorServer(
-            coordinator_config=coordinator_config
+            config=coordinator_config
         )
         
         # Set instance_manager attribute (required by CoordinatorServer's _handle_openai_request)
@@ -123,13 +126,13 @@ class TestCoordinatorServer:
         except Exception:
             pass
     
-    def test_health_endpoints(self):
-        """Test health check endpoints"""
-        # Test /health
-        response = self.mgmt_client.get("/health")
-        assert response.status_code == 200, f"Health probe failed: {response.status_code}"
+    def test_liveness_endpoints(self):
+        """Test liveness check endpoints"""
+        # Test /liveness
+        response = self.mgmt_client.get("/liveness")
+        assert response.status_code == 200, f"Liveness probe failed: {response.status_code}"
         data = response.json()
-        assert data["status"] == "ok", f"Health probe status abnormal: {data}"
+        assert data["status"] == "ok", f"Liveness probe status abnormal: {data}"
         
         # Test /startup
         response = self.mgmt_client.get("/startup")
@@ -196,7 +199,7 @@ class TestCoordinatorServer:
         im_instance.refresh_instances.return_value = None
         im_mock_cls.return_value = im_instance
 
-        CoordinatorConfig().standby_config.enable_master_standby = True
+        self.coordinator_config.standby_config.enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
         standby_manager.current_role = StandbyRole.MASTER
 
@@ -209,7 +212,7 @@ class TestCoordinatorServer:
 
     def test_readiness_endpoints_fail_when_enable_standby_is_standby(self):
         """Test readiness endpoints"""
-        CoordinatorConfig().standby_config.enable_master_standby = True
+        self.coordinator_config.standby_config.enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
         standby_manager.current_role = StandbyRole.STANDBY
 
@@ -221,7 +224,7 @@ class TestCoordinatorServer:
 
     def test_readiness_endpoints_fail_when_enable_standby_is_master(self):
         """Test readiness endpoints"""
-        CoordinatorConfig().standby_config.enable_master_standby = True
+        self.coordinator_config.standby_config.enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
         standby_manager.current_role = StandbyRole.MASTER
 
@@ -249,7 +252,7 @@ class TestCoordinatorServer:
 
     def test_list_models_ok(self):
         """Test list_models endpoints"""
-        CoordinatorConfig().aigw_model = {"k": "v"}
+        self.coordinator_config.aigw_model = {"k": "v"}
 
         response = self.openai_client.get("/v1/models")
         assert response.status_code == 200
@@ -549,7 +552,7 @@ class TestCoordinatorServer:
             "messages": [{"role": "user", "content": "test"}],
             "max_tokens": 10
         }
-        
+
         response = self.openai_client.post(
             "/v1/chat/completions",
             json=test_data,
@@ -657,12 +660,12 @@ class TestFastAPIMiddleware:
     def test_simple_rate_limit_config(self):
         """Test SimpleRateLimitConfig dataclass"""
         config = self.SimpleRateLimitConfig()
-        assert config.enabled == True, "Default enabled should be True"
+        assert config.enabled is True, "Default enabled should be True"
         assert config.max_requests == 100, "Default max_requests should be 100"
         assert config.window_size == 60, "Default window_size should be 60"
         assert config.scope == "per_ip", "Default scope should be per_ip"
         assert config.skip_paths is not None, "skip_paths should be initialized"
-        assert "/health" in config.skip_paths, "/health should be in skip_paths"
+        assert "/liveness" in config.skip_paths, "/liveness should be in skip_paths"
     
     def test_load_rate_limit_config_default(self):
         """Test load_rate_limit_config with default values"""
@@ -712,14 +715,14 @@ class TestFastAPIMiddleware:
             os.environ["RATE_LIMIT_MAX_REQUESTS"] = "200"
             os.environ["RATE_LIMIT_WINDOW_SIZE"] = "30"
             os.environ["RATE_LIMIT_SCOPE"] = "global"
-            os.environ["RATE_LIMIT_SKIP_PATHS"] = "/health,/metrics"
+            os.environ["RATE_LIMIT_SKIP_PATHS"] = "/liveness,/metrics"
             
             config = self.load_rate_limit_config()
             assert config.enabled == False, "Should load enabled from env"
             assert config.max_requests == 200, "Should load max_requests from env"
             assert config.window_size == 30, "Should load window_size from env"
             assert config.scope == "global", "Should load scope from env"
-            assert "/health" in config.skip_paths, "Should load skip_paths from env"
+            assert "/liveness" in config.skip_paths, "Should load skip_paths from env"
             assert "/metrics" in config.skip_paths, "Should load skip_paths from env"
         finally:
             # Restore original env
@@ -779,24 +782,24 @@ class TestFastAPIMiddleware:
         async def test_endpoint():
             return {"status": "ok"}
         
-        @self.app.get("/health")
-        async def health_endpoint():
+        @self.app.get("/liveness")
+        async def liveness_endpoint():
             return {"status": "healthy"}
         
         rate_limiter = self.SimpleRateLimiter(max_requests=1, window_size=60)
         middleware = self.SimpleRateLimitMiddleware(
             app=self.app,
             rate_limiter=rate_limiter,
-            skip_paths=["/health"]
+            skip_paths=["/liveness"]
         )
         
         # Middleware itself is an ASGI app (inherits from BaseHTTPMiddleware)
         client = self.TestClient(middleware)
         
-        # /health should be skipped (not rate limited)
+        # /liveness should be skipped (not rate limited)
         for _ in range(5):
-            response = client.get("/health")
-            assert response.status_code == 200, "Health endpoint should not be rate limited"
+            response = client.get("/liveness")
+            assert response.status_code == 200, "Liveness endpoint should not be rate limited"
         
         # /test should be rate limited after first request
         response1 = client.get("/test")
@@ -951,7 +954,7 @@ class TestCoordinatorServerAdvanced:
         
         # Create CoordinatorServer instance
         coordinator_server = CoordinatorServer(
-            coordinator_config=coordinator_config
+            config=coordinator_config
         )
         
         # Set instance_manager attribute
@@ -1106,8 +1109,8 @@ class TestCoordinatorServerAdvanced:
         unified_client = TestClient(unified_app)
         
         # Test management route
-        response = unified_client.get("/health")
-        assert response.status_code == 200, "Health endpoint should be available in unified app"
+        response = unified_client.get("/liveness")
+        assert response.status_code == 200, "Liveness endpoint should be available in unified app"
         
         # Test inference route
         response = unified_client.post(
@@ -1130,7 +1133,7 @@ class TestCoordinatorServerAdvanced:
         coordinator_config.rate_limit_config.enabled = False
         
         coordinator_server = CoordinatorServer(
-            coordinator_config=coordinator_config
+            config=coordinator_config
         )
         coordinator_server.instance_manager = MagicMock()
         
@@ -1517,7 +1520,7 @@ class TestCoordinatorServerAdvanced:
         disabled_config.enabled = False
         
         coordinator_server = CoordinatorServer(
-            coordinator_config=CoordinatorConfig()
+            config=CoordinatorConfig()
         )
         coordinator_server.instance_manager = MagicMock()
         
@@ -1532,7 +1535,7 @@ class TestCoordinatorServerAdvanced:
             mock_create.side_effect = Exception("Test exception")
             
             coordinator_server = CoordinatorServer(
-                coordinator_config=CoordinatorConfig()
+                config=CoordinatorConfig()
             )
             coordinator_server.instance_manager = MagicMock()
             
@@ -1700,25 +1703,25 @@ class TestFastAPIMiddlewareAdvanced:
         async def test_endpoint():
             return {"status": "ok"}
         
-        @self.app.get("/health")
-        async def health_endpoint():
+        @self.app.get("/liveness")
+        async def liveness_endpoint():
             return {"status": "healthy"}
         
         rate_limiter = self.SimpleRateLimiter(max_requests=1, window_size=60)
         middleware = self.SimpleRateLimitMiddleware(
             app=self.app,
             rate_limiter=rate_limiter,
-            skip_paths=["/health"]
+            skip_paths=["/liveness"]
         )
         
         client = self.TestClient(middleware)
         
-        # /health should be skipped
-        response1 = client.get("/health")
-        assert response1.status_code == 200, "Health endpoint should not be rate limited"
+        # /liveness should be skipped
+        response1 = client.get("/liveness")
+        assert response1.status_code == 200, "Liveness endpoint should not be rate limited"
         
-        response2 = client.get("/health")
-        assert response2.status_code == 200, "Health endpoint should still not be rate limited"
+        response2 = client.get("/liveness")
+        assert response2.status_code == 200, "Liveness endpoint should still not be rate limited"
         
         # /test should be rate limited
         response3 = client.get("/test")
@@ -1754,7 +1757,7 @@ class TestFastAPIMiddlewareAdvanced:
         """Test SimpleRateLimitConfig __post_init__"""
         config = self.SimpleRateLimitConfig()
         assert config.skip_paths is not None, "skip_paths should be initialized"
-        assert "/health" in config.skip_paths, "/health should be in skip_paths"
+        assert "/liveness" in config.skip_paths, "/liveness should be in skip_paths"
         assert "/ready" in config.skip_paths, "/ready should be in skip_paths"
         assert "/metrics" in config.skip_paths, "/metrics should be in skip_paths"
     
@@ -1790,7 +1793,7 @@ async def test_run_combined_mode(monkeypatch):
     cfg = CoordinatorConfig()
     cfg.http_config.combined_mode = True
 
-    srv = CoordinatorServer(coordinator_config=cfg)
+    srv = CoordinatorServer(config=cfg)
     await srv.run()
 
 
@@ -1818,6 +1821,6 @@ async def test_run_split_mode(monkeypatch):
     cfg = CoordinatorConfig()
     cfg.http_config.combined_mode = False
 
-    srv = CoordinatorServer(coordinator_config=cfg)
+    srv = CoordinatorServer(config=cfg)
     await srv.run()
     assert len(instances) == 2 or len(instances) == 0 or len(instances) == 1

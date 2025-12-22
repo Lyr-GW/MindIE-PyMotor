@@ -5,6 +5,7 @@ import asyncio
 import json
 import ssl
 import logging
+import threading
 from typing import Optional, Any
 from datetime import datetime, timezone
 from functools import wraps
@@ -95,14 +96,16 @@ class SSLConfig:
 
 class CoordinatorServer:
     
-    def __init__(
-        self,
-        coordinator_config: Optional[CoordinatorConfig] = None
-    ):
-        self._initialize_config(coordinator_config)
+    def __init__(self, config: CoordinatorConfig | None = None):
+        self._config_lock = threading.RLock()
+        self.coordinator_config = config
+        self._api_key_config = config.api_key_config
+        self._tls_config = config.tls_config
+        self._ssl_config = SSLConfig()
+        self._load_ssl_config()
+
         self._service_start_timestamp = int(datetime.now(timezone.utc).timestamp())
         self._log_configuration()
-        self.instance_manager = InstanceManager()
         self._create_apps()
         self._setup_cors_middleware()
         self._register_routes()
@@ -242,8 +245,8 @@ class CoordinatorServer:
     
     @staticmethod
     def _create_base_uvicorn_config(app: FastAPI, host: str, port: int) -> dict[str, Any]:
-        # Create ApiAccessFilter for health endpoint
-        api_filter = ApiAccessFilter({"/health": logging.ERROR})
+        # Create ApiAccessFilter for liveness endpoint
+        api_filter = ApiAccessFilter({"/liveness": logging.ERROR})
 
         # Configure uvicorn access logger with filter
         uvicorn_access_logger = logging.getLogger("uvicorn.access")
@@ -277,17 +280,25 @@ class CoordinatorServer:
             except Exception as e:
                 logger.warning(f"Error occurred during coordinator server shutdown: {e}", exc_info=True)
 
+    def update_config(self, config: CoordinatorConfig) -> None:
+        """Update configuration for the coordinator server"""
+        with self._config_lock:
+            self._api_key_config = config.api_key_config
+            self._tls_config = config.tls_config
+        self._load_ssl_config()
+        logger.info("CoordinatorServer configuration updated")
+
     def verify_api_key(self, request: Request) -> bool:
-        if not self.api_key_config.enabled:
+        if not self._api_key_config.enable_api_key:
             return True
         
-        if request.url.path in self.api_key_config.skip_paths:
+        if request.url.path in self._api_key_config.skip_paths:
             return True
         
-        authorization = request.headers.get(self.api_key_config.header_name)
+        authorization = request.headers.get(self._api_key_config.header_name)
         
         if not authorization:
-            logger.warning(f"API Key validation failed: missing Authorization header")
+            logger.warning("API Key validation failed: missing Authorization header")
             raise HTTPException(
                 status_code=HTTP_STATUS_UNAUTHORIZED,
                 detail="Missing Authorization header",
@@ -295,17 +306,17 @@ class CoordinatorServer:
             )
         
         api_key = authorization
-        if self.api_key_config.key_prefix and authorization.startswith(self.api_key_config.key_prefix):
-            api_key = authorization[len(self.api_key_config.key_prefix):]
+        if self._api_key_config.key_prefix and authorization.startswith(self._api_key_config.key_prefix):
+            api_key = authorization[len(self._api_key_config.key_prefix):]
         
-        if api_key not in self.api_key_config.valid_keys:
+        if api_key not in self._api_key_config.valid_keys:
             logger.warning("API Key validation failed: invalid key")
             raise HTTPException(
                 status_code=HTTP_STATUS_FORBIDDEN,
                 detail="Invalid API Key"
             )
         
-        logger.debug(f"API Key validation successful")
+        logger.debug("API Key validation successful")
         return True
     
     def setup_rate_limiting(
@@ -316,7 +327,7 @@ class CoordinatorServer:
             if rate_limit_config is None:
                 rate_limit_config = self.coordinator_config.rate_limit_config
 
-            if not rate_limit_config.enabled:
+            if not rate_limit_config.enable_rate_limit:
                 logger.info("Rate limiting is disabled in configuration")
                 return
 
@@ -365,7 +376,7 @@ class CoordinatorServer:
             if rate_limit_config is None:
                 rate_limit_config = self.coordinator_config.rate_limit_config
 
-            if not rate_limit_config.enabled:
+            if not rate_limit_config.enable_rate_limit:
                 logger.info("Rate limiting is disabled in configuration")
             else:
                 middleware = create_simple_rate_limit_middleware(
@@ -420,44 +431,30 @@ class CoordinatorServer:
             await self._shutdown_servers(mgmt_server, inference_server, unified_server)
             raise
     
-    def _initialize_config(self, coordinator_config: Optional[CoordinatorConfig]):
-        if coordinator_config is None:
-            try:
-                coordinator_config = CoordinatorConfig()
-                logger.info("CoordinatorConfig initialized successfully")
-            except Exception as e:
-                logger.error(f"Failed to initialize CoordinatorConfig: {e}")
-                raise RuntimeError("Failed to initialize CoordinatorConfig") from e
-        
-        self.coordinator_config = coordinator_config
-        self.api_key_config = coordinator_config.api_key_config
-        self.ssl_config = SSLConfig()
-        self._load_ssl_config()
-    
     def _log_configuration(self):
         logger.info(
             "Infer timeout configuration: infer_timeout=%ss",
             self.coordinator_config.exception_config.infer_timeout
         )
         
-        if self.api_key_config.enabled and not self.api_key_config.valid_keys:
+        if self._api_key_config.enable_api_key and not self._api_key_config.valid_keys:
             logger.warning("API Key validation enabled but no valid keys configured!")
         
         logger.info(
             "API Key validation enabled: %s, valid keys count: %s, header: %s, prefix: %s, skip paths: %s",
-            self.api_key_config.enabled,
-            len(self.api_key_config.valid_keys),
-            self.api_key_config.header_name,
-            self.api_key_config.key_prefix,
-            len(self.api_key_config.skip_paths)
+            self._api_key_config.enable_api_key,
+            len(self._api_key_config.valid_keys),
+            self._api_key_config.header_name,
+            self._api_key_config.key_prefix,
+            len(self._api_key_config.skip_paths)
         )
         
-        if self.ssl_config.enabled:
+        if self._ssl_config.enabled:
             logger.info(
                 "SSL configuration enabled: cert_file=%s, key_file=%s, ca_file=%s",
-                self.ssl_config.cert_file,
-                self.ssl_config.key_file,
-                self.ssl_config.ca_file
+                self._ssl_config.cert_file,
+                self._ssl_config.key_file,
+                self._ssl_config.ca_file
             )
         else:
             logger.info("SSL configuration disabled")
@@ -465,7 +462,7 @@ class CoordinatorServer:
     def _create_apps(self):
         self.management_app = FastAPI(
             title="Motor Coordinator Management Server",
-            description="Management plane: health, readiness, metrics, instance refresh",
+            description="Management plane: liveness, startup, readiness, metrics, instance refresh",
             version="1.0.0",
             lifespan=self._lifespan
         )
@@ -494,19 +491,19 @@ class CoordinatorServer:
         config_kwargs[UVICORN_KEY_TIMEOUT_GRACEFUL_SHUTDOWN] = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
     
     def _apply_ssl_to_unified_config(self, config_kwargs: dict[str, Any]):
-        if not (self.ssl_config and self.ssl_config.enabled):
+        if not (self._ssl_config and self._ssl_config.enabled):
             return
         
         ssl_context = CoordinatorCertUtil.create_ssl_context(
-            cert_file=self.ssl_config.cert_file,
-            key_file=self.ssl_config.key_file,
-            ca_file=self.ssl_config.ca_file,
-            password=self.ssl_config.password
+            cert_file=self._ssl_config.cert_file,
+            key_file=self._ssl_config.key_file,
+            ca_file=self._ssl_config.ca_file,
+            password=self._ssl_config.password
         )
         if ssl_context:
-            config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self.ssl_config.key_file
-            config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self.ssl_config.cert_file
-            config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = self.ssl_config.ca_file
+            config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self._ssl_config.key_file
+            config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self._ssl_config.cert_file
+            config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = self._ssl_config.ca_file
             logger.info("HTTPS support enabled for unified server")
         else:
             logger.warning("SSL configuration failed, using HTTP mode")
@@ -516,33 +513,33 @@ class CoordinatorServer:
         mgmt_config_kwargs: dict[str, Any],
         inference_config_kwargs: dict[str, Any]
     ):
-        if not (self.ssl_config and self.ssl_config.enabled):
+        if not (self._ssl_config and self._ssl_config.enabled):
             return
         
         mgmt_ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
-            cert_file=self.ssl_config.cert_file,
-            key_file=self.ssl_config.key_file,
-            ca_file=self.ssl_config.ca_file,
-            password=self.ssl_config.password
+            cert_file=self._ssl_config.cert_file,
+            key_file=self._ssl_config.key_file,
+            ca_file=self._ssl_config.ca_file,
+            password=self._ssl_config.password
         )
         inference_ssl_context = CoordinatorCertUtil.create_ssl_context(
-            cert_file=self.ssl_config.cert_file,
-            key_file=self.ssl_config.key_file,
-            ca_file=self.ssl_config.ca_file,
-            password=self.ssl_config.password
+            cert_file=self._ssl_config.cert_file,
+            key_file=self._ssl_config.key_file,
+            ca_file=self._ssl_config.ca_file,
+            password=self._ssl_config.password
         )
         
         if mgmt_ssl_context:
-            mgmt_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self.ssl_config.key_file
-            mgmt_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self.ssl_config.cert_file
+            mgmt_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self._ssl_config.key_file
+            mgmt_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self._ssl_config.cert_file
             logger.info("HTTPS support enabled for management server (no client cert verification)")
         else:
             logger.warning("SSL configuration failed for management server, using HTTP mode")
         
         if inference_ssl_context:
-            inference_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self.ssl_config.key_file
-            inference_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self.ssl_config.cert_file
-            inference_config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = self.ssl_config.ca_file
+            inference_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self._ssl_config.key_file
+            inference_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self._ssl_config.cert_file
+            inference_config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = self._ssl_config.ca_file
             logger.info("HTTPS support enabled for inference server")
         else:
             logger.warning("SSL configuration failed for inference server, using HTTP mode")
@@ -614,17 +611,13 @@ class CoordinatorServer:
         await asyncio.sleep(SERVER_SHUTDOWN_SLEEP_SECONDS)
     
     def _load_ssl_config(self):
-        request_tls = self.coordinator_config.request_server_tls
-        
-        if request_tls.tls_enable:
-            self.ssl_config.enabled = True
-            tls_items = request_tls.items
-            self.ssl_config.cert_file = tls_items.get("tls_cert", "")
-            self.ssl_config.key_file = tls_items.get("tls_key", "")
-            self.ssl_config.ca_file = tls_items.get("ca_cert", "")
-            self.ssl_config.password = tls_items.get("tls_passwd", "")
-        else:
-            self.ssl_config.enabled = False
+        with self._config_lock:
+            if self._tls_config.enable_tls:
+                self._ssl_config.enabled = True
+                self._ssl_config.cert_file = self._tls_config.items.get("tls_cert", "")
+                self._ssl_config.key_file = self._tls_config.items.get("tls_key", "")
+                self._ssl_config.ca_file = self._tls_config.items.get("ca_cert", "")
+                self._ssl_config.password = self._tls_config.items.get("tls_passwd", "")
 
     def _build_models_metadata(self) -> list[dict[str, Any]]:
         """Construct model metadata from coordinator config and instance state."""
@@ -691,10 +684,10 @@ class CoordinatorServer:
             logger.debug("Received startup probe request")
             return self._build_ok_response("Coordinator is starting up")
         
-        @self.management_app.get("/health")
-        async def health_check():
-            logger.debug("Received health check request, Coordinator is healthy")
-            return self._build_ok_response("Coordinator is healthy")
+        @self.management_app.get("/liveness")
+        async def liveness_check():
+            logger.debug("Received liveness check request, Coordinator is alive")
+            return self._build_ok_response("Coordinator is alive")
         
         @self.management_app.get("/readiness")
         async def readiness_check(request: Request):
@@ -767,7 +760,7 @@ class CoordinatorServer:
                         "POST /v1/chat/completions": "OpenAI Chat Completion API"
                     },
                     "# monitoring and health check": {
-                        "GET /health": "health check",
+                        "GET /liveness": "liveness check",
                         "GET /startup": "startup probe",
                         "GET /readiness": "readiness check",
                         "GET /metrics": "get metrics",
@@ -841,7 +834,6 @@ class CoordinatorServer:
             ) from e
         
         InstanceManager().refresh_instances(event_msg.event, event_msg.instances)
-        is_ready = InstanceHealthChecker().check_state_alarm()
         
         return RequestResponse(
             request_id="refresh_request",
@@ -851,7 +843,6 @@ class CoordinatorServer:
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "event_type": event_msg.event.value,
                 "instance_count": len(event_msg.instances),
-                "is_ready": is_ready
             }
         )
     
@@ -861,7 +852,7 @@ class CoordinatorServer:
             body_json = json.loads(body.decode(ENCODING_UTF8))
             
             self._validate_openai_request(body_json, request_type)
-            if not self.instance_manager.is_available():
+            if not InstanceManager().is_available():
                 raise HTTPException(status_code=HTTP_STATUS_SERVICE_UNAVAILABLE, detail="Service is not available")
 
             return await handle_request(request)
@@ -874,7 +865,7 @@ class CoordinatorServer:
     async def _handle_metaserver_request(self, request: Request):
         """Handle MetaServer request"""
         try:
-            if not self.instance_manager.is_available():
+            if not InstanceManager().is_available():
                 raise HTTPException(status_code=503, detail="Service is not available")
 
             # Use router to handle requests

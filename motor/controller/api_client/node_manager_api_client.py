@@ -2,8 +2,7 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-from motor.common.resources.instance import Instance, NodeManagerInfo
-from motor.common.resources.http_msg_spec import StartCmdMsg
+from motor.common.resources import NodeManagerInfo, StartCmdMsg
 from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.utils.logger import get_logger
 
@@ -36,7 +35,6 @@ class NodeManagerApiClient:
             client.close()
 
         return is_succeed
-
 
     @staticmethod
     def stop(node_mgr: NodeManagerInfo) -> bool:

@@ -7,7 +7,8 @@ from typing import Any
 from pathlib import Path
 
 from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
-from motor.config.etcd_config import EtcdConfig
+from motor.common.utils.env import Env
+from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig
 
 
@@ -19,16 +20,16 @@ class ApiConfig:
     """API configuration class"""
 
     # controller API configuration
-    controller_api_host: str = '127.0.0.1'
-    controller_api_port: int = 8000
+    controller_api_host: str = field(default_factory=lambda: Env.pod_ip or '127.0.0.1')
+    controller_api_port: int = 1026
 
     # coordinator API configuration
-    coordinator_api_dns: str = '127.0.0.1'
+    coordinator_api_dns: str = field(default_factory=lambda: Env.coordinator_service or '127.0.0.1')
     coordinator_api_port: int = 1026
 
 
 @dataclass
-class TlsConfig:
+class TLSConfig:
     """TLS configuration class"""
 
     # TLS enable/disable
@@ -91,7 +92,7 @@ class ControllerConfig:
     # Configuration sections
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
     api_config: ApiConfig = field(default_factory=ApiConfig)
-    tls_config: TlsConfig = field(default_factory=TlsConfig)
+    tls_config: TLSConfig = field(default_factory=TLSConfig)
     instance_config: InstanceConfig = field(default_factory=InstanceConfig)
     event_config: EventPusherConfig = field(default_factory=EventPusherConfig)
     fault_tolerance_config: FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
@@ -104,24 +105,34 @@ class ControllerConfig:
 
     def __post_init__(self):
         """Validate configuration after initialization"""
+        # Refresh master lock key with controller prefix
+        if self.standby_config.master_lock_key == "/master_lock":
+            self.standby_config.master_lock_key = "/controller" + self.standby_config.master_lock_key
         self.validate_config()
 
     @classmethod
-    def from_json(cls, json_path: str) -> 'ControllerConfig':
+    def from_json(cls, json_path: str | None = None) -> 'ControllerConfig':
         """Load configuration from JSON file"""
-        config_path = Path(json_path)
+        if json_path is None:
+            # Read from environment variable
+            json_path = os.getenv("MOTOR_CONTROLLER_CONFIG_PATH")
+
+        config_path = Path(json_path) if json_path else None
 
         cfg = {}
-        if config_path.exists():
-            try:
+        try:
+            if config_path and config_path.exists():
                 with open(config_path, 'r', encoding='utf-8') as f:
-                    cfg = json.load(f)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Configuration file {json_path} format error: {e}") from e
-            except Exception as e:
-                raise ValueError(f"Unable to read configuration file {json_path}: {e}") from e
+                    content = f.read().strip()
+                    if content:  # Only parse if file is not empty
+                        cfg = json.loads(content)
+        except json.JSONDecodeError as e:
+            # If JSON parsing fails, use default configuration
+            logger.warning(f"Configuration file {json_path} format error: {e}, using default configuration")
+        except Exception as e:
+            # If any other error occurs, use default configuration
+            logger.warning(f"Unable to read configuration file {json_path}: {e}, using default configuration")
 
-        # Create configuration instance with default values
         try:
             config = cls()
 
@@ -158,9 +169,13 @@ class ControllerConfig:
                 update_config_from_dict(config.etcd_config, cfg['etcd_config'])
 
             # Set internal fields
-            config.config_path = str(config_path)
-            if config_path.exists():
-                config.last_modified = config_path.stat().st_mtime
+            if config_path:
+                config.config_path = str(config_path)
+                if config_path.exists():
+                    config.last_modified = config_path.stat().st_mtime
+            else:
+                config.config_path = None
+                config.last_modified = None
 
             # Configure logging for this module with the loaded configuration
             from motor.common.utils.logger import set_logging_config_for_module
@@ -170,11 +185,14 @@ class ControllerConfig:
             )
 
             # Now it's safe to log after logging configuration is set
-            logger.info(f"Loading configuration file: {config_path}")
-            if config_path.exists():
-                logger.info(f"Successfully loaded configuration file: {config_path}")
+            if config_path:
+                logger.info(f"Loading configuration file: {config_path}")
+                if config_path.exists():
+                    logger.info(f"Successfully loaded configuration file: {config_path}")
+                else:
+                    logger.warning(f"Configuration file does not exist, using default configuration: {config_path}")
             else:
-                logger.warning(f"Configuration file does not exist, using default configuration: {config_path}")
+                logger.info("Using default configuration (no config file specified)")
             logger.info("Configuration loading completed")
 
             return config
@@ -316,53 +334,52 @@ class ControllerConfig:
 
     def get_config_summary(self) -> str:
         """Get configuration summary information"""
-        return f"""
-                Controller Configuration Summary:
-                  API Service: {self.api_config.controller_api_host}:{self.api_config.controller_api_port}
-                  Coordinator API Service: {self.api_config.coordinator_api_dns}:{self.api_config.coordinator_api_port}
-                  Instance Assembly Timeout: {self.instance_config.instance_assemble_timeout} seconds
-                  Instance Heartbeat Timeout: {self.instance_config.instance_heartbeat_timeout} seconds
-                  Instance Expired Timeout: {self.instance_config.instance_expired_timeout} seconds
-                  Fault Tolerance: {'Enabled' if self.fault_tolerance_config.enable_fault_tolerance else 'Disabled'}
-                  Configuration Path: {self.config_path or 'Not set'}
-                """
-
-
-# Global configuration instance
-CONFIG_PATH_OVERRIDE = None
-
-
-def set_config_path(config_path: str) -> None:
-    """Set the configuration file path override"""
-    global CONFIG_PATH_OVERRIDE
-    CONFIG_PATH_OVERRIDE = config_path
-    logger.info(f"Configuration path override set to: {config_path}")
-
-
-def find_config_file():
-    """Intelligently find configuration file, prioritize development environment configuration file"""
-    # If path override is set, use it
-    if CONFIG_PATH_OVERRIDE:
-        return CONFIG_PATH_OVERRIDE
-
-    # First try configuration file in current package directory
-    package_config = os.path.join(os.path.dirname(__file__), 'controller_config.json')
-    if os.path.exists(package_config):
-        return package_config
-
-    # If not in package, try configuration file in project root directory
-    # Find project root directory by searching upward
-    current_dir = os.path.dirname(__file__)
-    while current_dir != os.path.dirname(current_dir):  # Until root directory
-        project_config = os.path.join(current_dir, 'motor', 'config', 'controller_config.json')
-        if os.path.exists(project_config):
-            return project_config
-        current_dir = os.path.dirname(current_dir)
-
-    # Finally return package path (even if file does not exist)
-    return package_config
-
-
-def get_config_path():
-    """Get the current configuration file path"""
-    return find_config_file()
+        separator = "=" * 80
+        title = " " * 22 + "Controller Configuration Summary"
+        enable_fault_tolerance = self.fault_tolerance_config.enable_fault_tolerance
+        enable_scale_p2d = (self.fault_tolerance_config.enable_scale_p2d
+                            and enable_fault_tolerance)
+        enable_lingqu_network_recover = (self.fault_tolerance_config.enable_lingqu_network_recover
+                                         and enable_fault_tolerance)
+        master_standby_check_interval = self.standby_config.master_standby_check_interval
+        master_lock_ttl = self.standby_config.master_lock_ttl
+        master_lock_key = self.standby_config.master_lock_key
+        controller_api = f"{self.api_config.controller_api_host}:{self.api_config.controller_api_port}"
+        coordinator_api = f"{self.api_config.coordinator_api_dns}:{self.api_config.coordinator_api_port}"
+        return (
+            f"{separator}\n"
+            f"{title}\n"
+            f"{separator}\n"
+            "  Logging Configuration:\n"
+            f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
+            "\n"
+            "  Network Configuration:\n"
+            f"    ├─ Pod IP:              {Env.pod_ip}\n"
+            f"    ├─ Controller API:      {controller_api}\n"
+            f"    ├─ Coordinator API:     {coordinator_api}\n"
+            f"    └─ TLS:                 {'Enabled' if self.tls_config.enable_tls else 'Disabled'}\n"
+            "\n"
+            "  Instance Management:\n"
+            f"    ├─ Assemble Timeout:    {self.instance_config.instance_assemble_timeout} seconds\n"
+            f"    ├─ Heartbeat Timeout:   {self.instance_config.instance_heartbeat_timeout} seconds\n"
+            f"    └─ Expired Timeout:     {self.instance_config.instance_expired_timeout} seconds\n"
+            "\n"
+            "  High Availability:\n"
+            f"    ├─ Advanced RAS:        {'Enabled' if enable_fault_tolerance else 'Disabled'}\n"
+            f"    │   ├─ Scale P2D:         {'Enabled' if enable_scale_p2d else 'Disabled'}\n"
+            f"    │   └─ Lingqu Network Recover: {'Enabled' if enable_lingqu_network_recover else 'Disabled'}\n"
+            f"    ├─ ETCD:\n"
+            f"    │   ├─ Persistence:       {'Enabled' if self.etcd_config.enable_etcd_persistence else 'Disabled'}\n"
+            f"    │   ├─ Host:              {self.etcd_config.etcd_host}\n"
+            f"    │   ├─ Port:              {self.etcd_config.etcd_port}\n"
+            f"    │   └─ Timeout:           {self.etcd_config.etcd_timeout} seconds\n"
+            f"    └─ Master/Standby:       {'Enabled' if self.standby_config.enable_master_standby else 'Disabled'}\n"
+            f"        ├─ Check Interval:   {master_standby_check_interval} seconds\n"
+            f"        ├─ Lock TTL:         {master_lock_ttl} seconds\n"
+            f"        └─ Lock Key:         {master_lock_key}\n"
+            "\n"
+            "  Configuration:\n"
+            f"    └─ Config Path:         {self.config_path or 'Not set'}\n"
+            f"{separator}"
+        )

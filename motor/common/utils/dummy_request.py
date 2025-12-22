@@ -15,7 +15,7 @@ class DummyRequestUtil:
     """
     Utility class for sending dummy inference requests compatible with standard formats
     """
-    
+
     def __init__(self):
         self._http_session = requests.Session()
         self.config = CoordinatorConfig().health_check_config
@@ -24,48 +24,48 @@ class DummyRequestUtil:
     def _validate_response(response) -> bool:
         """
         Validate response format
-        
+
         Args:
             response: HTTP response object
-            
+
         Returns:
             bool: True if response is valid, False otherwise
         """
         if response.status_code != 200:
             logger.warning(f"Dummy request failed with status {response.status_code} :{response}")
             return False
-        
+
         try:
             response_data = response.json()
-            
+
             if not isinstance(response_data, dict):
                 return False
-            
+
             if 'choices' not in response_data:
                 return False
-            
+
             choices = response_data['choices']
             if not isinstance(choices, list) or len(choices) == 0:
                 return False
-            
+
             choice = choices[0]
             if 'text' in choice:
                 text = choice['text']
                 return isinstance(text, str) and len(text.strip()) > 0
-            
+
             return False
-            
+
         except (ValueError, KeyError, IndexError, TypeError) as e:
             logger.warning(f"Invalid response format: {e}")
             return False
-            
+
     def send_dummy_request(self, endpoint: Endpoint) -> bool:
         """
         Send dummy inference request to instance
-        
+
         Args:
             endpoint: Target endpoint
-            
+
         Returns:
             bool: True if request successful, False otherwise
         """
@@ -73,7 +73,7 @@ class DummyRequestUtil:
             if not endpoint.ip or not endpoint.business_port:
                 logger.warning(f"Endpoint {endpoint.id} IP or port not available")
                 return False
-            
+
             url_path = getattr(self.config, 'dummy_request_endpoint', '/v1/completions')
 
             try:
@@ -123,7 +123,7 @@ class DummyRequestUtil:
     def _get_completion_request(self) -> dict:
         """Get completion request for health check"""
         request_config = getattr(self.config, 'dummy_request_body', {})
-        
+
         return {
             "model": request_config.get('model', 'test-model'),
             "prompt": request_config.get('prompt', 'Health check. Please respond with OK only.'),

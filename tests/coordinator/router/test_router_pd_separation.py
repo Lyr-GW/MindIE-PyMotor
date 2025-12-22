@@ -116,8 +116,23 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(InstanceManager, "get_available_instances", mock_get_available_instances)
         monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
         monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
-        monkeypatch.setattr(CoordinatorConfig().scheduler_config, "deploy_mode", DeployMode.CPCD_SEPARATE)
-        monkeypatch.setattr(CoordinatorConfig().exception_config, "retry_delay", 0.0001)
+
+        # Mock CoordinatorConfig to return CPCD_SEPARATE deploy mode
+        mock_scheduler_config = MagicMock()
+        mock_scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
+        mock_exception_config = MagicMock()
+        mock_exception_config.retry_delay = 0.0001
+        mock_exception_config.max_retry = 5
+        mock_http_config = MagicMock()
+        mock_http_config.coordinator_api_host = "127.0.0.1"
+        mock_http_config.coordinator_api_mgmt_port = 1025
+
+        mock_config = MagicMock()
+        mock_config.scheduler_config = mock_scheduler_config
+        mock_config.exception_config = mock_exception_config
+        mock_config.http_config = mock_http_config
+
+        monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
     
     @pytest.mark.asyncio
     async def test_empty_request_body(self, client):

@@ -30,6 +30,23 @@ config: NodeManagerConfig | None = None
 config_watcher: ConfigWatcher | None = None
 
 
+def log_config_summary(message_prefix: str | None = None) -> None:
+    """Log configuration summary with optional message prefix"""
+    if config:
+        if message_prefix:
+            logger.info(message_prefix)
+        for line in config.get_config_summary().splitlines():
+            if line.strip():  # Skip empty lines
+                logger.info(line)
+
+
+def on_config_updated() -> None:
+    """Callback function called when configuration is updated"""
+    global config
+    logger.info("Configuration reloaded, printing updated summary:")
+    log_config_summary()
+
+
 def init_all_modules(config_path: str | None = None, hccl_path: str | None = None) -> None:
     """Initialize all modules but don't start them yet"""
 
@@ -99,11 +116,15 @@ def main() -> int:
     # Initialize all modules
     init_all_modules(Env.config_path, Env.hccl_path)
 
+    # Log configuration summary
+    log_config_summary()
+
     # Start configuration file watcher
     if config.config_path and os.path.exists(config.config_path):
         config_watcher = ConfigWatcher(
             config_path=config.config_path,
-            reload_callback=config.reload
+            reload_callback=config.reload,
+            config_update_callback=on_config_updated
         )
         config_watcher.start()
         logger.info("Configuration file watcher started")

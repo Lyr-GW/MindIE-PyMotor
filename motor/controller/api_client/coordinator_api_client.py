@@ -2,7 +2,7 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-from motor.common.resources.http_msg_spec import InsEventMsg
+from motor.common.resources import InsEventMsg
 from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.utils.logger import get_logger
 

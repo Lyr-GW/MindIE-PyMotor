@@ -7,6 +7,7 @@ import json
 from pytest import MonkeyPatch
 from fastapi import FastAPI, status, Request
 from fastapi.testclient import TestClient
+from unittest.mock import MagicMock
 import pytest
 
 from motor.config.coordinator import DeployMode, CoordinatorConfig
@@ -96,7 +97,23 @@ class TestRouterPDHybrid:
         monkeypatch.setattr(InstanceManager, "get_available_instances", mock_get_available_instances)
         monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
         monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
-        monkeypatch.setattr(CoordinatorConfig().scheduler_config, "deploy_mode", DeployMode.SINGLE_NODE)
+
+        # Mock CoordinatorConfig to return SINGLE_NODE deploy mode
+        mock_scheduler_config = MagicMock()
+        mock_scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
+        mock_exception_config = MagicMock()
+        mock_exception_config.retry_delay = 0.0001
+        mock_exception_config.max_retry = 5
+        mock_http_config = MagicMock()
+        mock_http_config.coordinator_api_host = "127.0.0.1"
+        mock_http_config.coordinator_api_mgmt_port = 1025
+
+        mock_config = MagicMock()
+        mock_config.scheduler_config = mock_scheduler_config
+        mock_config.exception_config = mock_exception_config
+        mock_config.http_config = mock_http_config
+
+        monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
         
     
     @pytest.mark.asyncio

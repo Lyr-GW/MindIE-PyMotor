@@ -40,7 +40,7 @@ class SimpleRateLimitConfig:
     def __post_init__(self):
         if self.skip_paths is None:
             self.skip_paths = [
-                "/health", "/ready", "/metrics", 
+                "/liveness", "/ready", "/metrics", 
                 "/docs", "/redoc", "/openapi.json",
                 "/favicon.ico", "/startup"
             ]
@@ -138,7 +138,7 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
         
         self.rate_limiter = rate_limiter or SimpleRateLimiter()
         self.skip_paths = skip_paths or [
-            "/health", "/ready", "/metrics", "/docs", "/redoc", "/openapi.json"
+            "/liveness", "/ready", "/metrics", "/docs", "/redoc", "/openapi.json"
         ]
         self.error_message = error_message
         self.error_status_code = error_status_code
@@ -246,7 +246,7 @@ def create_simple_rate_limit_middleware(app: ASGIApp,
     middleware = SimpleRateLimitMiddleware(
         app=app,
         rate_limiter=rate_limiter,
-        skip_paths=["/health", "/ready", "/metrics", "/docs", "/redoc", "/openapi.json"]
+        skip_paths=["/liveness", "/ready", "/metrics", "/docs", "/redoc", "/openapi.json"]
     )
     
     return middleware

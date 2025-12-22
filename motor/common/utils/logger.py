@@ -218,41 +218,58 @@ def get_logger(
             log_name = parts[1]
 
     logger = logging.getLogger(log_name)
-    if not logger.handlers:
-        logger.setLevel(level)
 
-        # Console handler
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(level)
-        formatter = MaxLengthFormatter(
-            config.log_format,
-            max_length=config.log_max_line_length,
-            datefmt=config.log_date_format
-        )
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+    # Always ensure root logger has proper handlers configured
+    _ensure_root_logger_configured(config, log_file)
 
-        # File handler (optional)
-        if log_file:
-            # Ensure log directory exists
-            log_dir = os.path.dirname(log_file)
-            if log_dir and not os.path.exists(log_dir):
-                try:
-                    Path(log_dir).mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    # If directory creation fails, skip file logging
-                    pass
-            else:
-                try:
-                    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-                    file_handler.setLevel(level)
-                    file_handler.setFormatter(formatter)
-                    logger.addHandler(file_handler)
-                except Exception:
-                    # If file logging fails, continue with console only
-                    pass
+    # Set logger level - logs will propagate to root logger
+    logger.setLevel(level)
 
     return logger
+
+
+def _ensure_root_logger_configured(config: LoggingConfig, log_file: str | None) -> None:
+    """Ensure root logger has the proper handlers configured."""
+    root_logger = logging.getLogger()
+
+    # If root logger already has handlers, assume it's properly configured
+    if root_logger.handlers:
+        return
+
+    # Configure root logger with handlers
+    level = getattr(logging, config.log_level.upper(), logging.INFO)
+    root_logger.setLevel(level)
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(level)
+    formatter = MaxLengthFormatter(
+        config.log_format,
+        max_length=config.log_max_line_length,
+        datefmt=config.log_date_format
+    )
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    # File handler (optional)
+    if log_file:
+        # Ensure log directory exists
+        log_dir = os.path.dirname(log_file)
+        if log_dir and not os.path.exists(log_dir):
+            try:
+                Path(log_dir).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                # If directory creation fails, skip file logging
+                pass
+        else:
+            try:
+                file_handler = logging.FileHandler(log_file, encoding='utf-8')
+                file_handler.setLevel(level)
+                file_handler.setFormatter(formatter)
+                root_logger.addHandler(file_handler)
+            except Exception:
+                # If file logging fails, continue with console only
+                pass
 
 
 def reconfigure_logging(log_config: LoggingConfig) -> None:
@@ -274,31 +291,20 @@ def reconfigure_logging(log_config: LoggingConfig) -> None:
         # In test environment, skip logging reconfiguration to avoid breaking pytest caplog
         return
 
-    # In production, update root logger level
+    # Ensure root logger is properly configured with new settings
     root_logger = logging.getLogger()
-    root_logger.setLevel(new_level)
 
-    # Update all existing handlers on root logger
-    for handler in root_logger.handlers:
-        handler.setLevel(new_level)
+    # Remove existing handlers and reconfigure
+    for handler in root_logger.handlers[:]:  # Create a copy of the list to avoid modification issues
+        root_logger.removeHandler(handler)
 
-        # If it's a formatter with max_length, update the formatter
-        if hasattr(handler, 'formatter') and isinstance(handler.formatter, MaxLengthFormatter):
-            new_formatter = MaxLengthFormatter(
-                log_config.log_format,
-                max_length=log_config.log_max_line_length,
-                datefmt=log_config.log_date_format
-            )
-            handler.setFormatter(new_formatter)
+    # Reconfigure root logger with new settings
+    _ensure_root_logger_configured(log_config, log_config.log_file)
 
-    # Update specific loggers that might have been created
-    # This covers loggers created by get_logger() calls
+    # Update all existing logger levels (they propagate to root logger for formatting)
     for name in logging.root.manager.loggerDict:
         logger_obj = logging.getLogger(name)
-        if logger_obj.handlers:  # Only update loggers with handlers
-            logger_obj.setLevel(new_level)
-            for handler in logger_obj.handlers:
-                handler.setLevel(new_level)
+        logger_obj.setLevel(new_level)
 
     # Log the reconfiguration (using root logger to avoid import issues)
     logging.info(f"Logging reconfigured with level: {log_config.log_level}")

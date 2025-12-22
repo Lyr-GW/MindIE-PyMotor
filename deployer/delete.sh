@@ -19,9 +19,8 @@ fi
 kubectl delete cm boot-bash-script -n "$NAME_SPACE";
 kubectl delete cm hccl-tools-script -n "$NAME_SPACE";
 kubectl delete cm update-config-script -n "$NAME_SPACE";
-kubectl delete cm probe-script -n "$NAME_SPACE";
-kubectl delete cm probe-status-check-script -n "$NAME_SPACE";
-kubectl delete cm get-mgmt-port-script -n "$NAME_SPACE";
+kubectl delete cm probe-shell-script -n "$NAME_SPACE";
+kubectl delete cm probe-python-script -n "$NAME_SPACE";
 kubectl delete cm user-config -n "$NAME_SPACE";
 
 YAML_DIR=./output/deployment

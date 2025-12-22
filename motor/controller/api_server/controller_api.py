@@ -11,7 +11,7 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 
-from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
+from motor.common.resources import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
 from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.config.controller import ControllerConfig
@@ -262,21 +262,6 @@ class ControllerAPI:
         """
         status = {}
 
-        # Check module health
-        unhealthy_modules = []
-        for name, module in self.modules.items():
-            if not hasattr(module, 'is_alive'):
-                continue
-            alive = module.is_alive()
-            if not alive:
-                unhealthy_modules.append(name)
-
-        if unhealthy_modules:
-            status["overall_healthy"] = False
-            logger.error("Unhealthy modules: %s", unhealthy_modules)
-        else:
-            status["overall_healthy"] = True
-
         # Set deploy mode and role
         with self.config_lock:
             enable_master_standby = self.enable_master_standby
@@ -286,6 +271,26 @@ class ControllerAPI:
             status["role"] = "master" if StandbyManager().is_master() else "standby"
         else:
             status["deploy_mode"] = "standalone"
+
+        # Check module health
+        # In master_standby mode, standby node doesn't run modules, so don't check health
+        if enable_master_standby and not StandbyManager().is_master():
+            # Standby node: modules are not running, but this is expected
+            status["overall_healthy"] = True
+        else:
+            unhealthy_modules = []
+            for name, module in self.modules.items():
+                if not hasattr(module, 'is_alive'):
+                    continue
+                alive = module.is_alive()
+                if not alive:
+                    unhealthy_modules.append(name)
+
+            if unhealthy_modules:
+                status["overall_healthy"] = False
+                logger.error("Unhealthy modules: %s", unhealthy_modules)
+            else:
+                status["overall_healthy"] = True
 
         return status
 

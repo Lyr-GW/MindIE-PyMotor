@@ -11,9 +11,7 @@ from typing import Any
 from motor.common.utils.logger import get_logger
 from motor.common.utils.data_builder import build_ins_ranktable, build_endpoints
 from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.common.resources.http_msg_spec import RegisterMsg, StartCmdMsg, ReregisterMsg
-from motor.common.resources.instance import Instance
-from motor.common.resources.endpoint import Endpoint
+from motor.common.resources import RegisterMsg, StartCmdMsg, ReregisterMsg, Instance, Endpoint
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import InstanceManager
 from motor.config.controller import ControllerConfig
@@ -139,9 +137,17 @@ class InstanceAssembler(ThreadSafeSingleton):
     def stop(self) -> None:
         self.stop_event.set()
         # Only join threads that have been started
-        if self.assemble_instance_thread.is_alive():
+        if (
+            hasattr(self, 'assemble_instance_thread')
+            and self.assemble_instance_thread is not None
+            and self.assemble_instance_thread.is_alive()
+        ):
             self.assemble_instance_thread.join()
-        if self.start_command_thread.is_alive():
+        if (
+            hasattr(self, 'start_command_thread')
+            and self.start_command_thread is not None
+            and self.start_command_thread.is_alive()
+        ):
             self.start_command_thread.join()
 
         # Close ETCD client

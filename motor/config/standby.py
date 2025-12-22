@@ -14,7 +14,7 @@ class StandbyConfig:
     master_standby_check_interval: int = 5
 
     # master lock lease TTL in seconds
-    master_lock_ttl: int = 60
+    master_lock_ttl: int = 10
 
     # master lock retry interval in seconds
     master_lock_retry_interval: int = 5
@@ -23,4 +23,6 @@ class StandbyConfig:
     master_lock_max_failures: int = 3
 
     # master lock key path in ETCD
-    master_lock_key: str = "/controller/master_lock"
+    # Note: controller and coordinator will automatically 
+    # add "/controller/" and "/coordinator/" prefixes respectively
+    master_lock_key: str = "/master_lock"

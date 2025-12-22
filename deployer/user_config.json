@@ -12,12 +12,6 @@
     "hardware_type": "800I_A3",
     "env_path": "./conf/env.json",
     "weight_mount_path": "/mnt/weight/",
-    "coordinator_backup_cfg": {
-      "function_enable": false
-    },
-    "controller_backup_cfg": {
-      "function_enable": false
-    },
     "tls_config": {
       "tls_enable": true,
       "kmc_ksf_master": "./security/master/tools/pmt/master/ksfa",
@@ -58,14 +52,32 @@
       }
     }
   },
-  "motor_controller_config": {},
-  "motor_nodemanger_config": {},
-  "motor_coordinator_config": {},
+  "motor_controller_config": {
+    "standby_config": {
+      "enable_master_standby": false
+    },
+    "fault_tolerance_config": {
+      "enable_fault_tolerance": true,
+      "enable_scale_p2d": true,
+      "enable_lingqu_network_recover": true
+    }
+  },
+  "motor_coordinator_config": {
+    "standby_config": {
+      "enable_master_standby": false
+    },
+    "request_limit": {
+      "single_node_max_requests": 4096,
+      "max_requests": 10000
+    }   
+  },
+  "motor_nodemanger_config": {
+  },
   "motor_engine_prefill_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "qwen3-30B",
-      "model_path": "/mnt/weight/qwen3_14B",
+      "model_name": "qwen3-8B",
+      "model_path": "/mnt/weight/qwen3_8B",
       "npu_mem_utils": 0.9,
       "prefill_parallel_config": {
         "dp_size": 2,
@@ -103,8 +115,8 @@
   "motor_engine_decode_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "qwen3-30B",
-      "model_path": "/mnt/weight/qwen3_14B",
+      "model_name": "qwen3-8B",
+      "model_path": "/mnt/weight/qwen3_8B",
       "npu_mem_utils": 0.9,
       "decode_parallel_config": {
         "dp_size": 2,

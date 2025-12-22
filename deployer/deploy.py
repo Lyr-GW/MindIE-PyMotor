@@ -42,6 +42,10 @@ NAME_FLAG = " -n "
 g_controller_service = "mindie-ms-controller-service"
 g_coordinator_service = "mindie-ms-coordinator-service"
 BOOT_SHELL_PATH = "./boot_helper/boot.sh"
+STANDBY_CONFIG = "standby_config"
+MOTOR_CONTROLLER_CONFIG = "motor_controller_config"
+MOTOR_COORDINATOR_CONFIG = "motor_coordinator_config"
+ENABLE_MASTER_STANDBY = "enable_master_standby"
 
 
 def read_json(file_path):
@@ -144,24 +148,26 @@ def generate_unique_id():
     return f"{timestamp}{random_part}"
 
 
-def modify_controller_or_coordinator_yaml(data, deploy_config):
+def modify_controller_or_coordinator_yaml(data, user_config):
     """Modify controller or coordinator YAML configuration"""
+    deploy_config = user_config["motor_deploy_config"]
+
     # Modify deployment data
     deployment_data = data[0] if isinstance(data, list) else data
     deployment_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
 
     container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
     container["image"] = deploy_config["image_name"]
-    
+
     role = CONTROLLER if CONTROLLER in deployment_data[METADATA][NAME] else COORDINATOR
     if ENV not in container:
         container[ENV] = []
-    
+
     container[ENV].append({
         NAME: "ROLE",
         VALUE: role
     })
-    
+
     # Modify service data
     service_data = data[1]
     service_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
@@ -177,16 +183,20 @@ def modify_controller_or_coordinator_yaml(data, deploy_config):
         container[ENV].extend([
             {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service}
         ])
-    modify_coordinator_or_controller_replicas(data[0], deploy_config, role)
+    modify_coordinator_or_controller_replicas(data[0], user_config, role)
 
 
-def modify_coordinator_or_controller_replicas(data, deploy_config, role):
-    #  Modify replicas bases on backup_cfg
+def modify_coordinator_or_controller_replicas(data, user_config, role):
+    #  Modify replicas based on standby_config from motor_controller_config and motor_coordinator_config
     if role == CONTROLLER:
-        if "controller_backup_cfg" in deploy_config and deploy_config["controller_backup_cfg"]["function_enable"]:
+        if MOTOR_CONTROLLER_CONFIG in user_config and \
+           STANDBY_CONFIG in user_config[MOTOR_CONTROLLER_CONFIG] and \
+           user_config[MOTOR_CONTROLLER_CONFIG][STANDBY_CONFIG][ENABLE_MASTER_STANDBY]:
             data[SPEC][REPLICAS] = 2
     elif role == COORDINATOR:
-        if "coordinator_backup_cfg" in deploy_config and deploy_config["coordinator_backup_cfg"]["function_enable"]:
+        if MOTOR_COORDINATOR_CONFIG in user_config and \
+           STANDBY_CONFIG in user_config[MOTOR_COORDINATOR_CONFIG] and \
+           user_config[MOTOR_COORDINATOR_CONFIG][STANDBY_CONFIG][ENABLE_MASTER_STANDBY]:
             data[SPEC][REPLICAS] = 2
 
 
@@ -343,12 +353,9 @@ def exec_all_kubectl_multi(deploy_config, out_path, user_config_path):
     safe_exec_cmd("kubectl create configmap hccl-tools-script --from-file=./boot_helper/hccl_tools.py"
                 + NAME_FLAG + job_id)
     safe_exec_cmd("kubectl create configmap update-config-script "
-                "--from-file=./boot_helper/update_config_from_user_config.py" + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap probe-script --from-file=./probe/probe.sh" + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap probe-status-check-script --from-file=./probe/probe_status_check.py"
-                + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap get-mgmt-port-script --from-file=./probe/get_mgmt_port.py"
-                + NAME_FLAG + job_id)
+                  "--from-file=./boot_helper/update_config_from_user_config.py" + NAME_FLAG + job_id)
+    safe_exec_cmd("kubectl create configmap probe-shell-script --from-file=./probe/probe.sh" + NAME_FLAG + job_id)
+    safe_exec_cmd("kubectl create configmap probe-python-script --from-file=./probe/probe.py" + NAME_FLAG + job_id)
     safe_exec_cmd(f"kubectl create configmap user-config --from-file=user_config.json={user_config_path}"
                 + NAME_FLAG + job_id)
     
@@ -421,8 +428,8 @@ def main():
 
     # Generate YAML files - pass user_config instead of user_config_path
     init_service_domain_name(controller_input_yaml, coordinator_input_yaml, deploy_config)
-    generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, deploy_config)
-    generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, deploy_config)
+    generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, user_config)
+    generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, user_config)
     generate_yaml_server(server_input_yaml, server_output_yaml, deploy_config)
     exec_all_kubectl_multi(deploy_config, output_root_path, user_config_path)
 

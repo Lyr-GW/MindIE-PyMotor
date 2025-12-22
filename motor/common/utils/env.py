@@ -34,4 +34,13 @@ class Env:
     def pod_ip(self):
         return os.getenv("POD_IP", None)
 
+    @property
+    def coordinator_service(self):
+        return os.getenv("COORDINATOR_SERVICE", None)
+
+    @property
+    def controller_service(self):
+        return os.getenv("CONTROLLER_SERVICE", None)
+
+
 Env = Env()

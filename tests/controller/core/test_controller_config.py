@@ -5,12 +5,7 @@ import pytest
 import tempfile
 from unittest.mock import patch, MagicMock
 
-from motor.config.controller import (
-    ControllerConfig,
-    find_config_file,
-    set_config_path,
-    get_config_path
-)
+from motor.config.controller import ControllerConfig
 
 
 @pytest.fixture
@@ -35,35 +30,40 @@ def temp_dir():
         yield temp_dir
 
 
-@pytest.fixture
-def reset_config_path():
-    """Fixture to reset config path override after each test."""
-    yield
-    # Reset after test
-    import motor.config.controller as config_module
-    config_module.CONFIG_PATH_OVERRIDE = None
 
 
 def test_default_config_initialization():
     """Test default configuration initialization"""
-    config = ControllerConfig()
+    # Ensure no environment variables interfere with default values
+    original_pod_ip = os.environ.get('POD_IP')
+    if 'POD_IP' in os.environ:
+        del os.environ['POD_IP']
 
-    # Verify default values
-    assert config.instance_config.instance_assemble_timeout == 600
-    assert config.instance_config.instance_assembler_check_internal == 1
-    assert config.instance_config.instance_assembler_cmd_send_internal == 1
-    assert config.instance_config.send_cmd_retry_times == 3
-    assert config.instance_config.instance_manager_check_internal == 1
-    assert config.instance_config.instance_heartbeat_timeout == 5
-    assert config.instance_config.instance_expired_timeout == 300
-    assert config.api_config.controller_api_host == '127.0.0.1'
-    assert config.api_config.controller_api_port == 8000
-    assert config.event_config.event_consumer_sleep_interval == 1.0
-    assert config.event_config.coordinator_heartbeat_interval == 5.0
-    assert config.tls_config.enable_tls is False
-    assert config.tls_config.cert_path == 'security/controller/cert/server.crt'
-    assert config.tls_config.key_path == 'security/controller/keys/server.key'
-    assert config.fault_tolerance_config.enable_fault_tolerance is True
+    try:
+        config = ControllerConfig()
+
+        # Verify default values
+        assert config.instance_config.instance_assemble_timeout == 600
+        assert config.instance_config.instance_assembler_check_internal == 1
+        assert config.instance_config.instance_assembler_cmd_send_internal == 1
+        assert config.instance_config.send_cmd_retry_times == 3
+        assert config.instance_config.instance_manager_check_internal == 1
+        assert config.instance_config.instance_heartbeat_timeout == 5
+        assert config.instance_config.instance_expired_timeout == 300
+        assert config.api_config.controller_api_host == '127.0.0.1'
+        assert config.api_config.controller_api_port == 1026
+        assert config.event_config.event_consumer_sleep_interval == 1.0
+        assert config.event_config.coordinator_heartbeat_interval == 5.0
+        assert config.tls_config.enable_tls is False
+        assert config.tls_config.cert_path == 'security/controller/cert/server.crt'
+        assert config.tls_config.key_path == 'security/controller/keys/server.key'
+        assert config.fault_tolerance_config.enable_fault_tolerance is True
+    finally:
+        # Restore original environment variable
+        if original_pod_ip is not None:
+            os.environ['POD_IP'] = original_pod_ip
+        elif 'POD_IP' in os.environ:
+            del os.environ['POD_IP']
     assert config.fault_tolerance_config.strategy_center_check_internal == 1
 
 
@@ -149,14 +149,26 @@ def test_from_json_success(temp_json_file):
 
 def test_from_json_file_not_exists(temp_dir):
     """Test loading configuration from non-existent JSON file (using default values)"""
-    non_existent_path = os.path.join(temp_dir, "non_existent.json")
-    config = ControllerConfig.from_json(non_existent_path)
+    # Ensure no environment variables interfere with default values
+    original_pod_ip = os.environ.get('POD_IP')
+    if 'POD_IP' in os.environ:
+        del os.environ['POD_IP']
 
-    # Should use default values
-    assert config.api_config.controller_api_host == '127.0.0.1'
-    assert config.api_config.controller_api_port == 8000
-    assert config.config_path == non_existent_path
-    assert config.last_modified is None
+    try:
+        non_existent_path = os.path.join(temp_dir, "non_existent.json")
+        config = ControllerConfig.from_json(non_existent_path)
+
+        # Should use default values
+        assert config.api_config.controller_api_host == '127.0.0.1'
+        assert config.api_config.controller_api_port == 1026
+        assert config.config_path == non_existent_path
+        assert config.last_modified is None
+    finally:
+        # Restore original environment variable
+        if original_pod_ip is not None:
+            os.environ['POD_IP'] = original_pod_ip
+        elif 'POD_IP' in os.environ:
+            del os.environ['POD_IP']
 
 
 def test_from_json_invalid_json(temp_json_file):
@@ -164,8 +176,10 @@ def test_from_json_invalid_json(temp_json_file):
     with open(temp_json_file, 'w') as f:
         f.write("invalid json content")
 
-    with pytest.raises(ValueError, match="Configuration file.*format error"):
-        ControllerConfig.from_json(temp_json_file)
+    # Should use default configuration instead of raising exception
+    config = ControllerConfig.from_json(temp_json_file)
+    assert config is not None
+    assert config.api_config.controller_api_port == 1026  # default value
 
 
 def test_reload_config_file_not_exists(temp_dir):
@@ -229,7 +243,9 @@ def test_reload_config_invalid_json(temp_json_file):
     current_time = time.time()
     os.utime(temp_json_file, (current_time, current_time))
 
-    assert config.reload() is False
+    # Should succeed and use default configuration
+    assert config.reload() is True
+    assert config.api_config.controller_api_port == 1026  # default value
 
 
 def test_to_dict():
@@ -317,39 +333,6 @@ def test_get_config_summary_no_path():
     assert "Not set" in summary
 
 
-def test_find_config_file_scenarios():
-    """Test various scenarios for finding configuration file"""
-    os_path_exists, os_path_dirname = 'os.path.exists', 'os.path.dirname'
-    # Test when package config exists
-    with patch(os_path_exists, return_value=True) as mock_exists:
-        with patch(os_path_dirname, return_value="/mock/package/dir"):
-            result = find_config_file()
-            assert result == "/mock/package/dir/controller_config.json"
-
-    # Test fallback to project root when package config doesn't exist
-    def mock_exists_fallback(path):
-        return "motor/config" not in path and "controller_config.json" in path
-
-    with patch(os_path_exists, side_effect=mock_exists_fallback):
-        with patch(os_path_dirname) as mock_dirname:
-            def mock_dirname_side_effect(path):
-                if "motor/config" in path:
-                    return "/mock/project/root/motor/config"
-                elif path == "/mock/project/root/motor/config":
-                    return "/mock/project/root/motor"
-                elif path == "/mock/project/root/motor":
-                    return "/mock/project/root"
-                return "/mock/project/root"
-
-            mock_dirname.side_effect = mock_dirname_side_effect
-            result = find_config_file()
-            assert "controller_config.json" in result
-
-    # Test when no config file is found
-    with patch(os_path_exists, return_value=False):
-        with patch(os_path_dirname, return_value="/mock/package/dir"):
-            result = find_config_file()
-            assert result == "/mock/package/dir/controller_config.json"
 
 
 def test_config_boundary_values():
@@ -378,36 +361,48 @@ def test_config_boundary_values():
 
 def test_config_partial_json_loading():
     """Test partial JSON configuration loading with multiple config groups"""
-    partial_config = {
-        "api_config": {
-            "controller_api_port": 9000
-        },
-        "event_config": {
-            "event_consumer_sleep_interval": 2.5
-        },
-        "instance_config": {
-            "instance_assemble_timeout": 300
-        }
-        # Other fields use default values
-    }
-
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        json.dump(partial_config, f)
-        temp_path = f.name
+    # Ensure no environment variables interfere with default values
+    original_pod_ip = os.environ.get('POD_IP')
+    if 'POD_IP' in os.environ:
+        del os.environ['POD_IP']
 
     try:
-        config = ControllerConfig.from_json(temp_path)
-        assert config.api_config.controller_api_port == 9000
-        assert config.event_config.event_consumer_sleep_interval == 2.5
-        assert config.instance_config.instance_assemble_timeout == 300
-        # Other fields should be default values
-        assert config.api_config.controller_api_host == '127.0.0.1'
-        assert config.event_config.coordinator_heartbeat_interval == 5.0
-        assert config.tls_config.enable_tls is False
-        assert config.tls_config.cert_path == 'security/controller/cert/server.crt'
-        assert config.tls_config.key_path == 'security/controller/keys/server.key'
+        partial_config = {
+            "api_config": {
+                "controller_api_port": 9000
+            },
+            "event_config": {
+                "event_consumer_sleep_interval": 2.5
+            },
+            "instance_config": {
+                "instance_assemble_timeout": 300
+            }
+            # Other fields use default values
+        }
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump(partial_config, f)
+            temp_path = f.name
+
+        try:
+            config = ControllerConfig.from_json(temp_path)
+            assert config.api_config.controller_api_port == 9000
+            assert config.event_config.event_consumer_sleep_interval == 2.5
+            assert config.instance_config.instance_assemble_timeout == 300
+            # Other fields should be default values
+            assert config.api_config.controller_api_host == '127.0.0.1'
+            assert config.event_config.coordinator_heartbeat_interval == 5.0
+            assert config.tls_config.enable_tls is False
+            assert config.tls_config.cert_path == 'security/controller/cert/server.crt'
+            assert config.tls_config.key_path == 'security/controller/keys/server.key'
+        finally:
+            os.unlink(temp_path)
     finally:
-        os.unlink(temp_path)
+        # Restore original environment variable
+        if original_pod_ip is not None:
+            os.environ['POD_IP'] = original_pod_ip
+        elif 'POD_IP' in os.environ:
+            del os.environ['POD_IP']
 
 
 def test_config_partial_fields_in_group():
@@ -429,12 +424,12 @@ def test_config_partial_fields_in_group():
         assert config.standby_config.enable_master_standby is False
         # Other fields should keep default values
         assert config.standby_config.master_standby_check_interval == 5
-        assert config.standby_config.master_lock_ttl == 60
+        assert config.standby_config.master_lock_ttl == 10
         assert config.standby_config.master_lock_retry_interval == 5
         assert config.standby_config.master_lock_max_failures == 3
         assert config.standby_config.master_lock_key == "/controller/master_lock"
         # Other config groups should have default values
-        assert config.api_config.controller_api_port == 8000
+        assert config.api_config.controller_api_port == 1026
         assert config.tls_config.enable_tls is False
     finally:
         os.unlink(temp_path)
@@ -462,7 +457,7 @@ def test_config_single_group_partial():
         # Non-updated field in tls_config should keep default
         assert config.tls_config.key_path == 'security/controller/keys/server.key'
         # Other config groups should have default values
-        assert config.api_config.controller_api_port == 8000
+        assert config.api_config.controller_api_port == 1026
         assert config.instance_config.instance_assemble_timeout == 600
     finally:
         os.unlink(temp_path)
@@ -479,7 +474,7 @@ def test_config_empty_json():
     try:
         config = ControllerConfig.from_json(temp_path)
         # All values should be defaults
-        assert config.api_config.controller_api_port == 8000
+        assert config.api_config.controller_api_port == 1026
         assert config.tls_config.enable_tls is False
         assert config.instance_config.instance_assemble_timeout == 600
         assert config.standby_config.enable_master_standby is False
@@ -655,62 +650,10 @@ def test_dynamic_config_reload_with_watcher(temp_json_file):
         watcher.stop()
 
 
-def test_config_path_override_operations(temp_dir, reset_config_path):
-    """Test various config path override operations"""
-    test_path = os.path.join(temp_dir, "config.json")
-    override_path = os.path.join(temp_dir, "override.json")
-
-    # Test setting path override
-    set_config_path(test_path)
-    assert get_config_path() == test_path
-
-    # Test find_config_file with override
-    set_config_path(override_path)
-    assert find_config_file() == override_path
-
-    # Test find_config_file without override
-    import motor.config.controller as config_module
-    config_module.CONFIG_PATH_OVERRIDE = None
-    result = find_config_file()
-    assert result is not None
-    assert "controller_config.json" in result
-
-    # Test multiple set operations
-    set_config_path(test_path)
-    assert get_config_path() == test_path
-
-    set_config_path(override_path)
-    assert get_config_path() == override_path
-
-    # Test logging
-    with patch('motor.config.controller.logger') as mock_logger:
-        set_config_path(test_path)
-        mock_logger.info.assert_called_with(f"Configuration path override set to: {test_path}")
-
-    # Test priority over auto-detection
-    set_config_path(override_path)
-    assert find_config_file() == override_path
 
 
-def test_config_path_override_persistence(temp_dir, reset_config_path):
-    """Test that config path override persists across calls"""
-    test_path = os.path.join(temp_dir, "persistent.json")
-    set_config_path(test_path)
-
-    # Multiple calls should return the same override
-    assert get_config_path() == test_path
-    assert find_config_file() == test_path
-    assert get_config_path() == test_path
 
 
-def test_find_config_file_fallback_behavior(reset_config_path):
-    """Test find_config_file fallback behavior without override"""
-    result = find_config_file()
-
-    # Should return a valid path (even if file doesn't exist)
-    assert result is not None
-    assert isinstance(result, str)
-    assert len(result) > 0
 
 
 def test_tls_config_default_values():

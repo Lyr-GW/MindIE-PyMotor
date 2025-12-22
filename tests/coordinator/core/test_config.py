@@ -1,17 +1,47 @@
-import pytest
-from pytest import MonkeyPatch
-import json
 import os
-from unittest.mock import patch, mock_open
+import json
+import pytest
+import tempfile
+
 from motor.config.coordinator import CoordinatorConfig
-from motor.common.utils.singleton import ThreadSafeSingleton
-import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-# Complete configuration template
+@pytest.fixture
+def temp_json_file():
+    """Fixture for temporary JSON file that gets cleaned up."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+        temp_path = f.name
+
+    yield temp_path
+
+    # Cleanup
+    try:
+        os.unlink(temp_path)
+    except FileNotFoundError:
+        pass
+
+
+@pytest.fixture
+def sample_config_data():
+    """Sample configuration data for testing"""
+    return {
+        "logging_config": {
+            "log_level": "DEBUG",
+            "log_max_line_length": 4096
+        },
+        "exception_config": {
+            "max_retry": 10
+        },
+        "scheduler_config": {
+            "deploy_mode": "single_node"
+        },
+        "api_key_config": {
+            "enable_api_key": True
+        }
+    }
+
+
+# Complete configuration template for testing
 COMPLETE_CONFIG = {
     "logging_config": {
         "log_level": "DEBUG",
@@ -26,12 +56,12 @@ COMPLETE_CONFIG = {
     "exception_config": {
         "max_retry": 5,
         "retry_delay": 0.2,
-        "first_token_timeout": 60,
-        "infer_timeout": 300,
+        "first_token_timeout": 600,
+        "infer_timeout": 600,
     },
     "tls_config": {
-        "controller_server_tls_enable": True,
-        "controller_server_tls_items": {
+        "request_server_tls_enable": True,
+        "request_server_tls_items": {
             "ca_cert": "ca.pem",
             "tls_cert": "server.pem",
             "tls_key": "server.key",
@@ -49,499 +79,345 @@ COMPLETE_CONFIG = {
         "dummy_request_interval": 5.0,
         "max_consecutive_failures": 3,
         "dummy_request_timeout": 10.0,
-        "controller_api_dns": "mindie-ms-controller-service.mindie.svc.cluster.local",
-        "controller_api_port": 57675
+        "controller_api_dns": "test.mindie.com",
+        "controller_api_port": 8080,
+        "dummy_request_endpoint": "/liveness",
+        "dummy_request_body": {
+            "test": "data"
+        },
+        "alarm_endpoint": "/alarm",
+        "alarm_timeout": 5.0,
+        "terminate_instance_endpoint": "/terminate",
+        "thread_join_timeout": 5.0,
+        "error_retry_interval": 1.0
+    },
+    "timeout_config": {
+        "request_timeout": 30,
+        "connection_timeout": 10,
+        "read_timeout": 15,
+        "write_timeout": 15,
+        "keep_alive_timeout": 60
+    },
+    "api_key_config": {
+        "enable_api_key": True,
+        "valid_keys": ["key1", "key2"],
+        "header_name": "X-API-Key",
+        "key_prefix": "Bearer ",
+        "skip_paths": ["/liveness", "/metrics"]
+    },
+    "rate_limit_config": {
+        "enable_rate_limit": True,
+        "max_requests": 100,
+        "window_size": 60,
+        "scope": "global",
+        "skip_paths": ["/liveness"],
+        "error_message": "Rate limit exceeded",
+        "error_status_code": 429
+    },
+    "standby_config": {
+        "enable_master_standby": True,
+        "master_standby_check_interval": 5,
+        "master_lock_ttl": 60,
+        "master_lock_retry_interval": 5,
+        "master_lock_max_failures": 3,
+        "master_lock_key": "/master/lock"
+    },
+    "etcd_config": {
+        "etcd_host": "localhost",
+        "etcd_port": 2379,
+        "etcd_timeout": 5,
+        "enable_etcd_persistence": True
     },
     "http_config": {
         "combined_mode": False,
         "coordinator_api_host": "127.0.0.1",
-        "coordinator_api_infer_port": 1025,
-        "coordinator_api_mgmt_port": 1026
-    },
-    "etcd_config": {
-        "etcd_host": "test_etcd",
-        "etcd_port": 2380,
-        "etcd_timeout": 10,
-        "enable_etcd_persistence": True
+        "coordinator_api_infer_port": 1026,
+        "coordinator_api_mgmt_port": 1025
     }
 }
 
-@pytest.fixture
-def reset_singleton():
-    """Reset singleton instance to ensure test isolation"""
 
-    # Remove the CoordinatorConfig class from the _instances dictionary
-    if CoordinatorConfig in ThreadSafeSingleton._instances:
-        del ThreadSafeSingleton._instances[CoordinatorConfig]
-    yield
-    # Clean up after the test
-    if CoordinatorConfig in ThreadSafeSingleton._instances:
-        del ThreadSafeSingleton._instances[CoordinatorConfig]
+def test_default_config_initialization():
+    """Test default configuration initialization"""
+    config = CoordinatorConfig()
 
-# Basic configuration template for reload tests (minimal required config)
-BASIC_RELOAD_CONFIG = {
-    "prometheus_metrics_config": {
-        "reuse_time": 3
-    },
-    "exception_config": {
-        "max_retry": 5,
-        "retry_delay": 0.2,
-        "first_token_timeout": 60,
-        "infer_timeout": 300,
-    },
-    "scheduler_config": {
-        "deploy_mode": "single_node",
-        "scheduler_type": "load_balance"
-    },
-    "health_check_config": {
-        "dummy_request_interval": 5.0,
-        "max_consecutive_failures": 3,
-        "dummy_request_timeout": 10.0,
-        "controller_api_dns": "mindie-ms-controller-service.mindie.svc.cluster.local",
-        "controller_api_port": 57675
+    # Verify default values
+    assert config.logging_config.log_level == "INFO"
+    assert config.logging_config.log_max_line_length == 8192
+    assert config.prometheus_metrics_config.reuse_time == 3
+    assert config.exception_config.max_retry == 5
+    assert config.exception_config.first_token_timeout == 600
+    assert config.scheduler_config.deploy_mode.value == "pd_separate"
+    assert config.scheduler_config.scheduler_type.value == "load_balance"
+    assert config.health_check_config.dummy_request_interval == 5.0
+    assert config.timeout_config.request_timeout == 30
+    assert config.api_key_config.enable_api_key is False
+    assert config.rate_limit_config.enable_rate_limit is False
+    assert config.http_config.coordinator_api_infer_port == 1025
+    assert config.http_config.coordinator_api_mgmt_port == 1026
+
+
+def test_from_json_success(temp_json_file):
+    """Test loading configuration from valid JSON file"""
+    test_config = {
+        "logging_config": {
+            "log_level": "DEBUG",
+            "log_max_line_length": 4096
+        },
+        "exception_config": {
+            "max_retry": 10
+        },
+        "scheduler_config": {
+            "deploy_mode": "single_node"
+        },
+        "api_key_config": {
+            "enable_api_key": True
+        },
+        "rate_limit_config": {
+            "enable_rate_limit": True
+        }
     }
-}
 
-# Full configuration template for reload tests (includes server config)
-FULL_RELOAD_CONFIG = {
-    **BASIC_RELOAD_CONFIG,
-    "server_config": {
-        "combined_mode": False,
-        "combined_host": "0.0.0.0",
-        "combined_port": 9999,
-        "mgmt_host": "0.0.0.0",
-        "mgmt_port": 9998,
-        "inference_host": "0.0.0.0",
-        "inference_port": 9999
+    with open(temp_json_file, 'w') as f:
+        json.dump(test_config, f)
+
+    config = CoordinatorConfig.from_json(temp_json_file)
+    assert config.logging_config.log_level == "DEBUG"
+    assert config.logging_config.log_max_line_length == 4096
+    assert config.exception_config.max_retry == 10
+    assert config.scheduler_config.deploy_mode.value == "single_node"
+    assert config.api_key_config.enable_api_key is True
+    assert config.rate_limit_config.enable_rate_limit is True
+    assert config.config_path == temp_json_file
+
+
+def test_from_json_with_invalid_json(temp_json_file):
+    """Test loading configuration from invalid JSON file"""
+    with open(temp_json_file, 'w') as f:
+        f.write("invalid json content")
+
+    # Should use default configuration instead of raising exception
+    config = CoordinatorConfig.from_json(temp_json_file)
+    assert config is not None
+    assert config.http_config.coordinator_api_infer_port == 1025  # default value
+
+
+def test_from_json_file_not_found():
+    """Test loading configuration from non-existent file"""
+    # Should use default configuration instead of raising exception
+    config = CoordinatorConfig.from_json("/non/existent/file.json")
+    assert config is not None
+    assert config.http_config.coordinator_api_infer_port == 1025  # default value
+
+
+def test_config_validation_success():
+    """Test successful configuration validation"""
+    config = CoordinatorConfig()
+    # Should not raise any exception
+    config.validate_config()
+
+
+@pytest.mark.parametrize("param,value,expected_error", [
+    ("log_max_line_length", -1, "log_max_line_length must be greater than 0"),
+    ("max_retry", -1, "max_retry cannot be negative"),
+    ("retry_delay", -0.1, "retry_delay must be greater than 0"),
+    ("first_token_timeout", -1, "first_token_timeout must be greater than 0"),
+    ("infer_timeout", 0, "infer_timeout must be greater than 0"),
+    ("dummy_request_interval", 0, "dummy_request_interval must be greater than 0"),
+    ("max_consecutive_failures", 0, "max_consecutive_failures must be greater than 0"),
+    ("dummy_request_timeout", -1, "dummy_request_timeout must be greater than 0"),
+    ("controller_api_port", 0, "controller_api_port must be in range 1-65535"),
+    ("controller_api_port", 65536, "controller_api_port must be in range 1-65535"),
+    ("alarm_timeout", 0, "alarm_timeout must be greater than 0"),
+    ("thread_join_timeout", -1, "thread_join_timeout must be greater than 0"),
+    ("error_retry_interval", 0, "error_retry_interval must be greater than 0"),
+    ("request_timeout", -1, "request_timeout must be greater than 0"),
+    ("connection_timeout", 0, "connection_timeout must be greater than 0"),
+    ("read_timeout", -1, "read_timeout must be greater than 0"),
+    ("write_timeout", 0, "write_timeout must be greater than 0"),
+    ("keep_alive_timeout", -1, "keep_alive_timeout must be greater than 0"),
+    ("coordinator_api_infer_port", 0, "coordinator_api_infer_port must be in range 1-65535"),
+    ("coordinator_api_mgmt_port", 65536, "coordinator_api_mgmt_port must be in range 1-65535"),
+    ("max_requests", -1, "max_requests must be greater than 0"),
+    ("window_size", 0, "window_size must be greater than 0"),
+    ("error_status_code", 99, "error_status_code must be in range 100-599"),
+    ("error_status_code", 600, "error_status_code must be in range 100-599"),
+    ("reuse_time", 0, "reuse_time must be greater than 0"),
+    ("master_standby_check_interval", -1, "master_standby_check_interval must be greater than 0"),
+    ("etcd_port", 0, "etcd_port must be in range 1-65535"),
+    ("etcd_timeout", 0, "etcd_timeout must be greater than 0"),
+])
+def test_config_validation_errors(param, value, expected_error):
+    """Test various configuration validation errors"""
+    with pytest.raises(ValueError, match=expected_error):
+        config = CoordinatorConfig()
+        if param in ["log_max_line_length"]:
+            setattr(config.logging_config, param, value)
+        elif param in ["max_retry", "retry_delay", "first_token_timeout", "infer_timeout"]:
+            setattr(config.exception_config, param, value)
+        elif param in ["dummy_request_interval", "max_consecutive_failures", "dummy_request_timeout",
+                      "controller_api_port", "alarm_timeout", "thread_join_timeout", "error_retry_interval"]:
+            setattr(config.health_check_config, param, value)
+        elif param in ["request_timeout", "connection_timeout", "read_timeout", "write_timeout", "keep_alive_timeout"]:
+            setattr(config.timeout_config, param, value)
+        elif param in ["coordinator_api_infer_port", "coordinator_api_mgmt_port"]:
+            setattr(config.http_config, param, value)
+        elif param in ["max_requests", "window_size", "error_status_code"]:
+            setattr(config.rate_limit_config, param, value)
+        elif param in ["reuse_time"]:
+            setattr(config.prometheus_metrics_config, param, value)
+        elif param in ["master_standby_check_interval"]:
+            setattr(config.standby_config, param, value)
+        elif param in ["etcd_port", "etcd_timeout"]:
+            setattr(config.etcd_config, param, value)
+        config.validate_config()
+
+
+def test_config_validation_multiple_errors():
+    """Test multiple configuration errors"""
+    with pytest.raises(ValueError) as exc_info:
+        config = CoordinatorConfig()
+        config.exception_config.max_retry = -1
+        config.health_check_config.controller_api_port = 0
+        config.rate_limit_config.max_requests = -1
+        config.validate_config()
+    error_msg = str(exc_info.value)
+    assert "max_retry cannot be negative" in error_msg
+    assert "controller_api_port must be in range 1-65535" in error_msg
+    assert "max_requests must be greater than 0" in error_msg
+
+
+def test_to_dict():
+    """Test configuration serialization to dict"""
+    config = CoordinatorConfig()
+    config_dict = config.to_dict()
+
+    # Check that all config sections are present
+    expected_keys = [
+        'logging_config', 'prometheus_metrics_config', 'exception_config',
+        'scheduler_config', 'tls_config', 'health_check_config', 'timeout_config',
+        'api_key_config', 'rate_limit_config', 'standby_config', 'etcd_config',
+        'http_config', 'aigw_model'
+    ]
+
+    for key in expected_keys:
+        assert key in config_dict
+
+    # Check that internal fields are not present
+    assert 'config_path' not in config_dict
+    assert 'last_modified' not in config_dict
+
+    # Check enum serialization
+    assert config_dict['scheduler_config']['deploy_mode'] == 'pd_separate'
+    assert config_dict['scheduler_config']['scheduler_type'] == 'load_balance'
+
+
+def test_save_to_json(temp_json_file):
+    """Test saving configuration to JSON file"""
+    config = CoordinatorConfig()
+    config.logging_config.log_level = "DEBUG"
+    config.exception_config.max_retry = 10
+
+    success = config.save_to_json(temp_json_file)
+    assert success is True
+
+    # Verify saved content
+    with open(temp_json_file, 'r') as f:
+        saved_data = json.load(f)
+
+    assert saved_data['logging_config']['log_level'] == 'DEBUG'
+    assert saved_data['exception_config']['max_retry'] == 10
+    assert saved_data['scheduler_config']['deploy_mode'] == 'pd_separate'
+
+
+def test_save_to_json_invalid_path():
+    """Test saving configuration to invalid path"""
+    config = CoordinatorConfig()
+    success = config.save_to_json("/invalid/path/config.json")
+    assert success is False
+
+
+def test_config_summary():
+    """Test configuration summary generation"""
+    config = CoordinatorConfig()
+    summary = config.get_config_summary()
+
+    assert "Coordinator Configuration Summary" in summary
+    assert "├─ Log Level:" in summary
+    assert "└─ Log Max Line Length:" in summary
+    assert "├─ HTTP Pod IP:" in summary
+    assert "├─ Inference Port:" in summary
+    assert "├─ Management Port:" in summary
+    assert "└─ Combined Mode:" in summary
+    assert "├─ Deploy Mode:" in summary
+    assert "└─ Scheduler Type:" in summary
+    assert "├─ API Key Auth:" in summary
+    assert "└─ Rate Limiting:" in summary
+    assert "└─ Master/Standby:" in summary
+    assert "└─ Config Path:" in summary
+
+
+def test_multiple_instances():
+    """Test that multiple instances can be created independently"""
+    config1 = CoordinatorConfig()
+    config2 = CoordinatorConfig()
+    assert config1 is not config2
+
+    # Modify one instance and verify the other is not affected
+    original_value = config1.exception_config.max_retry
+    config1.exception_config.max_retry = 999
+    assert config2.exception_config.max_retry == original_value
+
+
+def test_reload_config(temp_json_file):
+    """Test configuration reload functionality"""
+    # Create initial config
+    initial_config = {
+        "exception_config": {"max_retry": 5}
     }
-}
+    with open(temp_json_file, 'w') as f:
+        json.dump(initial_config, f)
 
-def create_coordinator_with_config(config_data, env_vars=None):
-    """Create CoordinatorConfig instance with mock configuration"""
-    # Set up environment variables first if provided
-    if env_vars:
-        for key, value in env_vars.items():
-            os.environ[key] = str(value)
-    
-    with patch('builtins.open', mock_open(read_data=json.dumps(config_data))):
-        with patch('os.path.exists', return_value=True):
-            return CoordinatorConfig()
+    config = CoordinatorConfig.from_json(temp_json_file)
+    assert config.exception_config.max_retry == 5
 
-def create_coordinator_with_file_not_found():
-    """Create CoordinatorConfig instance when file doesn't exist"""
-    with patch('os.path.exists', return_value=False):
-        return CoordinatorConfig()
+    # Modify config file
+    updated_config = {
+        "exception_config": {"max_retry": 10}
+    }
+    with open(temp_json_file, 'w') as f:
+        json.dump(updated_config, f)
 
-def create_coordinator_with_invalid_config(config_data):
-    """Create CoordinatorConfig instance with invalid configuration, expecting exception"""
-    with patch('builtins.open', mock_open(read_data=json.dumps(config_data))):
-        with patch('os.path.exists', return_value=True):
-            try:
-                coordinator = CoordinatorConfig()
-                return coordinator, None
-            except Exception as e:
-                return None, e
+    # Force update file modification time
+    import os
+    import time
+    current_time = time.time()
+    os.utime(temp_json_file, (current_time, current_time))
 
-class TestCoordinatorConfig:
-    
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_init_success(self):
-        """Test successful initialization"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-        
-        assert coordinator.prometheus_metrics_config.reuse_time == 3
-        assert coordinator.exception_config.max_retry == 5
-        assert coordinator.health_check_config.dummy_request_interval == 5.0
-
-    @pytest.mark.usefixtures("reset_singleton") 
-    def test_init_file_not_found(self):
-        """Test configuration file not found scenario"""
-        # This should raise FileNotFoundError during initialization
-        with pytest.raises(FileNotFoundError) as exc_info:
-            create_coordinator_with_file_not_found()
-        assert "Configuration file not found" in str(exc_info.value)
+    # Reload config
+    success = config.reload()
+    assert success is True
+    assert config.exception_config.max_retry == 10
 
 
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_metrics_config(self):
-        """Test Metrics configuration"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-        
-        assert coordinator.prometheus_metrics_config.reuse_time == 3
+def test_reload_config_file_not_modified(temp_json_file):
+    """Test reload when config file is not modified"""
+    initial_config = {
+        "exception_config": {"max_retry": 5}
+    }
+    with open(temp_json_file, 'w') as f:
+        json.dump(initial_config, f)
 
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_exception_config(self):
-        """Test exception configuration"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-        
-        assert coordinator.exception_config.max_retry == 5
-        assert coordinator.exception_config.first_token_timeout == 60
-        assert coordinator.exception_config.infer_timeout == 300
+    config = CoordinatorConfig.from_json(temp_json_file)
 
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config(self):
-        """Test logging configuration"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-
-        assert coordinator.logging_config.log_level == "DEBUG"
-        assert coordinator.logging_config.log_max_line_length == 4096
-        assert coordinator.logging_config.log_file == "/tmp/test.log"
-        assert coordinator.logging_config.log_format == "%(levelname)s [%(filename)s:%(lineno)d] %(message)s"
-        assert coordinator.logging_config.log_date_format == "%Y-%m-%d %H:%M:%S"
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config_invalid_log_level(self):
-        """Test invalid log level type"""
-        config = {
-            "logging_config": {
-                "log_level": 123  # Invalid type
-            },
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            }
-        }
-
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "log_level must be a string" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config_invalid_max_line_length(self):
-        """Test invalid max line length"""
-        config = {
-            "logging_config": {
-                "log_max_line_length": "invalid"  # Invalid type
-            },
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            }
-        }
-
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "log_max_line_length must be a positive integer" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config_invalid_log_file(self):
-        """Test invalid log file type"""
-        config = {
-            "logging_config": {
-                "log_file": 123  # Invalid type
-            },
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            }
-        }
-
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "log_file must be a string or null" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config_invalid_log_format(self):
-        """Test invalid log format type"""
-        config = {
-            "logging_config": {
-                "log_format": 123  # Invalid type
-            },
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            }
-        }
-
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "log_format must be a string" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config_invalid_date_format(self):
-        """Test invalid date format type"""
-        config = {
-            "logging_config": {
-                "log_date_format": 123  # Invalid type
-            },
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            }
-        }
-
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "log_date_format must be a string" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_logging_config_defaults(self):
-        """Test logging configuration defaults when not specified"""
-        config = {
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            }
-        }
-        coordinator = create_coordinator_with_config(config)
-
-        # Test default values
-        assert coordinator.logging_config.log_level == "INFO"
-        assert coordinator.logging_config.log_max_line_length == 8192
-        assert coordinator.logging_config.log_file is None
-        assert coordinator.logging_config.log_format == '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d]  %(message)s'
-        assert coordinator.logging_config.log_date_format == '%Y-%m-%d %H:%M:%S'
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_health_check_config(self):
-        """Test health check configuration"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-        
-        assert coordinator.health_check_config.dummy_request_interval == 5.0
-        assert coordinator.health_check_config.max_consecutive_failures == 3
-        assert coordinator.health_check_config.dummy_request_timeout == 10.0
-
-    
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_health_check_config_full(self):
-        """Test full health check configuration"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-        
-        assert coordinator.health_check_config.dummy_request_interval == 5.0
-        assert coordinator.health_check_config.max_consecutive_failures == 3
-        assert coordinator.health_check_config.dummy_request_timeout == 10.0
-        assert coordinator.health_check_config.controller_api_dns == "mindie-ms-controller-service.mindie.svc.cluster.local"
-        assert coordinator.health_check_config.controller_api_port == 57675
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_http_config_full(self):
-        """Test full HTTP configuration"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-        
-        assert coordinator.http_config.combined_mode is False
-        assert coordinator.http_config.coordinator_api_host == "127.0.0.1"
-        assert coordinator.http_config.coordinator_api_infer_port == 1025
-        assert coordinator.http_config.coordinator_api_mgmt_port == 1026
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_load_etcd_success(self):
-        """Test successful load etcd"""
-        config = COMPLETE_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-
-        assert coordinator.etcd_config is not None
-        assert coordinator.etcd_config.etcd_host == 'test_etcd'
-        assert coordinator.etcd_config.etcd_port == 2380
-        assert coordinator.etcd_config.etcd_timeout == 10
-        assert coordinator.etcd_config.enable_etcd_persistence is True
+    # Reload without modifying file
+    success = config.reload()
+    assert success is True  # Should return True because no change needed
 
 
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_load_etcd_port_fail(self):
-        config = {
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            },
-            "etcd_config": {
-                "etcd_host": "test_etcd",
-                "etcd_port": 0,
-                "etcd_timeout": 10,
-                "enable_etcd_persistence": True
-            }
-        }
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "Etcd port must be an integer between 1 and 65535" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_load_etcd_filed_type_fail(self):
-        config = {
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            },
-            "etcd_config": {
-                "etcd_host": "test_etcd",
-                "etcd_port": 1,
-                "etcd_timeout": 10,
-                "enable_etcd_persistence": "abc"
-            }
-        }
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-        assert "Etcd config field 'enable_etcd_persistence' must be of type <class 'bool'>" in str(exception)
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_load_etcd_tls_success(self):
-        config = {
-            "tls_config": {
-                "request_server_tls_enable": False,
-                "request_server_tls_items": {
-                    "ca_cert": "./security/request/security/certs/ca.pem",
-                    "tls_cert": "./security/request/security/certs/cert.pem",
-                    "tls_key": "./security/request/security/keys/cert.key.pem",
-                    "tls_passwd": "./security/request/security/pass/key_pwd.txt",
-                    "kmcKsfMaster": "./security/request/tools/pmt/master/ksfa",
-                    "kmcKsfStandby": "./security/request/tools/pmt/standby/ksfb",
-                    "tls_crl": ""
-                },
-                "etcd_client_tls_enable": True,
-                "etcd_client_tls_items": {
-                    "ca_cert": "./test/ca.pem",
-                    "tls_cert": "./test/cert.pem",
-                    "tls_key": "./test/cert.key.pem",
-                    "tls_passwd": "./test/key_pwd.txt",
-                    "kmcKsfMaster": "./test/ksfa",
-                    "kmcKsfStandby": "./test/ksfb",
-                    "tls_crl": "test"
-                }
-            },
-            "scheduler_config": {
-                "deploy_mode": "single_node",
-                "scheduler_type": "load_balance"
-            },
-            "etcd_config": {
-                "etcd_host": "test_etcd",
-                "etcd_port": 1,
-                "etcd_timeout": 10,
-                "enable_etcd_persistence": True
-            }
-        }
-        coordinator = create_coordinator_with_config(config)
-        assert coordinator is not None
-        assert coordinator.request_server_tls.tls_enable is False
-        assert coordinator.etcd_client_tls.tls_enable is True
-        assert coordinator.etcd_client_tls.items["ca_cert"] == "./test/ca.pem"
-        assert coordinator.etcd_client_tls.items["tls_cert"] == "./test/cert.pem"
-        assert coordinator.etcd_client_tls.items["tls_key"] == "./test/cert.key.pem"
-        assert coordinator.etcd_client_tls.items["tls_passwd"] == "./test/key_pwd.txt"
-        assert coordinator.etcd_client_tls.items["kmcKsfMaster"] == "./test/ksfa"
-        assert coordinator.etcd_client_tls.items["kmcKsfStandby"] == "./test/ksfb"
-        assert coordinator.etcd_client_tls.items["tls_crl"] == "test"
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_invalid_deploy_mode(self):
-        """Test invalid deployment mode"""
-        config = COMPLETE_CONFIG.copy()
-        config["scheduler_config"]["deploy_mode"] = "invalid_mode"
-        
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_invalid_scheduler_type(self):
-        """Test invalid scheduler type"""
-        config = COMPLETE_CONFIG.copy()
-        config["scheduler_config"]["scheduler_type"] = "invalid_scheduler"
-        
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_missing_required_fields(self):
-        """Test missing required fields"""
-        config = COMPLETE_CONFIG.copy()
-        config["scheduler_config"] = {
-            "deploy_mode": "single_node",
-            # Missing scheduler_type
-        }
-        
-        coordinator, exception = create_coordinator_with_invalid_config(config)
-        assert coordinator is None
-        assert exception is not None
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_default_values(self):
-        """Test default values"""
-        # Use minimal configuration without http_config to test defaults
-        minimal_config = {
-            "scheduler_config": {
-                "deploy_mode": "single_node", 
-                "scheduler_type": "load_balance",
-            }
-        }
-        
-        coordinator = create_coordinator_with_config(minimal_config)
-        assert coordinator.exception_config.max_retry == 5  # Default from ExceptionConfig
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_reload_success(self):
-        """Test successful configuration reload"""
-        # Use a fresh valid config to avoid any state pollution
-        config = FULL_RELOAD_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-
-        # Store original values
-        original_reuse_time = coordinator.prometheus_metrics_config.reuse_time
-        original_max_retry = coordinator.exception_config.max_retry
-
-        # Create modified config for reload
-        modified_config = config.copy()
-        modified_config["prometheus_metrics_config"]["reuse_time"] = original_reuse_time + 10
-        modified_config["exception_config"]["max_retry"] = original_max_retry + 5
-
-        # Mock file operations for reload
-        with patch('builtins.open', mock_open(read_data=json.dumps(modified_config))):
-            with patch('os.path.exists', return_value=True):
-                result = coordinator.reload()
-
-        assert result is True
-        assert coordinator.prometheus_metrics_config.reuse_time == original_reuse_time + 10
-        assert coordinator.exception_config.max_retry == original_max_retry + 5
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_reload_config_file_not_found(self):
-        """Test reload when configuration file doesn't exist"""
-        # Use a fresh valid config to avoid any state pollution
-        config = BASIC_RELOAD_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-
-        # Set config_file_path to a non-existent path
-        coordinator.config_file_path = "/non/existent/path/config.json"
-
-        result = coordinator.reload()
-        assert result is False
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_reload_invalid_json(self):
-        """Test reload with invalid JSON"""
-        # Use a fresh valid config to avoid any state pollution
-        config = BASIC_RELOAD_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-
-        # Mock invalid JSON
-        with patch('builtins.open', mock_open(read_data="invalid json content")):
-            with patch('os.path.exists', return_value=True):
-                result = coordinator.reload()
-
-        assert result is False
-
-    @pytest.mark.usefixtures("reset_singleton")
-    def test_reload_missing_config_file_path(self):
-        """Test reload when config_file_path is None"""
-        # Use a fresh valid config to avoid any state pollution
-        config = BASIC_RELOAD_CONFIG.copy()
-        coordinator = create_coordinator_with_config(config)
-
-        # Set config_file_path to None
-        coordinator.config_file_path = None
-
-        result = coordinator.reload()
-        assert result is False
+def test_reload_config_file_not_found():
+    """Test reload when config file doesn't exist"""
+    config = CoordinatorConfig()
+    config.config_path = "/non/existent/file.json"
+    success = config.reload()
+    assert success is False

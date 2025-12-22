@@ -5,8 +5,7 @@ from unittest.mock import MagicMock, patch
 from motor.controller.main import (
     parse_arguments, stop_all_modules, signal_handler,
     init_all_modules, start_all_modules, on_config_updated,
-    on_become_master, on_become_standby, get_controller_status,
-    modules
+    on_become_master, on_become_standby, modules
 )
 
 
@@ -397,124 +396,6 @@ def test_on_become_standby(mock_logger):
         on_become_standby()
 
         mock_stop.assert_called_once_with(exclude_modules={"ControllerAPI"})
-
-
-@patch('motor.controller.main.logger')
-def test_get_controller_status_master_standby_healthy(mock_logger):
-    """Test get_controller_status in master_standby mode with healthy modules"""
-    # Create mock config
-    mock_config = MagicMock()
-    mock_config.standby_config.enable_master_standby = True
-
-    # Create mock modules
-    mock_module1 = MagicMock()
-    mock_module1.is_alive.return_value = True
-    mock_module2 = MagicMock()
-    mock_module2.is_alive.return_value = True
-
-    modules_copy = {
-        "Module1": mock_module1,
-        "Module2": mock_module2
-    }
-
-    with patch('motor.controller.main.config', mock_config), \
-         patch('motor.controller.main.modules', modules_copy), \
-         patch('motor.controller.main.StandbyManager') as mock_standby_class:
-
-        mock_standby_instance = MagicMock()
-        mock_standby_instance.is_master.return_value = True
-        mock_standby_class.return_value = mock_standby_instance
-
-        status = get_controller_status()
-
-        assert status["deploy_mode"] == "master_standby"
-        assert status["role"] == "master"
-        assert status["overall_healthy"] is True
-
-
-@patch('motor.controller.main.logger')
-def test_get_controller_status_master_standby_unhealthy(mock_logger):
-    """Test get_controller_status in master_standby mode with unhealthy modules"""
-    # Create mock config
-    mock_config = MagicMock()
-    mock_config.standby_config.enable_master_standby = True
-
-    # Create mock modules
-    mock_module1 = MagicMock()
-    mock_module1.is_alive.return_value = True
-    mock_module2 = MagicMock()
-    mock_module2.is_alive.return_value = False
-
-    modules_copy = {
-        "Module1": mock_module1,
-        "Module2": mock_module2
-    }
-
-    with patch('motor.controller.main.config', mock_config), \
-         patch('motor.controller.main.modules', modules_copy), \
-         patch('motor.controller.main.StandbyManager') as mock_standby_class:
-
-        mock_standby_instance = MagicMock()
-        mock_standby_instance.is_master.return_value = False
-        mock_standby_class.return_value = mock_standby_instance
-
-        status = get_controller_status()
-
-        assert status["deploy_mode"] == "master_standby"
-        assert status["role"] == "standby"
-        assert status["overall_healthy"] is False
-        mock_logger.error.assert_called_with("Unhealthy modules: %s", ["Module2"])
-
-
-def test_get_controller_status_standalone():
-    """Test get_controller_status in standalone mode"""
-    # Create mock config
-    mock_config = MagicMock()
-    mock_config.standby_config.enable_master_standby = False
-
-    # Create mock modules
-    mock_module1 = MagicMock()
-    mock_module1.is_alive.return_value = True
-
-    modules_copy = {
-        "Module1": mock_module1
-    }
-
-    with patch('motor.controller.main.config', mock_config), \
-         patch('motor.controller.main.modules', modules_copy):
-
-        status = get_controller_status()
-
-        assert status["deploy_mode"] == "standalone"
-        assert "role" not in status
-        assert status["overall_healthy"] is True
-
-
-@patch('motor.controller.main.logger')
-def test_get_controller_status_no_is_alive_method(mock_logger):
-    """Test get_controller_status with modules that don't have is_alive method"""
-    # Create mock config
-    mock_config = MagicMock()
-    mock_config.standby_config.enable_master_standby = False
-
-    # Create mock modules
-    mock_module1 = MagicMock()
-    del mock_module1.is_alive  # Remove is_alive method
-    mock_module2 = MagicMock()
-    mock_module2.is_alive.return_value = True
-
-    modules_copy = {
-        "Module1": mock_module1,
-        "Module2": mock_module2
-    }
-
-    with patch('motor.controller.main.config', mock_config), \
-         patch('motor.controller.main.modules', modules_copy):
-
-        status = get_controller_status()
-
-        assert status["deploy_mode"] == "standalone"
-        assert status["overall_healthy"] is True  # Only Module2 is checked
 
 
 @patch('motor.controller.main.logger')

@@ -1,6 +1,7 @@
 import pytest
 from motor.coordinator.scheduler.scheduler import Scheduler, SchedulingPolicyType
 from motor.coordinator.core.instance_manager import InstanceManager
+from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction
 from motor.common.resources.http_msg_spec import EventType
@@ -60,15 +61,18 @@ def mix_instances():
 @pytest.fixture
 def scheduler_setup(prefill_instances, decode_instances, mix_instances):
     """Setup scheduler with instances and endpoints."""
+    config = CoordinatorConfig()
+    instance_manager = InstanceManager(config)
+
     # Clear all existing instances first
-    available_pool, unavailable_pool = InstanceManager().get_all_instances()
+    available_pool, unavailable_pool = instance_manager.get_all_instances()
     all_existing_instances = list(available_pool.values()) + list(unavailable_pool.values())
     if all_existing_instances:
-        InstanceManager().refresh_instances(EventType.DEL, all_existing_instances)
+        instance_manager.refresh_instances(EventType.DEL, all_existing_instances)
 
     # Add endpoints to all instances
     all_instances = prefill_instances + decode_instances + mix_instances
-    InstanceManager().refresh_instances(EventType.DEL, all_instances)
+    instance_manager.refresh_instances(EventType.DEL, all_instances)
     for instance in all_instances:
         endpoints = {}
         for j in range(2):  # 2 endpoints per instance
@@ -82,8 +86,8 @@ def scheduler_setup(prefill_instances, decode_instances, mix_instances):
             )
             endpoints[j] = endpoint
         instance.add_endpoints(f"192.168.1.{instance.id}", endpoints)
-        
-    InstanceManager().refresh_instances(EventType.ADD, all_instances)
+
+    instance_manager.refresh_instances(EventType.ADD, all_instances)
     return all_instances
 
 
@@ -367,9 +371,11 @@ def test_round_robin_mixed_role_selection(scheduler_setup):
 
 def test_round_robin_edge_cases():
     """Test round robin edge cases."""
-    available_pool, unavailable_pool = InstanceManager().get_all_instances()
+    config = CoordinatorConfig()
+    instance_manager = InstanceManager(config)
+    available_pool, unavailable_pool = instance_manager.get_all_instances()
     all_instances = list(available_pool.values()) + list(unavailable_pool.values())
-    InstanceManager().refresh_instances(EventType.DEL, all_instances)
+    instance_manager.refresh_instances(EventType.DEL, all_instances)
 
     empty_scheduler = Scheduler(SchedulingPolicyType.ROUND_ROBIN)
     

@@ -8,7 +8,7 @@ class EtcdConfig:
     """ETCD configuration class"""
 
     # ETCD connection configuration
-    etcd_host: str = 'localhost'
+    etcd_host: str = 'etcd.default.svc.cluster.local'
     etcd_port: int = 2379
     etcd_timeout: int = 5
 

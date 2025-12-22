@@ -27,7 +27,6 @@ from .main import (
     init_all_modules,
     start_all_modules,
     stop_all_modules,
-    get_controller_status,
     on_become_master,
     on_become_standby,
     main

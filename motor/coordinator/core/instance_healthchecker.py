@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
@@ -6,34 +5,39 @@ import time
 from typing import Any, Optional
 import threading
 import requests
+
 from motor.common.utils.logger import get_logger
 from motor.common.resources.instance import Instance
 from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.core.instance_manager import InstanceManager, UpdateInstanceMode
-from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.utils.dummy_request import DummyRequestUtil
+from motor.common.utils.singleton import ThreadSafeSingleton
+
 
 logger = get_logger(__name__)
 
 
 class InstanceHealthChecker(ThreadSafeSingleton):
-    
-    def __init__(self):
+
+    def __init__(self, config: CoordinatorConfig | None = None):
         if hasattr(self, '_initialized'):
             return
 
-        self.config = CoordinatorConfig().health_check_config
-        
+        self._config_lock = threading.RLock()
+        if config is None:
+            config = CoordinatorConfig()
+        self._health_check_config = config.health_check_config
+
         # Monitoring state - record instance IDs to be probed, corresponding endpoints and failure counts
         self._monitored_instances: dict[int, dict[str, Any]] = {}  # instance_id -> monitoring info
         self._consecutive_failures: dict[int, int] = {}  # instance_id -> consecutive failure count
-        
+
         # Use threading.Event for thread-safe shutdown control
         self._shutdown_event = threading.Event()
         self._monitoring_thread: Optional[threading.Thread] = None
         self._lock = threading.RLock()  # Reentrant lock for thread safety
-        
+
         self._dummy_request_util = DummyRequestUtil()
 
         self._initialized = True
@@ -50,14 +54,20 @@ class InstanceHealthChecker(ThreadSafeSingleton):
         
         # Wait for monitoring thread to finish
         if self._monitoring_thread and self._monitoring_thread.is_alive():
-            self._monitoring_thread.join(timeout=self.config.thread_join_timeout)
+            self._monitoring_thread.join(timeout=self._health_check_config.thread_join_timeout)
             if self._monitoring_thread.is_alive():
                 logger.warning("InstanceHealthChecker monitoring thread did not terminate gracefully")
         
         self._dummy_request_util.close()
-        
+
         logger.info("InstanceHealthChecker stopped")
-    
+
+    def update_config(self, config: CoordinatorConfig) -> None:
+        """Update configuration for the instance health checker"""
+        with self._config_lock:
+            self._health_check_config = config.health_check_config
+        logger.info("InstanceHealthChecker configuration updated")
+
     def push_exception_instance(self, instance: Instance, endpoint: Endpoint):
         """
         Receive abnormal instance information pushed by router module
@@ -136,12 +146,16 @@ class InstanceHealthChecker(ThreadSafeSingleton):
                 self._check_monitored_instances()
                 
                 # Wait for the configured interval or until shutdown is requested
-                self._shutdown_event.wait(self.config.dummy_request_interval)
-                
+                with self._config_lock:
+                    dummy_request_interval = self._health_check_config.dummy_request_interval
+                self._shutdown_event.wait(dummy_request_interval)
+
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {e}")
                 # Wait a short time on error, but check shutdown event
-                self._shutdown_event.wait(self.config.error_retry_interval)
+                with self._config_lock:
+                    error_retry_interval = self._health_check_config.error_retry_interval
+                self._shutdown_event.wait(error_retry_interval)
         
         logger.info("InstanceHealthChecker monitoring loop stopped")
     
@@ -190,12 +204,15 @@ class InstanceHealthChecker(ThreadSafeSingleton):
                     self._consecutive_failures[instance_id] = self._consecutive_failures.get(instance_id, 0) + 1
                     failure_count = self._consecutive_failures[instance_id]
                     
+                    with self._config_lock:
+                        max_consecutive_failures = self._health_check_config.max_consecutive_failures
+                        
                     logger.warning(
                         f"Instance {instance_id} dummy request failed "
-                        f"({failure_count}/{self.config.max_consecutive_failures})"
+                        f"({failure_count}/{max_consecutive_failures})"
                     )
-                    
-                    if failure_count >= self.config.max_consecutive_failures:
+
+                    if failure_count >= max_consecutive_failures:
                         # Consecutive failures reached threshold, terminate instance
                         self._terminate_instance(instance_id)
                         
@@ -266,7 +283,7 @@ class InstanceHealthChecker(ThreadSafeSingleton):
         try:
             reason = (
                 f"Coordinator: detect {instance_info['role']} instance {instance_id} "
-                f"is abnormal after {self.config.max_consecutive_failures} consecutive failures"
+                f"is abnormal after {self._health_check_config.max_consecutive_failures} consecutive failures"
             )
             
             terminate_success = self._call_controller_terminate(instance_id, reason)
@@ -314,7 +331,11 @@ class InstanceHealthChecker(ThreadSafeSingleton):
     def _call_controller_alarm(self, alarm_type: str, message: str, severity: str) -> bool:
         """Call controller report alarm interface"""
         try:
-            url = f"{self.config.controller_api_dns}:{self.config.controller_api_port}{self.config.alarm_endpoint}"
+            with self._config_lock:
+                dns = self._health_check_config.controller_api_dns
+                port = self._health_check_config.controller_api_port
+                endpoint = self._health_check_config.alarm_endpoint
+            url = f"http://{dns}:{port}{endpoint}"
             response = requests.post(
                 url,
                 json={
@@ -322,7 +343,7 @@ class InstanceHealthChecker(ThreadSafeSingleton):
                     "message": message,
                     "severity": severity
                 },
-                timeout=self.config.alarm_timeout
+                timeout=self._health_check_config.alarm_timeout
             )
             return response.status_code == 200
         except Exception as e:
@@ -332,11 +353,11 @@ class InstanceHealthChecker(ThreadSafeSingleton):
     def _call_controller_terminate(self, instance_id: int, reason: str) -> bool:
         """Call controller terminate instance interface"""
         try:
-            url = "http://{dns}:{port}{endpoint}".format(
-                dns=self.config.controller_api_dns,
-                port=self.config.controller_api_port,
-                endpoint=self.config.terminate_instance_endpoint
-            )
+            with self._config_lock:
+                dns = self._health_check_config.controller_api_dns
+                port = self._health_check_config.controller_api_port
+                endpoint = self._health_check_config.terminate_instance_endpoint
+            url = f"http://{dns}:{port}{endpoint}"
             response = requests.post(
                 url,
                 json={

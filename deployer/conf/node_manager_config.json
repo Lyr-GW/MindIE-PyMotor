@@ -1,0 +1,45 @@
+{
+  "api_config": {
+    "pod_ip": "127.0.0.1",
+    "host_ip": "127.0.0.1",
+    "node_manager_port": 1026,
+    "controller_api_dns": "127.0.0.1",
+    "controller_api_port": 1026
+  },
+  "tls_config": {
+    "enable_tls": false,
+    "ca_cert_path": "security/controller/cert/ca.crt",
+    "cert_path": "security/controller/cert/server.crt",
+    "key_path": "security/controller/keys/server.key"
+  },
+  "endpoint_config": {
+    "endpoint_num": 0,
+    "base_port": 10000,
+    "mgmt_ports": [],
+    "service_ports": []
+  },
+  "basic_config": {
+    "job_name": null,
+    "role": "both",
+    "model_name": "",
+    "hardware_type": "800I-A3",
+    "heartbeat_interval_seconds": 1,
+    "device_num": 0,
+    "parallel_config": {
+      "dp_size": 1,
+      "cp_size": 1,
+      "tp_size": 1,
+      "sp_size": 1,
+      "ep_size": 1,
+      "pp_size": 1,
+      "world_size": 1
+    }
+  },
+  "logging_config": {
+    "log_level": "INFO",
+    "log_max_line_length": 8192,
+    "log_file": null,
+    "log_format": "%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d]  %(message)s",
+    "log_date_format": "%Y-%m-%d %H:%M:%S"
+  }
+}

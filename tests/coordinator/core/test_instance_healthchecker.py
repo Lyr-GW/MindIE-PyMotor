@@ -6,6 +6,7 @@ from motor.common.resources.instance import Instance, PDRole
 from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.core.instance_manager import InstanceManager, UpdateInstanceMode
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
+from motor.config.coordinator import CoordinatorConfig
 from motor.common.utils.dummy_request import DummyRequestUtil
 
 
@@ -19,10 +20,14 @@ class TestInstanceHealthChecker:
             delattr(InstanceHealthChecker, "_instance")
         if hasattr(InstanceHealthChecker, "_initialized"):
             delattr(InstanceHealthChecker, "_initialized")
-        
+
         # Also reset InstanceManager singleton if needed
         if hasattr(InstanceManager, "_instance"):
             delattr(InstanceManager, "_instance")
+
+        # Create config for testing
+        self.config = CoordinatorConfig()
+        self.instance_manager = InstanceManager(self.config)
 
     @pytest.fixture
     def mock_instance(self):
@@ -63,7 +68,7 @@ class TestInstanceHealthChecker:
         config.dummy_request_interval = 0.1
         config.dummy_request_timeout = 5
         config.controller_api_dns =  "mindie-ms-controller-service.mindie.svc.cluster.local"
-        config.controller_api_port = 57675
+        config.controller_api_port = 1026
         config.alarm_endpoint = "/v1/alarm/coordinator"
         config.alarm_timeout = 5.0
         config.terminate_instance_endpoint = "/controller/terminate_instance"
@@ -82,41 +87,37 @@ class TestInstanceHealthChecker:
     @pytest.fixture
     def health_checker(self, mock_instance_manager, mock_config, mock_dummy_request_util):
         """Create health checker instance with fresh state"""
-        with patch('motor.coordinator.core.instance_healthchecker.CoordinatorConfig') as mock_config_class, \
-             patch('motor.coordinator.core.instance_healthchecker.InstanceManager', return_value=mock_instance_manager), \
+        # Create real config and health checker for testing
+        config = CoordinatorConfig()
+        config.health_check_config = mock_config
+
+        with patch('motor.coordinator.core.instance_healthchecker.InstanceManager', return_value=mock_instance_manager), \
              patch('motor.coordinator.core.instance_healthchecker.DummyRequestUtil', return_value=mock_dummy_request_util), \
              patch('threading.Thread') as mock_thread_class, \
              patch('threading.Event') as mock_event_class:
-            
-            mock_config_instance = Mock()
-            mock_config_instance.health_check_config = mock_config
-            mock_config_class.return_value = mock_config_instance
-            
+
             # Mock threading.Event
             mock_shutdown_event = Mock()
             mock_shutdown_event.is_set.return_value = False
             mock_shutdown_event.wait.return_value = None
             mock_event_class.return_value = mock_shutdown_event
-            
+
             # Mock threading.Thread
             mock_thread = Mock()
             mock_thread_class.return_value = mock_thread
-            
-            # Create instance directly, bypassing singleton complexity
-            checker = InstanceHealthChecker.__new__(InstanceHealthChecker)
-            
-            # Manually initialize the instance with required attributes
-            checker.config = mock_config
+
+            # Create health checker instance
+            checker = InstanceHealthChecker(config)
+            checker._shutdown_event = mock_shutdown_event
             checker._monitored_instances = {}
             checker._consecutive_failures = {}
-            checker._shutdown_event = mock_shutdown_event
             checker._monitoring_thread = mock_thread
             checker._lock = threading.RLock()
             checker._dummy_request_util = mock_dummy_request_util
-            
+
             # Mark as initialized
             checker._initialized = True
-            
+
             return checker
 
     def test_init_starts_monitoring_thread(self, mock_instance_manager, mock_config, mock_dummy_request_util):
@@ -141,7 +142,7 @@ class TestInstanceHealthChecker:
             mock_thread_class.return_value = mock_thread
             
             # Create instance
-            checker = InstanceHealthChecker()
+            checker = InstanceHealthChecker(self.config)
             checker.start()
             
             # Verify thread was created with correct parameters
@@ -176,7 +177,7 @@ class TestInstanceHealthChecker:
         mock_shutdown_event.set.assert_called_once()
         
         # Verify thread join was called
-        mock_thread.join.assert_called_once_with(timeout=health_checker.config.thread_join_timeout)
+        mock_thread.join.assert_called_once_with(timeout=health_checker._health_check_config.thread_join_timeout)
         
         # Verify DummyRequestUtil was closed
         mock_dummy_request_util.close.assert_called_once()
@@ -278,7 +279,7 @@ class TestInstanceHealthChecker:
             # Should call check twice before shutdown
             assert mock_check.call_count == 2
             # Should wait for the configured interval
-            mock_shutdown_event.wait.assert_called_with(health_checker.config.dummy_request_interval)
+            mock_shutdown_event.wait.assert_called_with(health_checker._health_check_config.dummy_request_interval)
 
     def test_monitoring_loop_with_exception(self, health_checker):
         """Test monitoring loop exception handling"""
@@ -294,7 +295,7 @@ class TestInstanceHealthChecker:
             health_checker._monitoring_loop()
             
             # Should wait for error retry interval after exception
-            mock_shutdown_event.wait.assert_called_with(health_checker.config.error_retry_interval)
+            mock_shutdown_event.wait.assert_called_with(health_checker._health_check_config.error_retry_interval)
 
     def test_check_monitored_instances_empty(self, health_checker):
         """Test checking empty monitored instances"""
@@ -501,8 +502,8 @@ class TestInstanceHealthChecker:
             mock_post.assert_called_once()
             # Verify correct URL was constructed
             call_args = mock_post.call_args
-            assert health_checker.config.controller_api_dns in call_args[0][0]
-            assert health_checker.config.alarm_endpoint in call_args[0][0]
+            assert health_checker._health_check_config.controller_api_dns in call_args[0][0]
+            assert health_checker._health_check_config.alarm_endpoint in call_args[0][0]
 
     def test_call_controller_alarm_failure(self, health_checker):
         """Test failed controller alarm call"""
@@ -535,8 +536,8 @@ class TestInstanceHealthChecker:
             mock_post.assert_called_once()
             # Verify correct URL was constructed
             call_args = mock_post.call_args
-            assert health_checker.config.controller_api_dns in call_args[0][0]
-            assert health_checker.config.terminate_instance_endpoint in call_args[0][0]
+            assert health_checker._health_check_config.controller_api_dns in call_args[0][0]
+            assert health_checker._health_check_config.terminate_instance_endpoint in call_args[0][0]
 
     def test_call_controller_terminate_failure(self, health_checker):
         """Test failed controller terminate call"""

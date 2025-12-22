@@ -8,14 +8,7 @@ import os
 import traceback
 from typing import Any
 
-# Add project root directory to Python path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.dirname(os.path.dirname(current_dir))
-sys.path.append(project_root)
-
-from motor.coordinator.api_server.coordinator_server import (
-    CoordinatorServer
-)
+from motor.coordinator.api_server.coordinator_server import CoordinatorServer
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
@@ -30,8 +23,46 @@ logger = get_logger(__name__)
 
 modules: dict[str, Any] = {}
 
+# Global configuration
+config: CoordinatorConfig | None = None
+
 # Global config watcher
 config_watcher: ConfigWatcher | None = None
+
+# Global standby manager
+standby_manager: StandbyManager | None = None
+
+
+def log_config_summary(message_prefix: str | None = None) -> None:
+    """Log configuration summary with optional message prefix"""
+    if config:
+        if message_prefix:
+            logger.info(message_prefix)
+        for line in config.get_config_summary().splitlines():
+            if line.strip():  # Skip empty lines
+                logger.info(line)
+
+
+def on_config_updated() -> None:
+    """Callback function called when configuration is updated"""
+    global config, modules
+
+    if config is None:
+        logger.error("Configuration is None in config update callback")
+        return
+
+    # Update configuration for all modules
+    logger.info("Updating configuration for all modules...")
+    for module_name, module in modules.items():
+        if hasattr(module, 'update_config'):
+            try:
+                module.update_config(config)
+                logger.info(f"Updated configuration for {module_name}")
+            except Exception as e:
+                logger.error(f"Failed to update configuration for {module_name}: {e}")
+
+    # Log configuration summary after reload
+    log_config_summary("Configuration reloaded, printing updated summary:")
 
 
 def start_all_modules(exclude_modules: set[str] | None = None) -> None:
@@ -66,9 +97,13 @@ def stop_all_modules() -> None:
 
 def on_become_master() -> None:
     """Callback when becoming master - start all modules"""
+    global config
     logger.info("Becoming master, starting all modules...")
     # Start all modules
     if not modules:
+        if config is None:
+            logger.error("Configuration is None in on_become_master")
+            return
         initialize_components()
     start_all_modules()
 
@@ -80,65 +115,59 @@ def on_become_standby() -> None:
     stop_all_modules()
 
 
-def initialize_components():
+def initialize_components() -> None:
     """Initialize all coordinator components"""
     logger.info("Initializing coordinator components...")
-    
-    logger.info("Initializing CoordinatorConfig...")
-    try:
-        modules["CoordinatorConfig"] = CoordinatorConfig()
-    except Exception as e:
-        logger.error(f"Failed to initialize CoordinatorConfig: {e}")
-        raise RuntimeError("Failed to initialize CoordinatorConfig") from e
-    
+
     logger.info("Initializing InstanceManager...")
-    modules["InstanceManager"] = InstanceManager()
-    
+    modules["InstanceManager"] = InstanceManager(config)
+
     logger.info("Initializing RequestManager...")
-    modules["RequestManager"] = RequestManager()
+    modules["RequestManager"] = RequestManager(config)
 
     logger.info("Initializing MetricsListener...")
-    modules["MetricsListener"] = MetricsCollector()
-    
+    modules["MetricsListener"] = MetricsCollector(config)
+
     logger.info("Initializing InstanceHealthChecker...")
-    modules["InstanceHealthChecker"] = InstanceHealthChecker()
-    
-    logger.info("Creating server configurations...")
-    coordinator_config = modules.get("CoordinatorConfig")
-    
+    modules["InstanceHealthChecker"] = InstanceHealthChecker(config)
+
     logger.info("Initializing CoordinatorServer...")
-    coordinator_server = CoordinatorServer(
-        coordinator_config=coordinator_config
-    )
-    modules["CoordinatorServer"] = coordinator_server
-    
+    modules["CoordinatorServer"] = CoordinatorServer(config)
+
     logger.info("All components initialized successfully")
 
 
 async def main():
-    global config_watcher
+    global config, config_watcher, standby_manager
 
     try:
         logger.info("Starting Motor Coordinator HTTP server...")
 
+        # Load configuration from file
+        config = CoordinatorConfig.from_json()
+        if config.config_path:
+            logger.info(f"Loaded configuration from: {config.config_path}")
+        else:
+            logger.info("Using default configuration (no config file specified)")
+
         initialize_components()
 
+        # Log configuration summary
+        log_config_summary()
+
         # Start configuration file watcher
-        coordinator_config = modules.get("CoordinatorConfig")
-        if (
-            coordinator_config and coordinator_config.config_file_path and 
-            os.path.exists(coordinator_config.config_file_path)
-        ):
+        if config.config_path and os.path.exists(config.config_path):
             config_watcher = ConfigWatcher(
-                config_path=coordinator_config.config_file_path,
-                reload_callback=coordinator_config.reload
+                config_path=config.config_path,
+                reload_callback=config.reload,
+                config_update_callback=on_config_updated
             )
             config_watcher.start()
             logger.info("Configuration file watcher started")
 
-        if coordinator_config.standby_config.enable_master_standby:
+        if config.standby_config.enable_master_standby:
             logger.info("Master/standby feature is enabled, running in master-standby mode")
-            standby_manager = StandbyManager(coordinator_config)
+            standby_manager = StandbyManager(config)
             standby_manager.start(
                 on_become_master=on_become_master,
                 on_become_standby=on_become_standby
@@ -166,6 +195,11 @@ async def main():
         if config_watcher:
             config_watcher.stop()
             logger.info("Configuration file watcher stopped")
+
+        # Stop standby manager
+        if standby_manager:
+            standby_manager.stop()
+            logger.info("Standby manager stopped")
 
         stop_all_modules()
         logger.info("Coordinator server shutdown complete")

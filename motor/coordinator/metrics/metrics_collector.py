@@ -6,11 +6,13 @@ import time
 import threading
 from enum import Enum
 import requests
+
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import Instance
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.common.utils.logger import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -48,10 +50,14 @@ class SingleMetric():
 class MetricsCollector(ThreadSafeSingleton):
     METRICS_KEY = "metrics"
 
-    def __init__(self):
-        # If the metrics collector is already initialized, return.
+    def __init__(self, config: CoordinatorConfig | None = None):
         if hasattr(self, '_initialized'):
             return
+
+        self._config_lock = threading.RLock()
+        if config is None:
+            config = CoordinatorConfig()
+        self._prometheus_metrics_config = config.prometheus_metrics_config
 
         # Initial metrics state
         self._inactive_instance_metrics_aggregate: list[SingleMetric] = []
@@ -59,7 +65,6 @@ class MetricsCollector(ThreadSafeSingleton):
         self._last_metrics: str = ""
         self._last_instance_metrics: dict[int, list[SingleMetric]] = {}
 
-        self._reuse_time: int = CoordinatorConfig().prometheus_metrics_config.reuse_time
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._metrics_update_thread = None
@@ -94,6 +99,12 @@ class MetricsCollector(ThreadSafeSingleton):
         if self._metrics_update_thread and self._metrics_update_thread.is_alive():
             self._metrics_update_thread.join()
         logger.info("MetricsCollector stopped.")
+
+    def update_config(self, config: CoordinatorConfig) -> None:
+        """Update configuration for the metrics collector"""
+        with self._config_lock:
+            self._prometheus_metrics_config = config.prometheus_metrics_config
+        logger.info("MetricsCollector configuration updated")
 
     def prometheus_instance_metrics_handler(self):
         """
@@ -130,7 +141,9 @@ class MetricsCollector(ThreadSafeSingleton):
                 if metrics and instance_metrics:
                     self._last_metrics = metrics
                     self._last_instance_metrics = instance_metrics
-            time.sleep(self._reuse_time)
+            with self._config_lock:
+                reuse_time = self._prometheus_metrics_config.reuse_time
+            time.sleep(reuse_time)
 
     def _get_server_metrics_single(self, ip: str, port: str) -> str:
         """
@@ -379,8 +392,11 @@ class MetricsCollector(ThreadSafeSingleton):
             return True
 
         for instance_id in collects.keys():
-            if not isinstance(collects[instance_id], dict) or \
-                not collects[instance_id] or "endpoints" not in collects[instance_id]:
+            if (
+                not isinstance(collects[instance_id], dict)
+                or not collects[instance_id]
+                or "endpoints" not in collects[instance_id]
+            ):
                 logger.error("[Metrics] Invalid pods metric JSON file.")
                 return False
 
@@ -504,12 +520,7 @@ class MetricsCollector(ThreadSafeSingleton):
         return True
 
     def _aggregate_metrics_all_instance(self, collects: dict[int, dict[str, list[SingleMetric]]]) -> list[SingleMetric]:
-        """
-        Aggreagte metrics of all instances.
-
-        :param collects:
-        :returns:
-        """
+        """ Aggreagte metrics of all instances.  """
 
         if not self._instance_metrics_cached:
             return []
@@ -539,11 +550,7 @@ class MetricsCollector(ThreadSafeSingleton):
         return aggregate
 
     def _get_value_str(self, value: float) -> str:
-        """
-        Transform float to str.
-
-        :returns:
-        """
+        """ Transform float to str.  """
 
         if value == float("nan"):
             return "Nan"
@@ -554,12 +561,7 @@ class MetricsCollector(ThreadSafeSingleton):
         return str(value)
 
     def _get_serialize_metrics(self, aggregate: list[SingleMetric]) -> str:
-        """
-        Metrics serialize.
-
-        :param aggregate:
-        :returns:
-        """
+        """ Metrics serialize.  """
 
         lines = []
         for item in aggregate:
@@ -573,12 +575,7 @@ class MetricsCollector(ThreadSafeSingleton):
         self,
         collects: dict[int, dict[str, list[SingleMetric]]]
     ) -> dict[int, list[SingleMetric]]:
-        """
-        Instance metrics serialize.
-
-        :param collects:
-        :returns:
-        """
+        """ Instance metrics serialize.  """
 
         instance_metrics = {}
         for ins_id in collects.keys():
@@ -620,13 +617,8 @@ class MetricsCollector(ThreadSafeSingleton):
         for ins_id in clear_ins_list:
             del self._instance_metrics_cached[ins_id]
 
-
     def _get_and_aggregate_metrics(self) -> tuple[str, dict[str, list[SingleMetric]]]:
-        """
-        Get and Aggregate metrics.
-
-        :returns:
-        """
+        """ Get and Aggregate metrics.  """
 
         # Step 0: get instances/endpoints info
         available_instances, unavailable_instances = InstanceManager().get_all_instances()
@@ -648,4 +640,3 @@ class MetricsCollector(ThreadSafeSingleton):
 
         # Step 5: serialize and return to handler.
         return self._get_serialize_metrics(aggregate), self._get_serialize_instance_metrics(collects)
-

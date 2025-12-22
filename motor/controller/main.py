@@ -3,13 +3,13 @@
 
 import os
 import sys
+import select
 import signal
 import argparse
 import threading
-import time
 from typing import Any
 
-from motor.config.controller import ControllerConfig, set_config_path, find_config_file
+from motor.config.controller import ControllerConfig
 from motor.controller.api_server import ControllerAPI
 from motor.controller.core import InstanceAssembler, InstanceManager, EventPusher
 from motor.common.standby.standby_manager import StandbyManager
@@ -31,8 +31,21 @@ config: ControllerConfig | None = None
 # Global config watcher
 config_watcher: ConfigWatcher | None = None
 
+# Global standby manager
+standby_manager: StandbyManager | None = None
+
 # Global previous fault tolerance state for change detection
 previous_fault_tolerance_enabled: bool = False
+
+
+def log_config_summary(message_prefix: str | None = None) -> None:
+    """Log configuration summary with optional message prefix"""
+    if config:
+        if message_prefix:
+            logger.info(message_prefix)
+        for line in config.get_config_summary().splitlines():
+            if line.strip():  # Skip empty lines
+                logger.info(line)
 
 
 def on_config_updated() -> None:
@@ -97,6 +110,9 @@ def on_config_updated() -> None:
             except Exception as e:
                 logger.error(f"Failed to update configuration for {module_name}: {e}")
 
+    # Log configuration summary after reload
+    log_config_summary("Configuration reloaded, printing updated summary:")
+
 
 observers_list = {
     "EventPusher",
@@ -157,7 +173,11 @@ def stop_all_modules(exclude_modules: set[str] | None = None) -> None:
     for module_name, module in modules.items():
         if module_name in exclude_modules:
             continue
-        if hasattr(module, 'stop'):
+        if (
+            module is not None
+            and hasattr(module, 'stop')
+            and module.is_alive()
+        ):
             try:
                 module.stop()
             except Exception as e:
@@ -182,46 +202,17 @@ def on_become_standby() -> None:
     stop_all_modules(exclude_modules={"ControllerAPI"})
 
 
-def get_controller_status() -> dict:
-    """
-    Get controller status including:
-    - deploy mode: "master_standby" or "standalone"
-    - role(Optional): "master" or "standby"
-    - overall health of all modules
-    """
-    status = {}
-
-    # Check module health
-    unhealthy_modules = []
-    for name, module in modules.items():
-        if not hasattr(module, 'is_alive'):
-            continue
-        alive = module.is_alive()
-        if not alive:
-            unhealthy_modules.append(name)
-
-    if unhealthy_modules:
-        status["overall_healthy"] = False
-        logger.error("Unhealthy modules: %s", unhealthy_modules)
-    else:
-        status["overall_healthy"] = True
-
-    # Set deploy mode and role
-    if config.standby_config.enable_master_standby:
-        status["deploy_mode"] = "master_standby"
-        # Get singleton instance (assumes it has been initialized)
-        status["role"] = "master" if StandbyManager().is_master() else "standby"
-    else:
-        status["deploy_mode"] = "standalone"
-
-    return status
-
-
 def signal_handler(sig, frame) -> None:
-    global config_watcher
+    global config_watcher, standby_manager
     logger.warning("Receive signal %d, exit gracefully...", sig)
     stop_event.set()
     stop_all_modules()
+
+    # Stop standby manager if it was started
+    if standby_manager:
+        logger.info("Stopping standby manager...")
+        standby_manager.stop()
+        logger.info("Standby manager stopped")
 
     # Stop config watcher
     if config_watcher:
@@ -241,29 +232,23 @@ def parse_arguments():
 
 
 def main() -> None:
-    global config, config_watcher, previous_fault_tolerance_enabled
+    global config, config_watcher, previous_fault_tolerance_enabled, standby_manager
 
     args = parse_arguments()
 
     if args.config:
-        set_config_path(args.config)
+        config = ControllerConfig.from_json(args.config)
         logger.info("Using configuration file: %s", args.config)
     else:
-        logger.info("Using auto-detected configuration file")
-
-    config_path = args.config if args.config else None
-    try:
-        if config_path:
-            config = ControllerConfig.from_json(config_path)
-        else:
-            # Find config file automatically
-            config = ControllerConfig.from_json(find_config_file())
-    except Exception as e:
-        logger.error(f"Failed to load configuration: {e}, using default configuration")
-        config = ControllerConfig()
+        # Read from environment variable
+        config = ControllerConfig.from_json()
+        logger.info("Using configuration from environment variable MOTOR_CONTROLLER_CONFIG_PATH")
 
     # Initialize previous fault tolerance state
     previous_fault_tolerance_enabled = config.fault_tolerance_config.enable_fault_tolerance
+
+    # Log configuration summary
+    log_config_summary()
 
     # Start configuration file watcher if config file exists
     if config.config_path and os.path.exists(config.config_path):
@@ -308,24 +293,30 @@ def main() -> None:
     try:
         while not stop_event.is_set():
             try:
-                user_input = input().strip().lower()
-                if user_input == 'stop':
-                    stop_event.set()
-                    break
-                elif user_input:
-                    logger.error("Unknown command: %s", user_input)
+                # Use select to make input non-blocking with timeout
+                if select.select([sys.stdin], [], [], 1.0)[0]:
+                    user_input = input().strip().lower()
+                    if user_input == 'stop':
+                        stop_event.set()
+                        break
+                    elif user_input:
+                        logger.error("Unknown command: %s", user_input)
             except EOFError:
-                # In non-interactive environment, keep program running
-                time.sleep(1)
+                # In non-interactive environment, just continue
+                pass
+            except OSError:
+                # select not available or stdin not available
+                stop_event.wait(1)
     except KeyboardInterrupt:
         stop_event.set()
 
     # Cleanup
     stop_all_modules()
 
-    if config.standby_config.enable_master_standby:
-        # Stop standby manager singleton if it was started
-        StandbyManager().stop()
+    if standby_manager is not None:
+        # Stop standby manager if it was started
+        standby_manager.stop()
+        logger.info("Standby manager stopped")
 
     # Stop config watcher
     if config_watcher:
