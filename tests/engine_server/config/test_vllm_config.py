@@ -409,15 +409,31 @@ class TestVLLMConfig:
         VLLMConfig = imports['VLLMConfig']
         vllm_config = VLLMConfig(server_config=prefill_server_config)
 
-        # Set kv_transfer_config as JSON object (no longer needs json.dumps)
+        # Set kv_transfer_config with mooncake connector
         kv_config = {
+            "kv_connector": "mooncake",
             "kv_connector_extra_config": {
                 "prefill": {},
                 "decode": {}
             }
         }
 
-        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config):
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config), \
+                patch.object(vllm_config.server_config.deploy_config,
+                             'get_parallel_config') as mock_get_parallel_config:
+            # Create mock parallel configs
+            mock_prefill_parallel_config = MockParallelConfig(tp_size=1, dp_size=1)
+            mock_decode_parallel_config = MockParallelConfig(tp_size=1, dp_size=1)
+
+            def mock_get_parallel_config_side_effect(role):
+                if role == "prefill":
+                    return mock_prefill_parallel_config
+                elif role == "decode":
+                    return mock_decode_parallel_config
+                return MockParallelConfig()
+
+            mock_get_parallel_config.side_effect = mock_get_parallel_config_side_effect
+
             vllm_config._process_kv_transfer_config()
 
             assert vllm_config.kv_transfer_config is not None
@@ -430,14 +446,31 @@ class TestVLLMConfig:
         VLLMConfig = imports['VLLMConfig']
         vllm_config = VLLMConfig(server_config=decode_server_config)
 
+        # Set kv_transfer_config with mooncake connector
         kv_config = {
+            "kv_connector": "mooncake",
             "kv_connector_extra_config": {
                 "prefill": {},
                 "decode": {}
             }
         }
 
-        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config):
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config), \
+                patch.object(vllm_config.server_config.deploy_config,
+                             'get_parallel_config') as mock_get_parallel_config:
+            # Create mock parallel configs
+            mock_prefill_parallel_config = MockParallelConfig(tp_size=1, dp_size=1)
+            mock_decode_parallel_config = MockParallelConfig(tp_size=1, dp_size=1)
+
+            def mock_get_parallel_config_side_effect(role):
+                if role == "prefill":
+                    return mock_prefill_parallel_config
+                elif role == "decode":
+                    return mock_decode_parallel_config
+                return MockParallelConfig()
+
+            mock_get_parallel_config.side_effect = mock_get_parallel_config_side_effect
+
             vllm_config._process_kv_transfer_config()
 
             assert vllm_config.kv_transfer_config is not None
@@ -474,3 +507,313 @@ class TestVLLMConfig:
                 vllm_config._process_kv_transfer_config()
 
             mock_run_log.error.assert_called_once()
+
+    def test_process_multi_connector_prefill(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config with multi connector
+        kv_config = {
+            "kv_connector": "MultiConnector",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    {
+                        "kv_connector": "mooncake",
+                        "kv_connector_extra_config": {
+                            "prefill": {},
+                            "decode": {}
+                        }
+                    },
+                    {
+                        "kv_connector": "MooncakeConnectorStoreV1",
+                        "kv_connector_extra_config": {}
+                    }
+                ]
+            }
+        }
+
+        with patch.object(vllm_config, '_process_mooncake_connector') as mock_mooncake, \
+                patch.object(vllm_config, '_process_store_connector') as mock_store:
+            vllm_config._process_multi_connector(kv_config)
+
+            # Verify kv_role is set correctly for prefill
+            assert kv_config["kv_role"] == "kv_producer"
+            # Verify engine_id is set correctly to instance_id
+            assert kv_config["engine_id"] == "test-instance"
+            # Verify both connectors are processed
+            assert mock_mooncake.call_count == 1
+            assert mock_store.call_count == 1
+            # Verify the correct connectors were passed to each method
+            mock_mooncake.assert_called_with(kv_config["kv_connector_extra_config"]["connectors"][0])
+            mock_store.assert_called_with(kv_config["kv_connector_extra_config"]["connectors"][1])
+
+    def test_process_multi_connector_decode(self, imports, decode_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=decode_server_config)
+
+        # Create mock kv_config with multi connector
+        kv_config = {
+            "kv_connector": "MultiConnector",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    {
+                        "kv_connector": "mooncake",
+                        "kv_connector_extra_config": {
+                            "prefill": {},
+                            "decode": {}
+                        }
+                    },
+                    {
+                        "kv_connector": "MooncakeConnectorStoreV1",
+                        "kv_connector_extra_config": {}
+                    }
+                ]
+            }
+        }
+
+        with patch.object(vllm_config, '_process_mooncake_connector') as mock_mooncake, \
+                patch.object(vllm_config, '_process_store_connector') as mock_store:
+            vllm_config._process_multi_connector(kv_config)
+
+            # Verify kv_role is set correctly for decode
+            assert kv_config["kv_role"] == "kv_consumer"
+            # Verify engine_id is set correctly to instance_id
+            assert kv_config["engine_id"] == "test-instance"
+            # Verify both connectors are processed
+            assert mock_mooncake.call_count == 1
+            assert mock_store.call_count == 1
+
+    def test_process_multi_connector_missing_extra_config(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config with missing extra config
+        kv_config = {
+            "kv_connector": "MultiConnector"
+            # Missing kv_connector_extra_config
+        }
+
+        with pytest.raises(ValueError, match="KV connector extra config missing from multi connector"):
+            vllm_config._process_multi_connector(kv_config)
+
+    def test_process_multi_connector_insufficient_connectors(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config with only one connector
+        kv_config = {
+            "kv_connector": "MultiConnector",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    {
+                        "kv_connector": "mooncake",
+                        "kv_connector_extra_config": {
+                            "prefill": {},
+                            "decode": {}
+                        }
+                    }
+                ]
+            }
+        }
+
+        with pytest.raises(ValueError, match="KV connector extra config at least have 2 connectors"):
+            vllm_config._process_multi_connector(kv_config)
+
+    def test_process_mooncake_connector_prefill(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config for mooncake connector
+        kv_config = {
+            "kv_connector_extra_config": {
+                "prefill": {},
+                "decode": {}
+            }
+        }
+
+        # Mock get_parallel_config to return different configurations for prefill and decode
+        with patch.object(vllm_config.server_config.deploy_config, 'get_parallel_config') as mock_get_parallel_config:
+            # Create mock parallel configs with different tp_size and dp_size
+            mock_prefill_parallel_config = MockParallelConfig(tp_size=2, dp_size=2)
+            mock_decode_parallel_config = MockParallelConfig(tp_size=4, dp_size=1)
+
+            # Make get_parallel_config return different configs based on role
+            def mock_get_parallel_config_side_effect(role):
+                if role == "prefill":
+                    return mock_prefill_parallel_config
+                elif role == "decode":
+                    return mock_decode_parallel_config
+                return MockParallelConfig()
+
+            mock_get_parallel_config.side_effect = mock_get_parallel_config_side_effect
+
+            vllm_config._process_mooncake_connector(kv_config)
+
+            # Verify kv_role is set correctly for prefill
+            assert kv_config["kv_role"] == "kv_producer"
+            # Verify engine_id is set
+            assert kv_config["engine_id"] == "test-instance"
+            # Verify parallel configs are set correctly
+            assert kv_config["kv_connector_extra_config"]["prefill"]["tp_size"] == 2
+            assert kv_config["kv_connector_extra_config"]["prefill"]["dp_size"] == 2
+            assert kv_config["kv_connector_extra_config"]["decode"]["tp_size"] == 4
+            assert kv_config["kv_connector_extra_config"]["decode"]["dp_size"] == 1
+
+    def test_process_mooncake_connector_decode(self, imports, decode_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=decode_server_config)
+
+        # Create mock kv_config for mooncake connector
+        kv_config = {
+            "kv_connector_extra_config": {
+                "prefill": {},
+                "decode": {}
+            }
+        }
+
+        # Mock get_parallel_config to return different configurations for prefill and decode
+        with patch.object(vllm_config.server_config.deploy_config, 'get_parallel_config') as mock_get_parallel_config:
+            # Create mock parallel configs with different tp_size and dp_size
+            mock_prefill_parallel_config = MockParallelConfig(tp_size=2, dp_size=2)
+            mock_decode_parallel_config = MockParallelConfig(tp_size=4, dp_size=1)
+
+            # Make get_parallel_config return different configs based on role
+            def mock_get_parallel_config_side_effect(role):
+                if role == "prefill":
+                    return mock_prefill_parallel_config
+                elif role == "decode":
+                    return mock_decode_parallel_config
+                return MockParallelConfig()
+
+            mock_get_parallel_config.side_effect = mock_get_parallel_config_side_effect
+
+            vllm_config._process_mooncake_connector(kv_config)
+
+            # Verify kv_role is set correctly for decode
+            assert kv_config["kv_role"] == "kv_consumer"
+            # Verify engine_id is set
+            assert kv_config["engine_id"] == "test-instance"
+            # Verify parallel configs are set correctly
+            assert kv_config["kv_connector_extra_config"]["prefill"]["tp_size"] == 2
+            assert kv_config["kv_connector_extra_config"]["prefill"]["dp_size"] == 2
+            assert kv_config["kv_connector_extra_config"]["decode"]["tp_size"] == 4
+            assert kv_config["kv_connector_extra_config"]["decode"]["dp_size"] == 1
+
+    def test_process_store_connector_mooncake_store_v1(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config for mooncake_store_v1
+        kv_config = {
+            "kv_connector": "MooncakeConnectorStoreV1",
+            "kv_connector_extra_config": {}
+        }
+
+        vllm_config._process_store_connector(kv_config)
+
+        # Verify kv_role is set correctly for prefill
+        assert kv_config["kv_role"] == "kv_producer"
+        # Verify mooncake_rpc_port is set to instance_id
+        assert kv_config["kv_connector_extra_config"]["mooncake_rpc_port"] == "test-instance"
+
+    def test_process_store_connector_ascend_store(self, imports, decode_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=decode_server_config)
+
+        # Create mock kv_config for ascend_store_connector
+        kv_config = {
+            "kv_connector": "AscendStoreConnector"
+        }
+
+        vllm_config._process_store_connector(kv_config)
+
+        # Verify kv_role is set correctly for decode
+        assert kv_config["kv_role"] == "kv_consumer"
+        # Verify lookup_rpc_port is set to instance_id
+        assert kv_config["lookup_rpc_port"] == "test-instance"
+
+    def test_process_store_connector_unsupported(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config with unsupported connector
+        kv_config = {
+            "kv_connector": "UnsupportedConnector"
+        }
+
+        with pytest.raises(ValueError, match="kv_connector is not supported"):
+            vllm_config._process_store_connector(kv_config)
+
+    def test_process_kv_transfer_config_with_multi_connector(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config with multi connector
+        kv_config = {
+            "kv_connector": "MultiConnector",
+            "kv_connector_extra_config": {
+                "connectors": [
+                    {
+                        "kv_connector": "mooncake",
+                        "kv_connector_extra_config": {
+                            "prefill": {},
+                            "decode": {}
+                        }
+                    },
+                    {
+                        "kv_connector": "MooncakeConnectorStoreV1",
+                        "kv_connector_extra_config": {}
+                    }
+                ]
+            }
+        }
+
+        # Mock the nested processing methods
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config), \
+                patch.object(vllm_config, '_process_mooncake_connector') as mock_mooncake, \
+                patch.object(vllm_config, '_process_store_connector') as mock_store:
+            vllm_config._process_kv_transfer_config()
+
+            # Verify both connectors are processed
+            assert mock_mooncake.call_count == 1
+            assert mock_store.call_count == 1
+            # Verify kv_transfer_config is set
+            assert vllm_config.kv_transfer_config is not None
+
+    def test_process_kv_transfer_config_with_mooncake_connector(self, imports, prefill_server_config, mock_vllm_module):
+        VLLMConfig = imports['VLLMConfig']
+        vllm_config = VLLMConfig(server_config=prefill_server_config)
+
+        # Create mock kv_config with mooncake connector
+        kv_config = {
+            "kv_connector": "mooncake",
+            "kv_connector_extra_config": {
+                "prefill": {},
+                "decode": {}
+            }
+        }
+
+        # Mock _process_mooncake_connector
+        with patch.object(vllm_config.server_config.deploy_config.engine_config, 'get', return_value=kv_config), \
+                patch.object(vllm_config, '_process_mooncake_connector') as mock_mooncake, \
+                patch.object(vllm_config.server_config.deploy_config,
+                             'get_parallel_config') as mock_get_parallel_config:
+            # Create mock parallel configs
+            mock_prefill_parallel_config = MockParallelConfig(tp_size=1, dp_size=1)
+            mock_decode_parallel_config = MockParallelConfig(tp_size=1, dp_size=1)
+
+            def mock_get_parallel_config_side_effect(role):
+                if role == "prefill":
+                    return mock_prefill_parallel_config
+                elif role == "decode":
+                    return mock_decode_parallel_config
+                return MockParallelConfig()
+
+            mock_get_parallel_config.side_effect = mock_get_parallel_config_side_effect
+
+            vllm_config._process_kv_transfer_config()
+
+            # Verify mooncake connector is processed
+            mock_mooncake.assert_called_once()
+            # Verify kv_transfer_config is set
+            assert vllm_config.kv_transfer_config is not None

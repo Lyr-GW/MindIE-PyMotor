@@ -14,7 +14,6 @@ from motor.common.utils.logger import get_logger
 from motor.engine_server.utils.ranktable import get_data_parallel_address
 from motor.engine_server.constants import constants
 
-
 logger = get_logger("engine_server")
 
 
@@ -99,32 +98,67 @@ class VLLMConfig(BaseConfig):
         kv_config = self.server_config.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG)
         if kv_config is None:
             raise ValueError(f"{constants.KV_TRANSFER_CONFIG} is None in engine_config")
-
         try:
-            if role == constants.PREFILL_ROLE:
-                kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
-            elif role == constants.DECODE_ROLE:
-                kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
-
-            kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
-
-            prefill_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
-            decode_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_DECODE)
-
-            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
-                constants.DP_SIZE] = prefill_parallel.dp_size
-            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
-                constants.TP_SIZE] = prefill_parallel.tp_size
-
-            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
-                constants.DP_SIZE] = decode_parallel.dp_size
-            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
-                constants.TP_SIZE] = decode_parallel.tp_size
+            if kv_config[constants.KV_CONNECTOR] == constants.MULTI_CONNECTOR:
+                self._process_multi_connector(kv_config)
+            else:
+                self._process_mooncake_connector(kv_config)
 
             self.kv_transfer_config = json.dumps(kv_config)
         except Exception as e:
             logger.error(f"Failed to process kv_transfer_config: {e}")
             raise ValueError(f"Failed to process kv_transfer_config: {e}") from e
+
+    def _process_multi_connector(self, kv_config):
+        role = self.server_config.role
+        if role == constants.PREFILL_ROLE:
+            kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
+        elif role == constants.DECODE_ROLE:
+            kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
+        kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
+        if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
+            raise ValueError("KV connector extra config missing from multi connector")
+        connectors = kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.CONNECTORS]
+        if len(connectors) < 2:
+            raise ValueError("KV connector extra config at least have 2 connectors")
+        self._process_mooncake_connector(connectors[0])
+        self._process_store_connector(connectors[1])
+
+    def _process_mooncake_connector(self, kv_config):
+        role = self.server_config.role
+        if role == constants.PREFILL_ROLE:
+            kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
+        elif role == constants.DECODE_ROLE:
+            kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
+        kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
+
+        prefill_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
+        decode_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_DECODE)
+
+        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
+            constants.DP_SIZE] = prefill_parallel.dp_size
+        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
+            constants.TP_SIZE] = prefill_parallel.tp_size
+
+        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
+            constants.DP_SIZE] = decode_parallel.dp_size
+        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
+            constants.TP_SIZE] = decode_parallel.tp_size
+
+    def _process_store_connector(self, kv_config):
+        role = self.server_config.role
+        if role == constants.PREFILL_ROLE:
+            kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
+        elif role == constants.DECODE_ROLE:
+            kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
+
+        if kv_config[constants.KV_CONNECTOR] == constants.MOON_CAKE_STORE_V1:
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.MOON_CAKE_RPC_PORT] \
+                = str(self.server_config.instance_id)
+        elif kv_config[constants.KV_CONNECTOR] == constants.ASCEND_STORE_CONNECTOR:
+            kv_config[constants.LOOKUP_RPC_PORT] = str(self.server_config.instance_id)
+        else:
+            raise ValueError(f"{constants.KV_CONNECTOR} is not supported")
 
     def _flatten_config(self) -> dict[str, Any]:
         """

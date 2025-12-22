@@ -41,6 +41,13 @@ KV_CONSUMER = "kv_consumer"
 KV_CONNECTOR_EXTRA_CONFIG = "kv_connector_extra_config"
 KV_PREFILL = "prefill"
 KV_DECODE = "decode"
+KV_CONNECTOR = "kv_connector"
+MULTI_CONNECTOR = "MultiConnector"
+MOON_CAKE_STORE_V1 = "MooncakeConnectorStoreV1"
+ASCEND_STORE_CONNECTOR = "AscendStoreConnector"
+MOON_CAKE_RPC_PORT = "mooncake_rpc_port"
+LOOKUP_RPC_PORT = "lookup_rpc_port"
+CONNECTORS = "connectors"
 
 # parallel config keys
 DP_SIZE = "dp_size"
