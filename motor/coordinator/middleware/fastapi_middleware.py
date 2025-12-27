@@ -14,6 +14,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from motor.common.utils.logger import get_logger
+from motor.common.utils.security_utils import validate_file_security
 
 from .rate_limiter import SimpleRateLimiter
 
@@ -61,6 +62,8 @@ def load_rate_limit_config(config_file: Optional[str] = None) -> SimpleRateLimit
     # load from config file first
     if config_file and os.path.exists(config_file):
         try:
+            validate_file_security(config_file)
+
             with open(config_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             

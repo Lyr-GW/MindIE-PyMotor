@@ -13,6 +13,7 @@ from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.models.contants import REQUEST_DATA_KEY, RESOURCE_KEY
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
+from motor.common.utils.security_utils import filter_sensitive_body, sanitize_error_message
 
 # Import only for type checking to avoid runtime circular dependencies
 if TYPE_CHECKING:
@@ -75,8 +76,9 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
     last_exc = None
     self_instance: 'BaseRouter' = args[0]
     resource: ScheduledResource = kwargs[RESOURCE_KEY]
+    filtered_data = filter_sensitive_body(kwargs[REQUEST_DATA_KEY])
     self_instance.logger.debug("Forwarding request to instance at %s:%s with data: %s", \
-        resource.endpoint.ip, resource.endpoint.business_port, kwargs[REQUEST_DATA_KEY])
+        resource.endpoint.ip, resource.endpoint.business_port, filtered_data)
     
     for attempt in range(CoordinatorConfig().exception_config.max_retry):
         try:
@@ -97,9 +99,10 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
             __handle_final_failure(last_exc, self_instance)
             if isinstance(last_exc, HTTPException):
                 raise last_exc
+            safe_error_msg = sanitize_error_message(str(last_exc))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-                detail=str(last_exc)
+                detail=safe_error_msg
             )
         
         await __handle_retry_delay(attempt, self_instance)
@@ -168,9 +171,10 @@ def __handle_request_error(error: httpx.RequestError, self_instance: 'BaseRouter
         self_instance.req_info.update_state(ReqState.TIMEOUT)
     else:
         self_instance.logger.warning(f"Unknown request error: {str(error)}")
+    safe_error_msg = sanitize_error_message(str(error))
     raise HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-        detail=str(error)
+        detail=safe_error_msg
     )
 
 

@@ -3,7 +3,6 @@
 
 import asyncio
 import json
-import ssl
 import logging
 import threading
 from typing import Optional, Any
@@ -11,7 +10,7 @@ from datetime import datetime, timezone
 from functools import wraps
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 import uvicorn
@@ -19,7 +18,12 @@ import uvicorn
 from motor.common.resources.http_msg_spec import InsEventMsg
 from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.utils.logger import get_logger, ApiAccessFilter
-from motor.common.utils.cert_util import CoordinatorCertUtil
+from motor.common.utils.cert_util import (
+    CoordinatorCertUtil,
+    TLS_CERT,
+    TLS_KEY,
+    CA_CERTS,
+)
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.common.resources.instance import PDRole
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
@@ -31,31 +35,26 @@ from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
 from motor.coordinator.models.request import RequestType, RequestResponse
 from motor.coordinator.router.router import handle_request, handle_metaserver_request
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
+from motor.coordinator.models.contants import (
+    OPENAI_FIELD_MESSAGES,
+    OPENAI_FIELD_PROMPT,
+    OPENAI_FIELD_MODEL,
+    OPENAI_FIELD_STREAM,
+    OPENAI_FIELD_ROLE,
+    OPENAI_FIELD_CONTENT,
+)
+from motor.common.utils.security_utils import sanitize_error_message, log_audit_event
 
 
 logger = get_logger(__name__)
-
-
-# Constants for OpenAI request fields
-FIELD_MESSAGES = "messages"
-FIELD_PROMPT = "prompt"
-FIELD_MODEL = "model"
-FIELD_STREAM = "stream"
-FIELD_ROLE = "role"
-FIELD_CONTENT = "content"
-
-# HTTP Status Code Constants
-HTTP_STATUS_BAD_REQUEST = 400
-HTTP_STATUS_UNAUTHORIZED = 401
-HTTP_STATUS_FORBIDDEN = 403
-HTTP_STATUS_INTERNAL_SERVER_ERROR = 500
-HTTP_STATUS_SERVICE_UNAVAILABLE = 503
-HTTP_STATUS_GATEWAY_TIMEOUT = 504
 
 # Timeout Constants
 GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 30
 SERVER_SHUTDOWN_SLEEP_SECONDS = 0.1
 REQUEST_BODY_PREVIEW_LENGTH = 200
+
+# Request Body Size Limit (10MB)
+MAX_REQUEST_BODY_SIZE = 10 * 1024 * 1024  # 10MB in bytes
 
 # Uvicorn Config Key Constants
 UVICORN_KEY_APP = "app"
@@ -81,39 +80,27 @@ ENCODING_UTF8 = "utf-8"
 FILE_MODE_READ_BINARY = "rb"
 
 NOT_A_DICT = "not a dict"
+INSTANCE_REFRESH = "instance_refresh"
+INSTANCE_REFRESH_URL = "/instances/refresh"
 
 
-class SSLConfig:
-    def __init__(self):
-        self.enabled = False
-        self.cert_file = ""
-        self.key_file = ""
-        self.ca_file = ""
-        self.password = ""
-        self.verify_mode = ssl.CERT_REQUIRED
-        self.check_hostname = True
 
 
 class CoordinatorServer:
     
     def __init__(self, config: CoordinatorConfig | None = None):
         self._config_lock = threading.RLock()
-        self.coordinator_config = config
-        self._api_key_config = config.api_key_config
-        self._tls_config = config.tls_config
-        self._ssl_config = SSLConfig()
-        self._load_ssl_config()
-
+        self._initialize_config(config)
         self._service_start_timestamp = int(datetime.now(timezone.utc).timestamp())
         self._log_configuration()
         self._create_apps()
         self._setup_cors_middleware()
         self._register_routes()
-
+    
     @staticmethod
     def _openai_is_stream(body_json: dict[str, Any]) -> bool:
-        if FIELD_STREAM in body_json:
-            stream_value = body_json[FIELD_STREAM]
+        if OPENAI_FIELD_STREAM in body_json:
+            stream_value = body_json[OPENAI_FIELD_STREAM]
             if isinstance(stream_value, str):
                 return stream_value.lower() in ("true", "1", "yes")
             return bool(stream_value)
@@ -131,46 +118,50 @@ class CoordinatorServer:
     
     @staticmethod
     def _validate_openai_request(body_json: dict[str, Any], request_type: RequestType):
-        if FIELD_MODEL not in body_json:
+        if OPENAI_FIELD_MODEL not in body_json:
             raise HTTPException(
-                status_code=HTTP_STATUS_BAD_REQUEST,
-                detail=f"Missing required field: {FIELD_MODEL}"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing required field: {OPENAI_FIELD_MODEL}"
             )
         
         if request_type != RequestType.OPENAI:
             return
         
-        if FIELD_PROMPT not in body_json and FIELD_MESSAGES not in body_json:
+        if OPENAI_FIELD_PROMPT not in body_json and OPENAI_FIELD_MESSAGES not in body_json:
             raise HTTPException(
-                status_code=HTTP_STATUS_BAD_REQUEST,
-                detail=f"Missing required field: {FIELD_PROMPT} or {FIELD_MESSAGES}"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing required field: {OPENAI_FIELD_PROMPT} or {OPENAI_FIELD_MESSAGES}"
             )
         
-        if FIELD_MESSAGES not in body_json:
+        if OPENAI_FIELD_MESSAGES not in body_json:
             return
         
-        if not isinstance(body_json[FIELD_MESSAGES], list) or len(body_json[FIELD_MESSAGES]) == 0:
+        if not isinstance(body_json[OPENAI_FIELD_MESSAGES], list) or len(body_json[OPENAI_FIELD_MESSAGES]) == 0:
             raise HTTPException(
-                status_code=HTTP_STATUS_BAD_REQUEST,
-                detail=f"Invalid {FIELD_MESSAGES} field: must be a non-empty array"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid {OPENAI_FIELD_MESSAGES} field: must be a non-empty array"
             )
         
-        for i, message in enumerate(body_json[FIELD_MESSAGES]):
+        for i, message in enumerate(body_json[OPENAI_FIELD_MESSAGES]):
             if not isinstance(message, dict):
                 raise HTTPException(
-                    status_code=HTTP_STATUS_BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid message format at index {i}: must be an object"
                 )
-            if FIELD_ROLE not in message or FIELD_CONTENT not in message:
+            if OPENAI_FIELD_ROLE not in message or OPENAI_FIELD_CONTENT not in message:
                 raise HTTPException(
-                    status_code=HTTP_STATUS_BAD_REQUEST,
-                    detail=f"Invalid message at index {i}: missing {FIELD_ROLE} or {FIELD_CONTENT}"
-                )
-            if message[FIELD_ROLE] not in ["system", "user", "assistant"]:
-                raise HTTPException(
-                    status_code=HTTP_STATUS_BAD_REQUEST,
+                    status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Invalid {FIELD_ROLE} '{message[FIELD_ROLE]}' at index {i}: must be system, "
+                        "Invalid message at index {i}: missing "
+                        f"{OPENAI_FIELD_ROLE} or {OPENAI_FIELD_CONTENT}"
+                    )
+                )
+            if message[OPENAI_FIELD_ROLE] not in ["system", "user", "assistant"]:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Invalid {OPENAI_FIELD_ROLE} "
+                        f"'{message[OPENAI_FIELD_ROLE]}' at index {i}: must be system, "
                         "user, or assistant"
                     )
                 )
@@ -185,15 +176,15 @@ class CoordinatorServer:
                 path = getattr(route, "path", None)
                 if not path:
                     continue
-                
+
                 if any(path == reserved_path or path.startswith(reserved_path + "/") 
                        for reserved_path in reserved_paths):
                     continue
-                
+
                 dst_app.router.routes.append(route)
             except Exception as e:
-                logger.warning(f"Failed to copy route: {e}", exc_info=True)
-                continue
+                logger.error(f"Failed to copy route: {e}", exc_info=True)
+                raise
 
     @staticmethod
     def _normalize_instance_endpoints(body: dict[str, Any]) -> None:
@@ -273,34 +264,20 @@ class CoordinatorServer:
             raise
         finally:
             logger.info("Coordinator server is shutting down...")
-            try:
-                await asyncio.sleep(SERVER_SHUTDOWN_SLEEP_SECONDS)
-            except asyncio.CancelledError:
-                logger.info("Coordinator server shutdown was cancelled")
-            except Exception as e:
-                logger.warning(f"Error occurred during coordinator server shutdown: {e}", exc_info=True)
 
-    def update_config(self, config: CoordinatorConfig) -> None:
-        """Update configuration for the coordinator server"""
-        with self._config_lock:
-            self._api_key_config = config.api_key_config
-            self._tls_config = config.tls_config
-        self._load_ssl_config()
-        logger.info("CoordinatorServer configuration updated")
-
-    def verify_api_key(self, request: Request) -> bool:
+    def verify_api_key(self, request: Request) -> None:
         if not self._api_key_config.enable_api_key:
-            return True
+            return
         
         if request.url.path in self._api_key_config.skip_paths:
-            return True
+            return
         
         authorization = request.headers.get(self._api_key_config.header_name)
         
         if not authorization:
             logger.warning("API Key validation failed: missing Authorization header")
             raise HTTPException(
-                status_code=HTTP_STATUS_UNAUTHORIZED,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Missing Authorization header",
                 headers={"WWW-Authenticate": "Bearer"}
             )
@@ -312,12 +289,11 @@ class CoordinatorServer:
         if api_key not in self._api_key_config.valid_keys:
             logger.warning("API Key validation failed: invalid key")
             raise HTTPException(
-                status_code=HTTP_STATUS_FORBIDDEN,
+                status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid API Key"
             )
         
-        logger.debug("API Key validation successful")
-        return True
+        logger.debug(f"API Key validation successful")
     
     def setup_rate_limiting(
         self,
@@ -351,7 +327,11 @@ class CoordinatorServer:
             )
 
         except Exception as e:
-            logger.error(f"Failed to setup rate limiting middleware (Inference): {e}", exc_info=True)
+            logger.error(
+                f"Failed to setup rate limiting middleware (Inference): {e}",
+                exc_info=True
+            )
+            raise
     
     def create_unified_app(
         self,
@@ -399,7 +379,11 @@ class CoordinatorServer:
                 )
 
         except Exception as e:
-            logger.error(f"Failed to setup rate limiting middleware (Unified): {e}", exc_info=True)
+            logger.error(
+                f"Failed to setup rate limiting middleware (Unified): {e}",
+                exc_info=True
+            )
+            raise
 
         self._copy_routes(self.management_app, unified_app)
         self._copy_routes(self.inference_app, unified_app)
@@ -431,6 +415,19 @@ class CoordinatorServer:
             await self._shutdown_servers(mgmt_server, inference_server, unified_server)
             raise
     
+    def _initialize_config(self, coordinator_config: Optional[CoordinatorConfig]):
+        if coordinator_config is None:
+            try:
+                coordinator_config = CoordinatorConfig()
+                logger.info("CoordinatorConfig initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize CoordinatorConfig: {e}")
+                raise RuntimeError("Failed to initialize CoordinatorConfig") from e
+        
+        self.coordinator_config = coordinator_config
+        self._api_key_config = coordinator_config.api_key_config
+        self._tls_config = coordinator_config.tls_config
+    
     def _log_configuration(self):
         logger.info(
             "Infer timeout configuration: infer_timeout=%ss",
@@ -448,13 +445,14 @@ class CoordinatorServer:
             self._api_key_config.key_prefix,
             len(self._api_key_config.skip_paths)
         )
-        
-        if self._ssl_config.enabled:
+
+        if self._tls_config.enable_tls:
+            tls_items = self._tls_config.items or {}
             logger.info(
                 "SSL configuration enabled: cert_file=%s, key_file=%s, ca_file=%s",
-                self._ssl_config.cert_file,
-                self._ssl_config.key_file,
-                self._ssl_config.ca_file
+                tls_items.get(TLS_CERT, ""),
+                tls_items.get(TLS_KEY, ""),
+                tls_items.get(CA_CERTS, "")
             )
         else:
             logger.info("SSL configuration disabled")
@@ -491,19 +489,25 @@ class CoordinatorServer:
         config_kwargs[UVICORN_KEY_TIMEOUT_GRACEFUL_SHUTDOWN] = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
     
     def _apply_ssl_to_unified_config(self, config_kwargs: dict[str, Any]):
-        if not (self._ssl_config and self._ssl_config.enabled):
+        if not self._tls_config.enable_tls:
             return
-        
+
+        tls_items = self._tls_config.items or {}
+        cert_file = tls_items.get(TLS_CERT, "")
+        key_file = tls_items.get(TLS_KEY, "")
+        ca_file = tls_items.get(CA_CERTS, "")
+        password = tls_items.get("tls_passwd", "")
+
         ssl_context = CoordinatorCertUtil.create_ssl_context(
-            cert_file=self._ssl_config.cert_file,
-            key_file=self._ssl_config.key_file,
-            ca_file=self._ssl_config.ca_file,
-            password=self._ssl_config.password
+            cert_file=cert_file,
+            key_file=key_file,
+            ca_file=ca_file,
+            password=password
         )
         if ssl_context:
-            config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self._ssl_config.key_file
-            config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self._ssl_config.cert_file
-            config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = self._ssl_config.ca_file
+            config_kwargs[UVICORN_KEY_SSL_KEYFILE] = key_file
+            config_kwargs[UVICORN_KEY_SSL_CERTFILE] = cert_file
+            config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = ca_file
             logger.info("HTTPS support enabled for unified server")
         else:
             logger.warning("SSL configuration failed, using HTTP mode")
@@ -513,33 +517,27 @@ class CoordinatorServer:
         mgmt_config_kwargs: dict[str, Any],
         inference_config_kwargs: dict[str, Any]
     ):
-        if not (self._ssl_config and self._ssl_config.enabled):
+        if not self._tls_config.enable_tls:
             return
-        
-        mgmt_ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
-            cert_file=self._ssl_config.cert_file,
-            key_file=self._ssl_config.key_file,
-            ca_file=self._ssl_config.ca_file,
-            password=self._ssl_config.password
-        )
+
+        tls_items = self._tls_config.items or {}
+        cert_file = tls_items.get(TLS_CERT, "")
+        key_file = tls_items.get(TLS_KEY, "")
+        ca_file = tls_items.get(CA_CERTS, "")
+        password = tls_items.get("tls_passwd", "")
+
         inference_ssl_context = CoordinatorCertUtil.create_ssl_context(
-            cert_file=self._ssl_config.cert_file,
-            key_file=self._ssl_config.key_file,
-            ca_file=self._ssl_config.ca_file,
-            password=self._ssl_config.password
+            cert_file=cert_file,
+            key_file=key_file,
+            ca_file=ca_file,
+            password=password
         )
-        
-        if mgmt_ssl_context:
-            mgmt_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self._ssl_config.key_file
-            mgmt_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self._ssl_config.cert_file
-            logger.info("HTTPS support enabled for management server (no client cert verification)")
-        else:
-            logger.warning("SSL configuration failed for management server, using HTTP mode")
+
         
         if inference_ssl_context:
-            inference_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = self._ssl_config.key_file
-            inference_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = self._ssl_config.cert_file
-            inference_config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = self._ssl_config.ca_file
+            inference_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = key_file
+            inference_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = cert_file
+            inference_config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = ca_file
             logger.info("HTTPS support enabled for inference server")
         else:
             logger.warning("SSL configuration failed for inference server, using HTTP mode")
@@ -609,15 +607,6 @@ class CoordinatorServer:
             if srv:
                 srv.should_exit = True
         await asyncio.sleep(SERVER_SHUTDOWN_SLEEP_SECONDS)
-    
-    def _load_ssl_config(self):
-        with self._config_lock:
-            if self._tls_config.enable_tls:
-                self._ssl_config.enabled = True
-                self._ssl_config.cert_file = self._tls_config.items.get("tls_cert", "")
-                self._ssl_config.key_file = self._tls_config.items.get("tls_key", "")
-                self._ssl_config.ca_file = self._tls_config.items.get("ca_cert", "")
-                self._ssl_config.password = self._tls_config.items.get("tls_passwd", "")
 
     def _build_models_metadata(self) -> list[dict[str, Any]]:
         """Construct model metadata from coordinator config and instance state."""
@@ -636,7 +625,7 @@ class CoordinatorServer:
             "created": self._service_start_timestamp,
         }
         return [enriched_model]
-
+    
     def _timeout_handler(self, timeout_seconds: Optional[float] = None):
         def decorator(func):
             @wraps(func)
@@ -654,7 +643,7 @@ class CoordinatorServer:
                 except asyncio.TimeoutError as e:
                     logger.warning(f"Request timeout after {actual_timeout}s: {func.__name__}")
                     raise HTTPException(
-                        status_code=HTTP_STATUS_GATEWAY_TIMEOUT,
+                        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                         detail=f"Request timed out after {actual_timeout} seconds"
                     ) from e
                 except HTTPException:
@@ -708,7 +697,7 @@ class CoordinatorServer:
                 else:
                     logger.debug("Received readiness check request, This coordinator is not master")
                     raise HTTPException(
-                        status_code=HTTP_STATUS_SERVICE_UNAVAILABLE,
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         detail="Coordinator is not master"
                     )
             else:
@@ -727,7 +716,23 @@ class CoordinatorServer:
         @self.management_app.post("/instances/refresh", response_model=RequestResponse)
         @self._timeout_handler()
         async def refresh_instances(request: Request) -> RequestResponse:
-            return await self._handle_refresh_instances(request)
+            try:
+                result = await self._handle_refresh_instances(request)
+                log_audit_event(
+                    request=request,
+                    event_type=INSTANCE_REFRESH,
+                    resource_name=INSTANCE_REFRESH_URL,
+                    event_result="success"
+                )
+                return result
+            except Exception as e:
+                log_audit_event(
+                    request=request,
+                    event_type=INSTANCE_REFRESH,
+                    resource_name=INSTANCE_REFRESH_URL,
+                    event_result=f"failed: {sanitize_error_message(str(e))[:100]}"
+                )
+                raise
         
         @self.management_app.post("/v1/metaserver")
         @self._timeout_handler()
@@ -740,7 +745,7 @@ class CoordinatorServer:
             models = self._build_models_metadata()
             if not models:
                 raise HTTPException(
-                    status_code=HTTP_STATUS_SERVICE_UNAVAILABLE,
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="AIGW model configuration is not available. Please configure aigw in user_config.json."
                 )
             return {
@@ -777,12 +782,23 @@ class CoordinatorServer:
             raw_body = await request.body()
             if not raw_body:
                 logger.error("Request body is empty")
-                raise HTTPException(status_code=HTTP_STATUS_BAD_REQUEST, detail="Request body cannot be empty")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Request body cannot be empty")
+            
+            # validate request body size limit
+            if len(raw_body) > MAX_REQUEST_BODY_SIZE:
+                logger.error(f"Request body size {len(raw_body)} exceeds maximum allowed size {MAX_REQUEST_BODY_SIZE}")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "Request body size exceeds maximum allowed size of "
+                        f"{MAX_REQUEST_BODY_SIZE // (1024 * 1024)}MB"
+                    )
+                )
             
             body = json.loads(raw_body.decode(ENCODING_UTF8))
             if not body:
                 logger.error("Parsed JSON body is empty")
-                raise HTTPException(status_code=HTTP_STATUS_BAD_REQUEST, detail="Request body cannot be empty")
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Request body cannot be empty")
             
             logger.debug(
                 "Request body keys: %s",
@@ -803,17 +819,17 @@ class CoordinatorServer:
                 preview_text
             )
             raise HTTPException(
-                status_code=HTTP_STATUS_BAD_REQUEST,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid JSON format: {str(e)}"
             ) from e
         except Exception as e:
             logger.error("Failed to parse request body: %s, type: %s", e, type(e))
             raise HTTPException(
-                status_code=HTTP_STATUS_BAD_REQUEST,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Failed to parse request body: {str(e)}"
             ) from e
         
-        logger.info(
+        logger.debug(
             "Received instance refresh request, body keys: %s",
             list(body.keys()) if isinstance(body, dict) else NOT_A_DICT
         )
@@ -829,7 +845,7 @@ class CoordinatorServer:
                 list(body.keys()) if isinstance(body, dict) else NOT_A_DICT
             )
             raise HTTPException(
-                status_code=HTTP_STATUS_BAD_REQUEST,
+                status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid request format: {str(e)}"
             ) from e
         
@@ -853,20 +869,20 @@ class CoordinatorServer:
             
             self._validate_openai_request(body_json, request_type)
             if not InstanceManager().is_available():
-                raise HTTPException(status_code=HTTP_STATUS_SERVICE_UNAVAILABLE, detail="Service is not available")
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is not available")
 
             return await handle_request(request)
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Failed to process OpenAI request: {e}", exc_info=True)
-            raise HTTPException(status_code=HTTP_STATUS_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e
 
     async def _handle_metaserver_request(self, request: Request):
         """Handle MetaServer request"""
         try:
             if not InstanceManager().is_available():
-                raise HTTPException(status_code=503, detail="Service is not available")
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is not available")
 
             # Use router to handle requests
             return await handle_metaserver_request(request)
@@ -874,4 +890,4 @@ class CoordinatorServer:
             raise
         except Exception as e:
             logger.error(f"Failed to process MetaServer request: {e}")
-            raise HTTPException(status_code=HTTP_STATUS_INTERNAL_SERVER_ERROR, detail=str(e)) from e
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)) from e

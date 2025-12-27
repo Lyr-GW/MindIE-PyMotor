@@ -653,6 +653,36 @@ class CoordinatorCertUtil:
             logger.error(f"Certificate chain validation failed: {e}")
             return False
     
+    @staticmethod
+    def configure_tls13_only(context: ssl.SSLContext) -> None:
+        try:
+            context.minimum_version = ssl.TLSVersion.TLSv1_3
+            context.maximum_version = ssl.TLSVersion.TLSv1_3
+            
+            # TLS 1.3 password suites
+            tls13_ciphersuites = [
+                'TLS_AES_128_GCM_SHA256',
+                'TLS_AES_256_GCM_SHA384',
+                'TLS_CHACHA20_POLY1305_SHA256',
+                'TLS_AES_128_CCM_SHA256'
+            ]
+            
+
+            if hasattr(context, 'set_ciphersuites'):
+                try:
+                    context.set_ciphersuites(':'.join(tls13_ciphersuites))
+                    logger.info(f"TLS 1.3 cipher suites configured: {', '.join(tls13_ciphersuites)}")
+                except ssl.SSLError as e:
+                    logger.warning(f"Failed to set TLS 1.3 cipher suites: {e}, using default")
+            else:
+                logger.warning(
+                    "set_ciphersuites() not available, TLS 1.3 cipher suites will use OpenSSL defaults. "
+                    "TLS version is still restricted to 1.3 only."
+                )
+        except Exception as e:
+            logger.error(f"Failed to configure TLS 1.3: {e}")
+            raise
+
     @classmethod
     def construct_cert_context(cls, config: Dict[str, str]) -> Optional[object]:
         """
@@ -693,6 +723,10 @@ class CoordinatorCertUtil:
             
             # Create SSL context
             context = create_default_context(Purpose.SERVER_AUTH)
+            
+            # Configure TLS 1.3 and password suites
+            CoordinatorCertUtil.configure_tls13_only(context)
+            
             context.load_verify_locations(cafile=config[CA_CERTS])
             context.load_cert_chain(
                 certfile=config[TLS_CERT],
@@ -766,6 +800,9 @@ class CoordinatorCertUtil:
             # Create SSL context
             context = create_default_context(Purpose.SERVER_AUTH)
             
+            # Configure TLS 1.3 and password suites
+            CoordinatorCertUtil.configure_tls13_only(context)
+            
             # Load CA certificate
             context.load_verify_locations(cafile=ca_file)
             
@@ -776,7 +813,7 @@ class CoordinatorCertUtil:
                 password=password if password else None
             )
             
-            logger.info("SSL context created successfully with strict validation")
+            logger.info("SSL context created successfully with strict validation (TLS 1.3 only)")
             return context
             
         except Exception as e:
@@ -837,6 +874,10 @@ class CoordinatorCertUtil:
             
             # Create SSL context (no client cert verification)
             context = create_default_context(Purpose.SERVER_AUTH)
+            
+            # Configure TLS 1.3 and password suites
+            CoordinatorCertUtil.configure_tls13_only(context)
+            
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE  # Don't require client certificates
             

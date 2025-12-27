@@ -15,6 +15,12 @@ from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
+from motor.common.utils.security_utils import (
+    sanitize_error_message,
+    filter_sensitive_headers,
+    filter_sensitive_body,
+    validate_and_sanitize_path,
+)
 from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -58,9 +64,10 @@ async def handle_request(raw_request: Request) -> StreamingResponse:
         logger.debug(f"Error occurred in proxy server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
         if isinstance(e, HTTPException):
             raise e
+        safe_error_msg = sanitize_error_message(str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=str(e)
+            detail=safe_error_msg
         ) from e
 
 
@@ -92,9 +99,10 @@ async def handle_metaserver_request(raw_request: Request) -> httpx.Response:
         logger.debug(f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
         if isinstance(e, HTTPException):
             raise e
+        safe_error_msg = sanitize_error_message(str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail=str(e)
+            detail=safe_error_msg
         ) from e
 
 
@@ -119,13 +127,15 @@ async def __create_request_info(raw_request: Request, metaserver_request: bool =
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Empty request json"
         )
-    logger.debug("Got request headers: %s, body: %s", raw_request.headers, request_json)
+    filtered_headers = filter_sensitive_headers(raw_request.headers)
+    filtered_body = filter_sensitive_body(request_json)
+    logger.debug("Got request headers: %s, body: %s", filtered_headers, filtered_body)
     if metaserver_request:
         req_id = ""
     else:
         req_id = RequestManager().generate_request_id()
     req_len = len(request_body)
-    api = raw_request.url.path.lstrip('/')
+    api = validate_and_sanitize_path(raw_request.url.path)
     
     return RequestInfo(
         req_id=req_id,

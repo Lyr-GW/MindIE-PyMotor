@@ -15,6 +15,7 @@ from motor.coordinator.models.contants import REQUEST_ID_KEY, DEFAULT_REQUEST_ID
 from motor.coordinator.models.request import RequestInfo, ReqState, ScheduledResource
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.router.request_error_handler import handle_request_errors
+from motor.common.utils.security_utils import filter_sensitive_headers, filter_sensitive_body
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import PDRole
 from motor.common.utils.http_client import AsyncSafeHTTPSClient
@@ -161,8 +162,10 @@ class BaseRouter(ABC):
             'X-Request-Id': self.req_info.req_id
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
+        filtered_headers = filter_sensitive_headers(headers)
+        filtered_body = filter_sensitive_body(req_data)
         self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                          base_url, self.req_info.api, headers, req_data, 
+                          base_url, self.req_info.api, filtered_headers, filtered_body, 
                           CoordinatorConfig().exception_config.first_token_timeout)
         timeout = CoordinatorConfig().exception_config.infer_timeout \
             if CoordinatorConfig().exception_config.infer_timeout != 0 else None

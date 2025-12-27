@@ -14,8 +14,14 @@ from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from motor.coordinator.api_server.coordinator_server import SSLConfig
-from motor.common.utils.cert_util import CoordinatorCertUtil, CertUtil
+from motor.config.coordinator import TLSConfig
+from motor.common.utils.cert_util import (
+    CoordinatorCertUtil,
+    CertUtil,
+    TLS_CERT,
+    TLS_KEY,
+    CA_CERTS,
+)
 from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -280,19 +286,21 @@ def test_coordinator_server_ssl_config(test_certificates):
     test_certs = test_certificates
     
     # Create SSL configuration
-    ssl_config = SSLConfig()
-    ssl_config.enabled = True
-    ssl_config.cert_file = test_certs["server_cert"]
-    ssl_config.key_file = test_certs["server_key"]
-    ssl_config.ca_file = test_certs["ca_cert"]
+    tls_config = TLSConfig(enable_tls=True)
+    tls_config.items = {
+        TLS_CERT: test_certs["server_cert"],
+        TLS_KEY: test_certs["server_key"],
+        CA_CERTS: test_certs["ca_cert"],
+        "tls_passwd": "",
+    }
     
     logger.info("Coordinator server SSL configuration created successfully")
     
     ssl_context = CoordinatorCertUtil.create_ssl_context(
-        cert_file=ssl_config.cert_file,
-        key_file=ssl_config.key_file,
-        ca_file=ssl_config.ca_file,
-        password=ssl_config.password
+        cert_file=tls_config.items[TLS_CERT],
+        key_file=tls_config.items[TLS_KEY],
+        ca_file=tls_config.items[CA_CERTS],
+        password=tls_config.items.get("tls_passwd", "")
     )
     
     assert ssl_context is not None, "SSL context should be created successfully"
@@ -304,11 +312,10 @@ def test_ssl_disabled_mode():
     logger.info("=== Testing SSL disabled mode ===")
     
     # Create SSL configuration (disable SSL)
-    ssl_config = SSLConfig()
-    ssl_config.enabled = False
+    tls_config = TLSConfig(enable_tls=False)
     
     logger.info("Coordinator server configuration in SSL disabled mode created successfully")
-    assert ssl_config.enabled is False, "SSL should be disabled"
+    assert tls_config.enable_tls is False, "SSL should be disabled"
 
 
 # ============================================================================
