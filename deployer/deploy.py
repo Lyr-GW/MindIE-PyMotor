@@ -39,13 +39,17 @@ HARDWARE_TYPE = 'hardware_type'
 ANNOTATIONS = "annotations"
 SP_BLOCK = "sp-block"
 NAME_FLAG = " -n "
-g_controller_service = "mindie-ms-controller-service"
-g_coordinator_service = "mindie-ms-coordinator-service"
 BOOT_SHELL_PATH = "./boot_helper/boot.sh"
 STANDBY_CONFIG = "standby_config"
 MOTOR_CONTROLLER_CONFIG = "motor_controller_config"
 MOTOR_COORDINATOR_CONFIG = "motor_coordinator_config"
 ENABLE_MASTER_STANDBY = "enable_master_standby"
+
+# Global variables
+g_controller_service = "mindie-ms-controller-service"
+g_coordinator_service = "mindie-ms-coordinator-service"
+g_kv_pool_service = "kvp-master"
+g_kv_pool_enabled = False
 
 
 def read_json(file_path):
@@ -146,6 +150,16 @@ def generate_unique_id():
     timestamp = str(int(time.time() * 1000))
     random_part = str(uuid.uuid4()).split('-')[0]
     return f"{timestamp}{random_part}"
+
+
+def update_kv_pool_enabled_flag(user_config):
+    global g_kv_pool_enabled
+    g_kv_pool_enabled = False
+
+    kv_connector = user_config.get("motor_engine_prefill_config", {}).get("engine_config", {})\
+                    .get("kv_transfer_config", {}).get("kv_connector", "")
+    if kv_connector == "MultiConnector":
+        g_kv_pool_enabled = True
 
 
 def modify_controller_or_coordinator_yaml(data, user_config):
@@ -257,6 +271,12 @@ def modify_server_yaml(deployment_data, deploy_config, index, node_type):
         {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
         {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service}
     ])
+
+    if g_kv_pool_enabled:
+        container[ENV].append(
+            {NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service}
+        )
+
     
     # Modify replicas
     instance_pod_num_key = SINGER_P_INSTANCES_NUM if node_type == "p" else SINGER_D_INSTANCES_NUM
@@ -337,12 +357,38 @@ def generate_yaml_server(input_yaml, output_file, deploy_config):
         write_yaml(data, output_file_d, True)
 
 
-def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, deploy_config):
+def generate_yaml_kv_pool(input_yaml, output_file, deploy_config):
+    logger.info(f"Generating YAML from {input_yaml} to {output_file}")
+    data = load_yaml(input_yaml, False)
+    # Modify deployment data
+    deployment_data = data[0]
+    deployment_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
+
+    container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
+    container["image"] = deploy_config["image_name"]
+
+    if ENV not in container:
+        container[ENV] = []
+
+    container[ENV].extend([
+        {NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service}
+    ])
+    
+    # Modify service data
+    service_data = data[1]
+    service_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
+
+    write_yaml(data, output_file, False)
+
+
+def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, deploy_config):
 
     controller_data = load_yaml(controller_input_yaml, False)
     coordinator_data = load_yaml(coordinator_input_yaml, False)
+    kv_pull_data = load_yaml(kv_pool_input_yaml, False)
     controller_service_data = controller_data[1]
     coordinator_service_data = coordinator_data[1]
+    kv_pull_service_data = kv_pull_data[1]
 
     global g_controller_service
     controller_name = controller_service_data[METADATA][NAME]
@@ -350,6 +396,9 @@ def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, depl
     global g_coordinator_service
     coordinator_name = coordinator_service_data[METADATA][NAME]
     g_coordinator_service = f"{coordinator_name}.{deploy_config[CONFIG_JOB_ID]}.svc.cluster.local"
+    global g_kv_pool_service
+    kv_pool_name = kv_pull_service_data[METADATA][NAME]
+    g_kv_pool_service = f"{kv_pool_name}.{deploy_config[CONFIG_JOB_ID]}.svc.cluster.local"
 
 
 def exec_all_kubectl_multi(deploy_config, out_path, user_config_path):
@@ -384,6 +433,11 @@ def exec_all_kubectl_multi(deploy_config, out_path, user_config_path):
         server_yaml = os.path.join(out_deploy_yaml_path, f'mindie_server_d{d_index}.yaml')
         safe_exec_cmd(f"kubectl apply -f {server_yaml} -n {job_id}")
 
+    if g_kv_pool_enabled:
+        # Apply kv pool YAML file
+        kv_pool_yaml = os.path.join(out_deploy_yaml_path, 'mindie_ms_kv_pool.yaml')
+        safe_exec_cmd(f"kubectl apply -f {kv_pool_yaml} -n {job_id}")
+
 
 def set_env_to_shell(deploy_config):
     env_config_path = deploy_config.get("env_path", "./conf/env.json")
@@ -394,6 +448,7 @@ def set_env_to_shell(deploy_config):
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_coordinator_env", "set_coordinator_env")
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_engine_prefill_env", "set_prefill_env")
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_engine_decode_env", "set_decode_env")
+        update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
 
 
 def parse_arguments():
@@ -429,17 +484,23 @@ def main():
     coordinator_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_ms_coordinator.yaml')
     server_input_yaml = os.path.join(deploy_yaml_root_path, 'server_init.yaml')
     server_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_server')
+    kv_pool_input_yaml = os.path.join(deploy_yaml_root_path, 'kv_pool_init.yaml')
+    kv_pool_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_ms_kv_pool.yaml')
 
     user_config = read_json(user_config_path)
     deploy_config = user_config["motor_deploy_config"]
+
+    update_kv_pool_enabled_flag(user_config)
     
     set_env_to_shell(deploy_config)
 
     # Generate YAML files - pass user_config instead of user_config_path
-    init_service_domain_name(controller_input_yaml, coordinator_input_yaml, deploy_config)
+    init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, deploy_config)
     generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, user_config)
     generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, user_config)
     generate_yaml_server(server_input_yaml, server_output_yaml, deploy_config)
+    if g_kv_pool_enabled:
+        generate_yaml_kv_pool(kv_pool_input_yaml, kv_pool_output_yaml, deploy_config)
     exec_all_kubectl_multi(deploy_config, output_root_path, user_config_path)
 
     logger.info("all deploy end.")

@@ -46,4 +46,5 @@ sed -i '/^function set_coordinator_env()/,/^}/d' ./boot_helper/boot.sh
 sed -i '/^function set_prefill_env()/,/^}/d' ./boot_helper/boot.sh
 sed -i '/^function set_decode_env()/,/^}/d' ./boot_helper/boot.sh
 sed -i '/^function set_common_env()/,/^}/d' ./boot_helper/boot.sh
+sed -i '/^function set_kv_pool_env()/,/^}/d' ./boot_helper/boot.sh
 sed -i '/./,$!d' ./boot_helper/boot.sh
