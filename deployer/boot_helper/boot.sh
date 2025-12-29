@@ -44,6 +44,13 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
         python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_ENGINE_PATH" "$USER_CONFIG_FILE" "motor_engine_decode_config"
     fi
 
+    if [ -n "$KVP_MASTER_SERVICE" ]; then
+        echo "Updating kv cache pool configuration file..."
+        export MOONCAKE_CONFIG_PATH=$CONFIG_PATH/kv_cache_pool_config.json
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOONCAKE_CONFIG_PATH" "$USER_CONFIG_FILE" "kv_cache_pool_config"
+    fi
+
     # Use hccl_tools.py to generate ranktable.json
     if [ -f "$CONFIGMAP_PATH/hccl_tools.py" ]; then
         echo "Using hccl_tools.py to generate ranktable.json..."
@@ -139,4 +146,13 @@ if [ "$ROLE" == "coordinator" ]; then
 
     # Coordinator start command
     python3 -m motor.coordinator.main
+fi
+
+if [ "$ROLE" == "kv_pool" ]; then
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+    set_kv_pool_env
+
+    # KV Pool start
+    mooncake_master --port 50088 --eviction_high_watermark_ratio 0.95 --eviction_ratio 0.05
 fi

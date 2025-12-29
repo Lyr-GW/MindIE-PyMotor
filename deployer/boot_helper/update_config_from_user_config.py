@@ -36,6 +36,9 @@ D_MAX_SEQLEN = 'd_max_seqlen'
 SLO_TTFT = 'slo_ttft'
 SLO_TPOT = 'slo_tpot'
 HARDWARE_TYPE = 'hardware_type'
+LOCAL_HOSTNAME = 'local_hostname'
+MASTER_SERVER_ADDRESS = 'master_server_address'
+MASTER_SERVER_PORT = '50088'
 
 
 class ConfigKey(Enum):
@@ -44,6 +47,7 @@ class ConfigKey(Enum):
     MOTOR_ENGINE_PREFILL = "motor_engine_prefill_config"
     MOTOR_ENGINE_DECODE = "motor_engine_decode_config"
     MOTOR_NODEMANAGER = "motor_nodemanger_config"
+    MOTOR_KV_POOL = "kv_cache_pool_config"
 
     @staticmethod
     def is_valid(config_key: str) -> bool:
@@ -161,6 +165,9 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
             elif config_key == ConfigKey.MOTOR_ENGINE_DECODE.value:
                 updated_config[MODEL_CONFIG][PREFILL_PARALLEL_CONFIG] = \
                     user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value][MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
+            elif config_key == ConfigKey.MOTOR_KV_POOL.value:
+                updated_config[LOCAL_HOSTNAME] = f"{os.getenv('POD_IP')}"
+                updated_config[MASTER_SERVER_ADDRESS] = f"{os.getenv('KVP_MASTER_SERVICE')}:{MASTER_SERVER_PORT}"
         except KeyError as e:
             logging.warning(f"Failed to update {config_key} due to missing key: {str(e)}")
 

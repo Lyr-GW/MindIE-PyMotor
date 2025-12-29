@@ -102,7 +102,7 @@ class VLLMConfig(BaseConfig):
             if kv_config[constants.KV_CONNECTOR] == constants.MULTI_CONNECTOR:
                 self._process_multi_connector(kv_config)
             else:
-                self._process_mooncake_connector(kv_config)
+                self._process_mooncake_connector(kv_config, add_engine_id=True)
 
             self.kv_transfer_config = json.dumps(kv_config)
         except Exception as e:
@@ -121,16 +121,17 @@ class VLLMConfig(BaseConfig):
         connectors = kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.CONNECTORS]
         if len(connectors) < 2:
             raise ValueError("KV connector extra config at least have 2 connectors")
-        self._process_mooncake_connector(connectors[0])
+        self._process_mooncake_connector(connectors[0], add_engine_id=False)
         self._process_store_connector(connectors[1])
 
-    def _process_mooncake_connector(self, kv_config):
+    def _process_mooncake_connector(self, kv_config, add_engine_id: bool = True):
         role = self.server_config.role
         if role == constants.PREFILL_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
         elif role == constants.DECODE_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
-        kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
+        if add_engine_id:
+            kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
 
         prefill_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
         decode_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_DECODE)

@@ -544,7 +544,7 @@ class TestVLLMConfig:
             assert mock_mooncake.call_count == 1
             assert mock_store.call_count == 1
             # Verify the correct connectors were passed to each method
-            mock_mooncake.assert_called_with(kv_config["kv_connector_extra_config"]["connectors"][0])
+            mock_mooncake.assert_called_with(kv_config["kv_connector_extra_config"]["connectors"][0], add_engine_id=False)
             mock_store.assert_called_with(kv_config["kv_connector_extra_config"]["connectors"][1])
 
     def test_process_multi_connector_decode(self, imports, decode_server_config, mock_vllm_module):
