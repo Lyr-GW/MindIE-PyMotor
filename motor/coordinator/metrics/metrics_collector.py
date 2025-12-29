@@ -412,20 +412,46 @@ class MetricsCollector(ThreadSafeSingleton):
                 pod_info[self.METRICS_KEY] = parsed_metric
         return True
 
-    def _aggregate_metric_by_sum(self, metric_list: list[SingleMetric]) -> SingleMetric:
+    def _aggregate_labels_by_sum(self, metric_list: list[SingleMetric]) -> dict[str, float]:
         """
-        Aggregate single metric using rule sum.
+        Aggregate all labels by sum.
 
-        :param metric_list: the same metric from different pods or instances
+        :param metric_list:
         :returns:
         """
-
         aggregate = {}
         for metric in metric_list:
             for i, label in enumerate(metric.label):
                 if label not in aggregate:
                     aggregate[label] = 0.0
                 aggregate[label] += metric.value[i]
+        return aggregate
+
+    def _aggregate_labels_by_mean(self, metric_list: list[SingleMetric]) -> dict[str, float]:
+        """
+        Aggregate all labels by mean.
+
+        :param metric_list:
+        :returns:
+        """
+        aggregate = self._aggregate_labels_by_sum(metric_list)
+        for label in aggregate:
+            aggregate[label] /= len(metric_list)
+        return aggregate
+
+    def _aggregate_metric_common(self, metric_list: list[SingleMetric]) -> SingleMetric:
+        """
+        Aggregate single metric using different rule according metric name.
+
+        :param metric_list: the same metric from different pods or instances
+        :returns:
+        """
+
+        # vllm:kv_cache_usage_perc use mean rule, other use sum rule
+        if metric_list[0].name == "vllm:kv_cache_usage_perc":
+            aggregate = self._aggregate_labels_by_mean(metric_list)
+        else:
+            aggregate = self._aggregate_labels_by_sum(metric_list)
 
         metric_aggregate = SingleMetric()
         metric_aggregate.name = metric_list[0].name
@@ -438,9 +464,9 @@ class MetricsCollector(ThreadSafeSingleton):
             metric_aggregate.value.append(value)
         return metric_aggregate
 
-    def _aggregate_metrics_by_sum(self, metrics_list: list[list[SingleMetric]]) -> list[SingleMetric]:
+    def _aggregate_metrics_common(self, metrics_list: list[list[SingleMetric]]) -> list[SingleMetric]:
         """
-        Aggregate metrics using rule sum.
+        Aggregate metrics using different rule according metric name.
 
         :param metrics_list:
         :returns:
@@ -467,7 +493,7 @@ class MetricsCollector(ThreadSafeSingleton):
         # 4. aggregate all metrics
         metrics_aggregate = []
         for value in aggr_input.values():
-            metrics_aggregate.append(self._aggregate_metric_by_sum(value))
+            metrics_aggregate.append(self._aggregate_metric_common(value))
 
         return metrics_aggregate
 
@@ -509,15 +535,13 @@ class MetricsCollector(ThreadSafeSingleton):
             aggr_input = []
             for pod in endpoints.values():
                 aggr_input.append(pod[self.METRICS_KEY])
-            collects[instance_id][self.METRICS_KEY] = self._aggregate_metrics_by_sum(aggr_input)
+            collects[instance_id][self.METRICS_KEY] = self._aggregate_metrics_common(aggr_input)
             del collects[instance_id]["endpoints"]
 
             # update cache
             self._instance_metrics_cached[instance_id] = {
                 self.METRICS_KEY: collects[instance_id][self.METRICS_KEY]
             }
-
-        return True
 
     def _aggregate_metrics_all_instance(self, collects: dict[int, dict[str, list[SingleMetric]]]) -> list[SingleMetric]:
         """ Aggreagte metrics of all instances.  """
@@ -545,7 +569,7 @@ class MetricsCollector(ThreadSafeSingleton):
         aggr_input.append(aggr_input_single)
 
         # 3. excute aggregate
-        aggregate = self._aggregate_metrics_by_sum(aggr_input)
+        aggregate = self._aggregate_metrics_common(aggr_input)
 
         return aggregate
 
@@ -611,7 +635,7 @@ class MetricsCollector(ThreadSafeSingleton):
         aggr_input.append(aggr_input_single)
 
         # 4. excute aggregate and update history metric
-        self._inactive_instance_metrics_aggregate = self._aggregate_metrics_by_sum(aggr_input)
+        self._inactive_instance_metrics_aggregate = self._aggregate_metrics_common(aggr_input)
 
         # 5. remove ins_id from cache
         for ins_id in clear_ins_list:

@@ -406,7 +406,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
 
         # check function: empty collects
         collects = {}
-        assert metric_collector._aggregate_metrics_by_instance(collects)
+        metric_collector._aggregate_metrics_by_instance(collects)
         assert collects == {}
         assert len(metric_collector._instance_metrics_cached) == 0
 
@@ -435,7 +435,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         }
 
         assert len(metric_collector._instance_metrics_cached) == 0
-        assert metric_collector._aggregate_metrics_by_instance(collects)
+        metric_collector._aggregate_metrics_by_instance(collects)
         assert len(collects) == 1
         assert "endpoints" not in collects[0]
         assert "metrics" in collects[0]
@@ -464,7 +464,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         }
 
         assert len(metric_collector._instance_metrics_cached) == 1
-        assert metric_collector._aggregate_metrics_by_instance(collects)
+        metric_collector._aggregate_metrics_by_instance(collects)
         assert len(collects) == 1
         assert "endpoints" not in collects[1]
         assert "metrics" in collects[1]
@@ -533,7 +533,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
             print(metric.name, metric.type, metric.label, metric.value)
 
     @_test_without_background_thread
-    def test_aggregate_metric_by_sum(self):
+    def test_aggregate_metric_common(self):
         # ensure MetricsCollector clean
         self.clean_instances()
         metric_collector = MetricsCollector(self.config)
@@ -557,7 +557,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_b.value = [1.0, 2.0, 3.0]
         metric_c.label = ["a", "b", "c"]
         metric_c.value = [2.0, 4.0, 6.0]
-        metric_sum = metric_collector._aggregate_metric_by_sum([metric_a, metric_b])
+        metric_sum = metric_collector._aggregate_metric_common([metric_a, metric_b])
         assert self.check_metrics_equel([metric_sum], [metric_c])
 
         metric_a.label = ["a"]
@@ -566,7 +566,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_b.value = [1.0, 2.0, 3.0]
         metric_c.label = ["a", "b", "c"]
         metric_c.value = [2.0, 2.0, 3.0]
-        metric_sum = metric_collector._aggregate_metric_by_sum([metric_a, metric_b])
+        metric_sum = metric_collector._aggregate_metric_common([metric_a, metric_b])
         assert self.check_metrics_equel([metric_sum], [metric_c])
 
 
@@ -576,7 +576,27 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_b.value = [1.0, 2.0]
         metric_c.label = ["a", "b", "c"]
         metric_c.value = [2.0, 4.0, 3.0]
-        metric_sum = metric_collector._aggregate_metric_by_sum([metric_a, metric_b])
+        metric_sum = metric_collector._aggregate_metric_common([metric_a, metric_b])
+        assert self.check_metrics_equel([metric_sum], [metric_c])
+
+        # test mean
+        metric_a.name = "vllm:kv_cache_usage_perc"
+        metric_a.type = MetricType.GAUGE
+        metric_a.help = "KV-cache usage. 1 means 100 percent usage."
+        metric_b.name = "vllm:kv_cache_usage_perc"
+        metric_b.type = MetricType.GAUGE
+        metric_b.help = "KV-cache usage. 1 means 100 percent usage."
+        metric_c.name = "vllm:kv_cache_usage_perc"
+        metric_c.type = MetricType.GAUGE
+        metric_c.help = "KV-cache usage. 1 means 100 percent usage."
+
+        metric_a.label = ["a", "b", "c"]
+        metric_a.value = [1.0, 2.0, 3.0]
+        metric_b.label = ["a", "b"]
+        metric_b.value = [1.0, 4.0]
+        metric_c.label = ["a", "b", "c"]
+        metric_c.value = [1.0, 3.0, 1.5]
+        metric_sum = metric_collector._aggregate_metric_common([metric_a, metric_b])
         assert self.check_metrics_equel([metric_sum], [metric_c])
 
 
@@ -664,7 +684,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
 
         # check function: empty collects
         collects = {}
-        assert metric_collector._aggregate_metrics_by_instance(collects)
+        metric_collector._aggregate_metrics_by_instance(collects)
         assert collects == {}
         assert len(metric_collector._instance_metrics_cached) == 0
 
@@ -690,7 +710,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
         }
 
         assert len(metric_collector._instance_metrics_cached) == 0
-        assert metric_collector._aggregate_metrics_by_instance(collects)
+        metric_collector._aggregate_metrics_by_instance(collects)
         assert len(collects) == 1
         assert "endpoints" not in collects[0]
         assert "metrics" in collects[0]
@@ -716,7 +736,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
         }
 
         assert len(metric_collector._instance_metrics_cached) == 1
-        assert metric_collector._aggregate_metrics_by_instance(collects)
+        metric_collector._aggregate_metrics_by_instance(collects)
         assert len(collects) == 1
         assert "endpoints" not in collects[1]
         assert "metrics" in collects[1]
