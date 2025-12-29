@@ -1,67 +1,55 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
-from enum import Enum
 from motor.common.resources.instance import Instance, PDRole
 from motor.common.resources.endpoint import Endpoint, WorkloadAction
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.logger import get_logger
 from motor.coordinator.scheduler.base_scheduling_policy import BaseSchedulingPolicy
 from motor.coordinator.scheduler.round_robin_policy import RoundRobinPolicy
 from motor.coordinator.scheduler.load_balance_policy import LoadBalancePolicy
-from motor.common.utils.logger import get_logger
+from motor.config.coordinator import CoordinatorConfig, SchedulerType
+
 
 logger = get_logger(__name__)
 
 
-class SchedulingPolicyType(Enum):
-    ROUND_ROBIN = "round_robin"
-    LOAD_BALANCE = "load_balance"
-
-
-class SchedulingPolicyFactory:
-    """
-    Factory class for creating scheduling policy instances.
-    """
-
-    @staticmethod
-    def create_scheduling_policy(policy_type: SchedulingPolicyType | str) -> BaseSchedulingPolicy:
-        """
-        Create a scheduling policy instance based on the specified policy type.
-        
-        Args:
-            policy: The scheduling policy to use
-            
-        Returns:
-            A scheduler instance
-        """
-        policy_type_str = policy_type.value if isinstance(policy_type, SchedulingPolicyType) else policy_type
-
-        if policy_type_str == SchedulingPolicyType.ROUND_ROBIN.value:
-            return RoundRobinPolicy()
-        elif policy_type_str == SchedulingPolicyType.LOAD_BALANCE.value:
-            return LoadBalancePolicy()
-        else:
-            logger.error(f"Unsupported scheduling policy: {policy_type_str}")
-            raise ValueError(f"Unsupported scheduling policy: {policy_type_str}")
-
-
-class Scheduler:
+class Scheduler(ThreadSafeSingleton):
     """
     Main scheduler class that acts as a facade for different scheduling algorithms.
     """
 
-    def __init__(self, policy_type: SchedulingPolicyType | str = SchedulingPolicyType.ROUND_ROBIN):
-        self._scheduling_policy: BaseSchedulingPolicy = SchedulingPolicyFactory.create_scheduling_policy(policy_type)
-        self._policy_type = policy_type
-
-    def set_scheduling_policy(self, policy_type: SchedulingPolicyType | str) -> None:
+    def __init__(self, config: CoordinatorConfig | SchedulerType | None = None):
         """
-        Set the current scheduler instance.
+        Initialize the scheduler.
         
         Args:
-            policy: The scheduler type to use
+            config: Can be:
+                   - CoordinatorConfig object
+                   - SchedulerType enum value
+                   - None (uses default config)
         """
-        self._scheduling_policy = SchedulingPolicyFactory.create_scheduling_policy(policy_type)
-        self._policy_type = policy_type
-        logger.info(f"Scheduling policy type changed to {policy_type}")
+        # If the scheduler is already initialized, return.
+        if hasattr(self, '_initialized'):
+            return
+        
+        if config is None:
+            config = CoordinatorConfig()
+        
+        if isinstance(config, SchedulerType):
+            self._policy_type = config
+        else:
+            self._policy_type = config.scheduler_config.scheduler_type
+        
+        if self._policy_type == SchedulerType.ROUND_ROBIN:
+            self._scheduling_policy = RoundRobinPolicy()
+        elif self._policy_type == SchedulerType.LOAD_BALANCE:
+            self._scheduling_policy = LoadBalancePolicy()
+        else:
+            logger.error(f"Unsupported scheduling policy: {self._policy_type}")
+            raise ValueError(f"Unsupported scheduling policy: {self._policy_type}")
+
+        self._initialized = True
+        logger.info("Scheduler started.")
     
     def get_scheduling_policy(self) -> BaseSchedulingPolicy:
         """

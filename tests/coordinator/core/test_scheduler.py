@@ -1,10 +1,11 @@
 import pytest
-from motor.coordinator.scheduler.scheduler import Scheduler, SchedulingPolicyType
+from motor.coordinator.scheduler.scheduler import Scheduler, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction
 from motor.common.resources.http_msg_spec import EventType
+from motor.common.utils.singleton import ThreadSafeSingleton
 
 
 @pytest.fixture
@@ -88,13 +89,18 @@ def scheduler_setup(prefill_instances, decode_instances, mix_instances):
         instance.add_endpoints(f"192.168.1.{instance.id}", endpoints)
 
     instance_manager.refresh_instances(EventType.ADD, all_instances)
+
+    # Clear singleton instance to ensure fresh state for each test
+    if Scheduler in ThreadSafeSingleton._instances:
+        del ThreadSafeSingleton._instances[Scheduler]
+
     return all_instances
 
 
 def test_request_processing_pd_separation_scenario(scheduler_setup):
     """Test PD separation scenario with load balance policy."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.LOAD_BALANCE)
+    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
     load_balance_scheduler = scheduler.get_scheduling_policy()
     request_length = 4
     req_id = "test_request_1"
@@ -160,7 +166,7 @@ def test_request_processing_pd_separation_scenario(scheduler_setup):
 def test_request_processing_mix_scenario(scheduler_setup):
     """Test mixed role scenario with load balance policy."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.LOAD_BALANCE)
+    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
     request_length = 4
     req_id = "test_request_mix_1"
     
@@ -205,7 +211,7 @@ def test_request_processing_mix_scenario(scheduler_setup):
 def test_multiple_requests_load_balancing(scheduler_setup, request_length):
     """Test multiple requests with different lengths."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.LOAD_BALANCE)
+    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
     
     req_id = f"test_request_{request_length}"
     
@@ -236,7 +242,7 @@ def test_multiple_requests_load_balancing(scheduler_setup, request_length):
 def test_workload_calculation_accuracy(scheduler_setup):
     """Test workload calculation accuracy."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.LOAD_BALANCE)
+    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
     request_length = 4
     req_id = "test_workload_calc"
     load_balance_scheduler = scheduler.get_scheduling_policy()
@@ -276,7 +282,7 @@ def test_workload_calculation_accuracy(scheduler_setup):
 def test_load_balance_policy_selection_logic(scheduler_setup):
     """Test load balance policy selection logic."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.LOAD_BALANCE)
+    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
     
     prefill_instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
     assert prefill_instance is not None
@@ -298,7 +304,7 @@ def test_load_balance_policy_selection_logic(scheduler_setup):
 def test_round_robin_instance_selection(scheduler_setup):
     """Test round robin instance selection."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.ROUND_ROBIN)
+    scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
     
     selected_instances = []
     # select 6 times, should round robin all 3 prefill instances each 2 times
@@ -328,8 +334,7 @@ def test_round_robin_instance_selection(scheduler_setup):
 def test_round_robin_endpoint_selection(scheduler_setup):
     """Test round robin endpoint selection."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.ROUND_ROBIN)
-    
+    scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
     # select a prefill instance
     instance, endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
     assert instance is not None
@@ -349,7 +354,7 @@ def test_round_robin_endpoint_selection(scheduler_setup):
 def test_round_robin_mixed_role_selection(scheduler_setup):
     """Test round robin mixed role selection."""
     all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulingPolicyType.ROUND_ROBIN)
+    scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
     
     # test that the mixed role selection round robin works as expected
     selected_instances = []
@@ -377,8 +382,8 @@ def test_round_robin_edge_cases():
     all_instances = list(available_pool.values()) + list(unavailable_pool.values())
     instance_manager.refresh_instances(EventType.DEL, all_instances)
 
-    empty_scheduler = Scheduler(SchedulingPolicyType.ROUND_ROBIN)
-    
+    empty_scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
+
     # test that the round robin edge cases work as expected: no instances, no endpoints
     instance, _ = empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
     assert instance is None
