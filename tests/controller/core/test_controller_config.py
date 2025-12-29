@@ -30,8 +30,6 @@ def temp_dir():
         yield temp_dir
 
 
-
-
 def test_default_config_initialization():
     """Test default configuration initialization"""
     # Ensure no environment variables interfere with default values
@@ -616,44 +614,55 @@ def modify_config_api_port(config_path: str, new_port: int):
         json.dump(config, f, indent=2)
 
 
-def test_dynamic_config_reload_with_watcher(temp_json_file):
+def test_dynamic_config_reload_with_watcher():
     """Test dynamic config reload through ConfigWatcher"""
+    import uuid
     from motor.common.utils.config_watcher import ConfigWatcher
 
-    # Create initial config
-    create_test_config(temp_json_file, "INFO")
-
-    # Load config
-    config = ControllerConfig.from_json(temp_json_file)
-    assert config.logging_config.log_level == "INFO"
-    assert config.api_config.controller_api_port == 8000
-
-    # Start watcher
-    watcher = ConfigWatcher(temp_json_file, config.reload, debounce_seconds=0.1)
-    watcher.start()
+    # Create a unique config file for this test to avoid parallel test interference
+    unique_id = str(uuid.uuid4())[:8]
+    config_file = f"/tmp/test_config_{unique_id}.json"
 
     try:
+        # Create initial config
+        create_test_config(config_file, "INFO")
+
+        # Load config
+        config = ControllerConfig.from_json(config_file)
+        assert config.logging_config.log_level == "INFO"
+        assert config.api_config.controller_api_port == 8000
+
+        # Start watcher
+        watcher = ConfigWatcher(config_file, config.reload, debounce_seconds=0.1)
+        watcher.start()
+
         # Wait for watcher to start
-        time.sleep(0.1)
+        time.sleep(0.2)
 
         # Modify config values
-        modify_config_api_port(temp_json_file, 9000)
+        modify_config_api_port(config_file, 9000)
 
-        # Wait for reload
-        time.sleep(0.5)
+        # Wait for reload with retry logic
+        max_attempts = 10
+        reloaded = False
+        for attempt in range(max_attempts):
+            time.sleep(0.1)
+            if config.api_config.controller_api_port == 9000:
+                reloaded = True
+                break
 
-        # Check if config was reloaded
-        assert config.api_config.controller_api_port == 9000
-
-    finally:
-        # Stop watcher first to prevent race conditions
+        # Stop watcher
         watcher.stop()
 
+        # Check if config was reloaded
+        assert reloaded, f"Config reload failed after {max_attempts} attempts. Current port: {config.api_config.controller_api_port}"
 
-
-
-
-
+    finally:
+        # Clean up the unique config file
+        try:
+            os.unlink(config_file)
+        except FileNotFoundError:
+            pass
 
 
 def test_tls_config_default_values():

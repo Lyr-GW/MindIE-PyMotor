@@ -76,7 +76,16 @@ def on_config_updated() -> None:
 
                 # Start the fault manager
                 fault_manager.start()
-                logger.info("FaultManager started successfully")
+
+                # Update fault manager with existing instances since it was restarted
+                if instance_manager is not None:
+                    active_instances = instance_manager.get_active_instances()
+                    inactive_instances = instance_manager.get_inactive_instances()
+                    all_instances = active_instances + inactive_instances
+                    if all_instances:
+                        logger.info("Updating FaultManager with %d existing instances (%d active, %d inactive)",
+                                    len(all_instances), len(active_instances), len(inactive_instances))
+                        fault_manager.update_instances(all_instances)
             except Exception as e:
                 logger.error(f"Failed to start FaultManager: {e}")
         else:

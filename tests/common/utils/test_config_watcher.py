@@ -96,17 +96,22 @@ def test_config_reload_callback():
 
 def test_watcher_with_controller_config():
     """Test watcher integration with ControllerConfig"""
-    # Create initial config
-    config_data = {
-        "logging_config": {"log_level": "INFO"},
-        "api_config": {"controller_api_host": "127.0.0.1", "controller_api_port": 8000}
-    }
+    import uuid
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-        config_path = f.name
-        json.dump(config_data, f)
+    # Create a unique config file for this test to avoid parallel test interference
+    unique_id = str(uuid.uuid4())[:8]
+    config_path = f"/tmp/test_watcher_config_{unique_id}.json"
 
     try:
+        # Create initial config
+        config_data = {
+            "logging_config": {"log_level": "INFO"},
+            "api_config": {"controller_api_host": "127.0.0.1", "controller_api_port": 8000}
+        }
+
+        with open(config_path, 'w') as f:
+            json.dump(config_data, f)
+
         # Load config
         config = ControllerConfig.from_json(config_path)
         assert config.logging_config.log_level == "INFO"
@@ -123,15 +128,24 @@ def test_watcher_with_controller_config():
         with open(config_path, 'w') as f:
             json.dump(config_data, f)
 
-        # Wait for reload
-        time.sleep(0.05)
+        # Wait for reload with retry logic
+        max_attempts = 10
+        reloaded = False
+        for attempt in range(max_attempts):
+            time.sleep(0.05)
+            if config.logging_config.log_level == "DEBUG":
+                reloaded = True
+                break
 
         # Check if config was reloaded
-        assert config.logging_config.log_level == "DEBUG"
+        assert reloaded, f"Config reload failed after {max_attempts} attempts. Current log_level: {config.logging_config.log_level}"
 
     finally:
         watcher.stop()
-        os.unlink(config_path)
+        try:
+            os.unlink(config_path)
+        except FileNotFoundError:
+            pass
 
 
 def test_watcher_with_update_callback():

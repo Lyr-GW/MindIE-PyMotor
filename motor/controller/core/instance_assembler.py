@@ -3,15 +3,13 @@
 
 import time
 import threading
-import hashlib
-import json
 from enum import Enum
 from dataclasses import dataclass, asdict
-from typing import Any
 
 from motor.common.utils.logger import get_logger
 from motor.common.utils.data_builder import build_ins_ranktable, build_endpoints
 from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.persistent_state import PersistentState
 from motor.common.resources import RegisterMsg, StartCmdMsg, ReregisterMsg, Instance, Endpoint
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import InstanceManager
@@ -39,44 +37,6 @@ class AssembleInstanceMetadata:
     def __post_init__(self):
         if self.lock is None:
             self.lock = threading.Lock()
-
-
-@dataclass
-class PersistentAssembleInstanceMetadataState:
-    """Enhanced persistent state for assemble instance metadata with version control and data integrity"""
-    metadata_data: dict[str, Any]
-    version: int
-    timestamp: float
-    checksum: str
-
-    def calculate_checksum(self) -> str:
-        """Calculate checksum for data integrity verification"""
-        try:
-            # Calculate checksum using raw data (not normalized) for performance
-            # Type consistency is handled in is_valid() method
-            sorted_data = str(sorted(self.metadata_data.items()))
-            data_str = f"{sorted_data}{self.version}{self.timestamp}"
-            return hashlib.sha256(data_str.encode()).hexdigest()
-        except Exception as e:
-            logger.error("Error calculating checksum: %s", e)
-            return ""
-
-    def is_valid(self) -> bool:
-        """Validate data integrity using checksum"""
-        # Try both original format checksum and JSON normalized checksum for compatibility
-        current_checksum = self.calculate_checksum()
-        if self.checksum == current_checksum:
-            return True
-
-        # Also try with JSON normalized data for cases where data was stored with different types
-        try:
-            normalized_data = json.loads(json.dumps(self.metadata_data, sort_keys=True))
-            normalized_checksum = hashlib.sha256(
-                f"{normalized_data}{self.version}{self.timestamp}".encode()
-            ).hexdigest()
-            return self.checksum == normalized_checksum
-        except Exception:
-            return False
 
 
 class InstanceAssembler(ThreadSafeSingleton):
@@ -317,8 +277,8 @@ class InstanceAssembler(ThreadSafeSingleton):
                 persistent_states = {}
                 # Persist ins_id_cnt
                 ins_id_cnt_data = {"ins_id_cnt": self.ins_id_cnt}
-                ins_id_cnt_state = PersistentAssembleInstanceMetadataState(
-                    metadata_data=ins_id_cnt_data,
+                ins_id_cnt_state = PersistentState(
+                    data=ins_id_cnt_data,
                     version=next_version,
                     timestamp=current_time,
                     checksum=""  # Will be calculated
@@ -355,8 +315,8 @@ class InstanceAssembler(ThreadSafeSingleton):
                         "register_timestamp": metadata.register_timestamp,
                         "is_reregister": metadata.is_reregister
                     }
-                    persistent_state = PersistentAssembleInstanceMetadataState(
-                        metadata_data=metadata_data,
+                    persistent_state = PersistentState(
+                        data=metadata_data,
                         version=next_version,
                         timestamp=current_time,
                         checksum=""  # Will be calculated
@@ -381,7 +341,7 @@ class InstanceAssembler(ThreadSafeSingleton):
         try:
             persistent_states = self.etcd_client.restore_data(
                 "/controller/instance_assembler",
-                PersistentAssembleInstanceMetadataState
+                PersistentState
             )
             if persistent_states is None:
                 logger.info("No instance assembler data found in ETCD, starting with empty state")
@@ -395,7 +355,7 @@ class InstanceAssembler(ThreadSafeSingleton):
                 invalid_states = 0
 
                 for key, persistent_state in persistent_states.items():
-                    if isinstance(persistent_state, PersistentAssembleInstanceMetadataState):
+                    if isinstance(persistent_state, PersistentState):
                         # Validate data integrity
                         if not persistent_state.is_valid():
                             logger.warning("Data integrity check failed for instance assembler state %s, skipping",
@@ -407,12 +367,12 @@ class InstanceAssembler(ThreadSafeSingleton):
                         try:
                             if key == "ins_id_cnt":
                                 # Restore ins_id_cnt
-                                self.ins_id_cnt = persistent_state.metadata_data.get("ins_id_cnt", 0)
+                                self.ins_id_cnt = persistent_state.data.get("ins_id_cnt", 0)
                                 logger.info("Restored ins_id_cnt: %d (v%d)",
                                             self.ins_id_cnt, persistent_state.version)
                             else:
                                 # Restore instance metadata
-                                metadata_data = persistent_state.metadata_data
+                                metadata_data = persistent_state.data
                                 instance = Instance(
                                     job_name=metadata_data["job_name"],
                                     model_name=metadata_data["model_name"],

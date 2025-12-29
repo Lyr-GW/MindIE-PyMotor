@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
-from motor.config.coordinator import DeployMode, CoordinatorConfig
+from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.router.base_router import BaseRouter
@@ -175,6 +175,7 @@ class TestRouterCDPSeparation:
         # Mock CoordinatorConfig to return CDP_SEPARATE deploy mode
         mock_scheduler_config = MagicMock()
         mock_scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
+        mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
         mock_exception_config = MagicMock()
         mock_exception_config.retry_delay = 0.0001
         mock_exception_config.max_retry = 5

@@ -11,7 +11,6 @@ __all__ = [
 
     # Instance management
     "InstanceManager",
-    "PersistentInstanceState",
     "InstanceAssembler",
     "RegisterStatus",
 
@@ -21,6 +20,6 @@ __all__ = [
 ]
 
 from .observer import Observer, ObserverEvent
-from .instance_manager import InstanceManager, PersistentInstanceState
+from .instance_manager import InstanceManager
 from .instance_assembler import InstanceAssembler, RegisterStatus
 from .event_pusher import EventPusher, Event

@@ -114,6 +114,22 @@ class HeartbeatManager(ThreadSafeSingleton):
             self._engine_server_status_thread.join(timeout=2.0)
         logger.info("HeartBeatManager stopped.")
 
+    def check_all_endpoints_normal(self) -> bool:
+        """
+        Check if all endpoints are in normal status.
+
+        Returns:
+            bool: True if all endpoints are normal, False if any endpoint is abnormal
+        """
+        with self._endpoint_lock:
+            for endpoint in self._endpoints:
+                if endpoint.status != EndpointStatus.NORMAL:
+                    logger.warning("Endpoint %d at %s:%d is in status %s",
+                                   endpoint.id, endpoint.ip, endpoint.mgmt_port, endpoint.status)
+                    return False
+        logger.debug("All endpoints are in normal status")
+        return True
+
     def _refresh_endpoints_status_loop(self) -> None:
         while not self.stop_event.is_set():
             self._get_engine_server_status()

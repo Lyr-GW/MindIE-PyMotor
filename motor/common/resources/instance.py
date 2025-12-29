@@ -107,7 +107,6 @@ class Instance(BaseModel):
     """
     instance is a group of endpoints, it can be prefill or decode
     """
-    model_config = ConfigDict(protected_namespaces=())
     job_name: str = Field(..., description="Instance job name")
     model_name: str = Field(..., description="Instance model name")
     id: int = Field(..., description="Instance ID")
@@ -206,11 +205,19 @@ class Instance(BaseModel):
         else:
             timeout = CLEAR_INSTANCE_TIMEOUT
 
+        dead_endpoints: dict[str, list[int]] = {}  # pod_ip -> [endpoint_id]
         with self._lock:
             for pod_endpoints in self.endpoints.values():
                 for endpoint in pod_endpoints.values():
                     if not endpoint.is_alive(timestamp, timeout):
-                        return False
+                        if endpoint.ip not in dead_endpoints:
+                            dead_endpoints[endpoint.ip] = []
+                        dead_endpoints[endpoint.ip].append(endpoint.id)
+
+            if dead_endpoints and len(dead_endpoints) > 0:
+                logger.warning("Instance %s(id:%d)'s endpoints %s have heartbeat timeout",
+                               self.job_name, self.id, dead_endpoints)
+                return False
             return True
 
     def is_all_endpoints_ready(self) -> bool:

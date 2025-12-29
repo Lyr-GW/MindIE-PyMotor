@@ -1363,3 +1363,71 @@ def test_update_config():
             cert_cert=new_config.etcd_config.etcd_cert_cert,
             timeout=30.0
         )
+
+
+def test_update_instances():
+    """Test update_instances method adds new instances and updates existing ones"""
+    # Create FaultManager with mocked dependencies
+    with patch('motor.controller.ft.fault_manager.EtcdClient') as mock_etcd_class:
+        mock_client = MagicMock()
+        mock_client.persist_data.return_value = True
+        mock_client.restore_data.return_value = None
+        mock_etcd_class.return_value = mock_client
+
+        from motor.config.controller import ControllerConfig
+        config = ControllerConfig()
+        manager = FaultManager(config)
+
+        # Create mock instances
+        mock_instance1 = Mock(spec=Instance)
+        mock_instance1.id = 1
+        mock_instance1.job_name = "job1"
+        mock_instance1.get_node_managers.return_value = [
+            NodeManagerInfo(pod_ip="192.168.1.1", host_ip="10.0.0.1", port="8080"),
+            NodeManagerInfo(pod_ip="192.168.1.2", host_ip="10.0.0.2", port="8080")
+        ]
+
+        mock_instance2 = Mock(spec=Instance)
+        mock_instance2.id = 2
+        mock_instance2.job_name = "job2"
+        mock_instance2.get_node_managers.return_value = [
+            NodeManagerInfo(pod_ip="192.168.1.3", host_ip="10.0.0.3", port="8080")
+        ]
+
+        # Test 1: Add new instances
+        manager.update_instances([mock_instance1, mock_instance2])
+
+        # Verify instances were added
+        assert 1 in manager.instances
+        assert 2 in manager.instances
+        assert len(manager.instances) == 2
+
+        # Verify servers were added
+        assert "192.168.1.1" in manager.servers
+        assert "192.168.1.2" in manager.servers
+        assert "192.168.1.3" in manager.servers
+        assert len(manager.servers) == 3
+
+        # Test 2: Update existing instance with changed node managers
+        mock_instance1.get_node_managers.return_value = [
+            NodeManagerInfo(pod_ip="192.168.1.1", host_ip="10.0.0.1", port="8080"),
+            NodeManagerInfo(pod_ip="192.168.1.4", host_ip="10.0.0.4", port="8080")  # Changed node2 to node4
+        ]
+
+        manager.update_instances([mock_instance1])
+
+        # Verify instance 1 still exists
+        assert 1 in manager.instances
+        assert 2 in manager.instances
+
+        # Verify old server was removed and new server was added
+        assert "192.168.1.2" not in manager.servers  # Old server removed
+        assert "192.168.1.4" in manager.servers     # New server added
+        assert "192.168.1.1" in manager.servers     # Existing server kept
+        assert "192.168.1.3" in manager.servers     # Unchanged server kept
+        assert len(manager.servers) == 3  # Total servers should still be 3
+
+        # Test 3: Empty instance list should not cause issues
+        manager.update_instances([])
+        assert len(manager.instances) == 2  # No change
+        assert len(manager.servers) == 3    # No change

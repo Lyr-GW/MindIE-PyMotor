@@ -9,9 +9,9 @@ from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg
 from motor.controller.core.instance_assembler import (
     InstanceAssembler,
     AssembleInstanceMetadata,
-    RegisterStatus,
-    PersistentAssembleInstanceMetadataState
+    RegisterStatus
 )
+from motor.common.utils.persistent_state import PersistentState
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.controller.core import InstanceManager
 
@@ -692,8 +692,8 @@ def test_restore_data_enabled(instance_assembler, test_config):
 
     # Mock ETCD returning some data
     mock_persistent_states = {
-        "ins_id_cnt": PersistentAssembleInstanceMetadataState(
-            metadata_data={"ins_id_cnt": 5},
+        "ins_id_cnt": PersistentState(
+            data={"ins_id_cnt": 5},
             version=1,
             timestamp=time.time(),
             checksum="dummy_checksum"
@@ -733,8 +733,8 @@ def test_checksum_calculation(instance_assembler, test_config):
         "is_reregister": metadata.is_reregister
     }
 
-    state = PersistentAssembleInstanceMetadataState(
-        metadata_data=metadata_data,
+    state = PersistentState(
+        data=metadata_data,
         version=1,
         timestamp=time.time(),
         checksum=""
@@ -756,8 +756,8 @@ def test_ins_id_cnt_checksum(instance_assembler):
 
     # Create a persistent state for ins_id_cnt
     ins_id_cnt_data = {"ins_id_cnt": instance_assembler.ins_id_cnt}
-    state = PersistentAssembleInstanceMetadataState(
-        metadata_data=ins_id_cnt_data,
+    state = PersistentState(
+        data=ins_id_cnt_data,
         version=1,
         timestamp=time.time(),
         checksum=""
@@ -798,8 +798,8 @@ def test_restore_data_invalid_checksum(instance_assembler):
     """Test restore_data with invalid checksum (corrupted data)"""
     # Create mock persistent state with invalid checksum
     mock_persistent_states = {
-        "ins_id_cnt": PersistentAssembleInstanceMetadataState(
-            metadata_data={"ins_id_cnt": 5},
+        "ins_id_cnt": PersistentState(
+            data={"ins_id_cnt": 5},
             version=1,
             timestamp=time.time(),
             checksum="invalid_checksum"  # Wrong checksum
@@ -820,8 +820,8 @@ def test_restore_data_reconstruction_exception(instance_assembler):
         mock_instance_class.side_effect = Exception("Instance creation failed")
 
         mock_persistent_states = {
-            "test_instance": PersistentAssembleInstanceMetadataState(
-                metadata_data={
+            "test_instance": PersistentState(
+                data={
                     "job_name": "test_instance",
                     "model_name": "test_model",
                     "instance_id": 0,
@@ -876,8 +876,8 @@ def test_checksum_calculation_exception_handling(instance_assembler, test_config
         "is_reregister": metadata.is_reregister
     }
 
-    state = PersistentAssembleInstanceMetadataState(
-        metadata_data=metadata_data,
+    state = PersistentState(
+        data=metadata_data,
         version=1,
         timestamp=time.time(),
         checksum=""
@@ -896,8 +896,8 @@ def test_ins_id_cnt_checksum_exception_handling(instance_assembler):
 
     # Create a persistent state for ins_id_cnt
     ins_id_cnt_data = {"ins_id_cnt": instance_assembler.ins_id_cnt}
-    state = PersistentAssembleInstanceMetadataState(
-        metadata_data=ins_id_cnt_data,
+    state = PersistentState(
+        data=ins_id_cnt_data,
         version=1,
         timestamp=time.time(),
         checksum=""
@@ -911,10 +911,10 @@ def test_ins_id_cnt_checksum_exception_handling(instance_assembler):
 
 
 def test_persistent_state_is_valid_method():
-    """Test PersistentAssembleInstanceMetadataState.is_valid method"""
+    """Test PersistentState.is_valid method"""
     # Create a valid state
-    valid_state = PersistentAssembleInstanceMetadataState(
-        metadata_data={"test": "data"},
+    valid_state = PersistentState(
+        data={"test": "data"},
         version=1,
         timestamp=time.time(),
         checksum=""  # Will be calculated
@@ -925,8 +925,8 @@ def test_persistent_state_is_valid_method():
     assert valid_state.is_valid() == True
 
     # Create invalid state with wrong checksum
-    invalid_state = PersistentAssembleInstanceMetadataState(
-        metadata_data={"test": "data"},
+    invalid_state = PersistentState(
+        data={"test": "data"},
         version=1,
         timestamp=time.time(),
         checksum="wrong_checksum"
@@ -953,8 +953,8 @@ def test_restore_data_with_type_conversion():
 
     # Mock persistent state with string-formatted metadata
     mock_persistent_states = {
-        "test_type_conversion": PersistentAssembleInstanceMetadataState(
-            metadata_data=etcd_string_metadata,
+        "test_type_conversion": PersistentState(
+            data=etcd_string_metadata,
             version=1,
             timestamp=time.time(),
             checksum=""  # Will be calculated
@@ -1007,8 +1007,8 @@ def test_restore_data_with_invalid_enum_value():
     }
 
     mock_persistent_states = {
-        "test_invalid_enum": PersistentAssembleInstanceMetadataState(
-            metadata_data=corrupted_metadata,
+        "test_invalid_enum": PersistentState(
+            data=corrupted_metadata,
             version=1,
             timestamp=time.time(),
             checksum=""  # Will be calculated
@@ -1191,8 +1191,8 @@ def test_persist_and_restore_data_success(instance_assembler, test_config):
             mock_persistent_states = {}
 
             # Add ins_id_cnt state
-            ins_id_cnt_state = PersistentAssembleInstanceMetadataState(
-                metadata_data={"ins_id_cnt": instance_assembler.ins_id_cnt},
+            ins_id_cnt_state = PersistentState(
+                data={"ins_id_cnt": instance_assembler.ins_id_cnt},
                 version=1,
                 timestamp=time.time(),
                 checksum=""
@@ -1220,8 +1220,8 @@ def test_persist_and_restore_data_success(instance_assembler, test_config):
                 "is_reregister": metadata.is_reregister
             }
 
-            instance_state = PersistentAssembleInstanceMetadataState(
-                metadata_data=metadata_data,
+            instance_state = PersistentState(
+                data=metadata_data,
                 version=1,
                 timestamp=time.time(),
                 checksum=""
@@ -1282,7 +1282,7 @@ def test_persist_data_with_checksum_validation(instance_assembler, test_config):
             assert len(data_dict["checksum"]) > 0
 
             # Verify checksum is valid by reconstructing the state
-            state = PersistentAssembleInstanceMetadataState(**data_dict)
+            state = PersistentState(**data_dict)
             assert state.is_valid()
 
 
@@ -1290,8 +1290,8 @@ def test_restore_data_with_invalid_checksum(instance_assembler, test_config):
     """Test restore skips data with invalid checksums"""
     # Create mock persistent states with invalid checksum
     mock_persistent_states = {
-        "ins_id_cnt": PersistentAssembleInstanceMetadataState(
-            metadata_data={"ins_id_cnt": 5},
+        "ins_id_cnt": PersistentState(
+            data={"ins_id_cnt": 5},
             version=1,
             timestamp=time.time(),
             checksum="invalid_checksum"  # Wrong checksum
@@ -1347,7 +1347,7 @@ def test_persist_empty_state(instance_assembler):
 
         # Verify ins_id_cnt data
         ins_id_cnt_data = persisted_data["ins_id_cnt"]
-        assert ins_id_cnt_data["metadata_data"]["ins_id_cnt"] == instance_assembler.ins_id_cnt
+        assert ins_id_cnt_data["data"]["ins_id_cnt"] == instance_assembler.ins_id_cnt
         assert ins_id_cnt_data["version"] >= 1
         assert ins_id_cnt_data["timestamp"] > 0
         assert len(ins_id_cnt_data["checksum"]) > 0

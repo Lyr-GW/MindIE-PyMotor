@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 import pytest
 
-from motor.config.coordinator import DeployMode, CoordinatorConfig
+from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.models.request import ScheduledResource
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
@@ -101,6 +101,7 @@ class TestRouterPDHybrid:
         # Mock CoordinatorConfig to return SINGLE_NODE deploy mode
         mock_scheduler_config = MagicMock()
         mock_scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
+        mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
         mock_exception_config = MagicMock()
         mock_exception_config.retry_delay = 0.0001
         mock_exception_config.max_retry = 5

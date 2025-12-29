@@ -301,6 +301,8 @@ class CoordinatorConfig:
                 log_config=config.logging_config
             )
 
+            reconfigure_logging(config.logging_config)
+
             # Now it's safe to log after logging configuration is set
             if config_path:
                 logger.info(f"Loading configuration file: {config_path}")

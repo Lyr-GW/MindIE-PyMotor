@@ -4,7 +4,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from motor.controller.core.instance_manager import InstanceManager, PersistentInstanceState
+from motor.controller.core.instance_manager import InstanceManager, PersistentState
 from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import HeartbeatMsg
 from motor.common.resources.instance import (
@@ -270,8 +270,8 @@ def test_restore_data_success():
     """Test successful data restoration"""
     # Mock persistent states
     mock_persistent_states = {
-        "1": PersistentInstanceState(
-            instance_data={"id": 1, "job_name": "test_job", "model_name": "test_model",
+        "1": PersistentState(
+            data={"id": 1, "job_name": "test_job", "model_name": "test_model",
                           "role": "prefill", "endpoints": {}},
             version=1,
             timestamp=time.time(),
@@ -305,8 +305,8 @@ def test_restore_data_invalid_checksum():
     """Test restoration with invalid checksum"""
     # Mock persistent states with invalid checksum
     mock_persistent_states = {
-        "1": PersistentInstanceState(
-            instance_data={"id": 1, "job_name": "test_job", "model_name": "test_model",
+        "1": PersistentState(
+            data={"id": 1, "job_name": "test_job", "model_name": "test_model",
                           "role": "prefill", "endpoints": {}},
             version=1,
             timestamp=time.time(),
@@ -669,8 +669,8 @@ def test_checksum_calculation(instance_manager):
 
     # Create a persistent state to test checksum calculation
     instance_data = instance.model_dump()
-    state = PersistentInstanceState(
-        instance_data=instance_data,
+    state = PersistentState(
+        data=instance_data,
         version=1,
         timestamp=time.time(),
         checksum=""
@@ -683,8 +683,8 @@ def test_checksum_calculation(instance_manager):
     # Test that different instances produce different checksums
     instance2 = create_test_instance(999, "different_job", ["192.168.1.99"])
     instance_data2 = instance2.model_dump()
-    state2 = PersistentInstanceState(
-        instance_data=instance_data2,
+    state2 = PersistentState(
+        data=instance_data2,
         version=1,
         timestamp=time.time(),
         checksum=""
@@ -694,13 +694,13 @@ def test_checksum_calculation(instance_manager):
 
 
 def test_persistent_instance_state():
-    """Test PersistentInstanceState functionality"""
+    """Test PersistentState functionality"""
     instance_data = {"id": 1, "job_name": "test"}
     version = 1
     timestamp = time.time()
 
     # Create state and calculate correct checksum using the new method
-    state = PersistentInstanceState(instance_data, version, timestamp, "")
+    state = PersistentState(instance_data, version, timestamp, "")
     state.checksum = state.calculate_checksum()
 
     # Test valid checksum
@@ -854,8 +854,8 @@ def test_persist_and_restore_instance_data_success():
 
             # Add instance state
             instance_data = instance.model_dump()
-            instance_state = PersistentInstanceState(
-                instance_data=instance_data,
+            instance_state = PersistentState(
+                data=instance_data,
                 version=1,
                 timestamp=time.time(),
                 checksum=""
@@ -906,7 +906,7 @@ def test_persist_data_with_checksum_validation():
             assert len(data_dict["checksum"]) > 0
 
             # Verify checksum is valid by reconstructing the state
-            state = PersistentInstanceState(**data_dict)
+            state = PersistentState(**data_dict)
             assert state.is_valid()
 
 
@@ -916,8 +916,8 @@ def test_restore_data_with_invalid_checksum():
 
     # Create mock persistent states with invalid checksum
     mock_persistent_states = {
-        "203": PersistentInstanceState(
-            instance_data={
+        "203": PersistentState(
+            data={
                 "id": 203,
                 "job_name": "test_invalid",
                 "model_name": "test_model",
@@ -982,7 +982,7 @@ def test_restore_no_instance_data_available():
 
 
 def test_persistent_state_is_valid_method():
-    """Test PersistentInstanceState.is_valid method"""
+    """Test PersistentState.is_valid method"""
     # Create a valid state
     instance_data = {
         "id": 205,
@@ -993,8 +993,8 @@ def test_persistent_state_is_valid_method():
         "status": "ACTIVE"
     }
 
-    valid_state = PersistentInstanceState(
-        instance_data=instance_data,
+    valid_state = PersistentState(
+        data=instance_data,
         version=1,
         timestamp=time.time(),
         checksum=""  # Will be calculated
@@ -1005,8 +1005,8 @@ def test_persistent_state_is_valid_method():
     assert valid_state.is_valid() == True
 
     # Create invalid state with wrong checksum
-    invalid_state = PersistentInstanceState(
-        instance_data=instance_data,
+    invalid_state = PersistentState(
+        data=instance_data,
         version=1,
         timestamp=time.time(),
         checksum="wrong_checksum"
@@ -1031,8 +1031,8 @@ def test_restore_data_with_type_conversion():
 
     # Mock persistent state with string-formatted data
     mock_persistent_states = {
-        "206": PersistentInstanceState(
-            instance_data=etcd_string_data,
+        "206": PersistentState(
+            data=etcd_string_data,
             version=1,
             timestamp=time.time(),
             checksum=""  # Will be calculated
@@ -1076,8 +1076,8 @@ def test_restore_data_with_invalid_enum_value():
     }
 
     mock_persistent_states = {
-        "207": PersistentInstanceState(
-            instance_data=corrupted_data,
+        "207": PersistentState(
+            data=corrupted_data,
             version=1,
             timestamp=time.time(),
             checksum=""  # Will be calculated
@@ -1118,8 +1118,8 @@ def test_restore_data_with_malformed_numeric_data():
     }
 
     mock_persistent_states = {
-        "invalid": PersistentInstanceState(
-            instance_data=corrupted_data,
+        "invalid": PersistentState(
+            data=corrupted_data,
             version=1,
             timestamp=time.time(),
             checksum=""  # Will be calculated

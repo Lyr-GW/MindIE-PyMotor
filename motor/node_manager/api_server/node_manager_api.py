@@ -37,9 +37,9 @@ async def start_instance(request: Request):
             try:
                 parsed_ok = await asyncio.to_thread(engine_manager.parse_start_cmd, start_msg)
             except Exception as inner_err:
-                logger.error(f"Failed to parse start command: {inner_err}")
+                logger.error("Failed to parse start command: %s", inner_err)
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                                    detail=f"Invalid start command payload") from inner_err
+                                    detail="Invalid start command payload") from inner_err
 
         if not parsed_ok:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -51,9 +51,9 @@ async def start_instance(request: Request):
                                     start_msg.endpoints,
                                     start_msg.instance_id)
         except Exception as pull_err:
-            logger.error(f"Failed to pull engine: {pull_err}")
+            logger.error("Failed to pull engine: %s", pull_err)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                detail=f"Failed to start engine server") from pull_err
+                                detail="Failed to start engine server") from pull_err
 
         HeartbeatManager().update_endpoint(start_msg)
         HeartbeatManager().start()
@@ -63,9 +63,9 @@ async def start_instance(request: Request):
         raise http_err
     except Exception as err:
         # Catch other unexpected exceptions to avoid returning unfriendly internal errors
-        logger.error(f"Unexpected error: {err}")
+        logger.error("Unexpected error: %s", err)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"An internal server error occurred") from err
+                            detail="An internal server error occurred") from err
 
 
 @app.post("/node-manager/stop")
@@ -78,10 +78,27 @@ async def stop_instance(request: Request):
         content = {"message": "All engine processes stopped successfully."}
         return Response(status_code=status.HTTP_200_OK, content=json.dumps(content))
     except Exception as err:
-        logger.error(f"Failed to stop engines via daemon: {err}")
+        logger.error("Failed to stop engines via daemon: %s", err)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to stop engine processes"
+            detail="Failed to stop engine processes"
+        ) from err
+
+
+@app.get("/node-manager/status")
+async def get_instance_status():
+    """
+    Check if all endpoints managed by this node manager are in normal status.
+    Returns True if all endpoints are normal, False if any endpoint is abnormal.
+    """
+    try:
+        is_normal = await asyncio.to_thread(HeartbeatManager().check_all_endpoints_normal)
+        return {"status": is_normal}
+    except Exception as err:
+        logger.error("Failed to check endpoints status: %s", err)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check endpoints status"
         ) from err
 
 
@@ -127,5 +144,5 @@ class NodeManagerAPI:
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
             except Exception as e:
-                logger.error(f"Failed to shutdown server: {e}")
+                logger.error("Failed to shutdown server: %s", e)
             loop.close()

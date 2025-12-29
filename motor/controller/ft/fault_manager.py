@@ -346,6 +346,70 @@ class FaultManager(ThreadSafeSingleton, Observer):
         else:
             raise ValueError(f"Invalid event: {event}.")
 
+    def update_instances(self, instances: list[Instance]) -> None:
+        """
+        Update fault manager with existing instances.
+        This is used when fault manager is restarted and needs to catch up with existing instances.
+
+        Args:
+            instances: List of instances to update/add
+        """
+        logger.info("Updating fault manager with %d instances", len(instances))
+
+        for instance in instances:
+            logger.debug("Processing instance %s (id: %d)", instance.job_name, instance.id)
+
+            # Get current node managers from instance
+            current_node_managers = instance.get_node_managers()
+
+            with self.lock:
+                if instance.id in self.instances:
+                    # Instance exists, update its metadata
+                    ins_metadata = self.instances[instance.id]
+
+                    with ins_metadata.lock:
+                        # Store old node managers to clean up old servers
+                        old_node_managers = ins_metadata.node_managers.copy()
+                        ins_metadata.node_managers = current_node_managers
+                        logger.debug("Updated existing instance %d with %d node managers",
+                                   instance.id, len(current_node_managers))
+
+                    # Remove old servers that are no longer in the instance
+                    old_pod_ips = {node_mgr.pod_ip for node_mgr in old_node_managers}
+                    new_pod_ips = {node_mgr.pod_ip for node_mgr in current_node_managers}
+                    removed_pod_ips = old_pod_ips - new_pod_ips
+
+                    for pod_ip in removed_pod_ips:
+                        self.servers.pop(pod_ip, None)
+                        logger.debug("Removed server %s from fault manager", pod_ip)
+
+                    # Add new servers
+                    for node_mgr in current_node_managers:
+                        if node_mgr.pod_ip not in self.servers:
+                            self.servers[node_mgr.pod_ip] = ServerMetadata(
+                                pod_ip=node_mgr.pod_ip,
+                                host_ip=node_mgr.host_ip,
+                            )
+                            logger.debug("Added new server %s to fault manager", node_mgr.pod_ip)
+                else:
+                    # Instance doesn't exist, add it
+                    logger.debug("Adding new instance %d to fault manager", instance.id)
+                    ins_metadata = InstanceMetadata(
+                        instance_id=instance.id,
+                        node_managers=current_node_managers
+                    )
+
+                    server_metadatas = {}
+                    for node_mgr in current_node_managers:
+                        server_metadatas[node_mgr.pod_ip] = ServerMetadata(
+                            pod_ip=node_mgr.pod_ip,
+                            host_ip=node_mgr.host_ip,
+                        )
+
+                    self.instances[instance.id] = ins_metadata
+                    self.servers.update(server_metadatas)
+                    logger.debug("Added instance %d with %d servers", instance.id, len(server_metadatas))
+
     def _handle_instance_added(self, instance: Instance) -> None:
         with self.lock:
             # Check if instance already exists, if so, skip adding

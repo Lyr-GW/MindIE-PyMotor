@@ -3,11 +3,8 @@
 
 import time
 import threading
-import hashlib
-import json
 from collections.abc import Callable
-from dataclasses import dataclass, asdict
-from typing import Any
+from dataclasses import asdict
 from fastapi import HTTPException
 
 from motor.config.controller import ControllerConfig
@@ -15,6 +12,8 @@ from motor.common.utils.logger import get_logger
 from motor.controller.core import Observer, ObserverEvent
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.etcd_client import EtcdClient
+from motor.common.utils.persistent_state import PersistentState
+from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.resources import (HeartbeatMsg, Instance, InsStatus,
                                     InsConditionEvent, ReadOnlyInstance, EndpointStatus)
 
@@ -25,149 +24,6 @@ logger = get_logger(__name__)
 HEARTBEAT_HANDLER_SUCCESS = 200
 HEARTBEAT_HANDLER_ERROR = 500
 HEARTBEAT_HANDLER_RE_REGISTER = 503
-
-
-@dataclass
-class PersistentInstanceState:
-    """
-    Enhanced persistent instance state with version control and data integrity
-
-    Note: all fix methods are used to fix the data types mismatch between the
-    original data and the stored data in ETCD.
-    For example, the endpoints field is a dict with string keys, but the stored 
-    data in ETCD is a dict with int keys.  So we need to fix the data types 
-    mismatch by converting the string keys to int keys.
-    The fix methods are:
-    - _fix_data_types: fix the data types mismatch between the original data and the stored data in ETCD.
-    - _fix_endpoints: fix the endpoints field by converting the string keys to int keys.
-    - _fix_endpoint_dict: fix a single endpoint dictionary by converting the string keys to int keys.
-    - _fix_list: fix a list by recursively processing any dict elements.
-    """
-    instance_data: dict[str, Any]
-    version: int
-    timestamp: float
-    checksum: str
-
-    @staticmethod
-    def _fix_data_types(data: dict) -> dict:
-        """Fix data types that are lost during JSON serialization/deserialization"""
-        if not isinstance(data, dict):
-            return data
-
-        fixed_data = {}
-        for key, value in data.items():
-            fixed_data[key] = PersistentInstanceState._fix_value(key, value)
-
-        return fixed_data
-
-    @staticmethod
-    def _fix_value(key: str, value) -> any:
-        """Fix a single value based on its key and type"""
-        # Special handling for endpoints field
-        if key == "endpoints":
-            return PersistentInstanceState._fix_endpoints(value)
-
-        # Handle different value types
-        if isinstance(value, dict):
-            return PersistentInstanceState._fix_data_types(value)
-        elif isinstance(value, list):
-            return PersistentInstanceState._fix_list(value)
-        else:
-            return value
-
-    @staticmethod
-    def _fix_list(data_list: list) -> list:
-        """Fix a list by recursively processing any dict elements"""
-        return [
-            PersistentInstanceState._fix_data_types(item)
-            if isinstance(item, dict) else item for item in data_list
-        ]
-
-    @staticmethod
-    def _fix_endpoints(endpoints: dict) -> dict:
-        """Fix endpoints data structure, converting inner dict keys from str to int"""
-        if not isinstance(endpoints, dict):
-            return endpoints
-
-        fixed_endpoints = {}
-        for pod_ip, endpoint_dict in endpoints.items():
-            fixed_endpoints[pod_ip] = PersistentInstanceState._fix_endpoint_dict(endpoint_dict)
-
-        return fixed_endpoints
-
-    @staticmethod
-    def _fix_endpoint_dict(endpoint_dict) -> dict:
-        """Fix a single endpoint dictionary, converting string keys to int where possible"""
-        if not isinstance(endpoint_dict, dict):
-            return endpoint_dict
-
-        fixed_dict = {}
-        for endpoint_key, endpoint_value in endpoint_dict.items():
-            # Convert string key to int if it's a digit string, otherwise return as-is
-            try:
-                if isinstance(endpoint_key, str) and endpoint_key.isdigit():
-                    fixed_key = int(endpoint_key)
-                else:
-                    fixed_key = endpoint_key
-            except (ValueError, TypeError):
-                fixed_key = endpoint_key
-            fixed_dict[fixed_key] = endpoint_value
-
-        return fixed_dict
-
-    def calculate_checksum(self) -> str:
-        """Calculate checksum for data integrity verification"""
-        try:
-            # Fix data types first to ensure consistency
-            fixed_data = PersistentInstanceState._fix_data_types(self.instance_data)
-            # Calculate checksum using type-fixed data for consistency
-            sorted_data = str(sorted(fixed_data.items()))
-            data_str = f"{sorted_data}{self.version}{self.timestamp}"
-            return hashlib.sha256(data_str.encode()).hexdigest()
-        except Exception as e:
-            logger.error("Error calculating checksum: %s", e)
-            return ""
-
-    def is_valid(self) -> bool:
-        """Validate data integrity using checksum"""
-        # Try both original format checksum and JSON normalized checksum for compatibility
-        current_checksum = self.calculate_checksum()
-        logger.debug("Validating data integrity - stored checksum: %s, calculated checksum: %s",
-                     self.checksum, current_checksum)
-        logger.debug("Validation data - version: %s, timestamp: %s", self.version, self.timestamp)
-
-        if self.checksum == current_checksum:
-            return True
-
-        logger.warning("Original format checksum mismatch, attempting JSON normalized checksum")
-
-        # Also try with JSON normalized data for cases where data was stored with different types
-        try:
-            # First normalize the data through JSON serialization/deserialization
-            normalized_data = json.loads(json.dumps(self.instance_data, sort_keys=True))
-
-            # Fix data types that are lost during JSON serialization (especially dict keys)
-            fixed_data = PersistentInstanceState._fix_data_types(normalized_data)
-
-            normalized_checksum = hashlib.sha256(
-                f"{fixed_data}{self.version}{self.timestamp}".encode()
-            ).hexdigest()
-
-            logger.debug("JSON normalized checksum: %s", normalized_checksum)
-            logger.debug("Original data type information: %s",
-                         {k: type(v).__name__ for k, v in self.instance_data.items()})
-
-            if self.checksum == normalized_checksum:
-                logger.debug("Type-fixed checksum matched successfully")
-                return True
-            else:
-                logger.error("Validation failed - stored checksum: %s, normalized checksum: %s",
-                             self.checksum, normalized_checksum)
-                return False
-        except Exception as e:
-            logger.error("Exception occurred during JSON normalization: %s", e)
-            logger.error("Original data content: %s", self.instance_data)
-            return False
 
 
 class InstanceManager(ThreadSafeSingleton):
@@ -342,8 +198,8 @@ class InstanceManager(ThreadSafeSingleton):
                     instance_data = instance.model_dump()
                     logger.debug("Persisting instance %s - full data: %s", ins_id, instance_data)
 
-                    persistent_state = PersistentInstanceState(
-                        instance_data=instance_data,
+                    persistent_state = PersistentState(
+                        data=instance_data,
                         version=next_version,
                         timestamp=current_time,
                         checksum=""  # Will be calculated
@@ -371,7 +227,7 @@ class InstanceManager(ThreadSafeSingleton):
     def restore_data(self) -> bool:
         """Restore instance manager data from ETCD with version control and validation"""
         try:
-            persistent_states = self.etcd_client.restore_data("/controller/instances", PersistentInstanceState)
+            persistent_states = self.etcd_client.restore_data("/controller/instances", PersistentState)
             if persistent_states is None:
                 logger.info("No instance data found in ETCD, starting with empty state")
                 return True
@@ -386,7 +242,7 @@ class InstanceManager(ThreadSafeSingleton):
                 invalid_instances = 0
 
                 for ins_id_str, persistent_state in persistent_states.items():
-                    if isinstance(persistent_state, PersistentInstanceState):
+                    if isinstance(persistent_state, PersistentState):
                         # Validate data integrity
                         if not persistent_state.is_valid():
                             logger.warning("Data integrity check failed for instance %s, skipping", ins_id_str)
@@ -395,7 +251,7 @@ class InstanceManager(ThreadSafeSingleton):
 
                         # Reconstruct instance from persistent state
                         try:
-                            instance = Instance(**persistent_state.instance_data)
+                            instance = Instance(**persistent_state.data)
 
                             # Update data version
                             with self._version_lock:
@@ -628,8 +484,6 @@ class InstanceManager(ThreadSafeSingleton):
                     continue
                 if instance.is_all_endpoints_alive():
                     continue
-                logger.info("detected Instance %s (id:%d) heartbeat timeout on some endpoints.",
-                            instance.job_name, instance.id)
                 # Instance heartbeat timeout, handle state transition
                 from_state = instance.status
                 event = InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT
@@ -685,11 +539,71 @@ class InstanceManager(ThreadSafeSingleton):
     ) -> None:
         if from_state == InsStatus.INACTIVE:
             return
-        if condition_event == InsConditionEvent.INSTANCE_ABNORMAL or \
-                condition_event == InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT:
+
+        if condition_event == InsConditionEvent.INSTANCE_ABNORMAL:
             instance.update_instance_status(InsStatus.INACTIVE)
             self.notify(instance, ObserverEvent.INSTANCE_SEPERATED)
+            return
+
+        if condition_event == InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT:
+            # When heartbeat times out, actively check the instance status to avoid 
+            # false positives caused by the controller's own service being unavailable,
+            # which prevents node_manager from reporting heartbeats.
+
+            # [This scenario occurs when active-standby mode is enabled, and after the node
+            # where the originally primary pod is located is forcibly rebooted, kubelet cannot
+            # properly report the probe status (such as readiness) of pods on this node.
+            # This causes the active-standby traffic switching logic that relies on kubeproxy to fail. 
+            # After failure, node_manager easily reports heartbeats to the wrong pod, leading to 
+            # heartbeat timeout and instance isolation. Therefore, we need the controller to 
+            # directly query once using ip+port when heartbeat times out to avoid such situations.]
+            if self._check_node_managers_status(instance):
+                instance.update_instance_status(InsStatus.INACTIVE)
+                self.notify(instance, ObserverEvent.INSTANCE_SEPERATED)
+            else:
+                # If node managers are all normal, do not set to INACTIVE
+                # and we need to refresh the heartbeat to avoid immediate timeout
+                for endpoints in instance.endpoints.values():
+                    for endpoint in endpoints.values():
+                        endpoint.hb_timestamp = time.time()
         return
+
+    def _check_node_managers_status(self, instance: Instance) -> bool:
+        """
+        Check status of all node managers in the instance.
+        Returns True if any node manager has abnormal endpoints or if check fails,
+        meaning the instance should be set to INACTIVE.
+        Returns False if all node managers report normal status.
+        """
+        node_managers = instance.get_node_managers()
+        if not node_managers:
+            logger.warning("No node managers found for instance %s(id:%d), setting to INACTIVE",
+                           instance.job_name, instance.id)
+            return True
+
+        for node_mgr in node_managers:
+            try:
+                node_mgr_url = f"http://{node_mgr.pod_ip}:{node_mgr.port}"
+                with SafeHTTPSClient(base_url=node_mgr_url, timeout=1.0) as client:
+                    response = client.get("/node-manager/status")
+                    if isinstance(response, dict) and "status" in response:
+                        is_normal = response.get("status", False)
+                        if not is_normal:
+                            logger.warning("Node manager %s:%s reports abnormal endpoints for instance %s(id:%d)",
+                                           node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id)
+                            return True
+                    else:
+                        logger.warning("Invalid response from node manager %s:%s for instance %s(id:%d): %s",
+                                       node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, response)
+                        return True
+            except Exception as e:
+                logger.warning("Failed to check node manager %s:%s status for instance %s(id:%d): %s",
+                               node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, e)
+                return True
+
+        logger.info("All node managers report normal status for instance %s(id:%d)",
+                    instance.job_name, instance.id)
+        return False
 
     def _handle_deleted(
         self,
