@@ -209,6 +209,12 @@ class EventPusher(Observer):
                     self.is_first_heartbeat_success = True
                     logger.info("Coordinator heartbeat established successfully.")
                     log_counter = 0  # Reset counter on successful connection
+
+                if response is None or response.get("ready") is None or not response.get("ready"):
+                    # When get info 'coordinator is not ready', controller will reset coordinator
+                    logger.info("Coordinator is alive but is not ready.")
+                    self.is_coordinator_reset = True
+
                 if self.is_coordinator_reset:
                     # SET event means push all instances to coordinator,
                     # so job_name is not a instance job_name, it is "coordinator_restart".
@@ -216,11 +222,7 @@ class EventPusher(Observer):
                     self.event_queue.put(event)
                     self.is_coordinator_reset = False
                     hb_loss_cnt = 0
-                else:
-                    if response is None or response.get("ready") is None or not response.get("ready"):
-                        # When coordinator is not ready, controller will reset coordinator,
-                        logger.info("Coordinator is not ready.")
-                        self.is_coordinator_reset = True
+                    logger.debug("Controller will reset coordinator instance info.")
 
             except Exception as e:
                 # Only count heartbeat loss after we've successfully connected at least once
