@@ -102,7 +102,7 @@
           "job_id": "mindie-pymotor",
           "hardware_type": "800I_A2",
           "env_path": "./conf/env.json",
-          "weight_mount_path": "/mnt/weight/",
+          "weight_mount_path": "/mnt/weight/"
         },
         "motor_controller_config": {
           "standby_config": {
