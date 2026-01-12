@@ -24,7 +24,7 @@ import motor.coordinator.router.router as router
 app = FastAPI()
 @app.post("/v1/chat/completions")
 async def handle_completions(request: Request):
-    return await router.handle_request(request)
+    return await router.handle_request(request, CoordinatorConfig())
 
 
 # Create mock stream client
@@ -157,7 +157,7 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
 
         req_info = await create_mock_request_info()
-        pd_router = SeparatePDRouter(req_info)
+        pd_router = SeparatePDRouter(req_info, CoordinatorConfig())
         
         chunks = []
         stream_resp = await pd_router.handle_request()
@@ -201,7 +201,7 @@ class TestRouterPDSeparation:
             yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
         monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
 
-        pd_router = SeparatePDRouter(req_info)
+        pd_router = SeparatePDRouter(req_info, CoordinatorConfig())
         chunks = []
         stream_resp = await pd_router.handle_request()
         async for chunk in stream_resp.body_iterator:

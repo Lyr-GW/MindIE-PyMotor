@@ -6,7 +6,7 @@ import requests
 from requests.exceptions import RequestException, Timeout
 from motor.common.utils.logger import get_logger
 from motor.common.resources.endpoint import Endpoint
-from motor.config.coordinator import CoordinatorConfig
+from motor.config.coordinator import HealthCheckConfig
 
 logger = get_logger(__name__)
 
@@ -18,7 +18,6 @@ class DummyRequestUtil:
 
     def __init__(self):
         self._http_session = requests.Session()
-        self.config = CoordinatorConfig().health_check_config
 
     @staticmethod
     def _validate_response(response) -> bool:
@@ -59,7 +58,22 @@ class DummyRequestUtil:
             logger.warning(f"Invalid response format: {e}")
             return False
 
-    def send_dummy_request(self, endpoint: Endpoint) -> bool:
+    @staticmethod
+    def _get_completion_request(config: HealthCheckConfig) -> dict:
+        """Get completion request for health check"""
+        request_config = getattr(config, 'dummy_request_body', {})
+
+        return {
+            "model": request_config.get('model', 'test-model'),
+            "prompt": request_config.get('prompt', 'Health check. Please respond with OK only.'),
+            "message": request_config.get('message', "[{'role': 'user', 'content': 'hi'}]"),
+            "max_tokens": request_config.get('max_tokens', 3),
+            "temperature": request_config.get('temperature', 0.1),
+            "top_p": request_config.get('top_p', 0.9),
+            "stream": request_config.get('stream', False)
+        }
+
+    def send_dummy_request(self, endpoint: Endpoint, config: HealthCheckConfig) -> bool:
         """
         Send dummy inference request to instance
 
@@ -74,10 +88,10 @@ class DummyRequestUtil:
                 logger.warning(f"Endpoint {endpoint.id} IP or port not available")
                 return False
 
-            url_path = getattr(self.config, 'dummy_request_endpoint', '/v1/completions')
+            url_path = getattr(config, 'dummy_request_endpoint', '/v1/completions')
 
             try:
-                request_data = self._get_completion_request()
+                request_data = self._get_completion_request(config=config)
             except Exception as e:
                 logger.warning(f"Failed to generate request data for endpoint {endpoint.id}: {e}")
                 return False
@@ -94,7 +108,7 @@ class DummyRequestUtil:
                 response = self._http_session.post(
                     url,
                     json=request_data,
-                    timeout=self.config.dummy_request_timeout,
+                    timeout=config.dummy_request_timeout,
                     headers=headers
                 )
             except Timeout:
@@ -119,17 +133,3 @@ class DummyRequestUtil:
     def close(self):
         """Close HTTP session"""
         self._http_session.close()
-
-    def _get_completion_request(self) -> dict:
-        """Get completion request for health check"""
-        request_config = getattr(self.config, 'dummy_request_body', {})
-
-        return {
-            "model": request_config.get('model', 'test-model'),
-            "prompt": request_config.get('prompt', 'Health check. Please respond with OK only.'),
-            "message": request_config.get('message', "[{'role': 'user', 'content': 'hi'}]"),
-            "max_tokens": request_config.get('max_tokens', 3),
-            "temperature": request_config.get('temperature', 0.1),
-            "top_p": request_config.get('top_p', 0.9),
-            "stream": request_config.get('stream', False)
-        }

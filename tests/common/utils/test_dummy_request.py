@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import Mock, patch
 from requests.exceptions import Timeout, RequestException
+from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.endpoint import Endpoint
 from motor.common.utils.dummy_request import DummyRequestUtil
 
@@ -34,11 +35,10 @@ class TestDummyRequestUtil:
         return config
 
     @pytest.fixture
-    def dummy_request_util(self, mock_config):
+    def dummy_request_util(self):
         """Create DummyRequestUtil instance"""
         with patch('motor.config.coordinator.CoordinatorConfig') as mock_config_class:
             mock_config_instance = Mock()
-            mock_config_instance.health_check_config = mock_config
             mock_config_class.return_value = mock_config_instance
             
             util = DummyRequestUtil()
@@ -49,7 +49,7 @@ class TestDummyRequestUtil:
         assert hasattr(dummy_request_util, '_http_session')
         assert dummy_request_util._http_session is not None
 
-    def test_send_dummy_request_success(self, dummy_request_util, mock_endpoint):
+    def test_send_dummy_request_success(self, dummy_request_util, mock_endpoint, mock_config):
         """Test successful dummy request"""
         # Mock successful response
         mock_response = Mock()
@@ -61,31 +61,31 @@ class TestDummyRequestUtil:
         }
         
         with patch.object(dummy_request_util._http_session, 'post', return_value=mock_response):
-            result = dummy_request_util.send_dummy_request(mock_endpoint)
+            result = dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             assert result is True
             # Verify correct URL was constructed
             dummy_request_util._http_session.post.assert_called_once()
             call_args = dummy_request_util._http_session.post.call_args
-            assert f"http://{mock_endpoint.ip}:{mock_endpoint.business_port}{dummy_request_util.config.dummy_request_endpoint}" in call_args[0]
+            assert f"http://{mock_endpoint.ip}:{mock_endpoint.business_port}{mock_config.dummy_request_endpoint}" in call_args[0]
 
-    def test_send_dummy_request_missing_ip_port(self, dummy_request_util):
+    def test_send_dummy_request_missing_ip_port(self, dummy_request_util, mock_config):
         """Test dummy request with missing IP or port"""
         endpoint = Mock(spec=Endpoint)
         endpoint.id = 1
         endpoint.ip = None
         endpoint.port = "8080"
         
-        result = dummy_request_util.send_dummy_request(endpoint)
+        result = dummy_request_util.send_dummy_request(endpoint, mock_config)
         assert result is False
         
         endpoint.ip = "127.0.0.1"
         endpoint.port = None
         
-        result = dummy_request_util.send_dummy_request(endpoint)
+        result = dummy_request_util.send_dummy_request(endpoint, mock_config)
         assert result is False
 
-    def test_send_dummy_request_http_error(self, dummy_request_util, mock_endpoint):
+    def test_send_dummy_request_http_error(self, dummy_request_util, mock_endpoint, mock_config):
         """Test dummy request with HTTP error"""
         # Mock error response
         mock_response = Mock()
@@ -93,28 +93,28 @@ class TestDummyRequestUtil:
         mock_response.json.return_value = {}
         
         with patch.object(dummy_request_util._http_session, 'post', return_value=mock_response):
-            result = dummy_request_util.send_dummy_request(mock_endpoint)
+            result = dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             assert result is False
 
-    def test_send_dummy_request_timeout(self, dummy_request_util, mock_endpoint):
+    def test_send_dummy_request_timeout(self, dummy_request_util, mock_endpoint, mock_config):
         """Test dummy request timeout"""
         with patch.object(dummy_request_util._http_session, 'post', side_effect=Timeout()):
-            result = dummy_request_util.send_dummy_request(mock_endpoint)
+            result = dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             assert result is False
 
-    def test_send_dummy_request_connection_error(self, dummy_request_util, mock_endpoint):
+    def test_send_dummy_request_connection_error(self, dummy_request_util, mock_endpoint, mock_config):
         """Test dummy request connection error"""
         with patch.object(dummy_request_util._http_session, 'post', side_effect=RequestException("Connection error")):
-            result = dummy_request_util.send_dummy_request(mock_endpoint)
+            result = dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             assert result is False
 
-    def test_send_dummy_request_unexpected_error(self, dummy_request_util, mock_endpoint):
+    def test_send_dummy_request_unexpected_error(self, dummy_request_util, mock_endpoint, mock_config):
         """Test dummy request with unexpected error"""
         with patch.object(dummy_request_util._http_session, 'post', side_effect=Exception("Unexpected error")):
-            result = dummy_request_util.send_dummy_request(mock_endpoint)
+            result = dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             assert result is False
 
@@ -209,18 +209,18 @@ class TestDummyRequestUtil:
         result = dummy_request_util._validate_response(mock_response)
         assert result is False
 
-    def test_get_completion_request(self, dummy_request_util):
+    def test_get_completion_request(self, dummy_request_util, mock_config):
         """Test completion request generation"""
-        request_data = dummy_request_util._get_completion_request()
+        request_data = dummy_request_util._get_completion_request(mock_config)
         
         expected_fields = ["model", "prompt", "max_tokens", "temperature", "top_p", "stream"]
         for field in expected_fields:
             assert field in request_data
         
         # Verify values match config
-        assert request_data["model"] == dummy_request_util.config.dummy_request_body['model']
-        assert request_data["prompt"] == dummy_request_util.config.dummy_request_body['prompt']
-        assert request_data["max_tokens"] == dummy_request_util.config.dummy_request_body['max_tokens']
+        assert request_data["model"] == mock_config.dummy_request_body['model']
+        assert request_data["prompt"] == mock_config.dummy_request_body['prompt']
+        assert request_data["max_tokens"] == mock_config.dummy_request_body['max_tokens']
 
     def test_get_completion_request_default_values(self, mock_config):
         """Test completion request with default values"""
@@ -233,7 +233,7 @@ class TestDummyRequestUtil:
             mock_config_class.return_value = mock_config_instance
             
             util = DummyRequestUtil()
-            request_data = util._get_completion_request()
+            request_data = util._get_completion_request(CoordinatorConfig().health_check_config)
             
             # Should use default values
             assert request_data["model"] == "test-model"
@@ -246,7 +246,7 @@ class TestDummyRequestUtil:
             dummy_request_util.close()
             mock_close.assert_called_once()
 
-    def test_request_headers(self, dummy_request_util, mock_endpoint):
+    def test_request_headers(self, dummy_request_util, mock_endpoint, mock_config):
         """Test that correct headers are sent"""
         mock_response = Mock()
         mock_response.status_code = 200
@@ -257,14 +257,14 @@ class TestDummyRequestUtil:
         }
         
         with patch.object(dummy_request_util._http_session, 'post', return_value=mock_response):
-            dummy_request_util.send_dummy_request(mock_endpoint)
+            dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             # Verify headers include Content-Type
             call_kwargs = dummy_request_util._http_session.post.call_args[1]
             assert "headers" in call_kwargs
             assert call_kwargs["headers"]["Content-Type"] == "application/json"
 
-    def test_request_timeout(self, dummy_request_util, mock_endpoint):
+    def test_request_timeout(self, dummy_request_util, mock_endpoint, mock_config):
         """Test that timeout is set correctly"""
         mock_response = Mock()
         mock_response.status_code = 200
@@ -275,9 +275,9 @@ class TestDummyRequestUtil:
         }
         
         with patch.object(dummy_request_util._http_session, 'post', return_value=mock_response):
-            dummy_request_util.send_dummy_request(mock_endpoint)
+            dummy_request_util.send_dummy_request(mock_endpoint, mock_config)
             
             # Verify timeout is set
             call_kwargs = dummy_request_util._http_session.post.call_args[1]
             assert "timeout" in call_kwargs
-            assert call_kwargs["timeout"] == dummy_request_util.config.dummy_request_timeout
+            assert call_kwargs["timeout"] == mock_config.dummy_request_timeout

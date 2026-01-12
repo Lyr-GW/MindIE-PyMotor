@@ -9,7 +9,6 @@ import functools
 from fastapi import status, HTTPException
 import httpx
 
-from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.models.contants import REQUEST_DATA_KEY, RESOURCE_KEY
 from motor.coordinator.core.instance_healthchecker import InstanceHealthChecker
@@ -80,7 +79,7 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
     self_instance.logger.debug("Forwarding request to instance at %s:%s with data: %s", \
         resource.endpoint.ip, resource.endpoint.business_port, filtered_data)
     
-    for attempt in range(CoordinatorConfig().exception_config.max_retry):
+    for attempt in range(self_instance.config.exception_config.max_retry):
         try:
             async for result in __try_execute_function(func, stream, *args, **kwargs):
                 yield result
@@ -95,7 +94,7 @@ async def __execute_with_retry(func: Callable, stream: bool, *args, **kwargs):
             self_instance.logger.warning(f"Request occurred unknown critical error: {str(be)}", exc_info=True)
             raise be
             
-        if last_exc and attempt == CoordinatorConfig().exception_config.max_retry - 1:
+        if last_exc and attempt == self_instance.config.exception_config.max_retry - 1:
             __handle_final_failure(last_exc, self_instance)
             if isinstance(last_exc, HTTPException):
                 raise last_exc
@@ -194,13 +193,13 @@ def __handle_general_exception(error: Exception, self_instance: 'BaseRouter'):
 
 async def __handle_retry_delay(attempt: int, self_instance: 'BaseRouter'):
     """Handle delay between retry attempts"""
-    config = CoordinatorConfig().exception_config
+    config = self_instance.config.exception_config
     self_instance.logger.warning("Attempt failed, retrying %d/%d", attempt + 1, config.max_retry)
     await asyncio.sleep(config.retry_delay * (2 ** (attempt - 1)))
 
 
 def __handle_final_failure(exception: Exception, self_instance: 'BaseRouter'):
     """Handle final failure after all retries exhausted"""
-    config = CoordinatorConfig().exception_config
+    config = self_instance.config.exception_config
     self_instance.logger.error("Stream request forwarding failed, reach max retries %d", config.max_retry)
     self_instance.req_info.update_state(ReqState.EXCEPTION)

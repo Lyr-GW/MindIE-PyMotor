@@ -59,7 +59,7 @@ class APIConfig:
     node_manager_port: int = 1026
 
     # Controller API configuration
-    controller_api_dns: str | None = field(default_factory=lambda: Env.controller_service or "127.0.0.1")
+    controller_api_dns: str | None = field(default_factory=lambda: Env.controller_service)
     controller_api_port: int | None = 1026
 
 

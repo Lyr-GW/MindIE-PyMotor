@@ -444,7 +444,7 @@ class TestInstanceHealthChecker:
         }
 
         # Mock the scenario where instance is removed after getting endpoint but before sending request
-        def mock_send_dummy_request(endpoint):
+        def mock_send_dummy_request(endpoint, config):
             # Remove instance during the health check
             with instance_healthchecker._lock:
                 if instance_id in instance_healthchecker._monitored_instances:

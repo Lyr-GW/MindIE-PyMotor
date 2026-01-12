@@ -185,7 +185,7 @@ class InstanceHealthChecker(ThreadSafeSingleton):
                 endpoint = monitoring_info["endpoint"]
                 self._monitored_instances[instance_id]["last_check_time"] = time.time()
             
-            is_healthy = self._dummy_request_util.send_dummy_request(endpoint)
+            is_healthy = self._dummy_request_util.send_dummy_request(endpoint, self._health_check_config)
             
             with self._lock:
                 if instance_id not in self._monitored_instances:

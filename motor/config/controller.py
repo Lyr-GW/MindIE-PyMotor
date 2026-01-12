@@ -24,7 +24,7 @@ class ApiConfig:
     controller_api_port: int = 1026
 
     # coordinator API configuration
-    coordinator_api_dns: str = field(default_factory=lambda: Env.coordinator_service or '127.0.0.1')
+    coordinator_api_dns: str = field(default_factory=lambda: Env.coordinator_service)
     coordinator_api_port: int = 1026
 
 

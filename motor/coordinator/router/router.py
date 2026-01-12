@@ -2,13 +2,12 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import time
-
 from fastapi import HTTPException, Request, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
-from motor.coordinator.models.request import RequestInfo, ReqState
+from motor.config.coordinator import CoordinatorConfig
+from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.core.request_manager import RequestManager
 from motor.config.coordinator import DeployMode, CoordinatorConfig
 from motor.coordinator.router.base_router import BaseRouter
@@ -33,14 +32,17 @@ _ROUTER_MAP: dict[DeployMode, type['BaseRouter']] = {
 }
 
 
-async def handle_request(raw_request: Request) -> StreamingResponse:
+async def handle_request(raw_request: Request, 
+                         config: CoordinatorConfig
+                         ) -> StreamingResponse | JSONResponse:
     """Handle incoming requests and route them to appropriate router implementation
     
     Args:
         raw_request: The incoming FastAPI request object
         
     Returns:
-        StreamingResponse: The response stream from the selected router implementation
+        StreamingResponse: The stream response from the selected router implementation
+        JSONResponse: The nonstream response from the selected router implementation
         
     Raises:
         HTTPException: If request body is empty or request fail
@@ -48,7 +50,7 @@ async def handle_request(raw_request: Request) -> StreamingResponse:
 
     req_info = await __create_request_info(raw_request)
 
-    deploy_mode = CoordinatorConfig().scheduler_config.deploy_mode
+    deploy_mode = config.scheduler_config.deploy_mode
     router_impl_class = _ROUTER_MAP.get(deploy_mode)
     if not router_impl_class:
         raise HTTPException(
@@ -56,7 +58,7 @@ async def handle_request(raw_request: Request) -> StreamingResponse:
             detail=f"Unknown deploy mode: {deploy_mode}"
         )
         
-    router_impl = router_impl_class(req_info)
+    router_impl = router_impl_class(req_info, config)
     
     try:
         return await router_impl.handle_request()
@@ -71,7 +73,7 @@ async def handle_request(raw_request: Request) -> StreamingResponse:
         ) from e
 
 
-async def handle_metaserver_request(raw_request: Request) -> httpx.Response:
+async def handle_metaserver_request(raw_request: Request, config: CoordinatorConfig) -> httpx.Response:
     """Only for CDP mode
     Handle incoming requests from D Instance and route them to P instance
     
@@ -86,7 +88,7 @@ async def handle_metaserver_request(raw_request: Request) -> httpx.Response:
     """
     req_info = await __create_request_info(raw_request, True)
     
-    deploy_mode = CoordinatorConfig().scheduler_config.deploy_mode
+    deploy_mode = config.scheduler_config.deploy_mode
     if not deploy_mode or (deploy_mode != DeployMode.CDP_SEPARATE and deploy_mode != DeployMode.PD_SEPARATE):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
@@ -94,7 +96,7 @@ async def handle_metaserver_request(raw_request: Request) -> httpx.Response:
         )
     
     try:
-        return await SeparateCDPRouter(req_info=req_info).handle_metaserver_request()
+        return await SeparateCDPRouter(req_info=req_info, config=config).handle_metaserver_request()
     except Exception as e:
         logger.debug(f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
         if isinstance(e, HTTPException):
