@@ -7,7 +7,7 @@ import time
 
 from abc import ABC, abstractmethod
 from fastapi import status, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
 from motor.config.coordinator import CoordinatorConfig
@@ -35,12 +35,13 @@ class RequestLoggerAdapter(logging.LoggerAdapter):
 class BaseRouter(ABC):
     """Base router class for handling requests with different instance configurations"""
 
-    def __init__(self, req_info: RequestInfo):
+    def __init__(self, req_info: RequestInfo, config: CoordinatorConfig):
         """Initialize the base router with request information
 
         Args:
             req_info: Request information object containing request details
         """
+        self.config = config
         self.req_info = req_info
         self.first_chunk_sent = False
         self.logger = RequestLoggerAdapter(
@@ -49,7 +50,7 @@ class BaseRouter(ABC):
         )
 
     @abstractmethod
-    async def handle_request(self) -> StreamingResponse:
+    async def handle_request(self) -> StreamingResponse | JSONResponse:
         """Handle the request based on specific implementation
 
         Returns:
@@ -71,7 +72,7 @@ class BaseRouter(ABC):
         """
         self.req_info.update_state(ReqState.P_SCHEDULING if role == PDRole.ROLE_P else ReqState.D_SCHEDULING)
 
-        for i in range(CoordinatorConfig().exception_config.max_retry):
+        for i in range(self.config.exception_config.max_retry):
             result = Scheduler().select_instance_and_endpoint(role)
             self.logger.debug("Scheduling attempt %d for role %s", i + 1, role)
             # Check return value, ensure it's iterable with two elements
@@ -79,8 +80,8 @@ class BaseRouter(ABC):
                 ins, endpoint = result
                 break
             self.logger.warning("Scheduling failed, role: %s, retrying %d/%d, result: %s", role, i + 1, 
-                                CoordinatorConfig().exception_config.max_retry, result)
-            if i == CoordinatorConfig().exception_config.max_retry - 1:
+                                self.config.exception_config.max_retry, result)
+            if i == self.config.exception_config.max_retry - 1:
                 self.req_info.update_state(ReqState.EXCEPTION)
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
@@ -120,9 +121,9 @@ class BaseRouter(ABC):
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
         self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
                           base_url, self.req_info.api, headers, req_data, 
-                          CoordinatorConfig().exception_config.first_token_timeout)
-        timeout = CoordinatorConfig().exception_config.first_token_timeout \
-            if CoordinatorConfig().exception_config.first_token_timeout != 0 else None
+                          self.config.exception_config.first_token_timeout)
+        timeout = self.config.exception_config.first_token_timeout \
+            if self.config.exception_config.first_token_timeout != 0 else None
 
         async with AsyncSafeHTTPSClient(
             base_url=base_url,
@@ -166,9 +167,9 @@ class BaseRouter(ABC):
         filtered_body = filter_sensitive_body(req_data)
         self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
                           base_url, self.req_info.api, filtered_headers, filtered_body, 
-                          CoordinatorConfig().exception_config.first_token_timeout)
-        timeout = CoordinatorConfig().exception_config.infer_timeout \
-            if CoordinatorConfig().exception_config.infer_timeout != 0 else None
+                          self.config.exception_config.first_token_timeout)
+        timeout = self.config.exception_config.infer_timeout \
+            if self.config.exception_config.infer_timeout != 0 else None
 
         async with AsyncSafeHTTPSClient(
             base_url=base_url, 

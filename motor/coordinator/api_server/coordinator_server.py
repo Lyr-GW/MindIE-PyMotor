@@ -871,7 +871,7 @@ class CoordinatorServer:
             if not InstanceManager().is_available():
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is not available")
 
-            return await handle_request(request)
+            return await handle_request(request, self.coordinator_config)
         except HTTPException:
             raise
         except Exception as e:
@@ -885,7 +885,7 @@ class CoordinatorServer:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Service is not available")
 
             # Use router to handle requests
-            return await handle_metaserver_request(request)
+            return await handle_metaserver_request(request, self.coordinator_config)
         except HTTPException:
             raise
         except Exception as e:

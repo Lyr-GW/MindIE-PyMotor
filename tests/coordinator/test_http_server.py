@@ -33,7 +33,7 @@ class TestCoordinatorServer:
         im_mock_cls.return_value = im_instance
 
         # Mock handle_request to return appropriate JSON response
-        async def mock_handle_request(request):
+        async def mock_handle_request(request, config):
             """Mock handle_request that returns JSON response matching test expectations"""
             try:
                 # Try to get JSON from request (cached if already parsed)
@@ -892,7 +892,7 @@ class TestCoordinatorServerAdvanced:
         hc_mock_cls.return_value = hc_instance
 
         # Mock handle_request to return appropriate JSON response
-        async def mock_handle_request(request):
+        async def mock_handle_request(request, config):
             """Mock handle_request that returns JSON response matching test expectations"""
             try:
                 # Try to get JSON from request (cached if already parsed)

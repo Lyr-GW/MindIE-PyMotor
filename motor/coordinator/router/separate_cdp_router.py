@@ -2,24 +2,22 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import json
-
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import HTTPException, status
 import httpx
 
 from motor.coordinator.models.contants import REQUEST_ID_KEY
 from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.router.base_router import BaseRouter
-from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import PDRole
 from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.models.contants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX, COMPLETION_SUFFIX
+from motor.coordinator.models.request import ErrorResponse
 
 
 class SeparateCDPRouter(BaseRouter):
 
-    async def handle_request(self) -> StreamingResponse:
+    async def handle_request(self) -> StreamingResponse | JSONResponse:
 
         req_data = self._gen_d_request()
         try:
@@ -40,18 +38,18 @@ class SeparateCDPRouter(BaseRouter):
             except Exception as e:
                 self.logger.error("Error occurred while streaming Decode request: %s", str(e), exc_info=True)
                 if isinstance(e, HTTPException):
-                    error_response = {
-                        "status_code": e.status_code,
-                        "error_type": type(e).__name__,
-                        "error_message": e.detail,
-                    }
+                    error_response = ErrorResponse(
+                        code=e.status_code,
+                        type=type(e).__name__,
+                        message=e.detail,
+                    )
                 else:
-                    error_response = {
-                        "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        "error_type": type(e).__name__,
-                        "error_message": str(e),
-                    }
-                yield f"data: {json.dumps(error_response)}".encode('utf-8')
+                    error_response = ErrorResponse(
+                        code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        type=type(e).__name__,
+                        message=str(e),
+                    )
+                yield f"data: {error_response.model_dump_json()}".encode('utf-8')
             finally:
                 RequestManager().del_req_info(self.req_info.req_id)
                 # After streaming done or error occurred, release tokens
@@ -69,7 +67,7 @@ class SeparateCDPRouter(BaseRouter):
                 async for response in self.forward_post_request(req_data=req_data, resource=decode_resource):
                     resp_json = response.json()
                     self.req_info.update_state(ReqState.DECODE_END)
-                    return resp_json
+                    return JSONResponse(content=resp_json)
             except Exception as e:
                 self.logger.error("Error occurred while posting Decode request: %s", e)
                 raise e
@@ -114,8 +112,8 @@ class SeparateCDPRouter(BaseRouter):
     def _gen_d_request(self) -> dict:
         """Generate D request parameters"""
         # read management http config
-        host = CoordinatorConfig().http_config.coordinator_api_host
-        port = CoordinatorConfig().http_config.coordinator_api_mgmt_port
+        host = self.config.http_config.coordinator_api_host
+        port = self.config.http_config.coordinator_api_mgmt_port
 
         req_data = self.req_info.req_data.copy()
         req_data['kv_transfer_params'] = {

@@ -122,7 +122,7 @@ class HealthCheckConfig:
     dummy_request_interval: float = 5.0
     max_consecutive_failures: int = 3
     dummy_request_timeout: float = 10.0
-    controller_api_dns: str = "mindie-ms-controller-service.mindie.svc.cluster.local"
+    controller_api_dns: str = field(default_factory=lambda: Env.controller_service)
     controller_api_port: int = 1026
     dummy_request_endpoint: str = '/v1/completions'
     dummy_request_body: dict = field(default_factory=_default_dummy_request_body)

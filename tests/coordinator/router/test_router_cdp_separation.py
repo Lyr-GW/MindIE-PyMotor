@@ -24,11 +24,11 @@ from motor.coordinator.scheduler.scheduler import Scheduler
 app = FastAPI()
 @app.post("/v1/chat/completions")
 async def handle_completions(request: Request):
-    return await router.handle_request(request)
+    return await router.handle_request(request, CoordinatorConfig())
 
 @app.post("/v1/metaserver")
 async def handle_metaserver(request: Request):
-    return await router.handle_metaserver_request(request)
+    return await router.handle_metaserver_request(request, CoordinatorConfig())
 
 
 class MockAsyncClient:
@@ -207,7 +207,7 @@ class TestRouterCDPSeparation:
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
             
-            cdp_router = SeparateCDPRouter(req_info)
+            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
             response = await cdp_router.handle_request()
             chunks = []
             async for chunk in response.body_iterator:
@@ -279,7 +279,7 @@ class TestRouterCDPSeparation:
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
         
-            cdp_router = SeparateCDPRouter(req_info)
+            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
             response = await cdp_router.handle_request()
             chunks = []
             async for chunk in response.body_iterator:
@@ -321,7 +321,7 @@ class TestRouterCDPSeparation:
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            cdp_router = SeparateCDPRouter(req_info)
+            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
             response = await cdp_router.handle_request()
             chunks = []
             async for chunk in response.body_iterator:
@@ -354,7 +354,7 @@ class TestRouterCDPSeparation:
         req_info = await create_mock_request_info()
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            cdp_router = SeparateCDPRouter(req_info)
+            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
             response = await cdp_router.handle_request()
             chunks = []
             async for chunk in response.body_iterator:
@@ -387,7 +387,7 @@ class TestRouterCDPSeparation:
         req_info = await create_mock_request_info()
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            cdp_router = SeparateCDPRouter(req_info)
+            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
             response = await cdp_router.handle_request()
             chunks = []
             async for chunk in response.body_iterator:
@@ -415,7 +415,7 @@ class TestRouterCDPSeparation:
         req_info = await create_mock_request_info()
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            cdp_router = SeparateCDPRouter(req_info)
+            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
             response = await cdp_router.handle_request()
             chunks = []
             async for chunk in response.body_iterator:

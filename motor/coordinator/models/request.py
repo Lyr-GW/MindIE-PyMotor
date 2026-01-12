@@ -61,3 +61,9 @@ class RequestResponse(BaseModel):
     status: str
     message: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
+
+
+class ErrorResponse(BaseModel):
+    message: str
+    type: str
+    code: int

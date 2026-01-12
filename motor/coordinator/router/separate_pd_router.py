@@ -15,8 +15,8 @@ from motor.common.resources.instance import PDRole
 class SeparatePDRouter(BaseRouter):
     """Handle request with separate P and D instances (original behavior)"""
 
-    def __init__(self, req_info):
-        super().__init__(req_info)
+    def __init__(self, req_info, config: CoordinatorConfig):
+        super().__init__(req_info, config)
         self.retry = True  # Need to re-request when recomputing
         self.retry_count = 0  # Recomputation count
         self.total_generated_token = ""  # Record all generated tokens during recomputation
@@ -287,7 +287,7 @@ class SeparatePDRouter(BaseRouter):
         decode_resource: ScheduledResource
     ):
         """Handle recomputation logic"""
-        if self.retry_count >= CoordinatorConfig().exception_config.max_retry:
+        if self.retry_count >= self.config.exception_config.max_retry:
             raise HTTPException(status.HTTP_507_INSUFFICIENT_STORAGE, "Insufficient compute resource")
 
         self.retry = True

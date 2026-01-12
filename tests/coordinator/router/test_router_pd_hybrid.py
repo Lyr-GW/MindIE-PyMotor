@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 app = FastAPI()
 @app.post("/v1/chat/completions")
 async def handle_completions(request: Request):
-    return await router.handle_request(request)
+    return await router.handle_request(request, CoordinatorConfig())
 
 @pytest.fixture
 def mock_forward_stream_request(monkeypatch):
@@ -152,7 +152,7 @@ class TestRouterPDHybrid:
         )
         
         # Test the PD hybrid forwarding function
-        hybrid_router = PDHybridRouter(req_info)
+        hybrid_router = PDHybridRouter(req_info, CoordinatorConfig())
         chunks = []
         
         response = await hybrid_router.handle_request()
@@ -205,7 +205,7 @@ class TestRouterPDHybrid:
         monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward_stream_request)
         
         # Test the PD hybrid forwarding function with failure
-        hybrid_router = PDHybridRouter(req_info)
+        hybrid_router = PDHybridRouter(req_info, CoordinatorConfig())
         with pytest.raises(Exception) as exc_info:
             # Create an async generator and consume it
             stream_resp = await hybrid_router.handle_request()
