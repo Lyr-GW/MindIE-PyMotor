@@ -10,6 +10,7 @@ from motor.coordinator.models.request import ReqState, ScheduledResource
 from motor.coordinator.router.base_router import BaseRouter
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import PDRole
+from motor.coordinator.models.request import ErrorResponse
 
 
 class SeparatePDRouter(BaseRouter):
@@ -20,64 +21,71 @@ class SeparatePDRouter(BaseRouter):
         self.retry = True  # Need to re-request when recomputing
         self.retry_count = 0  # Recomputation count
         self.total_generated_token = ""  # Record all generated tokens during recomputation
+        self.is_finished = False
 
     async def handle_request(self) -> StreamingResponse:
         """Handle request with separate P and D instances"""
-
-        async def generate_stream():
+        return StreamingResponse(self.generate_stream(),
+                                 media_type="application/json")
+    
+    async def generate_stream(self):
+        for attempt in range(self.config.exception_config.max_retry):
+            # set True to start forward request
+            self.retry = True
             while self.retry:
                 self.first_chunk_sent = False
+                # set False to avoid recompute
                 self.retry = False
 
-                prefill_resource: ScheduledResource = None
-                try:
-                    # Schedule P instance
-                    prefill_resource = self.prepare_resource(PDRole.ROLE_P)
-                    # Forward P request
-                    p_resp_json = await self._forward_p_request(prefill_resource)
-                    self.logger.debug("Prefill response received: %s", p_resp_json)
-                except Exception as e:
-                    self.logger.error("Error occurred while forwarding P request: %s", e)
-                    if isinstance(e, HTTPException):
-                        error_response = {
-                            "status_code": e.status_code,
-                            "error_type": type(e).__name__,
-                            "error_message": e.detail,
-                        }
-                    else:
-                        error_response = {
-                            "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            "error_type": type(e).__name__,
-                            "error_message": str(e),
-                        }
-                    yield f"data: {json.dumps(error_response)}".encode('utf-8')
+                async for chunk in self.procss_single_attempt(attempt):
+                    yield chunk
+                if self.is_finished:
                     return
-                finally:
-                    if prefill_resource and self.req_info.state != ReqState.PREFILL_END:
-                        # When forwarding fails, releases p tokens and kvcache
-                        if not self.release_all(prefill_resource):
-                            self.logger.warning(
-                                "Fail to release prefill resource, instance id: %s, endpoint id: %s, req state: %s",
-                                prefill_resource.instance.id, prefill_resource.endpoint.id, self.req_info.state)
 
-                decode_resource: ScheduledResource = None
-                try:
-                    # Schedule D instance
-                    decode_resource = self.prepare_resource(PDRole.ROLE_D)
-                    # Forward D request
-                    async for chunk in self._forward_d_request(p_resp_json, prefill_resource, decode_resource):
-                        yield chunk
-                except Exception as e:
-                    self.logger.error("Error occurred while forwarding Decode request: %s", e)
-                    raise e
-                finally:
-                    # After streaming done or error occurred, release tokens
-                    if decode_resource and not self.release_tokens(decode_resource):
-                        self.logger.warning(
-                            "Fail to release decode resource, instance id: %s, endpoint id: %s, req state: %s",
-                            decode_resource.instance.id, decode_resource.endpoint.id, self.req_info.state)
-        return StreamingResponse(generate_stream(),
-                                 media_type="application/json")
+    async def procss_single_attempt(self, attempt):
+        prefill_resource: ScheduledResource = None
+        try:
+            # Schedule P instance
+            prefill_resource = self.prepare_resource(PDRole.ROLE_P)
+            # Forward P request
+            p_resp_json = await self._forward_p_request(prefill_resource)
+            self.logger.debug("Prefill response received: %s", p_resp_json)
+        except Exception as e:
+            self.logger.error("Error occurred while forwarding P request: %s", e)
+            if attempt != self.config.exception_config.max_retry - 1:
+                self.is_finished = False
+                return
+            yield self._generate_streaming_error_chunk(e)
+            self.is_finished = True
+            return
+        finally:
+            if prefill_resource and self.req_info.state != ReqState.PREFILL_END:
+                # When forwarding fails, releases p tokens and kvcache
+                if not self.release_all(prefill_resource):
+                    self.logger.warning(
+                        "Fail to release prefill resource, instance id: %s, endpoint id: %s, req state: %s",
+                        prefill_resource.instance.id, prefill_resource.endpoint.id, self.req_info.state)
+
+        decode_resource: ScheduledResource = None
+        try:
+            # Schedule D instance
+            decode_resource = self.prepare_resource(PDRole.ROLE_D)
+            # Forward D request
+            async for chunk in self._forward_d_request(p_resp_json, prefill_resource, decode_resource):
+                yield chunk
+            if not self.retry:
+                self.is_finished = True
+                return
+        except Exception as e:
+            self.logger.error("Error occurred while forwarding Decode request: %s", e)
+            if self.first_chunk_sent or attempt == self.config.exception_config.max_retry - 1:
+                yield self._generate_streaming_error_chunk(e)
+        finally:
+            # After streaming done or error occurred, release tokens
+            if decode_resource and not self.release_tokens(decode_resource):
+                self.logger.warning(
+                    "Fail to release decode resource, instance id: %s, endpoint id: %s, req state: %s",
+                    decode_resource.instance.id, decode_resource.endpoint.id, self.req_info.state)
 
     def _gen_p_request(self) -> dict:
         """Generate P request parameters"""
@@ -101,15 +109,17 @@ class SeparatePDRouter(BaseRouter):
     async def _forward_p_request(self, resource: ScheduledResource):
         """Forward P request to the given resource"""
         req_data = self._gen_p_request()
-        # P non-streaming request
-        async for response in self.forward_post_request(req_data=req_data, 
-                                                        resource=resource,
-                                                        timeout=self.config.exception_config.first_token_timeout
-                                                        ):
+
+        async with self._manage_client_context(
+                resource,
+                self.config.exception_config.infer_timeout
+            ) as prefill_client:
+            # P non-streaming request
+            response = await self.forward_post_request(req_data=req_data, client=prefill_client)
             resp_json = response.json()
             self.req_info.update_state(ReqState.PREFILL_END)
             self.release_tokens(resource)
-        return resp_json
+            return resp_json
 
     def _gen_d_request(self, resp_json: dict) -> dict:
         """Generate D request parameters"""
@@ -143,19 +153,7 @@ class SeparatePDRouter(BaseRouter):
             self.logger.info("Completed streaming for request %s", self.req_info)
         except Exception as e:
             self._handle_stream_error(prefill_resource, e)
-            if isinstance(e, HTTPException):
-                error_response = {
-                    "status_code": e.status_code,
-                    "error_type": type(e).__name__,
-                    "error_message": e.detail,
-                }
-            else:
-                error_response = {
-                    "status_code": status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    "error_type": type(e).__name__,
-                    "error_message": str(e),
-                }
-            yield f"data: {json.dumps(error_response)}".encode('utf-8')
+            raise e
 
     def _extract_request_info(self, req_data: dict) -> dict:
         """Extract request information from req_data"""
@@ -191,21 +189,22 @@ class SeparatePDRouter(BaseRouter):
         """Process stream chunks from decode resource"""
         release_kv = False
 
-        async for chunk in self.forward_stream_request(req_data=req_data, 
-                                                       resource=decode_resource,
-                                                       timeout=self.config.exception_config.first_token_timeout
-                                                       ):
-            if not release_kv and chunk:
-                release_kv = True
-                self.release_kv(prefill_resource)
+        async with self._manage_client_context(
+                decode_resource,
+                self.config.exception_config.infer_timeout
+            ) as decode_client:
+            async for chunk in self.forward_stream_request(req_data=req_data, client=decode_client):
+                if not release_kv and chunk:
+                    release_kv = True
+                    self.release_kv(prefill_resource)
 
-            processed_chunk = self._process_single_chunk(chunk, request_info, req_data)
-            if processed_chunk is None:  # Recomputation triggered
-                self._handle_recomputation(req_data, request_info, prefill_resource, decode_resource)
-                return
+                processed_chunk = self._process_single_chunk(chunk, request_info, req_data)
+                if processed_chunk is None:  # Recomputation triggered
+                    self._handle_recomputation(req_data, request_info, prefill_resource, decode_resource)
+                    return
 
-            if processed_chunk:
-                yield processed_chunk
+                if processed_chunk:
+                    yield processed_chunk
 
     def _process_single_chunk(self, chunk: bytes, request_info: dict, req_data: dict):
         """Process a single chunk and return processed chunk or None for recomputation"""

@@ -4,10 +4,12 @@
 import time
 from enum import Enum
 from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
+
+from httpx import AsyncClient
 
 from motor.common.resources.endpoint import Endpoint
-from motor.common.resources.instance import Instance
+from motor.common.resources.instance import Instance, PDRole
 
 
 class RequestType(Enum):
@@ -40,6 +42,8 @@ class RequestInfo(BaseModel):
     api: str = Field(..., description="API need to be forwarded")
     state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
+    _prefill_client: Optional[AsyncClient] = PrivateAttr(default=None)
+    _decode_client: Optional[AsyncClient] = PrivateAttr(default=None)
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -48,6 +52,18 @@ class RequestInfo(BaseModel):
     def update_state(self, new_state: ReqState):
         self.state = new_state
         self.status[new_state] = time.time()
+
+    def set_client(self, client: AsyncClient, role: PDRole):
+        if role == PDRole.ROLE_P:
+            self._prefill_client = client
+        if role == PDRole.ROLE_D:
+            self._decode_client = client
+    
+    async def close_clients(self):
+        if self._prefill_client and not self._prefill_client.is_closed:
+            await self._prefill_client.aclose()
+        if self._decode_client and not self._decode_client.is_closed:
+            await self._decode_client.aclose()
 
 
 class ScheduledResource(BaseModel):

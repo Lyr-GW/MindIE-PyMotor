@@ -12,7 +12,7 @@ import httpx
 
 from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.coordinator.models.request import ScheduledResource
+from motor.coordinator.models.request import ScheduledResource, RequestInfo
 from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
 from motor.common.resources.endpoint import WorkloadAction
@@ -34,6 +34,9 @@ class MockAsyncClient:
         self.fail_times = fail_times
         self.fail_count = 0
         
+        self.base_url = "test-base-url"
+        self.timeout = 1
+
     async def __aenter__(self):
         return self
     
@@ -138,7 +141,7 @@ class TestRouterPDSeparation:
     @pytest.fixture
     def setup_forward_post_request(self, monkeypatch: MonkeyPatch):
         # Mock the HTTP forwarding functions
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource, timeout):
+        async def mock_forward_post_request(self, req_data: dict, client: httpx.AsyncClient):
             # Return a mock response for P request
             mock_response = Mock()
             mock_response.json.return_value = {
@@ -149,9 +152,9 @@ class TestRouterPDSeparation:
                     "remote_port": "8001"
                 }
             }
-            yield mock_response
+            return mock_response
         monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
-    
+
     @pytest.mark.asyncio
     async def test_empty_request_body(self, client):
         """Test handling of empty request body"""
@@ -180,7 +183,7 @@ class TestRouterPDSeparation:
         stream_resp = await pd_router.handle_request()
         async for chunk in stream_resp.body_iterator:
             chunks.append(chunk)
-        chunk_str = b"".join(chunks).decode('utf-8')
+        chunk_str = "".join(chunks)
             
         assert str(status.HTTP_503_SERVICE_UNAVAILABLE) in chunk_str
         assert f"Scheduling failed, role:{PDRole.ROLE_P}" in chunk_str
@@ -194,7 +197,7 @@ class TestRouterPDSeparation:
         req_info = await create_mock_request_info(max_tokens=max_tokens, stream=stream)
         
         generated_prefill_request = {}
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource, timeout):
+        async def mock_forward_post_request(self, req_data: dict, client: httpx.AsyncClient):
             nonlocal generated_prefill_request
             generated_prefill_request = req_data
             # Return a mock response for P request
@@ -207,11 +210,11 @@ class TestRouterPDSeparation:
                     "remote_port": "8001"
                 }
             }
-            yield mock_response
+            return mock_response
         monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
         
         generated_decode_request = {}
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
+        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient):
             nonlocal generated_decode_request
             generated_decode_request = req_data
             # Yield a simple response for D request
@@ -278,8 +281,7 @@ class TestRouterPDSeparation:
         assert error_message in response.text
         # Should get a 4XX error
         assert str(status.HTTP_400_BAD_REQUEST) in response.text
-        # Should only try once (no retry for 4XX)
-        assert mock_async_client.post.await_count == 1 
+        assert mock_async_client.post.await_count == CoordinatorConfig().exception_config.max_retry
         assert exec_release > 1
         
     @pytest.mark.asyncio
@@ -353,7 +355,7 @@ class TestRouterPDSeparation:
         mock_async_client.post = AsyncMock(side_effect=[mock_response_fail, mock_response_success])
 
         decode_count = 0
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
+        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient):
             # Yield a simple response for D request
             nonlocal decode_count
             decode_count += 1
@@ -403,11 +405,11 @@ class TestRouterPDSeparation:
             })
             
         assert error_message in response.text
-        assert mock_async_client.post.await_count == 1
+        assert mock_async_client.post.await_count == CoordinatorConfig().exception_config.max_retry
 
     @pytest.mark.asyncio
-    async def test_engine_server_decode_continuous_5xx_status_code(self, client, 
-                                                                   monkeypatch: MonkeyPatch, 
+    async def test_engine_server_decode_continuous_5xx_status_code(self, client,
+                                                                   monkeypatch: MonkeyPatch,
                                                                    setup_pd_separation,
                                                                    setup_forward_post_request):
         """Test case: EngineServer Decode request continuously returns 5XX status code
@@ -432,8 +434,8 @@ class TestRouterPDSeparation:
             assert mock_async_client.fail_count == CoordinatorConfig().exception_config.max_retry
 
     @pytest.mark.asyncio
-    async def test_engine_server_decode_once_5xx_status_code(self, client, 
-                                                             monkeypatch: MonkeyPatch, 
+    async def test_engine_server_decode_once_5xx_status_code(self, client,
+                                                             monkeypatch: MonkeyPatch,
                                                              setup_pd_separation,
                                                              setup_forward_post_request):
         """Test case: EngineServer Decode request first returns 5XX status code, then returns 200 normally
@@ -457,8 +459,8 @@ class TestRouterPDSeparation:
             assert mock_async_client.fail_count == 1
 
     @pytest.mark.asyncio
-    async def test_successful_request_with_separate_pd(self, client, 
-                                                       monkeypatch: MonkeyPatch, 
+    async def test_successful_request_with_separate_pd(self, client,
+                                                       monkeypatch: MonkeyPatch,
                                                        setup_pd_separation,
                                                        setup_forward_post_request):
         """Test case: PD separation mode request succeeds
@@ -467,10 +469,10 @@ class TestRouterPDSeparation:
         2) Return normal response
         """
         # Mock the HTTP forwarding functions
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
+        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient):
             # Yield a simple response for D request
             yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
-        
+
         monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
         
         response = client.post("/v1/chat/completions", json={
@@ -485,8 +487,8 @@ class TestRouterPDSeparation:
         assert response.headers.get("content-type") == "application/json"
     
     @pytest.mark.asyncio
-    async def test_engine_server_stream_recompute(self, client, 
-                                                  monkeypatch: MonkeyPatch, 
+    async def test_engine_server_stream_recompute(self, client,
+                                                  monkeypatch: MonkeyPatch,
                                                   setup_pd_separation,
                                                   setup_forward_post_request):
 
@@ -520,11 +522,11 @@ class TestRouterPDSeparation:
                     continue
         
             assert result == ",1,2,3,4,5,6,7,8,9,10"
-            
+
             
     @pytest.mark.asyncio
-    async def test_engine_server_nostream_recompute(self, client, 
-                                                    monkeypatch: MonkeyPatch, 
+    async def test_engine_server_nostream_recompute(self, client,
+                                                    monkeypatch: MonkeyPatch,
                                                     setup_pd_separation,
                                                     setup_forward_post_request):
         

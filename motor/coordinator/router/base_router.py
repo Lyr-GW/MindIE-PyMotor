@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Any
+from typing import Any, Optional, AsyncGenerator
+import contextlib
 import logging
 import time
 
@@ -14,12 +15,12 @@ from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.contants import REQUEST_ID_KEY, DEFAULT_REQUEST_ID
 from motor.coordinator.models.request import RequestInfo, ReqState, ScheduledResource
 from motor.coordinator.scheduler.scheduler import Scheduler
-from motor.coordinator.router.request_error_handler import handle_request_errors
 from motor.common.utils.security_utils import filter_sensitive_headers, filter_sensitive_body
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import PDRole
 from motor.common.utils.http_client import AsyncSafeHTTPSClient
 from motor.common.utils.logger import get_logger
+from motor.coordinator.models.request import ErrorResponse
 
 logger = get_logger(__name__)
 
@@ -48,6 +49,34 @@ class BaseRouter(ABC):
             logger, 
             extra={REQUEST_ID_KEY: req_info.req_id}
         )
+
+    @contextlib.asynccontextmanager
+    async def _manage_resource_context(self, role: PDRole, release_func):
+        """
+        Manage scheduled resource
+        """
+        resource: Optional[ScheduledResource] = None
+        try:
+            resource = self.prepare_resource(role)
+            yield resource
+        finally:
+            if resource and not release_func(resource):
+                self.logger.warning(
+                    "Fail to release %s resource | Instance: %s | Endpoint: %s | State: %s",
+                    role.name, resource.instance.id, resource.endpoint.id, self.req_info.state
+                )
+
+    @contextlib.asynccontextmanager
+    async def _manage_client_context(self, resource: ScheduledResource, timeout: int):
+        """
+        Manage schedule resource and http client
+        :param resource: ScheduledResource
+        :param timeout: http client timeout
+        """
+        endpoint = resource.endpoint
+        base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
+        async with AsyncSafeHTTPSClient(base_url=base_url, timeout=timeout) as client:
+            yield client
 
     @abstractmethod
     async def handle_request(self) -> StreamingResponse | JSONResponse:
@@ -102,87 +131,71 @@ class BaseRouter(ABC):
         self.logger.debug("Allocated instance: %s, role: %s", ins.job_name, role)
         return ScheduledResource(instance=ins, endpoint=endpoint)
 
-    @handle_request_errors(stream=True)
-    async def forward_stream_request(self, 
-                                     req_data: dict, 
-                                     resource: ScheduledResource,
-                                     timeout: int
-                                     ):
+    async def forward_stream_request(self,
+                                     req_data: dict,
+                                     client: httpx.AsyncClient,
+                                     ) -> AsyncGenerator[str, None]:
         """Forward streaming request to the given endpoint
 
         Args:
             req_data: The request data to forward
-            resource: The scheduled resource containing the endpoint
+            client: The client connection with scheduled endpoint
 
         Yields:
-            Bytes of the response stream
+            The stream response from the endpoint
         """
-        endpoint = resource.endpoint
+
         headers = {
             'Content-Type': 'application/json',
             'X-Request-Id': self.req_info.req_id
         }
-        base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
-        self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                          base_url, self.req_info.api, headers, req_data, timeout)
+        self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
+                          client.base_url, self.req_info.api, headers, req_data, client.timeout)
 
-        async with AsyncSafeHTTPSClient(
-            base_url=base_url,
-            timeout=timeout
-        ) as client:
-            self.first_chunk_sent = False
-            async with client.stream(
-                "POST",
-                f"/{self.req_info.api}",
-                json=req_data,
-                headers=headers
-            ) as response:
-                if not response.is_success:
-                    await response.aread()
-                    response.raise_for_status()
-                async for chunk in response.aiter_bytes():
-                    if not self.first_chunk_sent and chunk:
-                        self.first_chunk_sent = True
-                        self.req_info.update_state(ReqState.FIRST_TOKEN_FINISH)
-                    yield chunk
-                return
+        self.first_chunk_sent = False
+        async with client.stream(
+            "POST",
+            f"/{self.req_info.api}",
+            json=req_data,
+            headers=headers
+        ) as response:
+            if not response.is_success:
+                await response.aread()
+                response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                if not self.first_chunk_sent and chunk:
+                    self.first_chunk_sent = True
+                    self.req_info.update_state(ReqState.FIRST_TOKEN_FINISH)
+                yield chunk
+            return
 
-    @handle_request_errors(stream=False)
-    async def forward_post_request(self, 
-                                   req_data: dict, 
-                                   resource: ScheduledResource,
-                                   timeout: int
+    async def forward_post_request(self,
+                                   req_data: dict,
+                                   client: httpx.AsyncClient,
                                    ) -> httpx.Response:
         """Forward non-streaming request to the given resource
 
         Args:
             req_data: The request data to forward
-            resource: The scheduled resource containing the endpoint
+            client: The client to scheduled endpoint
 
         Returns:
             The response from the endpoint
         """
-        endpoint = resource.endpoint
         headers = {
             'Content-Type': 'application/json',
             'X-Request-Id': self.req_info.req_id
         }
-        base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
         filtered_headers = filter_sensitive_headers(headers)
         filtered_body = filter_sensitive_body(req_data)
-        self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                          base_url, self.req_info.api, filtered_headers, filtered_body, timeout)
+        self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
+                          client.base_url, self.req_info.api, filtered_headers, filtered_body, client.timeout)
 
-        async with AsyncSafeHTTPSClient(
-            base_url=base_url, 
-            timeout=timeout
-        ) as client:
-
-            response = await client.post(f"/{self.req_info.api}",
-                                         json=req_data,
-                                         headers=headers)
-            response.raise_for_status()
-            return response
+        response = await client.post(f"/{self.req_info.api}",
+                                        json=req_data,
+                                        headers=headers)
+        response.raise_for_status()
+        return response
 
     def release_all(self, resource: ScheduledResource):
         return self._update_workload(resource, WorkloadAction.RELEASE_TOKENS) and \
@@ -226,3 +239,24 @@ class BaseRouter(ABC):
         self.logger.debug("API: %s, Length: %d, State: %s, Cost Time: %s, All status Time: %s",
                           self.req_info.api, self.req_info.req_len, self.req_info.state, 
                           cost_time, self.req_info.status)
+
+    def _generate_streaming_error_chunk(self, e: Exception) -> str:
+        if isinstance(e, HTTPException):
+            error_response = ErrorResponse(
+                code=e.status_code,
+                type=type(e).__name__,
+                message=e.detail,
+            )
+        elif isinstance(e, httpx.HTTPStatusError):
+            error_response = ErrorResponse(
+                code=e.response.status_code,
+                type=type(e).__name__,
+                message=str(e),
+            )
+        else:
+            error_response = ErrorResponse(
+                code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                type=type(e).__name__,
+                message=str(e),
+            )
+        return f"data: {error_response.model_dump_json()}\n\n"

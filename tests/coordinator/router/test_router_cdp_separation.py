@@ -48,6 +48,10 @@ class MockAsyncClient:
         self.req_data_from_metaserver = {}
         self.req_headers_from_router = {}
         
+        self.base_url = "test-base-url"
+        self.timeout = 1
+        self.is_closed = True
+        
     async def __aenter__(self):
         return self
     
@@ -256,7 +260,7 @@ class TestRouterCDPSeparation:
             message=error_message,
             request=None,
             response=httpx.Response(status_code=status.HTTP_400_BAD_REQUEST, text=error_message)
-        ))
+        ), stream_fail_times=CoordinatorConfig().exception_config.max_retry )
         req_info = await create_mock_request_info()
         
         release_p_tokens = 0
@@ -284,16 +288,14 @@ class TestRouterCDPSeparation:
             chunks = []
             async for chunk in response.body_iterator:
                 chunks.append(chunk)
-            chunk_str = b"".join(chunks).decode('utf-8')
+            chunk_str = "".join(chunks)
             
-        assert req_info.state == ReqState.INVALID
+        assert req_info.state == ReqState.EXCEPTION
         assert error_message in chunk_str
         # Should get a 4XX error
         assert str(status.HTTP_400_BAD_REQUEST) in chunk_str
-        # Should only try once (no retry for 4XX)
-        assert mock_async_client.stream_count == 1 
+        assert mock_async_client.stream_count == CoordinatorConfig().exception_config.max_retry 
         assert release_d_tokens >= 1
-        assert release_p_tokens == 0
         assert release_p_tokens == 0
         
     @pytest.mark.asyncio
@@ -326,7 +328,7 @@ class TestRouterCDPSeparation:
             chunks = []
             async for chunk in response.body_iterator:
                 chunks.append(chunk)
-            chunk_str = b"".join(chunks).decode('utf-8')
+            chunk_str = "".join(chunks)
             
         assert req_info.state == ReqState.EXCEPTION
         assert error_message in chunk_str
@@ -383,7 +385,8 @@ class TestRouterCDPSeparation:
         mock_async_client = MockAsyncClient(stream_exc=httpx.ConnectError(
             error_message, 
             request=MagicMock()
-        ))
+        ), stream_fail_times=CoordinatorConfig().exception_config.max_retry)
+        
         req_info = await create_mock_request_info()
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
@@ -392,10 +395,10 @@ class TestRouterCDPSeparation:
             chunks = []
             async for chunk in response.body_iterator:
                 chunks.append(chunk)
-            chunk_str = b"".join(chunks).decode('utf-8')
+            chunk_str = "".join(chunks)
         assert error_message in chunk_str
-        assert mock_async_client.stream_count == 1
-        assert mock_async_client.stream_fail_count == 1
+        assert mock_async_client.stream_count == CoordinatorConfig().exception_config.max_retry
+        assert mock_async_client.stream_fail_count == CoordinatorConfig().exception_config.max_retry
         assert req_info.state == ReqState.EXCEPTION
     
     @pytest.mark.asyncio
@@ -420,7 +423,7 @@ class TestRouterCDPSeparation:
             chunks = []
             async for chunk in response.body_iterator:
                 chunks.append(chunk)
-            chunk_str = b"".join(chunks).decode('utf-8')
+            chunk_str = "".join(chunks)
             
         assert error_message in chunk_str
         assert mock_async_client.post_count == retry_times

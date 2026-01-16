@@ -1,120 +1,164 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+from typing import Dict, AsyncGenerator, Any
+import asyncio
+import contextlib
 
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import HTTPException, status
-import httpx
 
 from motor.coordinator.models.contants import REQUEST_ID_KEY
-from motor.coordinator.models.request import ReqState, ScheduledResource
+from motor.coordinator.models.request import ReqState
 from motor.coordinator.router.base_router import BaseRouter
 from motor.common.resources.instance import PDRole
 from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.models.contants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX, COMPLETION_SUFFIX
-from motor.coordinator.models.request import ErrorResponse
 
 
 class SeparateCDPRouter(BaseRouter):
 
+    @contextlib.asynccontextmanager
+    async def _manage_request_context(self):
+        """
+        Lifecycle management for request in the RequestManager.
+        Ensures request info is added and cleaned up.
+        """
+        RequestManager().add_req_info(self.req_info)
+        try:
+            yield
+        finally:
+            RequestManager().del_req_info(self.req_info.req_id)
+            self._log_request_details()
+
     async def handle_request(self) -> StreamingResponse | JSONResponse:
 
         req_data = self._gen_d_request()
-        try:
-            # Schedule D instance
-            decode_resource = self.prepare_resource(PDRole.ROLE_D)
-        except Exception as e:
-            self.logger.error("Error occurred while scheduling Decode resource: %s", e)
-            raise e
-
-        async def generate_stream():
-            self.logger.debug("Handling streaming Decode request")
-            RequestManager().add_req_info(self.req_info)
-            try:
-                # Forward D request
-                async for chunk in self.forward_stream_request(req_data=req_data, 
-                                                               resource=decode_resource, 
-                                                               timeout=self.config.exception_config.first_token_timeout
-                                                               ):
-                    yield chunk
-                self.req_info.update_state(ReqState.DECODE_END)
-            except Exception as e:
-                self.logger.error("Error occurred while streaming Decode request: %s", str(e), exc_info=True)
-                if isinstance(e, HTTPException):
-                    error_response = ErrorResponse(
-                        code=e.status_code,
-                        type=type(e).__name__,
-                        message=e.detail,
-                    )
-                else:
-                    error_response = ErrorResponse(
-                        code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                        type=type(e).__name__,
-                        message=str(e),
-                    )
-                yield f"data: {error_response.model_dump_json()}".encode('utf-8')
-            finally:
-                RequestManager().del_req_info(self.req_info.req_id)
-                # After streaming done or error occurred, release tokens
-                if decode_resource and not self.release_tokens(decode_resource):
-                    self.logger.warning(f"Fail to release decode resource, instance id: {decode_resource.instance.id}, \
-                        endpoint id: {decode_resource.endpoint.id}, \
-                        req state: {self.req_info.state}")
-                self._log_request_details()
-
-        async def generate_post():
-            self.logger.debug("Handling non-streaming Decode request")
-            RequestManager().add_req_info(self.req_info)
-            try:
-                # Forward D request
-                async for response in self.forward_post_request(req_data=req_data, 
-                                                                resource=decode_resource,
-                                                                timeout=self.config.exception_config.infer_timeout):
-                    resp_json = response.json()
-                    self.req_info.update_state(ReqState.DECODE_END)
-                    return JSONResponse(content=resp_json)
-            except Exception as e:
-                self.logger.error("Error occurred while posting Decode request: %s", e)
-                raise e
-            finally:
-                RequestManager().del_req_info(self.req_info.req_id)
-                # After streaming done or error occurred, release tokens
-                if decode_resource and not self.release_tokens(decode_resource):
-                    self.logger.warning(f"Fail to release decode resource, instance id: {decode_resource.instance.id}, \
-                        endpoint id: {decode_resource.endpoint.id}, \
-                        req state: {self.req_info.state}")
-                self._log_request_details()
 
         if self.req_info.req_data.get("stream", False):
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
-        else:
-            return await generate_post()
+            return StreamingResponse(
+                self._generate_stream(req_data),
+                media_type="text/event-stream"
+            )
+        return await self._generate_post(req_data)
 
-    async def handle_metaserver_request(self) -> httpx.Response:
-        prefill_resource: ScheduledResource = None
+    async def handle_metaserver_request(self) -> Dict[str, Any]:
+        """
+        Handles the Prefill requests by metaserver
+        """
         req_data = self._gen_p_request()
         try:
-            # Schedule P instance
-            prefill_resource = self.prepare_resource(PDRole.ROLE_P)
-            # Forward P request
-            # P non-streaming request
-            async for response in self.forward_post_request(req_data=req_data, 
-                                                            resource=prefill_resource,
-                                                            timeout=self.config.exception_config.first_token_timeout):
-                resp_json = response.json()
-                self.logger.debug("Prefill response status code: %d, json content: %s", response.status_code, resp_json)
-                self.req_info.update_state(ReqState.PREFILL_END)
-        except Exception as e:
-            self.logger.error("Error occurred while forwarding P request: %s", e)
-            raise e
-        finally:
-            # After streaming done or error occurred, release tokens
-            if prefill_resource and not self.release_all(prefill_resource):
-                self.logger.warning(f"Fail to release decode resource, instance id: {prefill_resource.instance.id}, \
-                    endpoint id: {prefill_resource.endpoint.id}, \
-                    req state: {self.req_info.state}")
+            # Schedule Prefill instance and forward the request
+            async with self._manage_resource_context(PDRole.ROLE_P, self.release_all) as resource, \
+                       self._manage_client_context(resource, 
+                                                    self.config.exception_config.first_token_timeout
+                                                   ) as client:
 
-        return resp_json
+                self.req_info.set_client(client, PDRole.ROLE_P)
+                response = await self.forward_post_request(req_data, client)
+                resp_json = response.json()
+                
+                self.logger.debug("Prefill response received: %s", resp_json)
+                self.req_info.update_state(ReqState.PREFILL_END)
+                return resp_json
+
+        except asyncio.CancelledError:
+            self.logger.warning("Metaserver request was cancelled")
+            await self.req_info.close_clients()
+            raise
+        except Exception as e:
+            self.logger.error("Failed to forward Prefill request: %s", e)
+            await self.req_info.close_clients()
+            self.req_info.update_state(ReqState.EXCEPTION)
+            raise e
+
+    async def _generate_stream(self, req_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
+        """
+        Handles streaming Decode requests
+        """
+        self.logger.debug("Handling streaming Decode request")
+        max_retry = self.config.exception_config.max_retry
+
+        for attempt in range(max_retry):
+            try:
+                # Use context managers to ensure resource locking and client cleanup
+                async with self._manage_request_context(), \
+                           self._manage_resource_context(PDRole.ROLE_D, self.release_tokens) as resource, \
+                           self._manage_client_context(resource, 
+                                                        self.config.exception_config.first_token_timeout
+                                                       ) as client:
+                            
+                    self.req_info.set_client(client, PDRole.ROLE_D)
+                    
+                    async for chunk in self.forward_stream_request(req_data, client):
+                        yield chunk
+                    
+                    self.req_info.update_state(ReqState.DECODE_END)
+                return
+
+            except asyncio.CancelledError:
+                self.logger.debug("Stream request was cancelled")
+                await self.req_info.close_clients()
+                raise
+            except Exception as e:
+                self.logger.error(
+                    "Error in streaming Decode (attempt %d/%d): %s",
+                    attempt + 1, max_retry, str(e), exc_info=True
+                )
+                await self.req_info.close_clients()
+
+                # If chunk was already sent, cannot retry the HTTP stream.
+                # Send error chunk and terminate.
+                if self.first_chunk_sent or attempt == max_retry - 1:
+                    self.req_info.update_state(ReqState.EXCEPTION)
+                    yield self._generate_streaming_error_chunk(e)
+                    return
+
+                wait_time = self.config.exception_config.retry_delay * (2 ** attempt)
+                self.logger.info("Retrying streaming request in %.2f seconds...", wait_time)
+                await asyncio.sleep(wait_time)
+
+    async def _generate_post(self, req_data: Dict[str, Any]) -> JSONResponse:
+        """
+        Handles non-streaming Decode requests
+        """
+        self.logger.debug("Handling non-streaming Decode request")
+        max_retries = self.config.exception_config.max_retry
+
+        for attempt in range(max_retries):
+            try:
+                async with self._manage_request_context(), \
+                           self._manage_resource_context(PDRole.ROLE_D, self.release_tokens) as resource, \
+                           self._manage_client_context(resource, 
+                                                        self.config.exception_config.infer_timeout
+                                                       ) as client:
+                            
+                    self.req_info.set_client(client, PDRole.ROLE_D)
+                    response = await self.forward_post_request(req_data, client)
+                    
+                    self.req_info.update_state(ReqState.DECODE_END)
+                    return JSONResponse(content=response.json())
+
+            except asyncio.CancelledError:
+                self.logger.debug("Post request was cancelled")
+                await self.req_info.close_clients()
+                raise
+            except Exception as e:
+                self.logger.error(
+                    "Error in post Decode (attempt %d/%d): %s",
+                    attempt + 1, max_retries, str(e)
+                )
+                await self.req_info.close_clients()
+
+                if attempt < max_retries - 1:
+                    wait_time = self.config.exception_config.retry_delay * (2 ** attempt)
+                    self.logger.info("Retrying non-streaming request in %.2f seconds...", wait_time)
+                    await asyncio.sleep(wait_time)
+                    continue
+
+                self.logger.error("All retries failed for non-streaming decode request.")
+                self.req_info.update_state(ReqState.EXCEPTION)
+                raise e
 
     def _gen_d_request(self) -> dict:
         """Generate D request parameters"""
