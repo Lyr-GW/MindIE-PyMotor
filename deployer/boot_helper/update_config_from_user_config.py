@@ -140,6 +140,8 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
                 logging.info("Controller configuration will be written directly")
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
                 updated_config = user_config_data[config_key]
+                if AIGW in updated_config:
+                    update_aigw_config(updated_config, user_config_data)
                 logging.info("Coordinator configuration will be written directly")
             elif config_key == ConfigKey.MOTOR_NODEMANAGER.value:
                 role = os.getenv('ROLE')

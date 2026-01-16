@@ -17,6 +17,7 @@ from motor.coordinator.api_server.coordinator_server import (
     CoordinatorServer
 )
 from motor.config.coordinator import CoordinatorConfig
+from motor.coordinator.core.instance_manager import InstanceManager
 
 
 class TestCoordinatorServer:
@@ -100,9 +101,6 @@ class TestCoordinatorServer:
         coordinator_server = CoordinatorServer(
             config=coordinator_config
         )
-        
-        # Set instance_manager attribute (required by CoordinatorServer's _handle_openai_request)
-        coordinator_server.instance_manager = im_instance
         
         # Setup rate limiting
         coordinator_server.setup_rate_limiting()
@@ -956,10 +954,10 @@ class TestCoordinatorServerAdvanced:
         coordinator_server = CoordinatorServer(
             config=coordinator_config
         )
-        
-        # Set instance_manager attribute
-        coordinator_server.instance_manager = im_instance
-        
+
+        # Store coordinator_server as instance attribute for use in tests
+        self.coordinator_server = coordinator_server
+
         # Setup rate limiting
         coordinator_server.setup_rate_limiting()
         
@@ -1307,23 +1305,29 @@ class TestCoordinatorServerAdvanced:
     
     def test_handle_openai_request_unavailable_instances(self):
         """Test _handle_openai_request when instances are unavailable"""
-        # Mock instance_manager to return False for is_available
-        self.coordinator_server.instance_manager.is_available = MagicMock(return_value=False)
+        from unittest.mock import patch
         
-        inference_client = TestClient(self.coordinator_server.inference_app)
-        response = inference_client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": "test"}]
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.valid_api_key}"
-            }
-        )
-        
-        assert response.status_code == 503, f"Expected 503 for unavailable instances, got: {response.status_code}"
+        with patch('motor.coordinator.api_server.coordinator_server.InstanceManager') as mock_im_class:
+            # Configure the mock to return False for is_available
+            mock_instance = MagicMock()
+            mock_instance.is_available.return_value = False
+            mock_instance.refresh_instances.return_value = None
+            mock_im_class.return_value = mock_instance
+            
+            inference_client = TestClient(self.coordinator_server.inference_app)
+            response = inference_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": "test"}]
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.valid_api_key}"
+                }
+            )
+            
+            assert response.status_code == 503, f"Expected 503 for unavailable instances, got: {response.status_code}"
     
     def test_handle_openai_request_with_prompt(self):
         """Test _handle_openai_request with prompt field (completions API)"""
@@ -1591,24 +1595,28 @@ class TestCoordinatorServerAdvanced:
     
     def test_handle_openai_request_general_exception(self):
         """Test _handle_openai_request with general exception"""
-        # Mock instance_manager.is_available to raise exception
-        self.coordinator_server.instance_manager.is_available = MagicMock(side_effect=Exception("Test exception"))
-        
-        inference_client = TestClient(self.coordinator_server.inference_app)
-        response = inference_client.post(
-            "/v1/chat/completions",
-            json={
-                "model": "gpt-3.5-turbo",
-                "messages": [{"role": "user", "content": "test"}]
-            },
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.valid_api_key}"
-            }
-        )
-        
-        # Should return 500 error
-        assert response.status_code == 500, f"Expected 500 for exception, got: {response.status_code}"
+        with patch('motor.coordinator.api_server.coordinator_server.InstanceManager') as mock_im_class:
+            # Configure the mock to raise an exception when is_available is called
+            mock_instance = MagicMock()
+            mock_instance.is_available = MagicMock(side_effect=Exception("Test exception"))
+            mock_instance.refresh_instances.return_value = None
+            mock_im_class.return_value = mock_instance
+            
+            inference_client = TestClient(self.coordinator_server.inference_app)
+            response = inference_client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-3.5-turbo",
+                    "messages": [{"role": "user", "content": "test"}]
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self.valid_api_key}"
+                }
+            )
+            
+            # Should return 500 error
+            assert response.status_code == 500, f"Expected 500 for exception, got: {response.status_code}"
 
 
 class TestFastAPIMiddlewareAdvanced:

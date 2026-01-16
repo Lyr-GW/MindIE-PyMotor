@@ -615,8 +615,8 @@ class CoordinatorServer:
             logger.warning("No AIGW models configured in coordinator config")
             return []
 
-        p_instances = len(self.instance_manager.get_available_instances(PDRole.ROLE_P))
-        d_instances = len(self.instance_manager.get_available_instances(PDRole.ROLE_D))
+        p_instances = len(InstanceManager().get_available_instances(PDRole.ROLE_P))
+        d_instances = len(InstanceManager().get_available_instances(PDRole.ROLE_D))
 
         enriched_model = {
             **base_model,
