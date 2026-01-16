@@ -38,7 +38,10 @@ class PDHybridRouter(BaseRouter):
             self.logger.info(f"PD hybrid request data: {req_data}")
             
             release_kv = False
-            async for chunk in self.forward_stream_request(req_data=req_data, resource=resource):
+            async for chunk in self.forward_stream_request(req_data=req_data, 
+                                                           resource=resource,
+                                                           timeout=self.config.exception_config.first_token_timeout
+                                                           ):
                 if not release_kv and chunk:
                     release_kv = True
                     self.release_kv(resource)

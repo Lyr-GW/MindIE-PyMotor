@@ -103,7 +103,11 @@ class BaseRouter(ABC):
         return ScheduledResource(instance=ins, endpoint=endpoint)
 
     @handle_request_errors(stream=True)
-    async def forward_stream_request(self, req_data: dict, resource: ScheduledResource):
+    async def forward_stream_request(self, 
+                                     req_data: dict, 
+                                     resource: ScheduledResource,
+                                     timeout: int
+                                     ):
         """Forward streaming request to the given endpoint
 
         Args:
@@ -120,10 +124,7 @@ class BaseRouter(ABC):
         }
         base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
         self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                          base_url, self.req_info.api, headers, req_data, 
-                          self.config.exception_config.first_token_timeout)
-        timeout = self.config.exception_config.first_token_timeout \
-            if self.config.exception_config.first_token_timeout != 0 else None
+                          base_url, self.req_info.api, headers, req_data, timeout)
 
         async with AsyncSafeHTTPSClient(
             base_url=base_url,
@@ -147,7 +148,11 @@ class BaseRouter(ABC):
                 return
 
     @handle_request_errors(stream=False)
-    async def forward_post_request(self, req_data: dict, resource: ScheduledResource) -> httpx.Response:
+    async def forward_post_request(self, 
+                                   req_data: dict, 
+                                   resource: ScheduledResource,
+                                   timeout: int
+                                   ) -> httpx.Response:
         """Forward non-streaming request to the given resource
 
         Args:
@@ -166,10 +171,7 @@ class BaseRouter(ABC):
         filtered_headers = filter_sensitive_headers(headers)
         filtered_body = filter_sensitive_body(req_data)
         self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %d", 
-                          base_url, self.req_info.api, filtered_headers, filtered_body, 
-                          self.config.exception_config.first_token_timeout)
-        timeout = self.config.exception_config.infer_timeout \
-            if self.config.exception_config.infer_timeout != 0 else None
+                          base_url, self.req_info.api, filtered_headers, filtered_body, timeout)
 
         async with AsyncSafeHTTPSClient(
             base_url=base_url, 

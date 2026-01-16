@@ -135,6 +135,23 @@ class TestRouterPDSeparation:
 
         monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
     
+    @pytest.fixture
+    def setup_forward_post_request(self, monkeypatch: MonkeyPatch):
+        # Mock the HTTP forwarding functions
+        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource, timeout):
+            # Return a mock response for P request
+            mock_response = Mock()
+            mock_response.json.return_value = {
+                "kv_transfer_params": {
+                    "do_remote_decode": True,
+                    "remote_engine_id": "test-engine",
+                    "remote_host": "127.0.0.1",
+                    "remote_port": "8001"
+                }
+            }
+            yield mock_response
+        monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
+    
     @pytest.mark.asyncio
     async def test_empty_request_body(self, client):
         """Test handling of empty request body"""
@@ -177,7 +194,7 @@ class TestRouterPDSeparation:
         req_info = await create_mock_request_info(max_tokens=max_tokens, stream=stream)
         
         generated_prefill_request = {}
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource):
+        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource, timeout):
             nonlocal generated_prefill_request
             generated_prefill_request = req_data
             # Return a mock response for P request
@@ -194,7 +211,7 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
         
         generated_decode_request = {}
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource):
+        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
             nonlocal generated_decode_request
             generated_decode_request = req_data
             # Yield a simple response for D request
@@ -336,7 +353,7 @@ class TestRouterPDSeparation:
         mock_async_client.post = AsyncMock(side_effect=[mock_response_fail, mock_response_success])
 
         decode_count = 0
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource):
+        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
             # Yield a simple response for D request
             nonlocal decode_count
             decode_count += 1
@@ -389,7 +406,10 @@ class TestRouterPDSeparation:
         assert mock_async_client.post.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_engine_server_decode_continuous_5xx_status_code(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
+    async def test_engine_server_decode_continuous_5xx_status_code(self, client, 
+                                                                   monkeypatch: MonkeyPatch, 
+                                                                   setup_pd_separation,
+                                                                   setup_forward_post_request):
         """Test case: EngineServer Decode request continuously returns 5XX status code
         Expected behavior:
         1) Check request status is Exception
@@ -399,20 +419,6 @@ class TestRouterPDSeparation:
         # Mock the HTTP stream forwarding function to return a 5XX error once
         mock_async_client = MockAsyncClient(recomputed=False, fail_times=CoordinatorConfig().exception_config.max_retry)
 
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource):
-            # Return a mock response for P request
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "kv_transfer_params": {
-                    "do_remote_decode": True,
-                    "remote_engine_id": "test-engine",
-                    "remote_host": "127.0.0.1",
-                    "remote_port": "8001"
-                }
-            }
-            yield mock_response
-        
-        monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
@@ -426,7 +432,10 @@ class TestRouterPDSeparation:
             assert mock_async_client.fail_count == CoordinatorConfig().exception_config.max_retry
 
     @pytest.mark.asyncio
-    async def test_engine_server_decode_once_5xx_status_code(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
+    async def test_engine_server_decode_once_5xx_status_code(self, client, 
+                                                             monkeypatch: MonkeyPatch, 
+                                                             setup_pd_separation,
+                                                             setup_forward_post_request):
         """Test case: EngineServer Decode request first returns 5XX status code, then returns 200 normally
         Expected behavior:
         1) Check request status is Exception
@@ -436,20 +445,6 @@ class TestRouterPDSeparation:
         # Mock the HTTP stream forwarding function to return a 5XX error once
         mock_async_client = MockAsyncClient(recomputed=False, fail_times=1)
 
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource):
-            # Return a mock response for P request
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "kv_transfer_params": {
-                    "do_remote_decode": True,
-                    "remote_engine_id": "test-engine",
-                    "remote_host": "127.0.0.1",
-                    "remote_port": "8001"
-                }
-            }
-            yield mock_response
-        
-        monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
@@ -462,31 +457,20 @@ class TestRouterPDSeparation:
             assert mock_async_client.fail_count == 1
 
     @pytest.mark.asyncio
-    async def test_successful_request_with_separate_pd(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
+    async def test_successful_request_with_separate_pd(self, client, 
+                                                       monkeypatch: MonkeyPatch, 
+                                                       setup_pd_separation,
+                                                       setup_forward_post_request):
         """Test case: PD separation mode request succeeds
         Expected behavior:
         1) Check request status is DecodeEnd
         2) Return normal response
         """
         # Mock the HTTP forwarding functions
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource):
-            # Return a mock response for P request
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "kv_transfer_params": {
-                    "do_remote_decode": True,
-                    "remote_engine_id": "test-engine",
-                    "remote_host": "127.0.0.1",
-                    "remote_port": "8001"
-                }
-            }
-            yield mock_response
-        
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource):
+        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
             # Yield a simple response for D request
             yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
         
-        monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
         monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
         
         response = client.post("/v1/chat/completions", json={
@@ -501,22 +485,11 @@ class TestRouterPDSeparation:
         assert response.headers.get("content-type") == "application/json"
     
     @pytest.mark.asyncio
-    async def test_engine_server_stream_recompute(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
-        # Mock the HTTP forwarding functions
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource):
-            # Return a mock response for P request
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "kv_transfer_params": {
-                    "do_remote_decode": True,
-                    "remote_engine_id": "test-engine",
-                    "remote_host": "127.0.0.1",
-                    "remote_port": "8001"
-                }
-            }
-            yield mock_response
-        monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
-        
+    async def test_engine_server_stream_recompute(self, client, 
+                                                  monkeypatch: MonkeyPatch, 
+                                                  setup_pd_separation,
+                                                  setup_forward_post_request):
+
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=MockAsyncClient()):
             import json
             result = ""
@@ -550,22 +523,10 @@ class TestRouterPDSeparation:
             
             
     @pytest.mark.asyncio
-    async def test_engine_server_nostream_recompute(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
-        
-        # Mock the HTTP forwarding functions
-        async def mock_forward_post_request(self, req_data: dict, resource: ScheduledResource):
-            # Return a mock response for P request
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "kv_transfer_params": {
-                    "do_remote_decode": True,
-                    "remote_engine_id": "test-engine",
-                    "remote_host": "127.0.0.1",
-                    "remote_port": "8001"
-                }
-            }
-            yield mock_response
-        monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
+    async def test_engine_server_nostream_recompute(self, client, 
+                                                    monkeypatch: MonkeyPatch, 
+                                                    setup_pd_separation,
+                                                    setup_forward_post_request):
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=MockAsyncClient()):
             import json

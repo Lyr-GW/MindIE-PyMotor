@@ -57,7 +57,7 @@ COMPLETE_CONFIG = {
         "max_retry": 5,
         "retry_delay": 0.2,
         "first_token_timeout": 600,
-        "infer_timeout": 600,
+        "infer_timeout": 3600,
     },
     "tls_config": {
         "request_server_tls_enable": True,

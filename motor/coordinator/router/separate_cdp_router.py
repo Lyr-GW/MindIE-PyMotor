@@ -32,7 +32,10 @@ class SeparateCDPRouter(BaseRouter):
             RequestManager().add_req_info(self.req_info)
             try:
                 # Forward D request
-                async for chunk in self.forward_stream_request(req_data=req_data, resource=decode_resource):
+                async for chunk in self.forward_stream_request(req_data=req_data, 
+                                                               resource=decode_resource, 
+                                                               timeout=self.config.exception_config.first_token_timeout
+                                                               ):
                     yield chunk
                 self.req_info.update_state(ReqState.DECODE_END)
             except Exception as e:
@@ -64,7 +67,9 @@ class SeparateCDPRouter(BaseRouter):
             RequestManager().add_req_info(self.req_info)
             try:
                 # Forward D request
-                async for response in self.forward_post_request(req_data=req_data, resource=decode_resource):
+                async for response in self.forward_post_request(req_data=req_data, 
+                                                                resource=decode_resource,
+                                                                timeout=self.config.exception_config.infer_timeout):
                     resp_json = response.json()
                     self.req_info.update_state(ReqState.DECODE_END)
                     return JSONResponse(content=resp_json)
@@ -93,7 +98,9 @@ class SeparateCDPRouter(BaseRouter):
             prefill_resource = self.prepare_resource(PDRole.ROLE_P)
             # Forward P request
             # P non-streaming request
-            async for response in self.forward_post_request(req_data=req_data, resource=prefill_resource):
+            async for response in self.forward_post_request(req_data=req_data, 
+                                                            resource=prefill_resource,
+                                                            timeout=self.config.exception_config.first_token_timeout):
                 resp_json = response.json()
                 self.logger.debug("Prefill response status code: %d, json content: %s", response.status_code, resp_json)
                 self.req_info.update_state(ReqState.PREFILL_END)

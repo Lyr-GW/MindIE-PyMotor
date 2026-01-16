@@ -95,7 +95,7 @@ class ExceptionConfig:
     max_retry: int = 5
     retry_delay: float = 0.2
     first_token_timeout: int = 600  # 10 minutes
-    infer_timeout: int = 600  # 10 minutes
+    infer_timeout: int = 3600  # 60 minutes
 
 
 @dataclass

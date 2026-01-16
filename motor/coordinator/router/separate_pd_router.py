@@ -102,7 +102,10 @@ class SeparatePDRouter(BaseRouter):
         """Forward P request to the given resource"""
         req_data = self._gen_p_request()
         # P non-streaming request
-        async for response in self.forward_post_request(req_data=req_data, resource=resource):
+        async for response in self.forward_post_request(req_data=req_data, 
+                                                        resource=resource,
+                                                        timeout=self.config.exception_config.first_token_timeout
+                                                        ):
             resp_json = response.json()
             self.req_info.update_state(ReqState.PREFILL_END)
             self.release_tokens(resource)
@@ -188,7 +191,10 @@ class SeparatePDRouter(BaseRouter):
         """Process stream chunks from decode resource"""
         release_kv = False
 
-        async for chunk in self.forward_stream_request(req_data=req_data, resource=decode_resource):
+        async for chunk in self.forward_stream_request(req_data=req_data, 
+                                                       resource=decode_resource,
+                                                       timeout=self.config.exception_config.first_token_timeout
+                                                       ):
             if not release_kv and chunk:
                 release_kv = True
                 self.release_kv(prefill_resource)

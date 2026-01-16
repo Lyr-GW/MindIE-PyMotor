@@ -30,7 +30,7 @@ async def handle_completions(request: Request):
 @pytest.fixture
 def mock_forward_stream_request(monkeypatch):
     """Mock forward_stream_request 并自动设置和清理"""
-    async def mock_impl(self, req_data: dict, resource):
+    async def mock_impl(self, req_data: dict, resource, timeout):
         async def mock_stream():
             responses = [
                 b'{"choices": [{"text": "chunk 1"}]}',
@@ -198,7 +198,7 @@ class TestRouterPDHybrid:
         )
         
         # Mock the stream request function to fail in PDHybridRouter
-        async def mock_forward_stream_request(self, req_data, resource):
+        async def mock_forward_stream_request(self, req_data, resource,timeout):
             # This function should be an async generator that raises an exception
             raise Exception("PD hybrid request failed")
             yield
@@ -222,7 +222,7 @@ class TestRouterPDHybrid:
         2)返回正常响应
         """
         # Mock the HTTP forwarding function to return a successful response
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource):
+        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
             # Yield a simple response
             yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
         
