@@ -1,10 +1,10 @@
 import time
 import hashlib
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 from motor.common.utils.data_builder import build_pod_ranktable, build_endpoints
-from motor.common.resources.instance import Instance, ParallelConfig
+from motor.common.resources import Instance, ParallelConfig, Endpoint
 from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg
 from motor.controller.core.instance_assembler import (
     InstanceAssembler,
@@ -148,10 +148,11 @@ def register_instance_with_pods(assembler: InstanceAssembler, job_name: str, con
         result = assembler.register(msg)
         assert result == 0
 
-    # Try to assemble
+    # Try to assemble with mocked endpoint health check
     if job_name in assembler.instances:
         metadata = assembler.instances[job_name]
-        assembler._assemble_instance(metadata)
+        with patch.object(assembler, '_filter_abnormal_endpoints'):
+            assembler._assemble_instance(metadata)
         return metadata.register_status == RegisterStatus.ASSEMBLED
 
     return False
@@ -327,9 +328,10 @@ def test_reregister_already_assembled_instance(instance_assembler, test_config):
     result2 = instance_assembler.reregister(msg2)
     assert result2 == 0
 
-    # Assemble the instance
+    # Assemble the instance (mock endpoint filtering for reregistration)
     metadata = instance_assembler.instances[job_name]
-    instance_assembler._assemble_instance(metadata)
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints'):
+        instance_assembler._assemble_instance(metadata)
 
     # Verify instance is assembled and moved to InstanceManager
     assert job_name not in instance_assembler.instances
@@ -392,8 +394,9 @@ def test_assembly_incomplete_instance(instance_assembler, test_config):
     metadata = instance_assembler.instances[job_name]
     original_status = metadata.register_status
 
-    # Try to assemble
-    instance_assembler._assemble_instance(metadata)
+    # Try to assemble (mock endpoint filtering)
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints'):
+        instance_assembler._assemble_instance(metadata)
 
     # Should remain in assembling state
     assert metadata.register_status == original_status
@@ -442,8 +445,9 @@ def test_assembly_complete_instance_reregistration(instance_assembler, test_conf
     metadata = instance_assembler.instances[job_name]
     assert metadata.is_reregister == True
 
-    # Assemble
-    instance_assembler._assemble_instance(metadata)
+    # Assemble (mock endpoint filtering for reregistration)
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints'):
+        instance_assembler._assemble_instance(metadata)
 
     # For reregistration, instance should be removed from assembler after assembly
     assert job_name not in instance_assembler.instances
@@ -1362,3 +1366,215 @@ def test_restore_no_data_available(instance_assembler):
         assert result == True
         assert len(instance_assembler.instances) == 0
         assert instance_assembler.ins_id_cnt == 1  # Default value
+
+
+def test_filter_abnormal_endpoints_all_normal(instance_assembler, test_config):
+    """Test _filter_abnormal_endpoints filters endpoints when all node managers report normal status"""
+    # Create instance with node managers
+    instance = Instance(
+        job_name="test_filter_normal",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    # Add node managers
+    instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
+    instance.add_node_mgr("127.0.0.2", "127.0.0.2", "8088")
+
+    # Mock SafeHTTPSClient to return normal status
+    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value.__enter__.return_value = mock_client
+        mock_client.get.return_value = {"status": True}
+
+        instance_assembler._filter_abnormal_endpoints(instance)
+
+        # Verify SafeHTTPSClient was called for each node manager
+        assert mock_client_class.call_count == 2
+        mock_client.get.assert_called_with("/node-manager/status")
+
+
+def test_filter_abnormal_endpoints_with_abnormal(instance_assembler, test_config):
+    """Test _filter_abnormal_endpoints filters endpoints when some node managers report abnormal status"""
+    # Create instance with node managers
+    instance = Instance(
+        job_name="test_filter_abnormal",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    # Add node managers and endpoints
+    instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
+    instance.add_node_mgr("127.0.0.2", "127.0.0.2", "8088")
+
+    # Add endpoints for both nodes
+    endpoints1 = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
+    endpoints2 = {2: Endpoint(id=2, ip="127.0.0.2", business_port="1002", mgmt_port="9002")}
+    instance.add_endpoints("127.0.0.1", endpoints1)
+    instance.add_endpoints("127.0.0.2", endpoints2)
+
+    # Mock SafeHTTPSClient - first normal, second abnormal
+    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value.__enter__.return_value = mock_client
+
+        # First call returns normal, second returns abnormal
+        mock_client.get.side_effect = [{"status": True}, {"status": False}]
+
+        instance_assembler._filter_abnormal_endpoints(instance)
+
+        # Verify endpoints from abnormal node manager were removed
+        assert instance.get_endpoints_num() == 1  # Only one endpoint left
+        assert "127.0.0.2" not in instance.endpoints  # Abnormal node manager's endpoints removed
+        assert len(instance.node_managers) == 1  # Abnormal node manager removed
+
+
+def test_filter_abnormal_endpoints_invalid_response(instance_assembler, test_config):
+    """Test _filter_abnormal_endpoints filters endpoints when node manager returns invalid response"""
+    # Create instance with node managers
+    instance = Instance(
+        job_name="test_filter_invalid",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    # Add node manager and endpoints
+    instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
+    endpoints = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
+    instance.add_endpoints("127.0.0.1", endpoints)
+
+    # Mock SafeHTTPSClient to return invalid response
+    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
+        mock_client = MagicMock()
+        mock_client_class.return_value.__enter__.return_value = mock_client
+        mock_client.get.return_value = {"invalid": "response"}  # No 'status' field
+
+        instance_assembler._filter_abnormal_endpoints(instance)
+
+        # Verify endpoints were removed
+        assert instance.get_endpoints_num() == 0
+        assert len(instance.node_managers) == 0
+
+
+def test_filter_abnormal_endpoints_connection_error(instance_assembler, test_config):
+    """Test _filter_abnormal_endpoints filters endpoints when connection to node manager fails"""
+    # Create instance with node managers
+    instance = Instance(
+        job_name="test_filter_error",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    # Add node manager and endpoints
+    instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
+    endpoints = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
+    instance.add_endpoints("127.0.0.1", endpoints)
+
+    # Mock SafeHTTPSClient to raise exception
+    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
+        mock_client_class.return_value.__enter__.side_effect = Exception("Connection failed")
+
+        instance_assembler._filter_abnormal_endpoints(instance)
+
+        # Verify endpoints were removed
+        assert instance.get_endpoints_num() == 0
+        assert len(instance.node_managers) == 0
+
+
+def test_filter_abnormal_endpoints_no_node_managers(instance_assembler, test_config, caplog):
+    """Test _filter_abnormal_endpoints handles case when instance has no node managers"""
+    # Create instance without node managers
+    instance = Instance(
+        job_name="test_filter_no_managers",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    with caplog.at_level('WARNING'):
+        instance_assembler._filter_abnormal_endpoints(instance)
+
+    # Method should complete without error when no node managers
+    assert "No node managers found for instance test_filter_no_managers(id:1), cannot filter endpoints" in caplog.text
+
+
+def test_assemble_instance_with_abnormal_endpoints(instance_assembler, test_config):
+    """Test _assemble_instance when abnormal endpoints are removed leaving insufficient endpoints"""
+    # Create instance with only enough endpoints (= dp_size)
+    instance = Instance(
+        job_name="test_assemble_abnormal",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']  # dp=4
+    )
+
+    # Add exactly dp_size endpoints
+    for i in range(1, 5):
+        pod_ip = f"127.0.0.{i}"
+        endpoints = {i: Endpoint(id=i, ip=pod_ip, business_port=f"100{i}", mgmt_port=f"900{i}")}
+        instance.add_endpoints(pod_ip, endpoints)
+        instance.add_node_mgr(pod_ip, pod_ip, "8088")
+
+    # Create metadata
+    metadata = AssembleInstanceMetadata(instance=instance, register_timestamp=time.time())
+
+    # Mock _filter_abnormal_endpoints to remove some endpoints (simulate abnormal detection)
+    def mock_filter(instance_to_filter):
+        # Remove 2 endpoints, leaving only 2 which is less than dp_size=4
+        if "127.0.0.1" in instance_to_filter.endpoints:
+            instance_to_filter.del_endpoints("127.0.0.1")
+        if "127.0.0.2" in instance_to_filter.endpoints:
+            instance_to_filter.del_endpoints("127.0.0.2")
+
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints', side_effect=mock_filter):
+        instance_assembler._assemble_instance(metadata)
+
+        # Should not be assembled because not enough endpoints remain after filtering
+        assert metadata.register_status != RegisterStatus.ASSEMBLED
+
+
+def test_assemble_instance_with_healthy_endpoints(instance_assembler, test_config):
+    """Test _assemble_instance when endpoints are enough and all healthy"""
+    # Create instance with enough endpoints (>= dp_size)
+    instance = Instance(
+        job_name="test_assemble_healthy",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']  # dp=4
+    )
+
+    # Add exactly dp_size endpoints
+    for i in range(1, 5):
+        pod_ip = f"127.0.0.{i}"
+        endpoints = {i: Endpoint(id=i, ip=pod_ip, business_port=f"100{i}", mgmt_port=f"900{i}")}
+        instance.add_endpoints(pod_ip, endpoints)
+        instance.add_node_mgr(pod_ip, pod_ip, "8088")
+
+    # Create metadata
+    metadata = AssembleInstanceMetadata(instance=instance, register_timestamp=time.time())
+
+        # Mock _filter_abnormal_endpoints (no return value needed)
+    # Mock InstanceManager.add_instance
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints'), \
+         patch('motor.controller.core.instance_assembler.InstanceManager') as mock_im_class:
+
+        mock_im = MagicMock()
+        mock_im_class.return_value = mock_im
+
+        instance_assembler._assemble_instance(metadata)
+
+        # Should be assembled because all endpoints are healthy
+        assert metadata.register_status == RegisterStatus.ASSEMBLED
+        # InstanceManager.add_instance should be called
+        mock_im.add_instance.assert_called_once_with(instance)

@@ -15,6 +15,7 @@ from motor.controller.api_client.node_manager_api_client import NodeManagerApiCl
 from motor.controller.core import InstanceManager
 from motor.config.controller import ControllerConfig
 from motor.common.utils.etcd_client import EtcdClient
+from motor.common.utils.http_client import SafeHTTPSClient
 
 logger = get_logger(__name__)
 
@@ -535,10 +536,12 @@ class InstanceAssembler(ThreadSafeSingleton):
             for job_name in keys:
                 with self.lock:
                     if job_name not in self.instances:
+                        logger.warning("Instance %s is not exist!", job_name)
                         continue
                     metadata = self.instances[job_name]
                     with metadata.lock:
                         if metadata.register_status == RegisterStatus.ASSEMBLED:
+                            logger.info("Instance %s is already assembled!", job_name)
                             continue
 
                 self._assemble_instance(metadata)
@@ -552,8 +555,10 @@ class InstanceAssembler(ThreadSafeSingleton):
         logger.debug("Assembling instance %s(id:%d)...", job_name, metadata.instance.id)
         need_persist = False
 
+        # Filter abnormal endpoints before assembling
+        self._filter_abnormal_endpoints(metadata.instance)
         if metadata.instance.is_endpoints_enough():
-            # Assemble successfully
+            # All endpoints are healthy, assemble successfully
             with metadata.lock:
                 metadata.register_status = RegisterStatus.ASSEMBLED
                 if metadata.is_reregister:
@@ -583,6 +588,51 @@ class InstanceAssembler(ThreadSafeSingleton):
             enable_persistence = self.etcd_config.enable_etcd_persistence
         if need_persist and enable_persistence and not self.persist_data():
             logger.warning("Failed to persist instance assembler data to ETCD")
+
+    def _filter_abnormal_endpoints(self, instance: Instance) -> None:
+        """
+        Filter abnormal endpoints by checking node managers status.
+        Remove any abnormal endpoints found during the check.
+        """
+        node_managers = instance.get_node_managers()
+        if not node_managers:
+            logger.warning("No node managers found for instance %s(id:%d), cannot filter endpoints",
+                           instance.job_name, instance.id)
+            return
+
+        for node_mgr in node_managers:
+            if self._is_node_manager_abnormal(node_mgr, instance):
+                instance.del_endpoints(node_mgr.pod_ip)
+                instance.del_node_mgr(node_mgr.pod_ip, node_mgr.host_ip, node_mgr.port)
+
+        logger.info("Endpoint filtering completed for instance %s(id:%d)",
+                    instance.job_name, instance.id)
+
+    def _is_node_manager_abnormal(self, node_mgr, instance: Instance) -> bool:
+        """Check if a node manager is abnormal and log appropriate messages."""
+        try:
+            node_mgr_url = f"http://{node_mgr.pod_ip}:{node_mgr.port}"
+            with SafeHTTPSClient(base_url=node_mgr_url, timeout=1.0) as client:
+                response = client.get("/node-manager/status")
+
+                if isinstance(response, dict) and "status" in response:
+                    is_normal = response.get("status", False)
+                    if not is_normal:
+                        logger.warning("Node manager %s:%s reports abnormal endpoints for instance %s(id:%d), "
+                                       "removing endpoints",
+                                       node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id)
+                        return True
+                else:
+                    logger.warning("Invalid response from node manager %s:%s for instance %s(id:%d): %s, "
+                                   "removing endpoints",
+                                   node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, response)
+                    return True
+        except Exception as e:
+            logger.warning("Failed to check node manager %s:%s status for instance %s(id:%d): %s, "
+                           "removing endpoints",
+                           node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, e)
+            return True
+        return False
 
     def _get_next_version(self) -> int:
         """Get next data version for persistence"""

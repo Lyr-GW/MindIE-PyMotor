@@ -155,3 +155,82 @@ def test_readonly_instance_to_instance() -> None:
     copied_instance.job_name = "modified_job"
     assert instance.job_name == "test_to_instance"
     assert readonly_instance.job_name == "test_to_instance"
+
+
+def test_is_endpoints_enough_equal_dp_size() -> None:
+    """Test is_endpoints_enough returns True when endpoints equal dp size"""
+    parallel_config = ParallelConfig(dp=2, tp=2)
+    pod_ip = "127.0.0.1"
+    endpoints = {
+        1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip=pod_ip, business_port="1002", mgmt_port="9002")
+    }
+    instance = Instance(
+        job_name="test_endpoints_equal",
+        model_name="test_model",
+        id=1,
+        role="prefill",
+        parallel_config=parallel_config
+    )
+    instance.add_endpoints(pod_ip, endpoints)
+
+    assert instance.is_endpoints_enough() is True
+    assert instance.get_endpoints_num() == 2
+
+
+def test_is_endpoints_enough_greater_than_dp_size() -> None:
+    """Test is_endpoints_enough returns False when endpoints greater than dp size"""
+    parallel_config = ParallelConfig(dp=2, tp=2)
+    pod_ip = "127.0.0.1"
+    endpoints = {
+        1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip=pod_ip, business_port="1002", mgmt_port="9002"),
+        3: Endpoint(id=3, ip=pod_ip, business_port="1003", mgmt_port="9003")  # Extra endpoint
+    }
+    instance = Instance(
+        job_name="test_endpoints_greater",
+        model_name="test_model",
+        id=1,
+        role="prefill",
+        parallel_config=parallel_config
+    )
+    instance.add_endpoints(pod_ip, endpoints)
+
+    assert instance.is_endpoints_enough() is False
+    assert instance.get_endpoints_num() == 3
+
+
+def test_is_endpoints_enough_less_than_dp_size() -> None:
+    """Test is_endpoints_enough returns False when endpoints less than dp size"""
+    parallel_config = ParallelConfig(dp=4, tp=2)
+    pod_ip = "127.0.0.1"
+    endpoints = {
+        1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip=pod_ip, business_port="1002", mgmt_port="9002")
+    }
+    instance = Instance(
+        job_name="test_endpoints_less",
+        model_name="test_model",
+        id=1,
+        role="prefill",
+        parallel_config=parallel_config
+    )
+    instance.add_endpoints(pod_ip, endpoints)
+
+    assert instance.is_endpoints_enough() is False
+    assert instance.get_endpoints_num() == 2
+
+
+def test_is_endpoints_enough_no_endpoints() -> None:
+    """Test is_endpoints_enough returns False when no endpoints"""
+    parallel_config = ParallelConfig(dp=2, tp=2)
+    instance = Instance(
+        job_name="test_no_endpoints",
+        model_name="test_model",
+        id=1,
+        role="prefill",
+        parallel_config=parallel_config
+    )
+
+    assert instance.is_endpoints_enough() is False
+    assert instance.get_endpoints_num() == 0

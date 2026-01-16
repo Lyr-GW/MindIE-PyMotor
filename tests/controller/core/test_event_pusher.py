@@ -526,6 +526,27 @@ def test_update_deep_copy_seperated_instance(event_pusher):
     assert event.instance.job_name == original_job_name
 
 
+def test_update_seperated_instance_initial_stage_abnormal(event_pusher):
+    """test update seperated instance when instance abnormal in initial stage"""
+    test_instance = Instance(
+        job_name="test_job_initial_abnormal",
+        model_name="test_model",
+        id=1,
+        role="prefill"
+    )
+    readonly_instance = ReadOnlyInstance(test_instance)
+    # Intentionally do not add the instance to event_pusher.instances 
+    # dict to simulate abnormal instance in initial stage
+
+    event_pusher.update(readonly_instance, ObserverEvent.INSTANCE_SEPERATED)
+
+    # When instance abnormal in initial stage, the event should be 
+    # ignored and no event should be pushed to the queue
+    assert event_pusher.event_queue.empty()
+    # Verify that the instance was not added to the dictionary
+    assert readonly_instance.job_name not in event_pusher.instances
+
+
 def test_update_config():
     """Test update_config method updates configuration and recreates HTTP client"""
     with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:

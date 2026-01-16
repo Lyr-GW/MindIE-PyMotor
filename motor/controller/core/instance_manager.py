@@ -89,13 +89,12 @@ class InstanceManager(ThreadSafeSingleton):
         }
 
         """
-        self.transitions: dict[tuple[InsStatus, InsConditionEvent], InsStatus]
-        State transition rules: curStatus + event -> newStatus
+        State transition rule: FROM status + event -> TO status
         """
         self.transitions: dict[tuple[InsStatus, InsConditionEvent], InsStatus] = {
             (InsStatus.INITIAL, InsConditionEvent.INSTANCE_INIT): InsStatus.INITIAL,
             (InsStatus.INITIAL, InsConditionEvent.INSTANCE_NORMAL): InsStatus.ACTIVE,
-            (InsStatus.INITIAL, InsConditionEvent.INSTANCE_ABNORMAL): InsStatus.DELTETED,
+            (InsStatus.INITIAL, InsConditionEvent.INSTANCE_ABNORMAL): InsStatus.INACTIVE,
             (InsStatus.INITIAL, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.DELTETED,
             (InsStatus.ACTIVE, InsConditionEvent.INSTANCE_NORMAL): InsStatus.ACTIVE,
             (InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.INACTIVE,
