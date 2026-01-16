@@ -291,8 +291,8 @@ class NodeManagerConfig:
 
         if config.basic_config.device_num < devices_per_dp or dp < 1:
             raise ValueError(
-                f"Device count ({config.basic_config.device_num}) must bigger than"
-                f"or equal to devices per dp ({devices_per_dp})"
+                f"Device count ({config.basic_config.device_num}) must bigger than "
+                f"or equal to devices per dp ({devices_per_dp}) "
                 f"and dp must be bigger than 0"
             )
 
