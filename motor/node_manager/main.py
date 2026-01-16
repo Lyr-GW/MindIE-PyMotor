@@ -160,8 +160,11 @@ def main() -> int:
 
         stop_all_modules()
 
-    return 0
+    # -1: rescheduling; 0: restart
+    return -1
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    exit_code = main()
+    logger.info(f"exit_code: {exit_code}")
+    sys.exit(exit_code)
