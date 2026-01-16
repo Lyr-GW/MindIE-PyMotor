@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import json
+import time
 import shutil
 import logging
 import subprocess
@@ -11,7 +12,13 @@ from argparse import ArgumentParser
 from typing import Dict, Any
 from enum import Enum
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Define constants
 SERVER_LIST = 'server_list'
+MAX_RETRIES = 10 # max retries times for popen command
+RETRY_INTERVAL = 3 # retry interval for popen command, unit: second
 
 
 class HardwareType(Enum):
@@ -32,11 +39,9 @@ def parse_args():
     Examples:
         >>> parse_args()
     """
-    parser = ArgumentParser(description="mindspore distributed training launch "
-                                        "helper utility that will generate hccl"
-                                        " config file")
+    parser = ArgumentParser(description="Generate hccl config file")
     parser.add_argument("--hccl_path", type=str, default="hccl.json",
-                        help="Set the hccl_path manually, to avoid errors in auto detection.")
+                        help="Manually specify the path of hccl config file")
     args = parser.parse_args()
     return args
 
@@ -88,6 +93,22 @@ def get_visible_devices():
     return []
 
 
+def retry_command(cmd):
+    for attempt in range(MAX_RETRIES):
+        try:
+            result = os.popen(cmd).readlines()
+            if result:
+                return result
+            logging.warning(f"Command returned empty result, attempt {attempt + 1}/{MAX_RETRIES}")
+        except Exception as e:
+            logging.warning(f"Command failed: {e}, attempt {attempt + 1}/{MAX_RETRIES}")
+        
+        if attempt < MAX_RETRIES - 1:
+            time.sleep(RETRY_INTERVAL)
+    
+    raise ValueError(f"Command failed after {MAX_RETRIES} attempts: {cmd}")
+
+
 def main():
     logging.info("start %s", __file__)
     args = parse_args()
@@ -102,59 +123,61 @@ def main():
         raise ValueError("unknown hardware type!")
     logging.info('Detected hardware_type: %s', hardware_type)
 
-    # server_id
-    host_ip = os.getenv('HOST_IP', '127.0.0.1')
-    pod_ip = os.getenv('POD_IP', '127.0.0.1')
+    host_ip = os.getenv('HOST_IP', '127.0.0.1') # hccn_table server_id
+    pod_ip = os.getenv('POD_IP', '127.0.0.1') # hccn_table container_ip
     logging.info('host_ip: %s', host_ip)
     logging.info('pod_ip: %s', pod_ip)
 
-    # construct hccn_table
+    # Get device_ip and super_device_id for visible_devices through hccn_tool & npu-smi
     device_ips: Dict[Any, Any] = {}
     device_sdids: Dict[Any, Any] = {}
-    try:
-        for device_id in visible_devices:
-            # device_ip
-            ret_ip = os.popen("hccn_tool -i %s -ip -g" % device_id).readlines()
-            device_ips[device_id] = ret_ip[0].split(":")[1].replace('\n', '').replace(' ', '')
-            if hardware_type == HardwareType.A3:
-                # super_device_id
-                device_id_int = int(device_id)
-                card_id = device_id_int // 2
-                chip_id = device_id_int % 2
-                ret_sdid = os.popen(f"npu-smi info -t spod-info -i {card_id} -c {chip_id}").readlines()
-                device_sdids[device_id] = ret_sdid[0].split(":")[1].replace('\n', '').replace(' ', '')
-    except Exception as e:
-        logging.error(f"Failed to get device_ip or super_device_id, error: {e}")
+    for device_id in visible_devices:
+        # Get device_ip corresponding to device_id
+        ret_ip = retry_command(f"hccn_tool -i {device_id} -ip -g")
+        logging.info("device_id: %s, device_ip_info: %s", device_id, str(ret_ip))
+        device_ips[device_id] = ret_ip[0].split(":")[1].replace('\n', '').replace(' ', '')
+        # Get super_device_id corresponding to device_id for A3
+        if hardware_type == HardwareType.A3:
+            # Calculate card ID: each card contains 2 chips, divide by 2 for integer result
+            card_id = int(device_id) // 2
+            # Calculate chip ID: modulo 2 gives chip position within card (0 or 1)
+            chip_id = int(device_id) % 2
+            ret_sdid = retry_command(f"npu-smi info -t spod-info -i {card_id} -c {chip_id}")
+            logging.info("device_id: %s, super_device_id: %s", device_id, str(ret_sdid))
+            device_sdids[device_id] = ret_sdid[0].split(":")[1].replace('\n', '').replace(' ', '')
 
+    # Assemble device_id, device_ip, rank_id, super_device_id to device_list
     hccn_table = {'version': '1.0', 'server_count': '1', SERVER_LIST: []}
     device_list = []
-    rank_id = 0
     for rank_id, device_id in enumerate(visible_devices):
+        # Assemble device_id, device_ip, rank_id to device_info
         device_ip = device_ips[device_id]
-        device = {'device_id': device_id,
-                  'device_ip': device_ip,
-                  'rank_id': str(rank_id)}
+        device_info = {'device_id': device_id, 'device_ip': device_ip, 'rank_id': str(rank_id)}
+        # Assemble super_device_id to device_info if hardware_type is A3
         if hardware_type == HardwareType.A3:
-            device['super_device_id'] = device_sdids[device_id]
+            device_info['super_device_id'] = device_sdids[device_id]
+        # Append device_info to device_list
+        device_list.append(device_info)
         logging.info('rank_id: %s, device_id: %s, device_ip: %s', rank_id, device_id, device_ip)
-        device_list.append(device)
 
+    # 1. Write server_id, container_ip and device_list to hccn_table
     hccn_table[SERVER_LIST].append({
         'server_id': host_ip,
         'container_ip': pod_ip,
         'device': device_list
     })
 
+    # 2. Write super_pod_list to hccn_table if hardware_type is A3
     if hardware_type == HardwareType.A3:
         hccn_table['super_pod_list'] = [{"super_pod_id": "0", SERVER_LIST: [{"server_id": host_ip}]}]
 
+    # 3. Write status to hccn_table
     hccn_table['status'] = 'completed'
 
-    table_fn = args.hccl_path
-    with open(table_fn, 'w') as table_fp:
+    with open(args.hccl_path, 'w') as table_fp:
         json.dump(hccn_table, table_fp, indent=4)
     sys.stdout.flush()
-    logging.info("Completed: hccl file was save in : %s", table_fn)
+    logging.info("Completed: hccl file was save in : %s", args.hccl_path)
 
 
 if __name__ == "__main__":
