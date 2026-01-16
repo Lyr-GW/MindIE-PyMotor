@@ -126,7 +126,7 @@ class Instance(BaseModel):
 
     def add_node_mgr(self, pod_ip: str, host_ip: str, port: str) -> None:
         if pod_ip is None or host_ip is None or port is None:
-            logger.info(f"Invalid ip:{pod_ip} or host_ip:{host_ip} or port:{port}")
+            logger.warning("Invalid ip: %s or host_ip: %s or port: %s", pod_ip, host_ip, port)
             return
 
         node_mgr_info = NodeManagerInfo(pod_ip=pod_ip, host_ip=host_ip, port=port)
@@ -139,7 +139,7 @@ class Instance(BaseModel):
 
     def del_node_mgr(self, pod_ip: str, host_ip: str, port: str) -> None:
         if pod_ip is None or host_ip is None or port is None:
-            logger.info(f"Invalid ip:{pod_ip} or host_ip:{host_ip} or port:{port}")
+            logger.warning("Invalid ip: %s or host_ip: %s or port: %s", pod_ip, host_ip, port)
             return
 
         node_mgr_info = NodeManagerInfo(pod_ip=pod_ip, host_ip=host_ip, port=port)
@@ -152,17 +152,21 @@ class Instance(BaseModel):
 
     def add_endpoints(self, pod_ip: str, endpoints: dict[int, Endpoint]) -> None:
         if endpoints is None or not isinstance(endpoints, dict):
-            logger.info(f"Invalid endpoints for pod_ip:{pod_ip}")
+            logger.warning("Invalid endpoints for pod_ip: %s", pod_ip)
             return
 
-        add_endpoint_num = len(endpoints.values())
+        new_endpoint_num = len(endpoints.values())
         current_endpoint_num = self.get_endpoints_num()
 
         with self._lock:
+            old_endpoint_num = len(self.endpoints.get(pod_ip, {}))
             self.endpoints[pod_ip] = endpoints
-        logger.info(f"Add endpoints for pod_ip:{pod_ip}, added endpoints "
-                    f"number is {add_endpoint_num}, total endpoints "
-                    f"number is {current_endpoint_num + add_endpoint_num}")
+            actual_added_num = new_endpoint_num - old_endpoint_num
+
+        expected_endpoints = self.parallel_config.dp_size if self.parallel_config else 0
+        total_endpoints = current_endpoint_num + actual_added_num
+        logger.info("Add endpoints for pod_ip:%s, added endpoints number is %d, total endpoint number is %d/%d",
+                    pod_ip, actual_added_num, total_endpoints, expected_endpoints)
 
     def del_endpoints(self, pod_ip: str):
         current_endpoint_num = self.get_endpoints_num()
@@ -171,15 +175,17 @@ class Instance(BaseModel):
                 del_endpoint_num = len(self.endpoints[pod_ip])
                 del self.endpoints[pod_ip]
             else:
+                del_endpoint_num = 0
                 logger.warning(f"Pod_ip:{pod_ip} not found in instance:{self.job_name}")
 
-        logger.info(f"Del endpoints for pod_ip:{pod_ip}, deleted endpoints "
-                    f"number is {del_endpoint_num}, total endpoints number "
-                    f"is {current_endpoint_num - del_endpoint_num}")
+        expected_endpoints = self.parallel_config.dp_size if self.parallel_config else 0
+        remaining_endpoints = current_endpoint_num - del_endpoint_num
+        logger.info("Del endpoints for pod_ip:%s, deleted endpoints number is %d, total endpoint number is %d/%d",
+                    pod_ip, del_endpoint_num, remaining_endpoints, expected_endpoints)
 
     def is_endpoints_enough(self) -> bool:
         """
-            if endpoints number is equals to dp size, 
+            if endpoints number is equals to dp size,
             then we think this instance is ready.
 
         Returns:
@@ -190,10 +196,10 @@ class Instance(BaseModel):
                 dp_size = self.parallel_config.dp_size
         if self.endpoints is not None:
             total_endpoints = self.get_endpoints_num()
-            logger.debug(f"total endpoint size: {total_endpoints} dp size: {dp_size}")
+            logger.debug("total endpoint size: %d dp size: %d", total_endpoints, dp_size)
             if total_endpoints == dp_size:
-                logger.info(f"Instance {self.id} is assembled now, "
-                            f"endpoints number is {total_endpoints}")
+                logger.info("Instance %d has enough endpoints now, endpoint number is %d",
+                            self.id, total_endpoints)
                 return True
         return False
 

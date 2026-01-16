@@ -62,31 +62,6 @@ class EventPusher(Observer):
 
         logger.info("EventPusher initialized.")
 
-    def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
-        # Event pusher will interact with coordinator and send instances.
-        # So it should just use Instance instead of ReadOnlyInstance.
-        if event == ObserverEvent.INSTANCE_ADDED:
-            with self.lock:
-                self.instances[instance.job_name] = instance
-            # Deep copy the instance to ensure data consistency during async HTTP sending
-            event = Event(EventType.ADD, instance.to_instance())
-            logger.info("Instance added: %s", instance.job_name)
-        elif event == ObserverEvent.INSTANCE_SEPERATED:
-            with self.lock:
-                if instance.job_name in self.instances:
-                    del self.instances[instance.job_name]
-            # Deep copy the instance to ensure data consistency during async HTTP sending
-            event = Event(EventType.DEL, instance.to_instance())
-            logger.info("Instance removed: %s", instance.job_name)
-        elif event == ObserverEvent.INSTANCE_REMOVED:
-            # Separated event is already notified coordinator
-            # to remove instance. so we don't need to notify again.
-            return
-        else:
-            raise ValueError(f"Unknown event type: {event}")
-
-        self.event_queue.put(event)
-
     def start(self) -> None:
         """Start the event pusher threads"""
         # Reset stop_event if it was previously set (for singleton reuse)
@@ -157,6 +132,34 @@ class EventPusher(Observer):
                 timeout=0.5
             )
             logger.info("EventPusher configuration updated, new coordinator URL: %s", self.base_url)
+
+    def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
+        # Event pusher will interact with coordinator and send instances.
+        # So it should just use Instance instead of ReadOnlyInstance.
+        if event == ObserverEvent.INSTANCE_ADDED:
+            with self.lock:
+                self.instances[instance.job_name] = instance
+            # Deep copy the instance to ensure data consistency during async HTTP sending
+            event = Event(EventType.ADD, instance.to_instance())
+            logger.info("Instance added: %s", instance.job_name)
+        elif event == ObserverEvent.INSTANCE_SEPERATED:
+            with self.lock:
+                if instance.job_name in self.instances:
+                    del self.instances[instance.job_name]
+                else:
+                    # When instance abnormal in initial stage, we ignore this event
+                    return
+            # Deep copy the instance to ensure data consistency during async HTTP sending
+            event = Event(EventType.DEL, instance.to_instance())
+            logger.info("Instance removed: %s", instance.job_name)
+        elif event == ObserverEvent.INSTANCE_REMOVED:
+            # Separated event is already notified coordinator
+            # to remove instance. so we don't need to notify again.
+            return
+        else:
+            raise ValueError(f"Unknown event type: {event}")
+
+        self.event_queue.put(event)
 
     def _event_consumer(self) -> None:
         while not self.stop_event.is_set():
