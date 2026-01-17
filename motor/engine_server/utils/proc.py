@@ -48,15 +48,45 @@ class ProcManager:
             return False
 
     @staticmethod
-    def _get_all_children_pids(pid: int) -> Set[int]:
-        children_pids = set()
+    def _get_children_pids_by_depth(pid: int, depth: int) -> Set[int]:
+        if depth <= 0:
+            logger.warning("Recursive depth must be greater than 0, current input: %d, return empty set", depth)
+            return set()
+
+        logger.info("parent pid is: %d", pid)
         try:
-            parent_process = psutil.Process(pid)
-            all_children = parent_process.children(recursive=True)
-            # Extract PIDs from Process objects
-            children_pids.update(child.pid for child in all_children)
-        except Exception as e:
-            logger.warning(f"get children pids error: {e}")
+            current_level_processes = [psutil.Process(pid)]
+        except psutil.NoSuchProcess:
+            logger.warning("Parent process %d does not exist", pid)
+            return set()
+
+        def _log_process_info(current_depth: int, children, parent):
+            for child in children:
+                cmd_line = child.cmdline()
+                cmd = "".join(cmd_line) if cmd_line else "unknown"
+                logger.info("depth: %d, pid: %d, cmd: %s", current_depth, parent.pid, cmd)
+
+        children_pids = set()
+        for depth in range(1, depth + 1):
+            next_level_processes = []
+            for process in current_level_processes:
+                try:
+                    direct_children = process.children(recursive=False)
+                    child_pids = {child.pid for child in direct_children}
+                    children_pids.update(child_pids)
+
+                    _log_process_info(depth, direct_children, process)
+
+                    next_level_processes.extend(direct_children)
+                except psutil.NoSuchProcess:
+                    logger.warning("Process %d has exited, skip getting its child processes", process.pid)
+                except Exception as e:
+                    logger.warning("Failed to get level %d child processes of process %d: %s", depth, process.pid, e)
+            current_level_processes = next_level_processes
+            if not current_level_processes:
+                logger.info("No more child processes at level %d, terminate traversal early", depth)
+                break
+
         return children_pids
 
     def shutdown(self) -> None:
@@ -95,4 +125,5 @@ class ProcManager:
             return
         self.child_pids.clear()
         if self._is_process_exist(self.main_pid):
-            self.child_pids.update(self._get_all_children_pids(self.main_pid))
+            # get children and grandchildren pids
+            self.child_pids.update(self._get_children_pids_by_depth(self.main_pid, 2))

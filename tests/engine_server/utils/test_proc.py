@@ -78,35 +78,114 @@ class TestProcManager:
         mock_psutil.Process.return_value.status.return_value = mock_psutil.STATUS_ZOMBIE
         assert proc_manager._is_process_exist(5678) is False
 
-    def test_get_all_children_pids(self, mock_psutil):
-        """Test _get_all_children_pids method"""
+    def test_get_children_pids_by_depth(self, mock_psutil):
+        """Test _get_children_pids_by_depth method"""
+        # Set up psutil.NoSuchProcess exception class
+        mock_psutil.NoSuchProcess = type('NoSuchProcess', (Exception,), {})
+        
         # Mock process with children
-        mock_child1 = Mock(pid=1001)
-        mock_child2 = Mock(pid=1002)
-        mock_psutil.Process.return_value.children.return_value = [mock_child1, mock_child2]
-
+        mock_child1 = Mock(pid=1001, cmdline=Mock(return_value=["cmd1", "arg1"]))
+        mock_child2 = Mock(pid=1002, cmdline=Mock(return_value=["cmd2", "arg2"]))
+        mock_process = Mock()
+        mock_process.children.return_value = [mock_child1, mock_child2]
+        mock_process.pid = 5678
+        
         main_pid = 1234
+        # Set up Process mock for initialization
+        mock_main_process = Mock()
+        mock_main_process.is_running.return_value = True
+        mock_main_process.status.return_value = 'running'
+        
+        def process_side_effect(pid):
+            if pid == 1234:
+                return mock_main_process
+            elif pid == 5678:
+                return mock_process
+            else:
+                mock_child = Mock(pid=pid)
+                mock_child.children.return_value = []
+                mock_child.cmdline.return_value = ["cmd"]
+                return mock_child
+        
+        mock_psutil.Process.side_effect = process_side_effect
+        
         proc_manager = ProcManager(main_pid)
 
-        # Test getting children pids
-        children = proc_manager._get_all_children_pids(5678)
+        # Test getting children pids with depth 1
+        children = proc_manager._get_children_pids_by_depth(5678, 1)
         assert len(children) == 2
         assert 1001 in children  # Check if PID is in the set
         assert 1002 in children  # Check if PID is in the set
 
-        # Test exception handling
-        mock_psutil.Process.side_effect = Exception("Error getting children")
-        children = proc_manager._get_all_children_pids(5678)
+        # Test exception handling - NoSuchProcess when getting parent process
+        def process_side_effect_nosuch(pid):
+            if pid == 1234:
+                return mock_main_process
+            elif pid == 5678:
+                raise mock_psutil.NoSuchProcess("Process not found")
+            else:
+                mock_child = Mock(pid=pid)
+                mock_child.children.return_value = []
+                mock_child.cmdline.return_value = ["cmd"]
+                return mock_child
+        
+        mock_psutil.Process.side_effect = process_side_effect_nosuch
+        children = proc_manager._get_children_pids_by_depth(5678, 1)
         assert children == set()
+
+        # Test exception handling - generic exception when getting children
+        def process_side_effect_children_error(pid):
+            if pid == 1234:
+                return mock_main_process
+            elif pid == 5678:
+                mock_process_error = Mock()
+                mock_process_error.children.side_effect = Exception("Error getting children")
+                mock_process_error.pid = 5678
+                return mock_process_error
+            else:
+                mock_child = Mock(pid=pid)
+                mock_child.children.return_value = []
+                mock_child.cmdline.return_value = ["cmd"]
+                return mock_child
+        
+        mock_psutil.Process.side_effect = process_side_effect_children_error
+        children = proc_manager._get_children_pids_by_depth(5678, 1)
+        assert isinstance(children, set)
+        assert len(children) == 0  # No children due to exception
 
     def test_update_child_pids(self, mock_psutil):
         """Test _update_child_pids method"""
+        # Set up psutil.NoSuchProcess exception class
+        mock_psutil.NoSuchProcess = type('NoSuchProcess', (Exception,), {})
+        
         # Mock process with children
-        mock_child1 = Mock(pid=1001)
-        mock_child2 = Mock(pid=1002)
-        mock_psutil.Process.return_value.children.return_value = [mock_child1, mock_child2]
-        mock_psutil.Process.return_value.is_running.return_value = True
-        mock_psutil.Process.return_value.status.return_value = 'running'
+        # For depth 2, child processes should have empty children lists
+        mock_child1 = Mock(pid=1001, cmdline=Mock(return_value=["cmd1", "arg1"]))
+        mock_child1.children.return_value = []  # No grandchildren
+        mock_child2 = Mock(pid=1002, cmdline=Mock(return_value=["cmd2", "arg2"]))
+        mock_child2.children.return_value = []  # No grandchildren
+        
+        mock_main_process = Mock()
+        mock_main_process.pid = 1234
+        mock_main_process.children.return_value = [mock_child1, mock_child2]
+        mock_main_process.is_running.return_value = True
+        mock_main_process.status.return_value = 'running'
+        
+        # Configure Process to return different mocks for different calls
+        def process_side_effect(pid):
+            if pid == 1234:
+                return mock_main_process
+            elif pid == 1001:
+                return mock_child1
+            elif pid == 1002:
+                return mock_child2
+            else:
+                mock_child = Mock(pid=pid)
+                mock_child.children.return_value = []
+                mock_child.cmdline.return_value = ["cmd"]
+                return mock_child
+        
+        mock_psutil.Process.side_effect = process_side_effect
 
         main_pid = 1234
         proc_manager = ProcManager(main_pid)
@@ -117,6 +196,8 @@ class TestProcManager:
         # Test updating child pids
         proc_manager._update_child_pids()
         assert len(proc_manager.child_pids) == 2
+        assert 1001 in proc_manager.child_pids
+        assert 1002 in proc_manager.child_pids
 
         # Test with shutdown triggered
         proc_manager._shutdown_triggered = True
