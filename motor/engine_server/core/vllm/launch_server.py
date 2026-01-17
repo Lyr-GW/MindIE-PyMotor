@@ -10,7 +10,6 @@ from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.openai.api_server import load_log_config
 from vllm.entrypoints.openai.api_server import build_async_engine_client
-from vllm.entrypoints.openai.api_server import maybe_register_tokenizer_info_endpoint
 from vllm.entrypoints.openai.api_server import build_app
 from vllm.entrypoints.openai.api_server import init_app_state
 
@@ -56,7 +55,11 @@ async def engine_server_run_server_worker(
             args,
             client_config=ipc_config,
     ) as engine_client:
-        maybe_register_tokenizer_info_endpoint(args)
+        try:
+            from vllm.entrypoints.openai.api_server import maybe_register_tokenizer_info_endpoint
+            maybe_register_tokenizer_info_endpoint(args)
+        except Exception as e:
+            logger.warning(f"import failed: {e}, vLLM version >= 0.13.0 registry tokenizer info in build_app")
 
         application = build_app(args)
 
