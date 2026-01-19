@@ -2,6 +2,7 @@ import os
 import pytest
 from unittest.mock import patch, MagicMock
 import requests
+import re
 import copy
 from urllib.parse import urlparse
 
@@ -154,7 +155,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_gauge.help = "Number of requests in model execution batches."
         metric_gauge.type = MetricType.GAUGE
         metric_gauge.label = [
-            'vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}'
+            'vllm:num_requests_running{model_name="/job/model/Qwen2.5-0.5B-Instruct"}'
         ]
         metric_gauge.value = [1.0]
 
@@ -175,9 +176,9 @@ vllm:request_success_total{engine="0",finished_reason="abort",model_name="/job/m
         metric_counter.help = "Count of successfully processed requests."
         metric_counter.type = MetricType.COUNTER
         metric_counter.label = [
-            'vllm:request_success_total{engine="0",finished_reason="stop",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_success_total{engine="0",finished_reason="length",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_success_total{engine="0",finished_reason="abort",model_name="/job/model/Qwen2.5-0.5B-Instruct"}'
+            'vllm:request_success_total{finished_reason="stop",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_success_total{finished_reason="length",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_success_total{finished_reason="abort",model_name="/job/model/Qwen2.5-0.5B-Instruct"}'
         ]
         metric_counter.value = [1.0, 2.0, 0.0]
 
@@ -203,14 +204,14 @@ vllm:request_params_n_sum{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_histogram.help = "Histogram of the n request parameter."
         metric_histogram.type = MetricType.HISTOGRAM
         metric_histogram.label = [
-            'vllm:request_params_n_bucket{engine="0",le="1.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_bucket{engine="0",le="2.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_bucket{engine="0",le="5.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_bucket{engine="0",le="10.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_bucket{engine="0",le="20.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_bucket{engine="0",le="+Inf",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_count{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
-            'vllm:request_params_n_sum{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}'
+            'vllm:request_params_n_bucket{le="1.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_bucket{le="2.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_bucket{le="5.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_bucket{le="10.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_bucket{le="20.0",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_bucket{le="+Inf",model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_count{model_name="/job/model/Qwen2.5-0.5B-Instruct"}',
+            'vllm:request_params_n_sum{model_name="/job/model/Qwen2.5-0.5B-Instruct"}'
         ]
         metric_histogram.value = [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
 
@@ -766,11 +767,11 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
         ]
 
         # check function
-        assert metric_collector._get_serialize_metrics([metric_gauge]) == metric_str_gauge
-        assert metric_collector._get_serialize_metrics([metric_counter]) == metric_str_counter
-        assert metric_collector._get_serialize_metrics([metric_histogram]) == metric_str_histogram
-        assert metric_collector._get_serialize_metrics([metric_summary]) == metric_str_summary
-        assert metric_collector._get_serialize_metrics(metric_mix) == metric_str_mix
+        assert metric_collector._get_serialize_metrics([metric_gauge]) == re.sub(r'engine="\d+",', '', metric_str_gauge)
+        assert metric_collector._get_serialize_metrics([metric_counter]) == re.sub(r'engine="\d+",', '', metric_str_counter)
+        assert metric_collector._get_serialize_metrics([metric_histogram]) == re.sub(r'engine="\d+",', '', metric_str_histogram)
+        assert metric_collector._get_serialize_metrics([metric_summary]) == re.sub(r'engine="\d+",', '', metric_str_summary)
+        assert metric_collector._get_serialize_metrics(metric_mix) == re.sub(r'engine="\d+",', '', metric_str_mix)
 
     def mock_get_all_instances_normal(self):
         available_pool = {

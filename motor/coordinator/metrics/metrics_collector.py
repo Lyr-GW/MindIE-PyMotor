@@ -5,6 +5,7 @@
 import time
 import threading
 from enum import Enum
+import re
 import requests
 
 from motor.common.utils.singleton import ThreadSafeSingleton
@@ -280,7 +281,7 @@ class MetricsCollector(ThreadSafeSingleton):
 
     def _parse_metric_body_block(self, single_metric: SingleMetric, line: str) -> bool:
         """
-        Parse help line.
+        Parse label and value line.
 
         :param single_metric:
         :param line: format: "<label> <value>"
@@ -294,8 +295,10 @@ class MetricsCollector(ThreadSafeSingleton):
         if len(parts) != value_index + 1:
             logger.error("[Metrics] Parse metric body failed.")
             return False
-    
-        single_metric.label.append(parts[label_index])
+
+        # Remove sub label engine if exist
+        label = re.sub(r'engine="\d+",', '', parts[label_index])
+        single_metric.label.append(label)
         try:
             value = float(parts[value_index])
             if value < 0:
