@@ -1,21 +1,20 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-from typing import Optional
-import time
-import threading
-import os
 import json
+import os
 import signal
+import threading
+import time
+from typing import Optional
 
-from motor.common.resources.http_msg_spec import Ranktable, RegisterMsg, StartCmdMsg, ReregisterMsg
-from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.resources.endpoint import Endpoint
+from motor.common.resources.http_msg_spec import Ranktable, RegisterMsg, StartCmdMsg, ReregisterMsg
+from motor.common.utils.env import Env
+from motor.common.utils.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
-from motor.common.utils.logger import get_logger
-from motor.common.utils.env import Env
-
+from motor.node_manager.api_client.controller_api_client import ControllerApiClient
 
 logger = get_logger(__name__)
 
@@ -35,10 +34,6 @@ class EngineManager(ThreadSafeSingleton):
         self.instance_id: int = 0
         self.is_working = False
 
-        controller_api_dns = self._config.api_config.controller_api_dns
-        controller_api_port = self._config.api_config.controller_api_port
-        self.controller_api_url = f"http://{controller_api_dns}:{controller_api_port}"
-
         self._register_thread = threading.Thread(
             target=self._register,
             daemon=True,
@@ -51,15 +46,7 @@ class EngineManager(ThreadSafeSingleton):
 
     def update_config(self, config: NodeManagerConfig) -> None:
         """Update configuration for the engine manager"""
-        with self.config_lock:
-            # Update config fields
-            self._config = config
-
-            # Update controller API URL
-            controller_api_dns = self._config.api_config.controller_api_dns
-            controller_api_port = self._config.api_config.controller_api_port
-            self.controller_api_url = f"http://{controller_api_dns}:{controller_api_port}"
-            logger.info("EngineManager configuration updated")
+        pass
 
     def post_register_msg(self) -> Optional[bool]:
         register_msg = self._gen_register_msg()
@@ -67,24 +54,7 @@ class EngineManager(ThreadSafeSingleton):
             return False
         logger.debug("register_msg is %s", register_msg)
 
-        # Read config values under lock protection
-        with self.config_lock:
-            controller_api_url = self.controller_api_url
-
-        try:
-            with SafeHTTPSClient(
-                base_url=controller_api_url,
-                timeout=1,
-            ) as client:
-                response = client.post("/controller/register", register_msg.model_dump())
-                logger.info("Register success!")
-                return True
-        except Exception as e:
-            logger.error(
-                "Exception occurred while register to controller at %s: %s",
-                controller_api_url, e
-            )
-            return False
+        return ControllerApiClient.register(register_msg)
 
     def post_reregister_msg(self) -> Optional[bool]:
         reregister_msg = self._gen_reregister_msg()
@@ -92,24 +62,7 @@ class EngineManager(ThreadSafeSingleton):
             return False
         logger.debug("reregister_msg is %s", reregister_msg)
 
-        # Read config values under lock protection
-        with self.config_lock:
-            controller_api_url = self.controller_api_url
-
-        try:
-            with SafeHTTPSClient(
-                base_url=controller_api_url,
-                timeout=1,
-            ) as client:
-                response = client.post("/controller/reregister", reregister_msg.model_dump())
-                logger.info("Register success!")
-                return True
-        except Exception as e:
-            logger.error(
-                "Exception occurred while reregister to controller at %s: %s",
-                controller_api_url, e
-            )
-            return False
+        return ControllerApiClient.re_register(reregister_msg)
 
     def parse_start_cmd(self, start_cmd: StartCmdMsg):
         if not self._check_cmd_para(start_cmd):

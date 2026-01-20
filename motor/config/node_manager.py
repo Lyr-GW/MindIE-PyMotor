@@ -10,10 +10,10 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from motor.common.resources.instance import ParallelConfig, PDRole
+from motor.config.tls_config import TLSConfig
 from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
 from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
-
 
 PP = "pp_size"
 TP = "tp_size"
@@ -58,23 +58,6 @@ class APIConfig:
     host_ip: str | None = field(default_factory=lambda: Env.pod_ip or "127.0.0.1")
     node_manager_port: int = 1026
 
-    # Controller API configuration
-    controller_api_dns: str | None = field(default_factory=lambda: Env.controller_service)
-    controller_api_port: int | None = 1026
-
-
-@dataclass
-class TLSConfig:
-    """TLS configuration class"""
-
-    # TLS enable/disable
-    enable_tls: bool = False
-
-    # certificate paths
-    ca_cert_path: str = 'security/controller/cert/ca.crt'
-    cert_path: str = 'security/controller/cert/server.crt'
-    key_path: str = 'security/controller/keys/server.key'
-
 
 @dataclass
 class EndpointConfig:
@@ -97,7 +80,7 @@ class NodeManagerConfig:
 
     # Configuration sections
     api_config: APIConfig = field(default_factory=APIConfig)
-    tls_config: TLSConfig = field(default_factory=TLSConfig)
+    mgmt_tls_config: TLSConfig = field(default_factory=TLSConfig)
     endpoint_config: EndpointConfig = field(default_factory=EndpointConfig)
     basic_config: BasicConfig = field(default_factory=BasicConfig)
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
@@ -241,8 +224,8 @@ class NodeManagerConfig:
         if 'api_config' in cfg:
             update_config_from_dict(config.api_config, cfg['api_config'])
 
-        if 'tls_config' in cfg:
-            update_config_from_dict(config.tls_config, cfg['tls_config'])
+        if 'mgmt_tls_config' in cfg:
+            update_config_from_dict(config.mgmt_tls_config, cfg['mgmt_tls_config'])
 
         if 'endpoint_config' in cfg:
             update_config_from_dict(config.endpoint_config, cfg['endpoint_config'])
@@ -437,11 +420,10 @@ class NodeManagerConfig:
             f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
             "\n"
             "  Network Configuration:\n"
-            f"    ├─ Controller API:      {self.api_config.controller_api_dns}:{self.api_config.controller_api_port}\n"
             f"    ├─ Node Manager Port:   {self.api_config.node_manager_port}\n"
             f"    ├─ Pod IP:              {self.api_config.pod_ip}\n"
             f"    ├─ Host IP:             {self.api_config.host_ip}\n"
-            f"    └─ TLS:                 {'Enabled' if self.tls_config.enable_tls else 'Disabled'}\n"
+            f"    └─ TLS:                 {'Enabled' if self.mgmt_tls_config.tls_enable else 'Disabled'}\n"
             "\n"
             "  Basic Configuration:\n"
             f"    ├─ Job Name:            {self.basic_config.job_name}\n"

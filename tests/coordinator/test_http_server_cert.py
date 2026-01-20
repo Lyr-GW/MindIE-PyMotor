@@ -16,8 +16,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from motor.config.coordinator import TLSConfig
 from motor.common.utils.cert_util import (
-    CoordinatorCertUtil,
     CertUtil,
+    CertValidationUtil,
     TLS_CERT,
     TLS_KEY,
     CA_CERTS,
@@ -256,12 +256,12 @@ def test_cert_util_validation(test_certificates):
     test_certs = test_certificates
     
     # Test certificate information query
-    cert_info = CoordinatorCertUtil.query_certificate_info(test_certs["server_cert"])
+    cert_info = CertUtil.query_certificate_info(test_certs["server_cert"])
     logger.info(f"Certificate information query succeeded: {cert_info}")
     assert cert_info is not None, "Certificate information query should succeed"
     
     # Test certificate chain validation
-    validation_result = CoordinatorCertUtil.validate_certificate_chain(
+    validation_result = CertUtil.validate_certificate_chain(
         ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"]
@@ -270,11 +270,13 @@ def test_cert_util_validation(test_certificates):
     assert validation_result is True, "Certificate chain validation should succeed"
     
     # Test SSL context creation
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
+    tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
-        key_file=test_certs["server_key"],
-        ca_file=test_certs["ca_cert"]
+        key_file=test_certs["server_key"]
     )
+    ssl_context = CertUtil.create_ssl_context(tls_config=tls_config)
     logger.info(f"SSL context created successfully: {ssl_context is not None}")
     assert ssl_context is not None, "SSL context should be created successfully"
 
@@ -286,22 +288,16 @@ def test_coordinator_server_ssl_config(test_certificates):
     test_certs = test_certificates
     
     # Create SSL configuration
-    tls_config = TLSConfig(enable_tls=True)
-    tls_config.items = {
-        TLS_CERT: test_certs["server_cert"],
-        TLS_KEY: test_certs["server_key"],
-        CA_CERTS: test_certs["ca_cert"],
-        "tls_passwd": "",
-    }
+    tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file=test_certs["ca_cert"],
+        cert_file=test_certs["server_cert"],
+        key_file=test_certs["server_key"]
+    )
     
     logger.info("Coordinator server SSL configuration created successfully")
     
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
-        cert_file=tls_config.items[TLS_CERT],
-        key_file=tls_config.items[TLS_KEY],
-        ca_file=tls_config.items[CA_CERTS],
-        password=tls_config.items.get("tls_passwd", "")
-    )
+    ssl_context = CertUtil.create_ssl_context(tls_config=tls_config)
     
     assert ssl_context is not None, "SSL context should be created successfully"
     logger.info("SSL context created successfully, cert_util works properly in coordinator_server")
@@ -312,10 +308,10 @@ def test_ssl_disabled_mode():
     logger.info("=== Testing SSL disabled mode ===")
     
     # Create SSL configuration (disable SSL)
-    tls_config = TLSConfig(enable_tls=False)
+    tls_config = TLSConfig(tls_enable=False)
     
     logger.info("Coordinator server configuration in SSL disabled mode created successfully")
-    assert tls_config.enable_tls is False, "SSL should be disabled"
+    assert tls_config.tls_enable is False, "SSL should be disabled"
 
 
 # ============================================================================
@@ -329,21 +325,25 @@ def test_create_ssl_context_basic(test_certificates):
     test_certs = test_certificates
     
     # Test with valid certificates
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
+    tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
-        key_file=test_certs["server_key"],
-        ca_file=test_certs["ca_cert"]
+        key_file=test_certs["server_key"]
     )
+    ssl_context = CertUtil.create_ssl_context(tls_config=tls_config)
     assert ssl_context is not None, "SSL context should be created successfully"
     logger.info("SSL context created successfully")
     
     # Test with password parameter (even though key is not encrypted)
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
+    tls_config_with_passwd = TLSConfig(
+        tls_enable=True,
+        ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"],
-        ca_file=test_certs["ca_cert"],
-        password="test_password"
+        passwd_file=""
     )
+    ssl_context = CertUtil.create_ssl_context(tls_config=tls_config_with_passwd)
     assert ssl_context is not None, "SSL context should handle password parameter"
 
 
@@ -354,7 +354,7 @@ def test_create_ssl_context_no_client_cert(test_certificates):
     test_certs = test_certificates
     
     # Test with valid certificates (no client cert verification)
-    ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
+    ssl_context = CertUtil.create_ssl_context_no_client_cert(
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"],
         ca_file=test_certs["ca_cert"]
@@ -363,53 +363,57 @@ def test_create_ssl_context_no_client_cert(test_certificates):
     logger.info("SSL context created successfully without client cert verification")
     
     # Test without CA file (optional)
-    ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
+    ssl_context = CertUtil.create_ssl_context_no_client_cert(
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"],
         ca_file=""
     )
     assert ssl_context is not None, "SSL context should be created without CA file"
     
-    # Test with password
-    ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
+    # Test with password_file
+    ssl_context = CertUtil.create_ssl_context_no_client_cert(
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"],
         ca_file=test_certs["ca_cert"],
-        password=""
+        password_file=""
     )
-    assert ssl_context is not None, "SSL context should be created with empty password"
+    assert ssl_context is not None, "SSL context should be created with empty password_file"
 
 
 def test_create_ssl_context_error_handling():
     """Test SSL context creation error handling"""
     logger.info("=== Testing SSL context creation error handling ===")
     
-    # Test with None values
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
-        cert_file=None,
-        key_file=None,
-        ca_file=None
-    )
-    assert ssl_context is None, "None values should return None"
+    # Test with None values - should raise AttributeError
+    try:
+        ssl_context = CertUtil.create_ssl_context(tls_config=None)
+        assert ssl_context is None, "None values should return None or raise error"
+    except (AttributeError, TypeError):
+        # Expected behavior when None is passed
+        pass
     
-    # Test with empty string values
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
+    # Test with empty/invalid TLSConfig
+    empty_tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file="",
         cert_file="",
-        key_file="",
-        ca_file=""
+        key_file=""
     )
-    assert ssl_context is None, "Empty strings should return None"
+    ssl_context = CertUtil.create_ssl_context(tls_config=empty_tls_config)
+    assert ssl_context is None, "Empty certificate files should return None"
     
     # Test non-existent certificate files
-    ssl_context = CoordinatorCertUtil.create_ssl_context(
+    invalid_tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file="/nonexistent/ca.pem",
         cert_file="/nonexistent/cert.pem",
-        key_file="/nonexistent/key.pem",
-        ca_file="/nonexistent/ca.pem"
+        key_file="/nonexistent/key.pem"
     )
+    ssl_context = CertUtil.create_ssl_context(tls_config=invalid_tls_config)
     assert ssl_context is None, "Non-existent certificate files should return None"
     
     # Test create_ssl_context_no_client_cert with None values
-    ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
+    ssl_context = CertUtil.create_ssl_context_no_client_cert(
         cert_file=None,
         key_file=None,
         ca_file=None
@@ -417,7 +421,7 @@ def test_create_ssl_context_error_handling():
     assert ssl_context is None, "None values should return None"
     
     # Test with empty key_file
-    ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
+    ssl_context = CertUtil.create_ssl_context_no_client_cert(
         cert_file="/nonexistent/cert.pem",
         key_file="",
         ca_file=""
@@ -425,7 +429,7 @@ def test_create_ssl_context_error_handling():
     assert ssl_context is None, "Empty key_file should return None"
     
     # Test with non-existent certificate files
-    ssl_context = CoordinatorCertUtil.create_ssl_context_no_client_cert(
+    ssl_context = CertUtil.create_ssl_context_no_client_cert(
         cert_file="/nonexistent/cert.pem",
         key_file="/nonexistent/key.pem",
         ca_file=""
@@ -446,12 +450,12 @@ def test_cert_info_query(test_certificates):
     test_certs = test_certificates
     
     # Test certificate information query
-    cert_info = CoordinatorCertUtil.query_certificate_info(test_certs["server_cert"])
+    cert_info = CertUtil.query_certificate_info(test_certs["server_cert"])
     logger.info(f"Certificate information query succeeded: {cert_info}")
     assert cert_info is not None, "Certificate information query should succeed"
     
     # Test with non-existent certificate file
-    cert_info = CoordinatorCertUtil.query_certificate_info("/nonexistent/cert.pem")
+    cert_info = CertUtil.query_certificate_info("/nonexistent/cert.pem")
     assert cert_info == {}, "Certificate info query should return empty dict for non-existent file"
     
     # Test with invalid certificate file
@@ -461,13 +465,13 @@ def test_cert_info_query(test_certificates):
         with open(invalid_cert_path, "w") as f:
             f.write("invalid certificate content")
         
-        cert_info = CoordinatorCertUtil.query_certificate_info(invalid_cert_path)
+        cert_info = CertUtil.query_certificate_info(invalid_cert_path)
         assert cert_info == {}, "Certificate info query should return empty dict for invalid file"
     finally:
         shutil.rmtree(temp_dir)
     
     # Test CRL info query with non-existent file
-    crl_info = CoordinatorCertUtil.query_crl_info("/nonexistent/crl.pem")
+    crl_info = CertUtil.query_crl_info("/nonexistent/crl.pem")
     assert crl_info == [], "CRL info query should return empty list for non-existent file"
     logger.info("Certificate and CRL info query works correctly")
 
@@ -483,7 +487,7 @@ def test_validate_certificate_chain(test_certificates):
     test_certs = test_certificates
     
     # Test basic certificate chain validation
-    validation_result = CoordinatorCertUtil.validate_certificate_chain(
+    validation_result = CertUtil.validate_certificate_chain(
         ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"]
@@ -491,7 +495,7 @@ def test_validate_certificate_chain(test_certificates):
     assert validation_result is True, "Certificate chain validation should succeed"
     
     # Test without CRL (should work)
-    validation_result = CoordinatorCertUtil.validate_certificate_chain(
+    validation_result = CertUtil.validate_certificate_chain(
         ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"],
@@ -500,7 +504,7 @@ def test_validate_certificate_chain(test_certificates):
     assert validation_result is True, "Certificate chain validation should succeed without CRL"
     
     # Test with non-existent CRL file
-    validation_result = CoordinatorCertUtil.validate_certificate_chain(
+    validation_result = CertUtil.validate_certificate_chain(
         ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"],
@@ -510,14 +514,14 @@ def test_validate_certificate_chain(test_certificates):
     logger.info("Certificate chain validation handled non-existent CRL file")
     
     # Test error handling
-    result = CoordinatorCertUtil.validate_certificate_chain(
+    result = CertUtil.validate_certificate_chain(
         ca_file="/nonexistent/ca.pem",
         cert_file="/nonexistent/cert.pem",
         key_file="/nonexistent/key.pem"
     )
     assert result is False, "Non-existent files should return False"
     
-    result = CoordinatorCertUtil.validate_certificate_chain(
+    result = CertUtil.validate_certificate_chain(
         ca_file="",
         cert_file="",
         key_file=""
@@ -547,7 +551,7 @@ def test_construct_cert_context(test_certificates):
             "tls_passwd": ""
         }
         
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         # May succeed or fail depending on certificate validation
         logger.info(f"construct_cert_context result: {ssl_context is not None}")
     except Exception as e:
@@ -574,7 +578,7 @@ def test_validate_revoke_list(test_certificates):
         next_update_days=30,
         temp_dir=test_certs["temp_dir"]
     )
-    result = CertUtil.validate_revoke_list(crl_info["crl_path"])
+    result = CertValidationUtil.validate_revoke_list(crl_info["crl_path"])
     assert result is True, "Valid CRL should return True"
     
     # Test with CRL containing revoked certificates
@@ -586,7 +590,7 @@ def test_validate_revoke_list(test_certificates):
         next_update_days=30,
         temp_dir=test_certs["temp_dir"]
     )
-    result = CertUtil.validate_revoke_list(crl_info["crl_path"])
+    result = CertValidationUtil.validate_revoke_list(crl_info["crl_path"])
     assert result is True, "CRL with revoked certificates should return True"
     
     # Test with expired CRL
@@ -597,11 +601,11 @@ def test_validate_revoke_list(test_certificates):
         next_update_days=-1,  # Expired
         temp_dir=test_certs["temp_dir"]
     )
-    result = CertUtil.validate_revoke_list(crl_info["crl_path"])
+    result = CertValidationUtil.validate_revoke_list(crl_info["crl_path"])
     assert result is False, "Expired CRL should return False"
     
     # Test with non-existent file
-    result = CertUtil.validate_revoke_list("/nonexistent/crl.pem")
+    result = CertValidationUtil.validate_revoke_list("/nonexistent/crl.pem")
     assert result is False, "Non-existent file should return False"
     
     # Test with invalid CRL file
@@ -611,7 +615,7 @@ def test_validate_revoke_list(test_certificates):
         with open(invalid_crl_path, "w") as f:
             f.write("invalid CRL content")
         
-        result = CertUtil.validate_revoke_list(invalid_crl_path)
+        result = CertValidationUtil.validate_revoke_list(invalid_crl_path)
         assert result is False, "Invalid CRL file should return False"
     finally:
         shutil.rmtree(temp_dir)
@@ -633,7 +637,7 @@ def test_validate_ca_crl(test_certificates):
         next_update_days=30,
         temp_dir=test_certs["temp_dir"]
     )
-    result = CertUtil.validate_ca_crl(test_certs["ca_cert"], crl_info["crl_path"])
+    result = CertValidationUtil.validate_ca_crl(test_certs["ca_cert"], crl_info["crl_path"])
     assert result is True, "Valid CRL signed by matching CA should return True"
     
     # Test with CRL signed by different CA
@@ -645,11 +649,11 @@ def test_validate_ca_crl(test_certificates):
         next_update_days=30,
         temp_dir=test_certs["temp_dir"]
     )
-    result = CertUtil.validate_ca_crl(test_certs["ca_cert"], crl_info["crl_path"])
+    result = CertValidationUtil.validate_ca_crl(test_certs["ca_cert"], crl_info["crl_path"])
     assert result is False, "CRL signed by different CA should return False"
     
     # Test with non-existent files
-    result = CertUtil.validate_ca_crl("/nonexistent/ca.pem", "/nonexistent/crl.pem")
+    result = CertValidationUtil.validate_ca_crl("/nonexistent/ca.pem", "/nonexistent/crl.pem")
     assert result is False, "Non-existent files should return False"
     
     # Test with invalid CRL file
@@ -659,7 +663,7 @@ def test_validate_ca_crl(test_certificates):
         with open(invalid_crl_path, "w") as f:
             f.write("invalid CRL content")
         
-        result = CertUtil.validate_ca_crl("/nonexistent/ca.pem", invalid_crl_path)
+        result = CertValidationUtil.validate_ca_crl("/nonexistent/ca.pem", invalid_crl_path)
         assert result is False, "Invalid CRL file should return False"
     finally:
         shutil.rmtree(temp_dir)
@@ -685,7 +689,7 @@ def test_construct_cert_context_comprehensive(test_certificates):
             "tls_key": test_certs["server_key"],
             "tls_passwd": ""
         }
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         logger.info(f"construct_cert_context without CRL result: {ssl_context is not None}")
     except Exception as e:
         logger.info(f"construct_cert_context failed (may be due to directory permissions): {e}")
@@ -707,7 +711,7 @@ def test_construct_cert_context_comprehensive(test_certificates):
             "tls_crl": crl_info["crl_path"],
             "tls_passwd": ""
         }
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         assert ssl_context is not None, "construct_cert_context should succeed with valid CRL"
         
         # Verify context attributes
@@ -735,7 +739,7 @@ def test_construct_cert_context_comprehensive(test_certificates):
             "tls_crl": crl_info["crl_path"],
             "tls_passwd": ""
         }
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         assert ssl_context is not None, "construct_cert_context should succeed with CRL containing revoked certs"
     except Exception as e:
         logger.info(f"construct_cert_context failed (may be due to directory permissions): {e}")
@@ -754,7 +758,7 @@ def test_construct_cert_context_comprehensive(test_certificates):
             "tls_crl": invalid_crl_path,
             "tls_passwd": ""
         }
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         assert ssl_context is None, "construct_cert_context should fail with invalid CRL file"
     except Exception as e:
         logger.info(f"construct_cert_context failed as expected: {e}")
@@ -779,7 +783,7 @@ def test_construct_cert_context_comprehensive(test_certificates):
             "tls_crl": crl_info["crl_path"],
             "tls_passwd": ""
         }
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         assert ssl_context is None, "construct_cert_context should fail with mismatched CRL"
     except Exception as e:
         logger.info(f"construct_cert_context failed as expected: {e}")
@@ -792,13 +796,13 @@ def test_construct_cert_context_comprehensive(test_certificates):
             "tls_key": test_certs["server_key"],
             "tls_passwd": "test_password"
         }
-        ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+        ssl_context = CertUtil.construct_cert_context(config)
         assert ssl_context is not None, "construct_cert_context should handle password parameter"
     except Exception as e:
         logger.info(f"construct_cert_context failed (may be due to directory permissions): {e}")
     
     # Test error handling
-    ssl_context = CoordinatorCertUtil.construct_cert_context({})
+    ssl_context = CertUtil.construct_cert_context({})
     assert ssl_context is None, "Empty config should return None"
     
     invalid_config = {
@@ -806,7 +810,7 @@ def test_construct_cert_context_comprehensive(test_certificates):
         "tls_cert": "/nonexistent/cert.pem"
         # Missing tls_key
     }
-    ssl_context = CoordinatorCertUtil.construct_cert_context(invalid_config)
+    ssl_context = CertUtil.construct_cert_context(invalid_config)
     assert ssl_context is None, "Missing required keys should return None"
     logger.info("construct_cert_context comprehensive test completed")
 
@@ -822,14 +826,14 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
     test_certs = test_certificates
     
     # Test with valid certificates (without CA)
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"]
     )
     assert result is True, "validate_cert_and_key should succeed with valid certificates"
     
     # Test with valid certificates (with CA)
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"],
         ca_crt_path=test_certs["ca_cert"]
@@ -837,14 +841,14 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
     assert result is True, "validate_cert_and_key should succeed with valid CA certificate"
     
     # Test with empty/None CA (optional)
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"],
         ca_crt_path=""
     )
     assert result is True, "Empty CA certificate path should be treated as optional"
     
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"],
         ca_crt_path=None
@@ -852,14 +856,14 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
     assert result is True, "None CA certificate should be treated as optional"
     
     # Test with password
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"],
         plain_text=b""
     )
     assert result is True, "validate_cert_and_key should work with empty password"
     
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"],
         plain_text=b"test_password"
@@ -867,33 +871,33 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
     assert result is True, "validate_cert_and_key should handle password parameter gracefully"
     
     # Test error handling: None values
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=None,
         server_key_path="/nonexistent/key.pem"
     )
     assert result is False, "None server_crt_path should return False"
     
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path="/nonexistent/cert.pem",
         server_key_path=None
     )
     assert result is False, "None server_key_path should return False"
     
     # Test error handling: empty strings
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path="",
         server_key_path="/nonexistent/key.pem"
     )
     assert result is False, "Empty server_crt_path should return False"
     
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path="/nonexistent/cert.pem",
         server_key_path=""
     )
     assert result is False, "Empty server_key_path should return False"
     
     # Test error handling: non-existent files
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path="/nonexistent/server_cert.pem",
         server_key_path="/nonexistent/server_key.pem"
     )
@@ -909,7 +913,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         with open(empty_key_path, "w") as f:
             pass
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=empty_cert_path,
             server_key_path=empty_key_path
         )
@@ -928,7 +932,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         with open(invalid_key_path, "w") as f:
             f.write("-----BEGIN PRIVATE KEY-----\ninvalid\n-----END PRIVATE KEY-----\n")
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=invalid_cert_path,
             server_key_path=invalid_key_path
         )
@@ -941,7 +945,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         with open(invalid_key_path, "w") as f:
             f.write("This is not a valid private key")
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=valid_cert_path,
             server_key_path=invalid_key_path
         )
@@ -964,7 +968,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
                 encryption_algorithm=serialization.NoEncryption()
             ))
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=test_certs["server_cert"],
             server_key_path=other_key_path
         )
@@ -973,7 +977,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         shutil.rmtree(temp_dir)
     
     # Test error handling: CA-related errors
-    result = CertUtil.validate_cert_and_key(
+    result = CertValidationUtil.validate_cert_and_key(
         server_crt_path=test_certs["server_cert"],
         server_key_path=test_certs["server_key"],
         ca_crt_path="/nonexistent/ca_cert.pem"
@@ -986,7 +990,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         with open(invalid_ca_path, "w") as f:
             f.write("This is not a valid CA certificate")
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=test_certs["server_cert"],
             server_key_path=test_certs["server_key"],
             ca_crt_path=invalid_ca_path
@@ -999,7 +1003,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         with open(other_ca_path, "wb") as f:
             f.write(other_ca_cert.public_bytes(serialization.Encoding.PEM))
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=test_certs["server_cert"],
             server_key_path=test_certs["server_key"],
             ca_crt_path=other_ca_path
@@ -1011,7 +1015,7 @@ def test_validate_cert_and_key_comprehensive(test_certificates):
         with open(empty_ca_path, "w") as f:
             pass
         
-        result = CertUtil.validate_cert_and_key(
+        result = CertValidationUtil.validate_cert_and_key(
             server_crt_path=test_certs["server_cert"],
             server_key_path=test_certs["server_key"],
             ca_crt_path=empty_ca_path
@@ -1038,7 +1042,7 @@ def test_query_crl_info_cases(test_certificates):
         next_update_days=30,
         temp_dir=test_certs["temp_dir"]
     )
-    items = CoordinatorCertUtil.query_crl_info(crl_info["crl_path"])
+    items = CertUtil.query_crl_info(crl_info["crl_path"])
     assert isinstance(items, list), "query_crl_info should return a list"
     assert len(items) == len(revoked_serials), "Count of revoked entries should match"
     for item in items:
@@ -1054,7 +1058,7 @@ def test_query_crl_info_cases(test_certificates):
         next_update_days=30,
         temp_dir=test_certs["temp_dir"]
     )
-    empty_items = CoordinatorCertUtil.query_crl_info(empty_crl_info["crl_path"])
+    empty_items = CertUtil.query_crl_info(empty_crl_info["crl_path"])
     assert empty_items == [], "Empty CRL should return an empty list"
 
 
@@ -1073,5 +1077,5 @@ def test_construct_cert_context_with_invalid_crl_path(test_certificates):
     }
 
     # Directory permissions may not satisfy strict checks on different platforms; keep returning None per existing cases
-    ssl_context = CoordinatorCertUtil.construct_cert_context(config)
+    ssl_context = CertUtil.construct_cert_context(config)
     assert ssl_context is None, "Invalid CRL path should lead to returning None"

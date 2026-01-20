@@ -1,21 +1,21 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-import os
-import sys
-import select
-import signal
 import argparse
+import os
+import signal
+import sys
 import threading
 from typing import Any
 
-from motor.config.controller import ControllerConfig
-from motor.controller.api_server import ControllerAPI
-from motor.controller.core import InstanceAssembler, InstanceManager, EventPusher
+import select
+
 from motor.common.standby.standby_manager import StandbyManager
 from motor.common.utils.config_watcher import ConfigWatcher
 from motor.common.utils.logger import get_logger
-
+from motor.config.controller import ControllerConfig
+from motor.controller.api_server import ControllerAPI
+from motor.controller.core import InstanceAssembler, InstanceManager, EventPusher
 
 logger = get_logger(__name__)
 

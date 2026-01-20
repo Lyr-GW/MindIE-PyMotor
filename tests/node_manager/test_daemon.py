@@ -4,6 +4,7 @@
 import os
 import sys
 import json
+import signal
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
 
@@ -70,8 +71,6 @@ def daemon(config_data, hccl_data):
         config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])
         config.basic_config.job_name = config_data.get("model_name", "test_job")
         config.basic_config.role = PDRole(config_data.get("role", "both"))
-        config.api_config.controller_api_dns = config_data.get("controller_api_dns", "localhost")
-        config.api_config.controller_api_port = config_data.get("controller_api_port", 8080)
         config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
 
         # Set device info from hccl_data
@@ -124,11 +123,13 @@ class TestDaemon:
     ])
     @patch('os.kill')
     def test_exit_daemon(self, mock_kill, daemon, exception, should_not_raise):
-        daemon.engine_pids = [1001, 1002]
-        if exception:
-            mock_kill.side_effect = exception
-        daemon.stop()  # Method is called 'stop', not 'exit_daemon'
-        assert mock_kill.call_count == len([1001, 1002])
+        # Mock SIGKILL for Windows compatibility
+        with patch('motor.node_manager.core.daemon.signal.SIGKILL', 9, create=True):
+            daemon.engine_pids = [1001, 1002]
+            if exception:
+                mock_kill.side_effect = exception
+            daemon.stop()  # Method is called 'stop', not 'exit_daemon'
+            assert mock_kill.call_count == len([1001, 1002])
     
     @pytest.mark.parametrize("ip,port,expected", [
         ("192.168.1.100", "8080", True),

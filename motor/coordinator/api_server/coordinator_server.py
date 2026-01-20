@@ -5,35 +5,31 @@ import asyncio
 import json
 import logging
 import threading
-from typing import Optional, Any
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from functools import wraps
-from contextlib import asynccontextmanager
+from typing import Optional, Any
 
+import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-import uvicorn
 
 from motor.common.resources.http_msg_spec import InsEventMsg
-from motor.common.standby.standby_manager import StandbyManager, StandbyRole
-from motor.common.utils.logger import get_logger, ApiAccessFilter
-from motor.common.utils.cert_util import (
-    CoordinatorCertUtil,
-    TLS_CERT,
-    TLS_KEY,
-    CA_CERTS,
-)
-from motor.coordinator.core.instance_manager import InstanceManager
 from motor.common.resources.instance import PDRole
-from motor.coordinator.middleware.fastapi_middleware import (
-    SimpleRateLimitMiddleware, 
-    create_simple_rate_limit_middleware, 
+from motor.common.standby.standby_manager import StandbyManager, StandbyRole
+from motor.common.utils.cert_util import (
+    CertUtil,
 )
+from motor.common.utils.logger import get_logger, ApiAccessFilter
+from motor.common.utils.security_utils import sanitize_error_message, log_audit_event
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
-from motor.coordinator.models.request import RequestType, RequestResponse
-from motor.coordinator.router.router import handle_request, handle_metaserver_request
+from motor.coordinator.core.instance_manager import InstanceManager
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
+from motor.coordinator.middleware.fastapi_middleware import (
+    SimpleRateLimitMiddleware,
+    create_simple_rate_limit_middleware,
+)
 from motor.coordinator.models.contants import (
     OPENAI_FIELD_MESSAGES,
     OPENAI_FIELD_PROMPT,
@@ -42,8 +38,8 @@ from motor.coordinator.models.contants import (
     OPENAI_FIELD_ROLE,
     OPENAI_FIELD_CONTENT,
 )
-from motor.common.utils.security_utils import sanitize_error_message, log_audit_event
-
+from motor.coordinator.models.request import RequestType, RequestResponse
+from motor.coordinator.router.router import handle_request, handle_metaserver_request
 
 logger = get_logger(__name__)
 
@@ -86,7 +82,6 @@ INSTANCE_REFRESH_URL = "/instances/refresh"
 
 
 class CoordinatorServer:
-    
     def __init__(self, config: CoordinatorConfig | None = None):
         self._config_lock = threading.RLock()
         self._initialize_config(config)
@@ -425,8 +420,9 @@ class CoordinatorServer:
         
         self.coordinator_config = coordinator_config
         self._api_key_config = coordinator_config.api_key_config
-        self._tls_config = coordinator_config.tls_config
-    
+        self._infer_ssl_config = coordinator_config.infer_tls_config
+        self._mgmt_ssl_config = coordinator_config.mgmt_tls_config
+
     def _log_configuration(self):
         logger.info(
             "Infer timeout configuration: infer_timeout=%ss",
@@ -445,17 +441,26 @@ class CoordinatorServer:
             len(self._api_key_config.skip_paths)
         )
 
-        if self._tls_config.enable_tls:
-            tls_items = self._tls_config.items or {}
+        if self._infer_ssl_config.tls_enable:
             logger.info(
-                "SSL configuration enabled: cert_file=%s, key_file=%s, ca_file=%s",
-                tls_items.get(TLS_CERT, ""),
-                tls_items.get(TLS_KEY, ""),
-                tls_items.get(CA_CERTS, "")
+                "Infer SSL configuration enabled: cert_file=%s, key_file=%s, ca_file=%s",
+                self._infer_ssl_config.cert_file,
+                self._infer_ssl_config.key_file,
+                self._infer_ssl_config.ca_file
             )
         else:
-            logger.info("SSL configuration disabled")
-    
+            logger.info("Infer SSL configuration disabled")
+
+        if self._mgmt_ssl_config.tls_enable:
+            logger.info(
+                "Mgmt SSL configuration enabled: cert_file=%s, key_file=%s, ca_file=%s",
+                self._mgmt_ssl_config.cert_file,
+                self._mgmt_ssl_config.key_file,
+                self._mgmt_ssl_config.ca_file
+            )
+        else:
+            logger.info("Mgmt SSL configuration disabled")
+
     def _create_apps(self):
         self.management_app = FastAPI(
             title="Motor Coordinator Management Server",
@@ -486,61 +491,7 @@ class CoordinatorServer:
         infer_timeout = self.coordinator_config.exception_config.infer_timeout
         config_kwargs[UVICORN_KEY_TIMEOUT_KEEP_ALIVE] = infer_timeout
         config_kwargs[UVICORN_KEY_TIMEOUT_GRACEFUL_SHUTDOWN] = GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
-    
-    def _apply_ssl_to_unified_config(self, config_kwargs: dict[str, Any]):
-        if not self._tls_config.enable_tls:
-            return
 
-        tls_items = self._tls_config.items or {}
-        cert_file = tls_items.get(TLS_CERT, "")
-        key_file = tls_items.get(TLS_KEY, "")
-        ca_file = tls_items.get(CA_CERTS, "")
-        password = tls_items.get("tls_passwd", "")
-
-        ssl_context = CoordinatorCertUtil.create_ssl_context(
-            cert_file=cert_file,
-            key_file=key_file,
-            ca_file=ca_file,
-            password=password
-        )
-        if ssl_context:
-            config_kwargs[UVICORN_KEY_SSL_KEYFILE] = key_file
-            config_kwargs[UVICORN_KEY_SSL_CERTFILE] = cert_file
-            config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = ca_file
-            logger.info("HTTPS support enabled for unified server")
-        else:
-            logger.warning("SSL configuration failed, using HTTP mode")
-    
-    def _apply_ssl_to_separate_configs(
-        self,
-        mgmt_config_kwargs: dict[str, Any],
-        inference_config_kwargs: dict[str, Any]
-    ):
-        if not self._tls_config.enable_tls:
-            return
-
-        tls_items = self._tls_config.items or {}
-        cert_file = tls_items.get(TLS_CERT, "")
-        key_file = tls_items.get(TLS_KEY, "")
-        ca_file = tls_items.get(CA_CERTS, "")
-        password = tls_items.get("tls_passwd", "")
-
-        inference_ssl_context = CoordinatorCertUtil.create_ssl_context(
-            cert_file=cert_file,
-            key_file=key_file,
-            ca_file=ca_file,
-            password=password
-        )
-
-        
-        if inference_ssl_context:
-            inference_config_kwargs[UVICORN_KEY_SSL_KEYFILE] = key_file
-            inference_config_kwargs[UVICORN_KEY_SSL_CERTFILE] = cert_file
-            inference_config_kwargs[UVICORN_KEY_SSL_CA_CERTS] = ca_file
-            logger.info("HTTPS support enabled for inference server")
-        else:
-            logger.warning("SSL configuration failed for inference server, using HTTP mode")
-    
     async def _run_unified_server(self, rate_limit_config: Optional[RateLimitConfig]):
         unified_app = self.create_unified_app(rate_limit_config=rate_limit_config)
         logger.info(
@@ -556,26 +507,29 @@ class CoordinatorServer:
         )
         
         self._apply_timeout_to_config(unified_config_kwargs)
-        self._apply_ssl_to_unified_config(unified_config_kwargs)
-        
-        unified_server = uvicorn.Server(uvicorn.Config(**unified_config_kwargs))
+
+        config = uvicorn.Config(**unified_config_kwargs)
+        config.load()
+        if self._infer_ssl_config and self._infer_ssl_config.tls_enable:
+            ssl_context = CertUtil.create_ssl_context(tls_config=self._infer_ssl_config)
+            if ssl_context:
+                config.ssl = ssl_context
+            else:
+                raise RuntimeError("Failed to create ssl context")
+            logger.info("Coordinator infer server started: https://%s:%s",
+                        self.coordinator_config.http_config.coordinator_api_host,
+                        self.coordinator_config.http_config.coordinator_api_mgmt_port)
+        else:
+            logger.info("Coordinator infer server started: http://%s:%s",
+                        self.coordinator_config.http_config.coordinator_api_host,
+                        self.coordinator_config.http_config.coordinator_api_mgmt_port)
+        unified_server = uvicorn.Server(config=config)
         await unified_server.serve()
         return unified_server
     
     async def _run_separate_servers(self, rate_limit_config: Optional[RateLimitConfig]):
         self.setup_rate_limiting(rate_limit_config=rate_limit_config)
-        
-        logger.info(
-            "Starting Management server %s:%s",
-            self.coordinator_config.http_config.coordinator_api_host,
-            self.coordinator_config.http_config.coordinator_api_mgmt_port
-        )
-        logger.info(
-            "Starting Inference server %s:%s",
-            self.coordinator_config.http_config.coordinator_api_host,
-            self.coordinator_config.http_config.coordinator_api_infer_port
-        )
-        
+
         mgmt_config_kwargs = self._create_base_uvicorn_config(
             self.management_app,
             self.coordinator_config.http_config.coordinator_api_host,
@@ -590,10 +544,40 @@ class CoordinatorServer:
         
         self._apply_timeout_to_config(mgmt_config_kwargs)
         self._apply_timeout_to_config(inference_config_kwargs)
-        self._apply_ssl_to_separate_configs(mgmt_config_kwargs, inference_config_kwargs)
-        
-        mgmt_server = uvicorn.Server(uvicorn.Config(**mgmt_config_kwargs))
-        inference_server = uvicorn.Server(uvicorn.Config(**inference_config_kwargs))
+
+        mgmt_config = uvicorn.Config(**mgmt_config_kwargs)
+        mgmt_config.load()
+        if self._mgmt_ssl_config and self._mgmt_ssl_config.tls_enable:
+            mgmt_ssl_context = CertUtil.create_ssl_context(tls_config=self._mgmt_ssl_config)
+            if mgmt_ssl_context:
+                mgmt_config.ssl = mgmt_ssl_context
+                logger.info("Coordinator management server started: http://%s:%s",
+                            self.coordinator_config.http_config.coordinator_api_host,
+                            self.coordinator_config.http_config.coordinator_api_mgmt_port)
+            else:
+                raise RuntimeError("SSL configuration failed for management server")
+        else:
+            logger.info("Coordinator management server started: https://%s:%s",
+                        self.coordinator_config.http_config.coordinator_api_host,
+                        self.coordinator_config.http_config.coordinator_api_mgmt_port)
+        mgmt_server = uvicorn.Server(mgmt_config)
+
+        inference_config = uvicorn.Config(**inference_config_kwargs)
+        inference_config.load()
+        if self._infer_ssl_config and self._infer_ssl_config.tls_enable:
+            inference_ssl_context = CertUtil.create_ssl_context(tls_config=self._infer_ssl_config)
+            if inference_ssl_context:
+                inference_config.ssl = inference_ssl_context
+                logger.info("Coordinator infer server started: https://%s:%s",
+                            self.coordinator_config.http_config.coordinator_api_host,
+                            self.coordinator_config.http_config.coordinator_api_infer_port)
+            else:
+                raise RuntimeError("SSL configuration failed for inference server")
+        else:
+            logger.info("Coordinator infer server started: http://%s:%s",
+                        self.coordinator_config.http_config.coordinator_api_host,
+                        self.coordinator_config.http_config.coordinator_api_infer_port)
+        inference_server = uvicorn.Server(inference_config)
         
         await asyncio.gather(
             mgmt_server.serve(),

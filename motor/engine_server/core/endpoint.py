@@ -8,6 +8,7 @@ import threading
 from fastapi import FastAPI, Response
 import uvicorn
 
+from motor.common.utils.cert_util import CertUtil
 from motor.engine_server.config.base import ServerConfig
 from motor.engine_server.constants.constants import (
     STATUS_INTERFACE,
@@ -36,6 +37,7 @@ class Endpoint:
     def __init__(self, server_config: ServerConfig, services: dict[str, Service]):
         self.host = server_config.server_host
         self.port = server_config.server_port
+        self.mgmt_tls_config = server_config.deploy_config.mgmt_tls_config
         for service_key in [METRICS_SERVICE, HEALTH_SERVICE]:
             if service_key not in services:
                 raise ValueError(f"services must contain key: {service_key}")
@@ -55,7 +57,6 @@ class Endpoint:
     def run(self):
         if not self._server_thread or not self._server_thread.is_alive():
             self._server_thread.start()
-            logger.info(f"Endpoint server started: http://{self.host}:{self.port}")
 
     def shutdown(self):
         if self._server:
@@ -129,6 +130,18 @@ class Endpoint:
             log_level="warning",
             workers=1
         )
+
+        config.load()
+        if self.mgmt_tls_config and self.mgmt_tls_config.tls_enable:
+            ssl_context = CertUtil.create_ssl_context(self.mgmt_tls_config)
+            if ssl_context:
+                config.ssl = ssl_context
+            else:
+                raise RuntimeError("Failed to create ssl context")
+            logger.info(f"Endpoint server started: https://{self.host}:{self.port}")
+        else:
+            logger.info(f"Endpoint server started: http://{self.host}:{self.port}")
+
         self._server = uvicorn.Server(config)
         if not self._stop_event.is_set():
             self._server.run()

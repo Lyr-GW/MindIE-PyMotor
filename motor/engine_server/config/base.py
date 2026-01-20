@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from motor.engine_server.config import config_loader
+from motor.engine_server.config.config_loader import DeployConfig
 from motor.engine_server.utils.ip import ip_valid_check, port_valid_check
 from motor.engine_server.utils.validators import FileValidator
 
@@ -26,7 +27,7 @@ class ServerConfig:
     instance_id: int = 0
     dp_rank: int = 0
     config_path: Optional[str] = None
-    deploy_config = None
+    deploy_config: DeployConfig = None
 
     @classmethod
     def parse_cli_args(cls) -> argparse.Namespace:

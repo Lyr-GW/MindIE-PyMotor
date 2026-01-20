@@ -205,14 +205,11 @@ def modify_controller_or_coordinator_yaml(data, user_config):
         external_service_data = data[2]
         external_service_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
 
-    if role == CONTROLLER:
-        container[ENV].extend([
-            {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service}
-        ])
-    else:
-        container[ENV].extend([
-            {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service}
-        ])
+    container[ENV].extend([
+        {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
+        {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service}
+    ])
+
     modify_coordinator_or_controller_replicas(data[0], user_config, role)
 
 

@@ -63,7 +63,7 @@ async def handle_request(raw_request: Request,
     try:
         return await router_impl.handle_request()
     except Exception as e:
-        logger.debug(f"Error occurred in proxy server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
+        logger.error(f"Error occurred in proxy server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
         if isinstance(e, HTTPException):
             raise e
         safe_error_msg = sanitize_error_message(str(e))
@@ -98,7 +98,7 @@ async def handle_metaserver_request(raw_request: Request, config: CoordinatorCon
     try:
         return await SeparateCDPRouter(req_info=req_info, config=config).handle_metaserver_request()
     except Exception as e:
-        logger.debug(f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
+        logger.error(f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
         if isinstance(e, HTTPException):
             raise e
         safe_error_msg = sanitize_error_message(str(e))

@@ -41,11 +41,16 @@ def vllm_collector(mock_logger_module):
     # Reimport with fresh mocks
     from motor.engine_server.core.vllm.vllm_collector import VLLMCollector
     from motor.engine_server.config.base import IConfig
+    from motor.config.tls_config import TLSConfig
     
     with patch("motor.engine_server.core.vllm.vllm_collector.logger") as mock_logger:
         mock_config = Mock(spec=IConfig)
         mock_server_config = Mock()
         mock_server_config.engine_type = "vllm"
+        mock_deploy_config = Mock()
+        mock_tls_config = TLSConfig(tls_enable=False)
+        mock_deploy_config.infer_tls_config = mock_tls_config
+        mock_server_config.deploy_config = mock_deploy_config
         mock_config.get_server_config.return_value = mock_server_config
         mock_args = Mock()
         mock_args.host = "127.0.0.1"
@@ -65,11 +70,10 @@ def test_initialization(vllm_collector, mock_logger_module):
     assert vllm_collector.name == expected_name
     assert vllm_collector.host == "127.0.0.1"
     assert vllm_collector.port == 8000
-    assert vllm_collector._metrics_url == vllm_collector._expected_metrics_url
-    assert vllm_collector._health_url == vllm_collector._expected_health_url
+    assert vllm_collector.collect_interval == 3
+    assert vllm_collector.timeout == 2
     vllm_collector._mock_logger.info.assert_called_once_with(
-        f"VLLMCollector initialized: metrics_url={vllm_collector._expected_metrics_url}, "
-        f"health_url={vllm_collector._expected_health_url}, collect_interval=3s"
+        "VLLMCollector initialized: collect_interval=3s"
     )
 
 
@@ -92,15 +96,20 @@ def test_collect_returns_combined_data(mock_time, mock_do_metrics, mock_do_healt
     assert result["health"] == mock_health_data
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_metrics_success(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_metrics_success(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_metrics() should return success data when request succeeds"""
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
     mock_response = Mock()
     mock_response.status_code = 200
     mock_response.text = "prometheus_metrics_data"
-    mock_get.return_value = mock_response
+    mock_client.do_get.return_value = mock_response
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_metrics()
-    mock_get.assert_called_once_with(vllm_collector._expected_metrics_url, timeout=2)
+    
     assert result["status"] == "success"
     assert result["api_url"] == vllm_collector._expected_metrics_url
     assert result["data"] == "prometheus_metrics_data"
@@ -108,11 +117,17 @@ def test_do_collect_metrics_success(mock_get, vllm_collector, mock_logger_module
     assert "collect_time" in result
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_metrics_connection_error(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_metrics_connection_error(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_metrics() should return failed result with error log when connection fails"""
-    mock_get.side_effect = ConnectionError("Connection refused")
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.do_get.side_effect = ConnectionError("Connection refused")
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_metrics()
+    
     assert result["status"] == "failed"
     assert result["api_url"] == vllm_collector._expected_metrics_url
     assert "Connection refused" in result["error"]
@@ -121,69 +136,104 @@ def test_do_collect_metrics_connection_error(mock_get, vllm_collector, mock_logg
     vllm_collector._mock_logger.error.assert_called_once()
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_metrics_timeout(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_metrics_timeout(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_metrics() should return failed result when request times out"""
-    mock_get.side_effect = Timeout("Request timed out")
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.do_get.side_effect = Timeout("Request timed out")
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_metrics()
+    
     assert result["status"] == "failed"
     assert "timed out" in result["error"]
     assert result["http_status_code"] is None
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_metrics_http_error(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_metrics_http_error(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_metrics() should return failed result with status code when HTTP error occurs"""
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
     mock_response = Mock()
     mock_response.status_code = 404
-    mock_get.side_effect = HTTPError("404 Not Found", response=mock_response)
+    mock_client.do_get.side_effect = HTTPError("404 Not Found", response=mock_response)
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_metrics()
+    
     assert result["status"] == "failed"
     assert result["http_status_code"] == 404
     assert "404 Not Found" in result["error"]
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_metrics_generic_request_error(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_metrics_generic_request_error(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_metrics() should return failed result for generic request errors"""
-    mock_get.side_effect = RequestException("Unknown error")
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.do_get.side_effect = RequestException("Unknown error")
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_metrics()
+    
     assert result["status"] == "failed"
     assert "Unknown error" in result["error"]
     assert result["http_status_code"] is None
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_health_success(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_health_success(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_health() should return success result when health check succeeds"""
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
     mock_response = Mock()
     mock_response.status_code = 200
-    mock_get.return_value = mock_response
+    mock_client.do_get.return_value = mock_response
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_health()
-    mock_get.assert_called_once_with(vllm_collector._expected_health_url, timeout=2)
+    
     assert result["status"] == "success"
     assert result["http_status_code"] == 200
     assert result["data"] is None
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_health_non_200_status(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_health_non_200_status(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_health() should return failed result with error log when status is non-200"""
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
     mock_response = Mock()
     mock_response.status_code = 503
-    mock_get.return_value = mock_response
+    mock_client.do_get.return_value = mock_response
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_health()
+    
     assert result["status"] == "failed"
     assert result["http_status_code"] == 503
     assert "503" in result["error"]
     vllm_collector._mock_logger.error.assert_called_once()
 
 
-@patch("motor.engine_server.core.vllm.vllm_collector.requests.get")
-def test_do_collect_health_connection_error(mock_get, vllm_collector, mock_logger_module):
+@patch("motor.engine_server.core.vllm.vllm_collector.SafeHTTPSClient")
+def test_do_collect_health_connection_error(mock_client_class, vllm_collector, mock_logger_module):
     """test VLLMCollector._do_collect_health() should return failed result when connection fails"""
-    mock_get.side_effect = ConnectionError("Cannot connect")
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.do_get.side_effect = ConnectionError("Cannot connect")
+    mock_client_class.return_value = mock_client
+    
     result = vllm_collector._do_collect_health()
+    
     assert result["status"] == "failed"
     assert "Cannot connect" in result["error"]
 

@@ -1,26 +1,26 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import Any, Optional, AsyncGenerator
 import contextlib
 import logging
 import time
-
 from abc import ABC, abstractmethod
+from typing import Any, Optional, AsyncGenerator
+
+import httpx
 from fastapi import status, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
-import httpx
 
-from motor.config.coordinator import CoordinatorConfig
-from motor.coordinator.models.contants import REQUEST_ID_KEY, DEFAULT_REQUEST_ID
-from motor.coordinator.models.request import RequestInfo, ReqState, ScheduledResource
-from motor.coordinator.scheduler.scheduler import Scheduler
-from motor.common.utils.security_utils import filter_sensitive_headers, filter_sensitive_body
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import PDRole
 from motor.common.utils.http_client import AsyncSafeHTTPSClient
 from motor.common.utils.logger import get_logger
+from motor.common.utils.security_utils import filter_sensitive_headers, filter_sensitive_body
+from motor.config.coordinator import CoordinatorConfig
+from motor.coordinator.models.contants import REQUEST_ID_KEY, DEFAULT_REQUEST_ID
 from motor.coordinator.models.request import ErrorResponse
+from motor.coordinator.models.request import RequestInfo, ReqState, ScheduledResource
+from motor.coordinator.scheduler.scheduler import Scheduler
 
 logger = get_logger(__name__)
 
@@ -74,8 +74,10 @@ class BaseRouter(ABC):
         :param timeout: http client timeout
         """
         endpoint = resource.endpoint
-        base_url = f"http://{endpoint.ip}:{endpoint.business_port}"
-        async with AsyncSafeHTTPSClient(base_url=base_url, timeout=timeout) as client:
+        address = f"{endpoint.ip}:{endpoint.business_port}"
+        async with AsyncSafeHTTPSClient(address=address,
+                                        tls_config=self.config.infer_tls_config,
+                                        timeout=timeout) as client:
             yield client
 
     @abstractmethod

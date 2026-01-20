@@ -148,6 +148,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
         # Extract required config fields
         with self.config_lock:
             self.etcd_config = config.etcd_config
+            self.etcd_tls_config = config.etcd_tls_config
             self.strategy_center_check_internal = config.fault_tolerance_config.strategy_center_check_internal
 
         self.client = ClusterNodeClient('localhost', 5005)
@@ -156,9 +157,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
             self.etcd_client = EtcdClient(
                 host=self.etcd_config.etcd_host,
                 port=self.etcd_config.etcd_port,
-                ca_cert=self.etcd_config.etcd_ca_cert,
-                cert_key=self.etcd_config.etcd_cert_key,
-                cert_cert=self.etcd_config.etcd_cert_cert,
+                tls_config=self.etcd_tls_config,
                 timeout=self.etcd_config.etcd_timeout
             )
 
@@ -229,15 +228,14 @@ class FaultManager(ThreadSafeSingleton, Observer):
 
             # Update config fields
             self.etcd_config = config.etcd_config
+            self.etcd_tls_config = config.etcd_tls_config
             self.strategy_center_check_internal = config.fault_tolerance_config.strategy_center_check_internal
 
             # Update ETCD client with new configuration
             self.etcd_client = EtcdClient(
                 host=self.etcd_config.etcd_host,
                 port=self.etcd_config.etcd_port,
-                ca_cert=self.etcd_config.etcd_ca_cert,
-                cert_key=self.etcd_config.etcd_cert_key,
-                cert_cert=self.etcd_config.etcd_cert_cert,
+                tls_config=self.etcd_tls_config,
                 timeout=self.etcd_config.etcd_timeout
             )
             logger.info("FaultManager configuration updated")

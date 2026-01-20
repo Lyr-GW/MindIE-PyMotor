@@ -10,7 +10,7 @@ from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_log
 from motor.common.utils.env import Env
 from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
-
+from motor.config.tls_config import TLSConfig
 
 logger = get_logger(__name__)
 
@@ -21,24 +21,8 @@ class ApiConfig:
 
     # controller API configuration
     controller_api_host: str = field(default_factory=lambda: Env.pod_ip or '127.0.0.1')
+    controller_api_dns: str | None = field(default_factory=lambda: Env.controller_service or "127.0.0.1")
     controller_api_port: int = 1026
-
-    # coordinator API configuration
-    coordinator_api_dns: str = field(default_factory=lambda: Env.coordinator_service)
-    coordinator_api_port: int = 1026
-
-
-@dataclass
-class TLSConfig:
-    """TLS configuration class"""
-
-    # TLS enable/disable
-    enable_tls: bool = False
-
-    # certificate paths
-    ca_cert_path: str = 'security/controller/cert/ca.crt'
-    cert_path: str = 'security/controller/cert/server.crt'
-    key_path: str = 'security/controller/keys/server.key'
 
 
 @dataclass
@@ -92,7 +76,9 @@ class ControllerConfig:
     # Configuration sections
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
     api_config: ApiConfig = field(default_factory=ApiConfig)
-    tls_config: TLSConfig = field(default_factory=TLSConfig)
+    mgmt_tls_config: TLSConfig = field(default_factory=TLSConfig)
+    etcd_tls_config: TLSConfig = field(default_factory=TLSConfig)
+    grpc_tls_config: TLSConfig = field(default_factory=TLSConfig)
     instance_config: InstanceConfig = field(default_factory=InstanceConfig)
     event_config: EventPusherConfig = field(default_factory=EventPusherConfig)
     fault_tolerance_config: FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
@@ -150,8 +136,14 @@ class ControllerConfig:
             if 'api_config' in cfg:
                 update_config_from_dict(config.api_config, cfg['api_config'])
 
-            if 'tls_config' in cfg:
-                update_config_from_dict(config.tls_config, cfg['tls_config'])
+            if 'mgmt_tls_config' in cfg:
+                update_config_from_dict(config.mgmt_tls_config, cfg['mgmt_tls_config'])
+
+            if 'etcd_tls_config' in cfg:
+                update_config_from_dict(config.etcd_tls_config, cfg['etcd_tls_config'])
+
+            if 'grpc_tls_config' in cfg:
+                update_config_from_dict(config.grpc_tls_config, cfg['grpc_tls_config'])
 
             if 'instance_config' in cfg:
                 update_config_from_dict(config.instance_config, cfg['instance_config'])
@@ -347,20 +339,22 @@ class ControllerConfig:
         master_lock_ttl = self.standby_config.master_lock_ttl
         master_lock_key = self.standby_config.master_lock_key
         controller_api = f"{self.api_config.controller_api_host}:{self.api_config.controller_api_port}"
-        coordinator_api = f"{self.api_config.coordinator_api_dns}:{self.api_config.coordinator_api_port}"
+        controller_api_dns = f"{self.api_config.controller_api_dns}:{self.api_config.controller_api_port}"
         return (
             f"{separator}\n"
             f"{title}\n"
             f"{separator}\n"
             "  Logging Configuration:\n"
-            f"    ├─ Log Level:            {self.logging_config.log_level}\n"
-            f"    └─ Log Max Line Length:  {self.logging_config.log_max_line_length}\n"
+            f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
             "\n"
             "  Network Configuration:\n"
-            f"    ├─ Pod IP:               {Env.pod_ip}\n"
-            f"    ├─ Controller API:       {controller_api}\n"
-            f"    ├─ Coordinator API:      {coordinator_api}\n"
-            f"    └─ TLS:                  {'Enabled' if self.tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ Pod IP:              {Env.pod_ip}\n"
+            f"    ├─ Controller API:      {controller_api}\n"
+            f"    ├─ Controller API DNS:  {controller_api_dns}\n"
+            f"    ├─ Etcd TLS:            {'Enabled' if self.etcd_tls_config.tls_enable else 'Disabled'}\n"
+            f"    ├─ GRPC TLS:            {'Enabled' if self.grpc_tls_config.tls_enable else 'Disabled'}\n"
+            f"    └─ Management TLS:      {'Enabled' if self.mgmt_tls_config.tls_enable else 'Disabled'}\n"
             "\n"
             "  Instance Management:\n"
             f"    ├─ Assemble Timeout:     {self.instance_config.instance_assemble_timeout} seconds\n"

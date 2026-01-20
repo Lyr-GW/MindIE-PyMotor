@@ -6,6 +6,7 @@ import os
 import sys
 import logging
 from enum import Enum
+from typing import Any
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,6 +22,20 @@ ENGINE_CONFIG = 'engine_config'
 PREFILL = 'prefill'
 DECODE = 'decode'
 MOTOR_DEPLOY_CONFIG = 'motor_deploy_config'
+CA_FILE = 'ca_file'
+CERT_FILE = 'cert_file'
+KEY_FILE = 'key_file'
+SSL_ENABLE = 'ssl_enable'
+SSL_CA_CERTS = 'ssl_ca_certs'
+SSL_CERTFILE = 'ssl_certfile'
+SSL_KEYFILE = 'ssl_keyfile'
+TLS_CONFIG = 'tls_config'
+TLS_ENABLE = 'tls_enable'
+INFER_TLS_CONFIG = 'infer_tls_config'
+GRPC_TLS_CONFIG = 'grpc_tls_config'
+ETCD_TLS_CONFIG = 'etcd_tls_config'
+MGMT_TLS_CONFIG = 'mgmt_tls_config'
+ADDITIONAL_CONFIG = 'additional_config'
 AIGW = 'aigw'
 ID = 'id'
 MOTOR_ENGINE_PREFILL_CONFIG = 'motor_engine_prefill_config'
@@ -137,9 +152,13 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
             # For controller and coordinator, write config directly without merge
             if config_key == ConfigKey.MOTOR_CONTROLLER.value:
                 updated_config = user_config_data[config_key]
+                tls_configs = [MGMT_TLS_CONFIG, ETCD_TLS_CONFIG, GRPC_TLS_CONFIG]
+                _update_tls_config(tls_configs, updated_config, user_config_data)
                 logging.info("Controller configuration will be written directly")
             elif config_key == ConfigKey.MOTOR_COORDINATOR.value:
                 updated_config = user_config_data[config_key]
+                tls_configs = [MGMT_TLS_CONFIG, INFER_TLS_CONFIG, ETCD_TLS_CONFIG]
+                _update_tls_config(tls_configs, updated_config, user_config_data)
                 if AIGW in updated_config:
                     update_aigw_config(updated_config, user_config_data)
                 logging.info("Coordinator configuration will be written directly")
@@ -161,12 +180,16 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
                 elif role == DECODE:
                     updated_config[BASIC_CONFIG][PARALLEL_CONFIG] = \
                         user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value][MODEL_CONFIG][DECODE_PARALLEL_CONFIG]
+                tls_configs = [MGMT_TLS_CONFIG]
+                _update_tls_config(tls_configs, updated_config, user_config_data)
             elif config_key == ConfigKey.MOTOR_ENGINE_PREFILL.value:
                 updated_config[MODEL_CONFIG][DECODE_PARALLEL_CONFIG] = \
                     user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value][MODEL_CONFIG][DECODE_PARALLEL_CONFIG]
+                _update_engine_server_tls_config(updated_config, user_config_data)
             elif config_key == ConfigKey.MOTOR_ENGINE_DECODE.value:
                 updated_config[MODEL_CONFIG][PREFILL_PARALLEL_CONFIG] = \
                     user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value][MODEL_CONFIG][PREFILL_PARALLEL_CONFIG]
+                _update_engine_server_tls_config(updated_config, user_config_data)
             elif config_key == ConfigKey.MOTOR_KV_POOL.value:
                 updated_config[LOCAL_HOSTNAME] = f"{os.getenv('POD_IP')}"
                 updated_config[MASTER_SERVER_ADDRESS] = f"{os.getenv('KVP_MASTER_SERVICE')}:{MASTER_SERVER_PORT}"
@@ -183,6 +206,27 @@ def update_config_from_user_config(config_file, user_config_file, config_key):
     except Exception as e:
         logging.error(f"Failed to update configuration file: {str(e)}")
         return False
+
+
+def _update_tls_config(tls_configs: list[str], updated_config: dict[Any, Any], user_config_data):
+    for tls_config in tls_configs:
+        updated_config[tls_config] = user_config_data[MOTOR_DEPLOY_CONFIG][TLS_CONFIG][tls_config]
+
+
+def _update_engine_server_tls_config(updated_config: dict[Any, Any], user_config_data):
+    updated_config[MGMT_TLS_CONFIG] = user_config_data[MOTOR_DEPLOY_CONFIG][TLS_CONFIG][MGMT_TLS_CONFIG]
+    infer_tls_config = user_config_data[MOTOR_DEPLOY_CONFIG][TLS_CONFIG][INFER_TLS_CONFIG]
+    updated_config[INFER_TLS_CONFIG] = infer_tls_config
+    if infer_tls_config and infer_tls_config[TLS_ENABLE]:
+        updated_config[ENGINE_CONFIG][SSL_KEYFILE] = infer_tls_config[KEY_FILE]
+        updated_config[ENGINE_CONFIG][SSL_CERTFILE] = infer_tls_config[CERT_FILE]
+        updated_config[ENGINE_CONFIG][SSL_CA_CERTS] = infer_tls_config[CA_FILE]
+        if ADDITIONAL_CONFIG not in updated_config[ENGINE_CONFIG]:
+            updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG] = {}
+        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_ENABLE] = True
+        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_KEYFILE] = infer_tls_config[KEY_FILE]
+        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_CERTFILE] = infer_tls_config[CERT_FILE]
+        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_CA_CERTS] = infer_tls_config[CA_FILE]
 
 
 def main():

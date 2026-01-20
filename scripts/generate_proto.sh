@@ -27,13 +27,13 @@ fi
 # Generate Python code for each .proto file
 for proto_file in $PROTO_FILES; do
     echo "Generating code from $proto_file..."
-    
+
     # Get the directory containing the .proto file
     proto_dir=$(dirname "$proto_file")
-    
+
     # Get the base name of the .proto file (without extension)
     proto_base=$(basename "$proto_file" .proto)
-    
+
     # Generate _pb2.py and _pb2_grpc.py files
     # Change to proto directory for protoc execution (protoc requires proto_path to match file location)
     cd "$proto_dir"
@@ -43,10 +43,10 @@ for proto_file in $PROTO_FILES; do
         --grpc_python_out="." \
         "$(basename "$proto_file")"
     cd "$ROOT_DIR"
-    
+
     if [ $? -eq 0 ]; then
         echo "✓ Successfully generated code from $proto_file"
-        
+
         # Fix import paths in _pb2_grpc.py if it exists
         pb2_grpc_file="${proto_dir}/${proto_base}_pb2_grpc.py"
         if [ -f "$pb2_grpc_file" ]; then
@@ -57,7 +57,7 @@ for proto_file in $PROTO_FILES; do
             if [ "$package_path" = "." ]; then
                 package_path=""
             fi
-            
+
             # Replace relative import with absolute import
             # Pattern: import cluster_fault_pb2 -> from motor.controller.ft.cluster_grpc import cluster_fault_pb2
             # Use sed with word boundary to avoid double replacement
@@ -68,7 +68,7 @@ for proto_file in $PROTO_FILES; do
                     sed -i "s|^import ${proto_base}_pb2 as|from ${package_path} import ${proto_base}_pb2 as|g" "$pb2_grpc_file"
                 fi
             fi
-            
+
             echo "  Fixed import paths in ${proto_base}_pb2_grpc.py"
         fi
 

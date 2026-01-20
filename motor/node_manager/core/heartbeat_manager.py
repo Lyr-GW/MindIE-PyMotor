@@ -4,14 +4,15 @@
 import threading
 import time
 
-from motor.node_manager.core.engine_manager import EngineManager
-from motor.common.utils.logger import get_logger
-from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
 from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.utils.logger import get_logger
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
-
+from motor.node_manager.api_client.controller_api_client import ControllerApiClient
+from motor.node_manager.api_client.engine_server_api_client import EngineServerApiClient
+from motor.node_manager.core.engine_manager import EngineManager
 
 logger = get_logger(__name__)
 
@@ -27,13 +28,10 @@ class HeartbeatManager(ThreadSafeSingleton):
 
         if config is None:
             config = NodeManagerConfig.from_json()
+
+        self._config = config
         self.heartbeat_interval_seconds = config.basic_config.heartbeat_interval_seconds
-        self.controller_api_dns = config.api_config.controller_api_dns
-        self.controller_api_port = config.api_config.controller_api_port
-        self.pod_ip = config.api_config.pod_ip
-        self.controller_api_url = (
-            f"http://{self.controller_api_dns}:{self.controller_api_port}"
-        )
+
 
         self._job_name = ""
         self._role = "prefill"
@@ -73,14 +71,6 @@ class HeartbeatManager(ThreadSafeSingleton):
         with self.config_lock:
             # Update config fields
             self.heartbeat_interval_seconds = config.basic_config.heartbeat_interval_seconds
-            self.controller_api_dns = config.api_config.controller_api_dns
-            self.controller_api_port = config.api_config.controller_api_port
-            self.pod_ip = config.api_config.pod_ip
-
-            # Update controller API URL
-            self.controller_api_url = (
-                f"http://{self.controller_api_dns}:{self.controller_api_port}"
-            )
             logger.info("HeartbeatManager configuration updated")
 
     def update_endpoint(self, node_manager_info: StartCmdMsg) -> None:
@@ -150,22 +140,20 @@ class HeartbeatManager(ThreadSafeSingleton):
         updated_endpoints = []
         client = None
         for item in endpoints_snapshot:
-            engine_server_base_url = f"http://{item.ip}:{item.mgmt_port}"
             original_status = item.status
             client = None
             detected_status = None
-
+            engine_server_base_url = f"{item.ip}:{item.mgmt_port}"
             try:
-                client = SafeHTTPSClient(base_url=engine_server_base_url, timeout=2)
-                response = client.get("/status")
+                response = EngineServerApiClient.query_status(engine_server_base_url)
                 if isinstance(response, dict) and "status" in response:
                     status_value = response.get("status")
                     try:
                         detected_status = EndpointStatus(status_value)
                         if detected_status != original_status:
                             logger.info(
-                                "Engine Server rank %d, status change to %s from %s",
-                                item.id, detected_status, original_status
+                                "Engine Server rank %d, status change from %s to %s ",
+                                item.id, original_status, detected_status
                             )
                     except ValueError:
                         logger.error(
@@ -228,24 +216,15 @@ class HeartbeatManager(ThreadSafeSingleton):
                         for item in self._endpoints
                     }
 
-                # Read config values under lock protection
-                with self.config_lock:
-                    controller_api_dns = self.controller_api_dns
-                    controller_api_port = self.controller_api_port
-                    pod_ip = self.pod_ip
-
                 # Build message and send request outside of lock
                 heartbeat_msg = HeartbeatMsg(
                     job_name=self._job_name,
                     ins_id=self._instance_id,
-                    ip=pod_ip,
+                    ip=self._config.api_config.pod_ip,
                     status=endpoint_status_list,
                 )
-                with SafeHTTPSClient(
-                    base_url=f"http://{controller_api_dns}:{controller_api_port}",
-                    timeout=0.5,
-                ) as client:
-                    _ = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
+
+                ControllerApiClient.report_heartbeat(heartbeat_msg)
 
                 # Update consecutive abnormal count after successful heartbeat report
                 with self._abnormal_count_lock:
@@ -272,10 +251,7 @@ class HeartbeatManager(ThreadSafeSingleton):
                     self._reregister()
                 else:
                     with self.config_lock:
-                        logger.error(
-                            "Exception occurred while reporting endpoint status to controller at %s ",
-                            self.controller_api_url,
-                        )
+                        logger.error("Exception occurred while reporting endpoint status to controller...")
 
             with self.config_lock:
                 time.sleep(self.heartbeat_interval_seconds)

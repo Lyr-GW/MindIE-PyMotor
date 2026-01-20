@@ -19,18 +19,29 @@
     "deploy_mode": "pd_separate",
     "scheduler_type": "load_balance"
   },
-  "tls_config": {
-    "enable_tls": false,
-    "items": {
-      "ca_cert": "",
-      "tls_cert": "",
-      "tls_key": "",
-      "tls_passwd": "",
-      "tls_crl": "",
-      "kmcKsfMaster": "",
-      "kmcKsfStandby": ""
-    },
-    "check_files": true
+  "infer_tls_config": {
+    "tls_enable": true,
+    "ca_file": "security/mgmt/cert/ca.crt",
+    "cert_file": "security/mgmt/cert/server.crt",
+    "key_file": "security/mgmt/keys/server.key",
+    "passwd_file": "security/mgmt/keys/key_pwd.txt",
+    "crl_file": ""
+  },
+  "mgmt_tls_config": {
+    "tls_enable": true,
+    "ca_file": "security/mgmt/cert/ca.crt",
+    "cert_file": "security/mgmt/cert/server.crt",
+    "key_file": "security/mgmt/keys/server.key",
+    "passwd_file": "security/mgmt/keys/key_pwd.txt",
+    "crl_file": ""
+  },
+  "etcd_tls_config": {
+    "tls_enable": true,
+    "ca_file": "security/mgmt/cert/ca.crt",
+    "cert_file": "security/mgmt/cert/server.crt",
+    "key_file": "security/mgmt/keys/server.key",
+    "passwd_file": "security/mgmt/keys/key_pwd.txt",
+    "crl_file": ""
   },
   "timeout_config": {
     "request_timeout": 30,
@@ -87,10 +98,14 @@
     "etcd_host": "etcd.default.svc.cluster.local",
     "etcd_port": 2379,
     "etcd_timeout": 5,
-    "etcd_ca_cert": null,
-    "etcd_cert_key": null,
-    "etcd_cert_cert": null,
-    "enable_etcd_persistence": false
+    "enable_etcd_persistence": false,
+    "tls_config": {
+      "enable_tls": false,
+      "ca_cert": null,
+      "tls_cert": null,
+      "tls_key": null,
+      "tls_passwd": null
+    }
   },
   "http_config": {
     "combined_mode": false,

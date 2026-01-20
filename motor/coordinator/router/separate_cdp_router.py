@@ -1,19 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Dict, AsyncGenerator, Any
 import asyncio
 import contextlib
+from typing import Dict, AsyncGenerator, Any
 
-from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi import HTTPException, status
+from fastapi.responses import StreamingResponse, JSONResponse
 
-from motor.coordinator.models.contants import REQUEST_ID_KEY
-from motor.coordinator.models.request import ReqState
-from motor.coordinator.router.base_router import BaseRouter
 from motor.common.resources.instance import PDRole
 from motor.coordinator.core.request_manager import RequestManager
 from motor.coordinator.models.contants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX, COMPLETION_SUFFIX
+from motor.coordinator.models.contants import REQUEST_ID_KEY
+from motor.coordinator.models.request import ReqState
+from motor.coordinator.router.base_router import BaseRouter
 
 
 class SeparateCDPRouter(BaseRouter):
@@ -166,11 +166,15 @@ class SeparateCDPRouter(BaseRouter):
         host = self.config.http_config.coordinator_api_host
         port = self.config.http_config.coordinator_api_mgmt_port
 
+        if self.config.infer_tls_config.tls_enable:
+            url = f"https://{host}:{port}/v1/metaserver"
+        else:
+            url = f"http://{host}:{port}/v1/metaserver"
         req_data = self.req_info.req_data.copy()
         req_data['kv_transfer_params'] = {
             "do_remote_decode": False,
             "do_remote_prefill": True,
-            "metaserver": f"http://{host}:{port}/v1/metaserver"
+            "metaserver": url
         }
         return req_data
 

@@ -16,6 +16,7 @@ from vllm.v1.utils import APIServerProcessManager
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.utils import CoreEngineProcManager
 
+from motor.common.utils.http_client import SafeHTTPSClient
 from motor.engine_server.config.base import IConfig
 from motor.engine_server.core.base_core import BaseServerCore
 from motor.common.utils.logger import get_logger
@@ -34,7 +35,7 @@ class VLLMServerCore(BaseServerCore):
         self.core_manager: Optional[CoreEngineProcManager] = None
         self.coordinator: Optional[DPCoordinator] = None
         self._status: str = constants.INIT_STATUS
-        self._check_url = f"http://{self.args.host}:{self.args.port}/health"
+        self.infer_tls_config = config.get_server_config().deploy_config.infer_tls_config
 
     def initialize(self) -> None:
         self._register_signal_handlers()
@@ -128,8 +129,10 @@ class VLLMServerCore(BaseServerCore):
 
     def _check_api_server_ready(self):
         try:
-            response = requests.get(self._check_url, timeout=1)
-            response.raise_for_status()
+            address = f"{self.args.host}:{self.args.port}"
+            with SafeHTTPSClient(address=address, tls_config=self.infer_tls_config) as client:
+                response = client.do_get("/health")
+                response.raise_for_status()
             self._status = constants.NORMAL_STATUS
             logger.info(f"API server health check passed, status change to: {self._status}")
         except Exception as e:

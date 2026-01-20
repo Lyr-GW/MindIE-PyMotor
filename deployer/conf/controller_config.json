@@ -12,11 +12,29 @@
     "coordinator_api_dns": "127.0.0.1",
     "coordinator_api_port": 1026
   },
-  "tls_config": {
-    "enable_tls": false,
-    "ca_cert_path": "security/controller/cert/ca.crt",
-    "cert_path": "security/controller/cert/server.crt",
-    "key_path": "security/controller/keys/server.key"
+  "mgmt_tls_config": {
+    "tls_enable": true,
+    "ca_file": "security/mgmt/cert/ca.crt",
+    "cert_file": "security/mgmt/cert/server.crt",
+    "key_file": "security/mgmt/keys/server.key",
+    "passwd_file": "security/mgmt/keys/key_pwd.txt",
+    "crl_file": ""
+  },
+  "etcd_tls_config": {
+    "tls_enable": true,
+    "ca_file": "security/mgmt/cert/ca.crt",
+    "cert_file": "security/mgmt/cert/server.crt",
+    "key_file": "security/mgmt/keys/server.key",
+    "passwd_file": "security/mgmt/keys/key_pwd.txt",
+    "crl_file": ""
+  },
+  "grpc_tls_config": {
+    "tls_enable": true,
+    "ca_file": "security/mgmt/cert/ca.crt",
+    "cert_file": "security/mgmt/cert/server.crt",
+    "key_file": "security/mgmt/keys/server.key",
+    "passwd_file": "security/mgmt/keys/key_pwd.txt",
+    "crl_file": ""
   },
   "instance_config": {
     "instance_assemble_timeout": 600,

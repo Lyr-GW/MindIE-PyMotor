@@ -9,13 +9,14 @@ from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import Response
 import uvicorn
 
+from motor.common.utils.cert_util import CertUtil
+from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.heartbeat_manager import HeartbeatManager
 from motor.common.utils.logger import get_logger
 from motor.common.resources.http_msg_spec import StartCmdMsg
 from motor.node_manager.core.engine_manager import EngineManager
 from motor.node_manager.core.daemon import Daemon
 from motor.common.resources.instance import PDRole
-
 
 logger = get_logger(__name__)
 app = FastAPI()
@@ -103,7 +104,7 @@ async def get_instance_status():
 
 
 class NodeManagerAPI:
-    def __init__(self, config=None):
+    def __init__(self, config: NodeManagerConfig = None):
         self._config = config
         # Get host and port from config
         if self._config and self._config.api_config.pod_ip:
@@ -137,6 +138,17 @@ class NodeManagerAPI:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         config = uvicorn.Config(app, host=self.host, port=self.port, loop="asyncio")
+        config.load()
+        if self._config.mgmt_tls_config.tls_enable:
+            context = CertUtil.create_ssl_context(self._config.mgmt_tls_config)
+            if not context:
+                raise RuntimeError("Failed to create SSL context")
+            config.ssl = context
+
+            logger.info(f"Node Manager server started: https://{self.host}:{self.port}")
+        else:
+            logger.info(f"Node Manager server stated: http://{self.host}:{self.port}")
+
         self.server = uvicorn.Server(config)
         try:
             loop.run_until_complete(self.server.serve())

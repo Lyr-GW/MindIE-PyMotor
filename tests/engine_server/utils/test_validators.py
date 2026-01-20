@@ -3,7 +3,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
 import os
+import sys
 import tempfile
+import pytest
 from pathlib import Path
 
 from motor.engine_server.utils.validators import Validator, StringValidator, MapValidator, DirectoryValidator, \
@@ -11,6 +13,9 @@ from motor.engine_server.utils.validators import Validator, StringValidator, Map
 
 BIN_PATH = "/usr/bin"
 DIRECTORY_BLACKLIST_PATH = "/abc/d/e"
+
+# Check if running on Windows
+IS_WINDOWS = sys.platform == "win32"
 
 
 def test_validator_should_return_default_if_invalid():
@@ -56,17 +61,38 @@ def test_map_validator_should_contain_inclusive_keys():
 
 
 def test_directory_black_list():
-    assert not DirectoryValidator(DIRECTORY_BLACKLIST_PATH).with_blacklist(
-        lst=[DIRECTORY_BLACKLIST_PATH]).check().is_valid()
-    assert DirectoryValidator(DIRECTORY_BLACKLIST_PATH).with_blacklist(
-        lst=[""]).check().is_valid()
-    assert DirectoryValidator(DIRECTORY_BLACKLIST_PATH).with_blacklist(["/abc/d/"], exact_compare=True) \
-        .check().is_valid()
-    # if not exact compare, the /abc/d/e is chirldren path of /abc/d/, so it is invalid
-    assert not DirectoryValidator(DIRECTORY_BLACKLIST_PATH) \
-        .with_blacklist(["/abc/d/"], exact_compare=False).check().is_valid()
-    assert DirectoryValidator("/usr/bin/bash").with_blacklist().check().is_valid()
-    assert not DirectoryValidator("/usr/bin/bash").with_blacklist(exact_compare=False).check().is_valid()
+    # On Windows, /abc/d/e paths may not resolve correctly, so use temp directory for testing
+    if IS_WINDOWS:
+        temp_dir = tempfile.mkdtemp()
+        test_path = os.path.join(temp_dir, "test_dir")
+        os.makedirs(test_path, exist_ok=True)
+        try:
+            # Test exact match
+            assert not DirectoryValidator(test_path).with_blacklist(
+                lst=[test_path]).check().is_valid()
+            assert DirectoryValidator(test_path).with_blacklist(
+                lst=[""]).check().is_valid()
+            # Test parent path with exact_compare=True (should be valid)
+            assert DirectoryValidator(test_path).with_blacklist([temp_dir], exact_compare=True) \
+                .check().is_valid()
+            # Test parent path with exact_compare=False (should be invalid as test_path is child of temp_dir)
+            assert not DirectoryValidator(test_path) \
+                .with_blacklist([temp_dir], exact_compare=False).check().is_valid()
+        finally:
+            import shutil
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    else:
+        assert not DirectoryValidator(DIRECTORY_BLACKLIST_PATH).with_blacklist(
+            lst=[DIRECTORY_BLACKLIST_PATH]).check().is_valid()
+        assert DirectoryValidator(DIRECTORY_BLACKLIST_PATH).with_blacklist(
+            lst=[""]).check().is_valid()
+        assert DirectoryValidator(DIRECTORY_BLACKLIST_PATH).with_blacklist(["/abc/d/"], exact_compare=True) \
+            .check().is_valid()
+        # if not exact compare, the /abc/d/e is chirldren path of /abc/d/, so it is invalid
+        assert not DirectoryValidator(DIRECTORY_BLACKLIST_PATH) \
+            .with_blacklist(["/abc/d/"], exact_compare=False).check().is_valid()
+        assert DirectoryValidator("/usr/bin/bash").with_blacklist().check().is_valid()
+        assert not DirectoryValidator("/usr/bin/bash").with_blacklist(exact_compare=False).check().is_valid()
 
 
 def test_remove_prefix():
@@ -84,6 +110,10 @@ def test_directory_white_list():
 
 
 def test_directory_soft_link():
+    # Skip on Windows as creating symlinks requires admin privileges or developer mode
+    if IS_WINDOWS:
+        pytest.skip("Symlink creation requires admin privileges on Windows")
+    
     tmp = tempfile.NamedTemporaryFile(delete=True)
     temp_dir = tempfile.mkdtemp()
     path = os.path.join(temp_dir, "link.ink")
@@ -136,8 +166,10 @@ def test_file_check():
     file_path = os.path.join(os.path.dirname(__file__), "test_data", "test.txt")
     assert not FileValidator(file_path).check_file_size().check().is_valid()
     assert FileValidator(file_path).check_not_soft_link().check().is_valid()
-    os.chown(file_path, os.getuid(), os.getgid())
-    assert FileValidator(file_path).check_user_group().check().is_valid()
+    # Skip chown and check_user_group on Windows as os.chown, os.geteuid, os.getegid don't exist
+    if not IS_WINDOWS:
+        os.chown(file_path, os.getuid(), os.getgid())
+        assert FileValidator(file_path).check_user_group().check().is_valid()
 
 
 def test_int_check():

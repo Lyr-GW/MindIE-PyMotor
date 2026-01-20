@@ -87,8 +87,6 @@ class TestHeartBeatManager:
             config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])
             config.basic_config.job_name = config_data.get("model_name", "test_job")
             config.basic_config.role = PDRole(config_data.get("role", "both"))
-            config.api_config.controller_api_dns = config_data.get("controller_api_dns", "localhost")
-            config.api_config.controller_api_port = config_data.get("controller_api_port", 8080)
             config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
 
             # Set device info from hccl_data
@@ -125,10 +123,9 @@ class TestHeartBeatManager:
     @pytest.fixture
     def mock_http_client(self):
         """mock HTTP client fixture"""
-        with patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient') as mock_client_class:
-            mock_client = Mock()
-            mock_client_class.return_value = mock_client
-            yield mock_client
+        with patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat') as mock_report_heartbeat:
+            mock_report_heartbeat.return_value = None
+            yield mock_report_heartbeat
 
     @patch('motor.config.node_manager.safe_open')
     @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'})
@@ -166,35 +163,27 @@ class TestHeartBeatManager:
         assert heart_beat_manager._endpoints[0].id == 1
         assert heart_beat_manager._endpoints[1].id == 2
 
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_get_engine_server_status_success(self, mock_client_class, heart_beat_manager, sample_endpoints):
+    @patch('motor.node_manager.core.heartbeat_manager.EngineServerApiClient.query_status')
+    def test_get_engine_server_status_success(self, mock_query_status, heart_beat_manager, sample_endpoints):
         """test get engine server status success"""
-        # Mock client instance with get method returning status
-        mock_client = MagicMock()
-        mock_client.get.return_value = {"status": "normal"}
-        mock_client.close = MagicMock()
-        mock_client_class.return_value = mock_client
+        # Mock query_status to return normal status for each endpoint
+        mock_query_status.return_value = {"status": "normal"}
 
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = sample_endpoints.copy()
 
         heart_beat_manager._get_engine_server_status()
 
-        # Verify that client was created for each endpoint
-        assert mock_client_class.call_count == 2
-        # Verify that client.get was called for each endpoint with correct path
-        assert mock_client.get.call_count == 2
-        mock_client.get.assert_any_call("/status")
-        # Verify that client.close was called for each endpoint
-        assert mock_client.close.call_count == 2
+        # Verify that query_status was called for each endpoint
+        assert mock_query_status.call_count == 2
         
         # Verify that status was updated correctly
         assert heart_beat_manager._endpoints[0].status == EndpointStatus.NORMAL
         assert heart_beat_manager._endpoints[1].status == EndpointStatus.NORMAL
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_report_heartbeat_loop_success(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_report_heartbeat_loop_success(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test _report_heartbeat_loop success"""
         call_count = {"count": 0}
         
@@ -203,11 +192,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
         
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        # SafeHTTPSClient is used as context manager
-        mock_client_class.return_value.__enter__.return_value = mock_client_instance
-        mock_client_class.return_value.__exit__.return_value = None
+        mock_report_heartbeat.return_value = None
 
         # set endpoint info
         heart_beat_manager._job_name = "test_job"
@@ -224,13 +209,12 @@ class TestHeartBeatManager:
         # Call the method directly (will execute once then stop)
         heart_beat_manager._report_heartbeat_loop()
         
-        # Verify client was created and used
-        assert mock_client_class.called, "SafeHTTPSClient should be instantiated"
-        assert mock_client_instance.post.called, "post method should be called"
+        # Verify report_heartbeat was called
+        assert mock_report_heartbeat.called, "report_heartbeat should be called"
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_heartbeat_report_loop(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_heartbeat_report_loop(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test heartbeat report loop"""
         call_count = {"count": 0}
 
@@ -240,13 +224,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
 
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        mock_client_instance.close = MagicMock()
-        # SafeHTTPSClient is used as context manager in heartbeat reporting
-        mock_client_instance.__enter__.return_value = mock_client_instance
-        mock_client_instance.__exit__.return_value = None
-        mock_client_class.return_value = mock_client_instance
+        mock_report_heartbeat.return_value = None
 
         # set endpoint info
         heart_beat_manager._job_name = "test_job"
@@ -261,13 +239,12 @@ class TestHeartBeatManager:
         mock_sleep.side_effect = mock_stop_sleep
 
         heart_beat_manager._report_heartbeat_loop()
-        # assert client was called
-        assert mock_client_class.called
-        assert mock_client_instance.post.called
+        # assert report_heartbeat was called
+        assert mock_report_heartbeat.called
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_heartbeat_report_with_empty_endpoints(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_heartbeat_report_with_empty_endpoints(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test heartbeat report with empty endpoints"""
         call_count = {"count": 0}
 
@@ -277,13 +254,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
 
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        mock_client_instance.close = MagicMock()
-        # SafeHTTPSClient is used as context manager in heartbeat reporting
-        mock_client_instance.__enter__.return_value = mock_client_instance
-        mock_client_instance.__exit__.return_value = None
-        mock_client_class.return_value = mock_client_instance
+        mock_report_heartbeat.return_value = None
 
         # set endpoint info
         heart_beat_manager._job_name = "test_job"
@@ -299,8 +270,7 @@ class TestHeartBeatManager:
         heart_beat_manager._report_heartbeat_loop()
         # Even with empty endpoints, the loop should still run and send heartbeat
         # (with empty status dict)
-        assert mock_client_class.called
-        assert mock_client_instance.post.called
+        assert mock_report_heartbeat.called
 
     @patch('motor.config.node_manager.safe_open')
     @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'})
@@ -383,9 +353,9 @@ class TestHeartBeatManager:
     
     @patch('motor.node_manager.core.heartbeat_manager.threading.Thread')
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
     @patch('motor.node_manager.core.heartbeat_manager.EngineManager')
-    def test_reregister_triggered_on_503(self, mock_engine_manager_class, mock_client_class, mock_sleep, mock_thread_class, heart_beat_manager):
+    def test_reregister_triggered_on_503(self, mock_engine_manager_class, mock_report_heartbeat, mock_sleep, mock_thread_class, heart_beat_manager):
         """test that reregister is triggered when 503 error occurs"""
         call_count = {"count": 0}
         
@@ -394,9 +364,8 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
         
-        mock_client = MagicMock()
-        mock_client.post.side_effect = Exception("503 Service Unavailable")
-        mock_client_class.return_value.__enter__.return_value = mock_client
+        # Mock report_heartbeat to raise 503 error
+        mock_report_heartbeat.side_effect = Exception("503 Service Unavailable")
         
         mock_engine_manager = MagicMock()
         mock_engine_manager.post_reregister_msg.return_value = True
@@ -414,13 +383,12 @@ class TestHeartBeatManager:
         
         heart_beat_manager._report_heartbeat_loop()
         
-        # Verify that reregister thread was created and started (only if 503 was detected)
-        # The thread creation happens in the exception handler
-        assert mock_thread_class.call_count >= 0  # May or may not be called depending on exception handling
+        # Verify that reregister was called (via EngineManager)
+        mock_engine_manager.post_reregister_msg.assert_called()
     
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_reregister_lock_thread_safety(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_reregister_lock_thread_safety(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test that _reregister_lock prevents concurrent reregister attempts"""
         call_count = {"count": 0}
         
@@ -429,9 +397,8 @@ class TestHeartBeatManager:
                 heart_beat_manager.stop_event.set()
             call_count["count"] += 1
         
-        mock_client = MagicMock()
-        mock_client.post.side_effect = Exception("503 Service Unavailable")
-        mock_client_class.return_value.__enter__.return_value = mock_client
+        # Mock report_heartbeat to raise 503 error
+        mock_report_heartbeat.side_effect = Exception("503 Service Unavailable")
         
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
@@ -463,8 +430,8 @@ class TestHeartBeatManager:
         assert heart_beat_manager._consecutive_abnormal_count == 0
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_consecutive_abnormal_heartbeat_counting(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_consecutive_abnormal_heartbeat_counting(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test that consecutive abnormal heartbeats are counted correctly"""
         call_count = {"count": 0}
         
@@ -473,11 +440,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 6:  # Run 6 times to test 5 consecutive abnormal
                 heart_beat_manager.stop_event.set()
         
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        mock_client_instance.__enter__.return_value = mock_client_instance
-        mock_client_instance.__exit__.return_value = None
-        mock_client_class.return_value = mock_client_instance
+        mock_report_heartbeat.return_value = None
 
         # Set endpoint info with abnormal status
         heart_beat_manager._job_name = "test_job"
@@ -500,8 +463,8 @@ class TestHeartBeatManager:
         assert heart_beat_manager._consecutive_abnormal_count >= 5
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_abnormal_count_reset_on_normal_status(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_abnormal_count_reset_on_normal_status(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test that abnormal count resets when status returns to normal"""
         call_count = {"count": 0}
         
@@ -515,11 +478,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 3:
                 heart_beat_manager.stop_event.set()
         
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        mock_client_instance.__enter__.return_value = mock_client_instance
-        mock_client_instance.__exit__.return_value = None
-        mock_client_class.return_value = mock_client_instance
+        mock_report_heartbeat.return_value = None
 
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
@@ -555,8 +514,8 @@ class TestHeartBeatManager:
         assert heart_beat_manager.should_suicide() is False
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_suicide_flag_set_after_five_abnormal_heartbeats(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_suicide_flag_set_after_five_abnormal_heartbeats(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test that suicide flag is set exactly after 5 consecutive abnormal heartbeats"""
         call_count = {"count": 0}
         
@@ -565,11 +524,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 5:
                 heart_beat_manager.stop_event.set()
         
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        mock_client_instance.__enter__.return_value = mock_client_instance
-        mock_client_instance.__exit__.return_value = None
-        mock_client_class.return_value = mock_client_instance
+        mock_report_heartbeat.return_value = None
 
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1
@@ -593,8 +548,8 @@ class TestHeartBeatManager:
         assert heart_beat_manager._consecutive_abnormal_count == 5
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.SafeHTTPSClient')
-    def test_multiple_endpoints_abnormal_triggers_suicide(self, mock_client_class, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
+    def test_multiple_endpoints_abnormal_triggers_suicide(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test that if any endpoint is abnormal, it counts towards suicide"""
         call_count = {"count": 0}
         
@@ -603,11 +558,7 @@ class TestHeartBeatManager:
             if call_count["count"] >= 5:
                 heart_beat_manager.stop_event.set()
         
-        mock_client_instance = MagicMock()
-        mock_client_instance.post.return_value = {}
-        mock_client_instance.__enter__.return_value = mock_client_instance
-        mock_client_instance.__exit__.return_value = None
-        mock_client_class.return_value = mock_client_instance
+        mock_report_heartbeat.return_value = None
 
         heart_beat_manager._job_name = "test_job"
         heart_beat_manager._instance_id = 1

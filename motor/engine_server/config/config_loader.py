@@ -7,6 +7,8 @@ from typing import Dict, Any
 import json
 from pathlib import Path
 
+from motor.config.tls_config import TLSConfig
+
 
 @dataclass
 class ParallelConfig:
@@ -65,6 +67,8 @@ class DeployConfig:
     engine_type: str
     model_config: ModelConfig
     engine_config: EngineConfig
+    mgmt_tls_config: TLSConfig
+    infer_tls_config: TLSConfig
 
     @classmethod
     def load(cls, file_path: str | Path) -> "DeployConfig":
@@ -79,7 +83,9 @@ class DeployConfig:
         return cls(
             engine_type=data["engine_type"],
             model_config=ModelConfig.from_dict(data["model_config"]),
-            engine_config=EngineConfig.from_dict(data["engine_config"])
+            engine_config=EngineConfig.from_dict(data["engine_config"]),
+            mgmt_tls_config=TLSConfig.from_dict(data["mgmt_tls_config"]),
+            infer_tls_config=TLSConfig.from_dict(data["infer_tls_config"])
         )
 
     def get_parallel_config(self, role: str = "union") -> ParallelConfig:

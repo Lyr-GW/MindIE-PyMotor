@@ -67,9 +67,9 @@ def mock_config():
     # Disable ETCD persistence for most tests to avoid complexity
     config.etcd_config.enable_etcd_persistence = False
     config.instance_config.instance_assemble_timeout = 1.0  # Fast timeout for tests
-    config.instance_assembler_check_internal = 0.1
-    config.instance_assembler_cmd_send_internal = 0.1
-    config.send_cmd_retry_times = 3
+    config.instance_config.instance_assembler_check_internal = 0.1
+    config.instance_config.instance_assembler_cmd_send_internal = 0.1
+    config.instance_config.send_cmd_retry_times = 3
     return config
 
 
@@ -1133,6 +1133,7 @@ def test_update_config(instance_assembler):
 
     # Store original etcd config
     original_etcd_config = instance_assembler.etcd_config
+    original_etcd_tls_config = instance_assembler.etcd_tls_config
 
     # Create new config with different ETCD settings
     from motor.config.controller import ControllerConfig
@@ -1159,12 +1160,11 @@ def test_update_config(instance_assembler):
         assert instance_assembler.etcd_config.etcd_timeout == 30.0
 
         # Verify ETCD client constructor was called with new config
+        # Note: update_config doesn't update etcd_tls_config, so it uses the original one
         mock_etcd_class.assert_called_once_with(
             host="new-etcd-host",
             port=2380,
-            ca_cert=new_config.etcd_config.etcd_ca_cert,
-            cert_key=new_config.etcd_config.etcd_cert_key,
-            cert_cert=new_config.etcd_config.etcd_cert_cert,
+            tls_config=original_etcd_tls_config,
             timeout=30.0
         )
 
@@ -1383,17 +1383,14 @@ def test_filter_abnormal_endpoints_all_normal(instance_assembler, test_config):
     instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")
     instance.add_node_mgr("127.0.0.2", "127.0.0.2", "8088")
 
-    # Mock SafeHTTPSClient to return normal status
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value.__enter__.return_value = mock_client
-        mock_client.get.return_value = {"status": True}
+    # Mock NodeManagerApiClient.query_status to return normal status
+    with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
+        mock_query_status.return_value = {"status": True}
 
         instance_assembler._filter_abnormal_endpoints(instance)
 
-        # Verify SafeHTTPSClient was called for each node manager
-        assert mock_client_class.call_count == 2
-        mock_client.get.assert_called_with("/node-manager/status")
+        # Verify query_status was called for each node manager
+        assert mock_query_status.call_count == 2
 
 
 def test_filter_abnormal_endpoints_with_abnormal(instance_assembler, test_config):
@@ -1417,13 +1414,10 @@ def test_filter_abnormal_endpoints_with_abnormal(instance_assembler, test_config
     instance.add_endpoints("127.0.0.1", endpoints1)
     instance.add_endpoints("127.0.0.2", endpoints2)
 
-    # Mock SafeHTTPSClient - first normal, second abnormal
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value.__enter__.return_value = mock_client
-
+    # Mock NodeManagerApiClient.query_status - first normal, second abnormal
+    with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
         # First call returns normal, second returns abnormal
-        mock_client.get.side_effect = [{"status": True}, {"status": False}]
+        mock_query_status.side_effect = [{"status": True}, {"status": False}]
 
         instance_assembler._filter_abnormal_endpoints(instance)
 
@@ -1449,11 +1443,9 @@ def test_filter_abnormal_endpoints_invalid_response(instance_assembler, test_con
     endpoints = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
     instance.add_endpoints("127.0.0.1", endpoints)
 
-    # Mock SafeHTTPSClient to return invalid response
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client = MagicMock()
-        mock_client_class.return_value.__enter__.return_value = mock_client
-        mock_client.get.return_value = {"invalid": "response"}  # No 'status' field
+    # Mock NodeManagerApiClient.query_status to return invalid response
+    with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
+        mock_query_status.return_value = {"invalid": "response"}  # No 'status' field
 
         instance_assembler._filter_abnormal_endpoints(instance)
 
@@ -1478,9 +1470,9 @@ def test_filter_abnormal_endpoints_connection_error(instance_assembler, test_con
     endpoints = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
     instance.add_endpoints("127.0.0.1", endpoints)
 
-    # Mock SafeHTTPSClient to raise exception
-    with patch('motor.controller.core.instance_assembler.SafeHTTPSClient') as mock_client_class:
-        mock_client_class.return_value.__enter__.side_effect = Exception("Connection failed")
+    # Mock NodeManagerApiClient.query_status to raise exception
+    with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
+        mock_query_status.side_effect = Exception("Connection failed")
 
         instance_assembler._filter_abnormal_endpoints(instance)
 

@@ -10,6 +10,7 @@ from typing import Any, Type, TypeVar
 import grpc
 from pydantic import BaseModel
 
+from motor.config.tls_config import TLSConfig
 from motor.common.utils.proto import rpc_pb2, rpc_pb2_grpc
 from motor.common.utils import locks
 from motor.common.utils.logger import get_logger
@@ -26,20 +27,11 @@ RB = 'rb'
 class EtcdClient:
     """Etcd client with lease lock management and JSON data storage"""
 
-    def __init__(
-        self,
-        host: str = "localhost",
-        port: int = 2379,
-        ca_cert: str | None = None,
-        cert_key: str | None = None,
-        cert_cert: str | None = None,
-        timeout: int = 5
-    ) -> None:
+    def __init__(self, host: str = "localhost", port: int = 2379, tls_config: TLSConfig | None = None,
+                 timeout: int = 5) -> None:
         self.host = host
         self.port = port
-        self.ca_cert = ca_cert
-        self.cert_key = cert_key
-        self.cert_cert = cert_cert
+        self.tls_config = tls_config
         self.timeout = timeout
         self.channel = None
         self.kv_stub = None
@@ -48,12 +40,12 @@ class EtcdClient:
         self._lock = threading.Lock()
 
         try:
-            if ca_cert and cert_key and cert_cert:
-                with open(ca_cert, RB) as f:
+            if tls_config and tls_config.tls_enable:
+                with open(tls_config.ca_file, RB) as f:
                     root_cert = f.read()
-                with open(cert_key, RB) as f:
+                with open(tls_config.key_file, RB) as f:
                     private_key = f.read()
-                with open(cert_cert, RB) as f:
+                with open(tls_config.cert_file, RB) as f:
                     cert_chain = f.read()
                 creds = grpc.ssl_channel_credentials(
                     root_certificates=root_cert,

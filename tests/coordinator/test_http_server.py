@@ -1772,6 +1772,7 @@ class TestFastAPIMiddlewareAdvanced:
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_run_combined_mode(monkeypatch):
     from motor.coordinator.api_server.coordinator_server import CoordinatorServer
     from motor.config.coordinator import CoordinatorConfig
@@ -1791,12 +1792,16 @@ async def test_run_combined_mode(monkeypatch):
 
     cfg = CoordinatorConfig()
     cfg.http_config.combined_mode = True
+    # Disable TLS for testing
+    cfg.infer_tls_config.tls_enable = False
+    cfg.mgmt_tls_config.tls_enable = False
 
     srv = CoordinatorServer(config=cfg)
     await srv.run()
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_run_split_mode(monkeypatch):
     from motor.coordinator.api_server.coordinator_server import CoordinatorServer
     from motor.config.coordinator import CoordinatorConfig
@@ -1819,6 +1824,9 @@ async def test_run_split_mode(monkeypatch):
 
     cfg = CoordinatorConfig()
     cfg.http_config.combined_mode = False
+    # Disable TLS for testing
+    cfg.infer_tls_config.tls_enable = False
+    cfg.mgmt_tls_config.tls_enable = False
 
     srv = CoordinatorServer(config=cfg)
     await srv.run()

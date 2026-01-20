@@ -24,5 +24,21 @@
     "gpu_memory_utilization": 0.9,
     "tensor_parallel_size": 4,
     "max_context_len_to_capture": 8192
+  },
+  "mgmt_tls_config": {
+    "tls_enable": false,
+    "ca_file": "",
+    "cert_file": "",
+    "key_file": "",
+    "passwd_file": "",
+    "crl_file": ""
+  },
+  "infer_tls_config": {
+    "tls_enable": false,
+    "ca_file": "",
+    "cert_file": "",
+    "key_file": "",
+    "passwd_file": "",
+    "crl_file": ""
   }
 }

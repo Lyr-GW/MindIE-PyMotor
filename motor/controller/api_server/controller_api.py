@@ -13,12 +13,13 @@ from fastapi import FastAPI, Request, HTTPException
 
 from motor.common.resources import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
 from motor.common.standby.standby_manager import StandbyManager, StandbyRole
+from motor.common.utils.cert_util import CertUtil
 from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client import NodeManagerApiClient
 from motor.controller.api_server import om_api
-from motor.controller.core import InstanceAssembler, InstanceManager
-
+from motor.controller.core.instance_assembler import InstanceAssembler
+from motor.controller.core.instance_manager import InstanceManager
 
 logger = get_logger(__name__)
 
@@ -41,7 +42,7 @@ class ControllerAPI:
 
         # Extract required config fields for TLS and standby mode
         self.enable_master_standby = config.standby_config.enable_master_standby
-        self.tls_config = config.tls_config
+        self.mgmt_tls_config = config.mgmt_tls_config
 
         self.modules = modules
         self.config_lock = threading.RLock()
@@ -84,22 +85,11 @@ class ControllerAPI:
         # Only update the extracted config fields for future use
         with self.config_lock:
             self.enable_master_standby = config.standby_config.enable_master_standby
-            self.tls_config = config.tls_config
+            self.mgmt_tls_config = config.mgmt_tls_config
             logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
 
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI):
-        with self.config_lock:
-            enable_tls = self.tls_config.enable_tls
-            cert_path = self.tls_config.cert_path
-            key_path = self.tls_config.key_path
-        if enable_tls:
-            try:
-                validate_cert_and_key(cert_path, key_path)
-                logger.info("Cert and key validate pass: %s, %s", cert_path, key_path)
-            except Exception as e:
-                logger.error("Cert or key validate failed: %s", e)
-                raise
         logger.info("API server startup started")
         yield
         logger.info("API server shutdown completed")
@@ -112,7 +102,7 @@ class ControllerAPI:
             "/controller/heartbeat": logging.ERROR,
             "/controller/register": logging.INFO,
             "/controller/reregister": logging.INFO,
-            "/controller/terminate-instance": logging.INFO,
+            "/controller/terminate_instance": logging.INFO,
             "/v1/alarm/coordinator": logging.ERROR,
             "/startup": logging.ERROR,
             "/readiness": logging.ERROR,
@@ -173,24 +163,18 @@ class ControllerAPI:
 
     def _run_api_server(self) -> None:
         try:
-            enable_tls = os.environ.get("ENABLE_TLS", "0").lower() in ("1", "true", "yes")
-            logger.info("Starting API server on %s:%d TLS=%s", self.host, self.port, enable_tls)
-            if enable_tls:
-                with self.config_lock:
-                    default_cert_path = self.tls_config.cert_path
-                    default_key_path = self.tls_config.key_path
-                cert_path = os.environ.get("CERT_PATH", default_cert_path)
-                key_path = os.environ.get("KEY_PATH", default_key_path)
-                server_config = uvicorn.Config(
-                    self.app,
-                    host=self.host, 
-                    port=self.port, 
-                    log_level="info", 
-                    ssl_certfile=cert_path, 
-                    ssl_keyfile=key_path
-                )
+            server_config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info")
+            if self.mgmt_tls_config.tls_enable:
+                server_config.load()
+                context = CertUtil.create_ssl_context(self.mgmt_tls_config)
+                if not context:
+                    raise RuntimeError("Failed to create SSL context")
+
+                server_config.ssl = context
+                logger.info(f"Starting Controller API server on https://{self.host}:{self.port}")
             else:
-                server_config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="info")
+                logger.info(f"Starting Controller API server on http://{self.host}:{self.port}")
+
             self.server = uvicorn.Server(server_config)
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)

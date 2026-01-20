@@ -1,22 +1,22 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-import time
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import asdict
+
 from fastapi import HTTPException
 
-from motor.config.controller import ControllerConfig
-from motor.common.utils.logger import get_logger
-from motor.controller.core import Observer, ObserverEvent
-from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.common.utils.etcd_client import EtcdClient
-from motor.common.utils.persistent_state import PersistentState
-from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.resources import (HeartbeatMsg, Instance, InsStatus,
                                     InsConditionEvent, ReadOnlyInstance, EndpointStatus)
-
+from motor.common.utils.etcd_client import EtcdClient
+from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.utils.logger import get_logger
+from motor.common.utils.persistent_state import PersistentState
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.config.controller import ControllerConfig
+from motor.controller.core import Observer, ObserverEvent
 
 logger = get_logger(__name__)
 
@@ -62,6 +62,7 @@ class InstanceManager(ThreadSafeSingleton):
         # Extract required config fields
         with self.config_lock:
             self.etcd_config = config.etcd_config
+            self.etcd_tls_config = config.etcd_tls_config
             self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
 
         # Version control for data persistence
@@ -72,9 +73,7 @@ class InstanceManager(ThreadSafeSingleton):
             self.etcd_client = EtcdClient(
                 host=self.etcd_config.etcd_host,
                 port=self.etcd_config.etcd_port,
-                ca_cert=self.etcd_config.etcd_ca_cert,
-                cert_key=self.etcd_config.etcd_cert_key,
-                cert_cert=self.etcd_config.etcd_cert_cert,
+                tls_config=self.etcd_tls_config,
                 timeout=self.etcd_config.etcd_timeout
             )
 
@@ -160,15 +159,14 @@ class InstanceManager(ThreadSafeSingleton):
         with self.config_lock:
             # Update config fields
             self.etcd_config = config.etcd_config
+            self.etcd_tls_config = config.etcd_tls_config
             self.instance_manager_check_internal = config.instance_config.instance_manager_check_internal
 
             # Update ETCD client with new configuration
             self.etcd_client = EtcdClient(
                 host=self.etcd_config.etcd_host,
                 port=self.etcd_config.etcd_port,
-                ca_cert=self.etcd_config.etcd_ca_cert,
-                cert_key=self.etcd_config.etcd_cert_key,
-                cert_cert=self.etcd_config.etcd_cert_cert,
+                tls_config=self.etcd_tls_config,
                 timeout=self.etcd_config.etcd_timeout
             )
             logger.info("InstanceManager configuration updated")
@@ -582,8 +580,8 @@ class InstanceManager(ThreadSafeSingleton):
 
         for node_mgr in node_managers:
             try:
-                node_mgr_url = f"http://{node_mgr.pod_ip}:{node_mgr.port}"
-                with SafeHTTPSClient(base_url=node_mgr_url, timeout=1.0) as client:
+                node_mgr_url = f"{node_mgr.pod_ip}:{node_mgr.port}"
+                with SafeHTTPSClient(address=node_mgr_url, timeout=1.0) as client:
                     response = client.get("/node-manager/status")
                     if isinstance(response, dict) and "status" in response:
                         is_normal = response.get("status", False)

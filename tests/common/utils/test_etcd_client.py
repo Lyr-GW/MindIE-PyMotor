@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from motor.common.utils import locks
 from motor.common.utils.etcd_client import EtcdClient
 from motor.common.utils.proto import rpc_pb2, rpc_pb2_grpc
+from motor.config.tls_config import TLSConfig
 
 
 @pytest.fixture
@@ -16,6 +17,13 @@ def base_client_with_ssl():
     mock_kv_stub = MagicMock()
     mock_lease_stub = MagicMock()
 
+    tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file="ca_cert_path",
+        key_file="cert_key_path",
+        cert_file="cert_cert_path"
+    )
+
     with patch("grpc.secure_channel", return_value=mock_channel), \
             patch.object(rpc_pb2_grpc, "KVStub", return_value=mock_kv_stub), \
             patch.object(rpc_pb2_grpc, "LeaseStub", return_value=mock_lease_stub), \
@@ -23,9 +31,7 @@ def base_client_with_ssl():
         client = EtcdClient(
             host="test_host",
             port=1234,
-            ca_cert="ca_cert_path",
-            cert_key="cert_key_path",
-            cert_cert="cert_cert_path",
+            tls_config=tls_config,
             timeout=10
         )
         return client
@@ -36,9 +42,7 @@ def test_init_default_parameters():
     client = EtcdClient()
     assert client.host == "localhost"
     assert client.port == 2379
-    assert client.ca_cert is None
-    assert client.cert_key is None
-    assert client.cert_cert is None
+    assert client.tls_config is None
     assert client.timeout == 5
     assert client.channel is not None
     assert client.kv_stub is not None
@@ -52,6 +56,13 @@ def test_init_with_certificates():
     mock_kv_stub = MagicMock()
     mock_lease_stub = MagicMock()
 
+    tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file="ca_cert_path",
+        key_file="cert_key_path",
+        cert_file="cert_cert_path"
+    )
+
     with patch("grpc.secure_channel", return_value=mock_channel), \
             patch.object(rpc_pb2_grpc, "KVStub", return_value=mock_kv_stub), \
             patch.object(rpc_pb2_grpc, "LeaseStub", return_value=mock_lease_stub), \
@@ -59,17 +70,16 @@ def test_init_with_certificates():
         client = EtcdClient(
             host="test_host",
             port=1234,
-            ca_cert="ca_cert_path",
-            cert_key="cert_key_path",
-            cert_cert="cert_cert_path",
+            tls_config=tls_config,
             timeout=10
         )
 
         assert client.host == "test_host"
         assert client.port == 1234
-        assert client.ca_cert == "ca_cert_path"
-        assert client.cert_key == "cert_key_path"
-        assert client.cert_cert == "cert_cert_path"
+        assert client.tls_config == tls_config
+        assert client.tls_config.ca_file == "ca_cert_path"
+        assert client.tls_config.key_file == "cert_key_path"
+        assert client.tls_config.cert_file == "cert_cert_path"
         assert client.timeout == 10
         assert client.channel == mock_channel
         assert client.kv_stub == mock_kv_stub
@@ -78,13 +88,17 @@ def test_init_with_certificates():
 
 def test_init_with_missing_certificates():
     """Test initialization with missing certificate files."""
+    tls_config = TLSConfig(
+        tls_enable=True,
+        ca_file="ca_cert_path",
+        key_file="cert_key_path",
+        cert_file="cert_cert_path"
+    )
     with patch("builtins.open", side_effect=FileNotFoundError("File not found")):
         client = EtcdClient(
             host="test_host",
             port=1234,
-            ca_cert="ca_cert_path",
-            cert_key="cert_key_path",
-            cert_cert="cert_cert_path",
+            tls_config=tls_config,
             timeout=10
         )
         assert client.host == "test_host"
@@ -123,8 +137,17 @@ def test_prefix_range_end_empty_string():
 
 
 def test_acquire_lock_success(base_client_with_ssl):
-    result = base_client_with_ssl.acquire_lock("test_key")
-    assert result is not None
+    with patch.object(locks, "Lock") as mock_lock_class:
+        mock_lock = MagicMock()
+        mock_lock.acquire.return_value = True
+        mock_lock.lease_id = 12345
+        mock_uuid_bytes = b"test_uuid_bytes"
+        mock_lock.uuid = mock_uuid_bytes
+        mock_lock_class.return_value = mock_lock
+
+        result = base_client_with_ssl.acquire_lock("test_key")
+        assert result is not None
+        assert result == str(mock_uuid_bytes)
 
 
 def test_acquire_lock_failure(base_client_with_ssl):

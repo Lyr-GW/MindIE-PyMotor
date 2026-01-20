@@ -14,6 +14,7 @@ from motor.common.utils.logger import LoggingConfig, reconfigure_logging, get_lo
 from motor.common.utils.env import Env
 from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
+from motor.config.tls_config import TLSConfig
 
 logger = get_logger(__name__)
 
@@ -99,13 +100,6 @@ class ExceptionConfig:
 
 
 @dataclass
-class TLSConfig:
-    enable_tls: bool = False
-    items: dict[str, str] = field(default_factory=_default_tls_items)
-    check_files: bool = True
-
-
-@dataclass
 class TimeoutConfig:
     request_timeout: int = 30
     connection_timeout: int = 10
@@ -147,6 +141,16 @@ class RateLimitConfig:
 
 
 @dataclass
+class ApiConfig:
+    """API configuration class"""
+
+    # controller API configuration
+    coordinator_api_host: str = field(default_factory=lambda: Env.pod_ip or '127.0.0.1')
+    coordinator_api_dns: str = field(default_factory=lambda: Env.coordinator_service or '127.0.0.1')
+    coordinator_api_port: int = 1026
+
+
+@dataclass
 class CoordinatorConfig:
     """Coordinator configuration class with validation, reload and error handling support"""
 
@@ -154,7 +158,9 @@ class CoordinatorConfig:
     prometheus_metrics_config: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
     exception_config: ExceptionConfig = field(default_factory=ExceptionConfig)
     scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
-    tls_config: TLSConfig = field(default_factory=TLSConfig)
+    infer_tls_config: TLSConfig = field(default_factory=TLSConfig)
+    mgmt_tls_config: TLSConfig = field(default_factory=TLSConfig)
+    etcd_tls_config: TLSConfig = field(default_factory=TLSConfig)
     timeout_config: TimeoutConfig = field(default_factory=TimeoutConfig)
     api_key_config: APIKeyConfig = field(default_factory=APIKeyConfig)
     rate_limit_config: RateLimitConfig = field(default_factory=RateLimitConfig)
@@ -162,6 +168,7 @@ class CoordinatorConfig:
     etcd_config: EtcdConfig = field(default_factory=EtcdConfig)
     http_config: HttpConfig = field(default_factory=HttpConfig)
     aigw_model: dict[str, Any] | None = None
+    api_config: ApiConfig = field(default_factory=ApiConfig)
 
     # internal fields
     config_path: str | None = field(default=None, init=False)
@@ -232,26 +239,15 @@ class CoordinatorConfig:
                 ('standby_config', config.standby_config, None),
                 ('etcd_config', config.etcd_config, None),
                 ('http_config', config.http_config, None),
+                ('infer_tls_config', config.infer_tls_config, None),
+                ('mgmt_tls_config', config.mgmt_tls_config, None),
+                ('etcd_tls_config', config.etcd_tls_config, None),
+                ('api_config', config.api_config, None),
             ]
 
             for section_name, config_obj, special_handlers in config_mappings:
                 if section_name in cfg:
                     update_config_from_dict(config_obj, cfg[section_name], special_handlers)
-
-            # Handle TLS config separately due to its special structure
-            if 'tls_config' in cfg:
-                tls_config = cfg['tls_config']
-                if 'request_server_tls_enable' in tls_config and tls_config['request_server_tls_enable']:
-                    config.tls_config.enable_tls = True
-                    if 'request_server_tls_items' in tls_config:
-                        config.tls_config.items.update(tls_config['request_server_tls_items'])
-                    config.tls_config.check_files = config.check_mounted_files
-
-                if 'etcd_client_tls_enable' in tls_config and tls_config['etcd_client_tls_enable']:
-                    config.etcd_client_tls.enable_tls = True
-                    if 'etcd_client_tls_items' in tls_config:
-                        config.etcd_client_tls.items.update(tls_config['etcd_client_tls_items'])
-                    config.etcd_client_tls.check_files = config.check_mounted_files
 
             if 'aigw' in cfg:
                 config.aigw_model = dict(cfg['aigw'])
@@ -484,7 +480,9 @@ class CoordinatorConfig:
             f"    └─ Scheduler Type:      {self.scheduler_config.scheduler_type.value}\n"
             "\n"
             "  Security:\n"
-            f"    ├─ TLS:                 {'Enabled' if self.tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ Infer TLS:           {'Enabled' if self.infer_tls_config.tls_enable else 'Disabled'}\n"
+            f"    ├─ Management TLS:      {'Enabled' if self.mgmt_tls_config.tls_enable else 'Disabled'}\n"
+            f"    ├─ Etcd TLS:            {'Enabled' if self.etcd_tls_config.tls_enable else 'Disabled'}\n"
             f"    ├─ API Key Auth:        {'Enabled' if self.api_key_config.enable_api_key else 'Disabled'}\n"
             f"    └─ Rate Limiting:       {'Enabled' if self.rate_limit_config.enable_rate_limit else 'Disabled'}\n"
             "\n"

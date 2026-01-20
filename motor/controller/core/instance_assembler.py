@@ -1,21 +1,21 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-import time
 import threading
-from enum import Enum
+import time
 from dataclasses import dataclass, asdict
+from enum import Enum
 
-from motor.common.utils.logger import get_logger
-from motor.common.utils.data_builder import build_ins_ranktable, build_endpoints
-from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.common.utils.persistent_state import PersistentState
 from motor.common.resources import RegisterMsg, StartCmdMsg, ReregisterMsg, Instance, Endpoint
-from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
-from motor.controller.core import InstanceManager
-from motor.config.controller import ControllerConfig
+from motor.common.utils.data_builder import build_ins_ranktable, build_endpoints
 from motor.common.utils.etcd_client import EtcdClient
 from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.utils.logger import get_logger
+from motor.common.utils.persistent_state import PersistentState
+from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.config.controller import ControllerConfig
+from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
+from motor.controller.core import InstanceManager
 
 logger = get_logger(__name__)
 
@@ -61,6 +61,7 @@ class InstanceAssembler(ThreadSafeSingleton):
         # Extract required config fields
         with self.config_lock:
             self.etcd_config = config.etcd_config
+            self.etcd_tls_config = config.etcd_tls_config
             self.instance_assemble_timeout = config.instance_config.instance_assemble_timeout
             self.instance_assembler_check_internal = config.instance_config.instance_assembler_check_internal
             self.instance_assembler_cmd_send_internal = config.instance_config.instance_assembler_cmd_send_internal
@@ -74,9 +75,7 @@ class InstanceAssembler(ThreadSafeSingleton):
             self.etcd_client = EtcdClient(
                 host=self.etcd_config.etcd_host,
                 port=self.etcd_config.etcd_port,
-                ca_cert=self.etcd_config.etcd_ca_cert,
-                cert_key=self.etcd_config.etcd_cert_key,
-                cert_cert=self.etcd_config.etcd_cert_cert,
+                tls_config=self.etcd_tls_config,
                 timeout=self.etcd_config.etcd_timeout
             )
 
@@ -154,9 +153,7 @@ class InstanceAssembler(ThreadSafeSingleton):
             self.etcd_client = EtcdClient(
                 host=self.etcd_config.etcd_host,
                 port=self.etcd_config.etcd_port,
-                ca_cert=self.etcd_config.etcd_ca_cert,
-                cert_key=self.etcd_config.etcd_cert_key,
-                cert_cert=self.etcd_config.etcd_cert_cert,
+                tls_config=self.etcd_tls_config,
                 timeout=self.etcd_config.etcd_timeout
             )
             logger.info("InstanceAssembler configuration updated")
@@ -611,28 +608,17 @@ class InstanceAssembler(ThreadSafeSingleton):
     def _is_node_manager_abnormal(self, node_mgr, instance: Instance) -> bool:
         """Check if a node manager is abnormal and log appropriate messages."""
         try:
-            node_mgr_url = f"http://{node_mgr.pod_ip}:{node_mgr.port}"
-            with SafeHTTPSClient(base_url=node_mgr_url, timeout=1.0) as client:
-                response = client.get("/node-manager/status")
-
-                if isinstance(response, dict) and "status" in response:
-                    is_normal = response.get("status", False)
-                    if not is_normal:
-                        logger.warning("Node manager %s:%s reports abnormal endpoints for instance %s(id:%d), "
-                                       "removing endpoints",
-                                       node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id)
-                        return True
-                else:
-                    logger.warning("Invalid response from node manager %s:%s for instance %s(id:%d): %s, "
-                                   "removing endpoints",
-                                   node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, response)
-                    return True
+            response = NodeManagerApiClient.query_status(node_mgr)
+            is_normal = response.get("status", False)
+            if not is_normal:
+                logger.warning("Node manager %s:%s reports abnormal endpoints for instance %s(id:%d), "
+                               "removing endpoints",
+                               node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id)
+            return not is_normal
         except Exception as e:
             logger.warning("Failed to check node manager %s:%s status for instance %s(id:%d): %s, "
-                           "removing endpoints",
-                           node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, e)
+                           "removing endpoints", node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, e)
             return True
-        return False
 
     def _get_next_version(self) -> int:
         """Get next data version for persistence"""

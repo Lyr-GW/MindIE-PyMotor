@@ -2,18 +2,17 @@
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 
-import time
-import threading
-from enum import Enum
 import re
-import requests
+import threading
+import time
+from enum import Enum
 
+from motor.common.resources.instance import Instance
+from motor.common.utils.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
-from motor.common.resources.instance import Instance
+from motor.coordinator.api_client.engine_server_api_client import EngineServerApiClient
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.common.utils.logger import get_logger
-
 
 logger = get_logger(__name__)
 
@@ -154,21 +153,7 @@ class MetricsCollector(ThreadSafeSingleton):
         :param port: engine server port
         :returns: engine server metrics. If request failed, return "".
         """
-
-        url = f"http://{ip}:{port}/metrics"
-        try:
-            response = requests.get(url)
-
-            if response.status_code == 200:
-                data = response.text
-                return data
-            else:
-                logger.warning(f"[Metrics] request metrics failed: code = {response.status_code}")
-
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"[Metrics] request metrics failed: {e}")
-
-        return ""
+        return EngineServerApiClient.query_metrics(f"{ip}:{port}")
 
     def _get_server_metrics_endpoints(self, ins_info: Instance) -> dict[str, dict[int, str]]:
         """

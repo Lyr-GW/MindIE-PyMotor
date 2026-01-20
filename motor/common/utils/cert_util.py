@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 # coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2012-2020. All rights reserved.
-
 import datetime
-import json
 import os
-import stat
 import ssl
+import stat
 from datetime import timezone
 from ssl import Purpose, create_default_context
-from typing import Any, Dict, Optional, Union
+from typing import Dict, Optional
 
 from OpenSSL import crypto
 from cryptography import x509 as crypt_x509
 from cryptography.x509.oid import ExtensionOID
 
+from motor.common.utils.common_util import clear_passwd
 from motor.common.utils.logger import get_logger
+from motor.common.utils.password_decryptor import PasswordDecryptor
+from motor.config.tls_config import TLSConfig
 
 CryptoX509 = crypto.X509
 
@@ -231,7 +232,7 @@ def _check_invalid_ssl_path(ssl_options: Dict[str, str], required_keys: Optional
         check_single(ssl_key, ssl_options[ssl_key])
 
 
-class CertUtil:
+class CertValidationUtil:
     """Certificate utility class"""
     
     @classmethod
@@ -372,7 +373,7 @@ class CertUtil:
 
             # Calculate fingerprint
             fingerprint = ca_cert.digest(pkey_algorithm).decode(decode_format)
-            logger.info(f"CA path: {os.path.basename(ca_crt_path)} pKeyAlgorithm: {pkey_algorithm} "
+            logger.debug(f"CA path: {os.path.basename(ca_crt_path)} pKeyAlgorithm: {pkey_algorithm} "
                        f"Fingerprint: {fingerprint}")
 
             # Check if certificate has expired
@@ -576,7 +577,7 @@ class CertUtil:
             return False
 
 
-class CoordinatorCertUtil:
+class CertUtil:
     """Coordinator certificate utility class"""
     
     @staticmethod
@@ -590,7 +591,7 @@ class CoordinatorCertUtil:
         Returns:
             Certificate information dictionary
         """
-        return CertUtil.query_cert_info(cert_file)
+        return CertValidationUtil.query_cert_info(cert_file)
     
     @staticmethod
     def query_crl_info(crl_file: str) -> list:
@@ -603,7 +604,7 @@ class CoordinatorCertUtil:
         Returns:
             CRL information list
         """
-        return CertUtil.query_crl_info(crl_file)
+        return CertValidationUtil.query_crl_info(crl_file)
     
     @staticmethod
     def validate_certificate_chain(
@@ -628,19 +629,19 @@ class CoordinatorCertUtil:
         """
         try:
             # Validate CA certificate
-            if not CertUtil.validate_ca_certs(ca_file):
+            if not CertValidationUtil.validate_ca_certs(ca_file):
                 logger.error("CA certificate validation failed")
                 return False
             
             # Validate CRL (if provided)
             if crl_file and os.path.exists(crl_file):
-                if not CertUtil.validate_ca_crl(ca_file, crl_file):
+                if not CertValidationUtil.validate_ca_crl(ca_file, crl_file):
                     logger.error("CRL validation failed")
                     return False
             
             # Validate certificate and private key with certificate chain validation
             password_bytes = password.encode('utf-8') if password else None
-            if not CertUtil.validate_cert_and_key(
+            if not CertValidationUtil.validate_cert_and_key(
                 cert_file, key_file, password_bytes, ca_file
             ):
                 logger.error("Certificate and key validation failed")
@@ -707,16 +708,16 @@ class CoordinatorCertUtil:
             password = config.get("tls_passwd", "").encode(UTF8_ENCODING)
             
             # Use complete CA certificate validation
-            if not CertUtil.validate_ca_certs(config[CA_CERTS]):
+            if not CertValidationUtil.validate_ca_certs(config[CA_CERTS]):
                 raise RuntimeError("CA certificate validation failed")
             
             # Validate CRL (if provided)
             if TLS_CRL in config:
-                if not CertUtil.validate_ca_crl(config[CA_CERTS], config[TLS_CRL]):
+                if not CertValidationUtil.validate_ca_crl(config[CA_CERTS], config[TLS_CRL]):
                     raise RuntimeError("CRL validation failed")
             
             # Use complete certificate and private key validation with certificate chain validation
-            if not CertUtil.validate_cert_and_key(
+            if not CertValidationUtil.validate_cert_and_key(
                 config[TLS_CERT], config[TLS_KEY], password, config[CA_CERTS]
             ):
                 raise RuntimeError("Certificate and key validation failed")
@@ -725,7 +726,7 @@ class CoordinatorCertUtil:
             context = create_default_context(Purpose.SERVER_AUTH)
             
             # Configure TLS 1.3 and password suites
-            CoordinatorCertUtil.configure_tls13_only(context)
+            CertUtil.configure_tls13_only(context)
             
             context.load_verify_locations(cafile=config[CA_CERTS])
             context.load_cert_chain(
@@ -748,33 +749,31 @@ class CoordinatorCertUtil:
         except Exception as e:
             logger.error(f"Failed to construct certificate context: {e}")
             return None
-    
+
     @classmethod
-    def create_ssl_context(
-        cls,
-        cert_file: str,
-        key_file: str,
-        ca_file: str,
-        password: str = ""
-    ) -> Optional[object]:
+    def create_ssl_context(cls, tls_config: TLSConfig,
+                           purpose: Purpose = Purpose.SERVER_AUTH) -> Optional[ssl.SSLContext]:
         """
         Create SSL context - using strict validation
-        
+
         Args:
-            cert_file: Certificate file path
-            key_file: Private key file path
-            ca_file: CA certificate file path
-            password: Private key password
-            
+            tls_config: Certificate file path
+            purpose: Purpose of server authentication
+
         Returns:
             SSL context object
         """
+        cert_file = tls_config.cert_file
+        key_file = tls_config.key_file
+        ca_file = tls_config.ca_file
+        password_file = tls_config.passwd_file
+        crl_file = tls_config.crl_file
         try:
             # Check if file paths are empty or non-existent
             if not cert_file or not key_file or not ca_file:
                 logger.error("Certificate files cannot be empty")
                 return None
-            
+
             if (not os.path.exists(cert_file) or
                     not os.path.exists(key_file) or
                     not os.path.exists(ca_file)):
@@ -783,39 +782,49 @@ class CoordinatorCertUtil:
                     f"key={key_file}, ca={ca_file}"
                 )
                 return None
-            
-            # Use strict CA certificate validation
-            if not CertUtil.validate_ca_certs(ca_file):
-                logger.error("CA certificate validation failed")
-                return None
-            
-            # Use strict certificate and key validation with certificate chain validation
-            password_bytes = password.encode('utf-8') if password else None
-            if not CertUtil.validate_cert_and_key(
-                cert_file, key_file, password_bytes, ca_file
-            ):
-                logger.error("Certificate and key validation failed")
-                return None
-            
+
             # Create SSL context
-            context = create_default_context(Purpose.SERVER_AUTH)
-            
-            # Configure TLS 1.3 and password suites
-            CoordinatorCertUtil.configure_tls13_only(context)
-            
-            # Load CA certificate
-            context.load_verify_locations(cafile=ca_file)
-            
+            if purpose == Purpose.SERVER_AUTH:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            else:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+
+            # Validate cert and key
+            password_bytes = None
+            if password_file and os.path.exists(password_file):
+                password = PasswordDecryptor.decrypt(password_file)
+                # Use strict certificate and key validation with certificate chain validation
+                password_bytes = password.encode('utf-8') if password else None
+                if not CertValidationUtil.validate_cert_and_key(
+                        cert_file, key_file, password_bytes, ca_file
+                ):
+                    clear_passwd(password_bytes)
+                    logger.error(f"Certificate and key validation failed")
+                    return None
+
             # Load certificate chain
             context.load_cert_chain(
                 certfile=cert_file,
                 keyfile=key_file,
-                password=password if password else None
+                password=password_bytes if password_bytes else None
             )
-            
-            logger.info("SSL context created successfully with strict validation (TLS 1.3 only)")
+            clear_passwd(password_bytes)
+
+            # Use strict CA certificate validation
+            if not CertValidationUtil.validate_ca_certs(ca_file):
+                logger.error("CA certificate validation failed")
+                return None
+
+            # Load CA certificate
+            context.load_verify_locations(cafile=ca_file)
+
+            if crl_file and not CertValidationUtil.validate_ca_crl(ca_file, crl_file):
+                logger.error(f"CRL validation failed")
+                return None
+
+            logger.debug("SSL context created successfully")
             return context
-            
+
         except Exception as e:
             logger.error(f"Failed to create SSL context: {e}")
             return None
@@ -826,7 +835,7 @@ class CoordinatorCertUtil:
         cert_file: str,
         key_file: str,
         ca_file: str = "",
-        password: str = ""
+        password_file: str = ""
     ) -> Optional[object]:
         """
         Create SSL context without requiring client certificate verification
@@ -835,7 +844,7 @@ class CoordinatorCertUtil:
             cert_file: Certificate file path
             key_file: Private key file path
             ca_file: CA certificate file path (optional, for client cert verification)
-            password: Private key password
+            password_file: Private key password file path
             
         Returns:
             SSL context object
@@ -863,12 +872,15 @@ class CoordinatorCertUtil:
                     f"continuing without CA verification"
                 )
                 ca_file = None
+
+            password = PasswordDecryptor.decrypt(password_file)
             
             # Use strict certificate and key validation with certificate chain validation (if CA provided)
             password_bytes = password.encode('utf-8') if password else None
-            if not CertUtil.validate_cert_and_key(
+            if not CertValidationUtil.validate_cert_and_key(
                 cert_file, key_file, password_bytes, ca_cert_path_for_validation
             ):
+                clear_passwd(password_bytes)
                 logger.error("Certificate and key validation failed")
                 return None
             
@@ -876,8 +888,8 @@ class CoordinatorCertUtil:
             context = create_default_context(Purpose.SERVER_AUTH)
             
             # Configure TLS 1.3 and password suites
-            CoordinatorCertUtil.configure_tls13_only(context)
-            
+            CertUtil.configure_tls13_only(context)
+
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE  # Don't require client certificates
             
@@ -895,7 +907,7 @@ class CoordinatorCertUtil:
             context.load_cert_chain(
                 certfile=cert_file,
                 keyfile=key_file,
-                password=password if password else None
+                password=password_bytes if password_bytes else None
             )
             
             logger.info("SSL context created successfully (no client cert verification)")

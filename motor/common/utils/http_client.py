@@ -1,13 +1,17 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-import os
-import ssl
 from enum import Enum
+from ssl import Purpose
 from typing import Any, Optional
 
-import requests
 import httpx
+import requests
+from requests import Response
+from requests.adapters import HTTPAdapter
+
+from motor.common.utils.cert_util import CertUtil
+from motor.config.tls_config import TLSConfig
 
 
 class ConnectionMode(Enum):
@@ -17,30 +21,27 @@ class ConnectionMode(Enum):
 
 class SafeHTTPSClient:
     def __init__(self,
-                 base_url: str,
-                 cert_file: str | None = None,
-                 key_file: str | None = None,
-                 ca_file: str | None = None,
+                 address: str,
+                 tls_config: Optional[TLSConfig] = None,
                  mode: ConnectionMode = ConnectionMode.SHORT,
                  timeout: float = 5):
 
-        self.base_url = base_url.rstrip('/')
+        self.protocol = 'http://'
         self.timeout = timeout
         self.session = requests.Session()
 
-        # set https cert and CA cert
-        self.cert = None
-        self.verify = True
+        if tls_config and tls_config.tls_enable:
+            self.protocol = 'https://'
+            ssl_context = CertUtil.create_ssl_context(tls_config=tls_config, purpose=Purpose.CLIENT_AUTH)
 
-        if cert_file and key_file:
-            if not os.path.exists(cert_file) or not os.path.exists(key_file):
-                raise FileNotFoundError("can not find cert file or key file.")
-            self.cert = (cert_file, key_file)
-
-        if ca_file:
-            if not os.path.exists(ca_file):
-                raise FileNotFoundError("can not find CA cert file.")
-            self.verify = ca_file
+            adapter = HTTPAdapter()
+            adapter.init_poolmanager(
+                connections=10,
+                ssl_context=ssl_context,
+                maxsize=10,
+            )
+            self.session.mount(self.protocol, adapter)
+        self.base_url = self.protocol + address.rstrip('/')
 
         # set https headers
         self.session.headers.update({
@@ -60,65 +61,68 @@ class SafeHTTPSClient:
 
     def request(self, method: str, endpoint: str, data: dict | None = None,
                 params: dict | None = None) -> dict[str, Any]:
-        url = f"{self.base_url}/{endpoint.lstrip('/')}"
+        resp = self._request(method, endpoint, data, params)
+        return resp.json() if resp else None
 
+    def get(self, endpoint: str, params: dict | None = None) -> dict[str, Any]:
+        return self.request('GET', endpoint, params=params)
+
+    def do_get(self, endpoint: str, params: dict | None = None) -> Response:
+        return self._request('GET', endpoint, params=params)
+
+    def post(self, endpoint: str, data: dict | None = None) -> dict[str, Any]:
+        return self.request('POST', endpoint, data=data)
+
+    def do_post(self, endpoint: str, data: dict | None = None) -> Response:
+        return self._request('POST', endpoint, data=data)
+
+    def close(self) -> None:
+        self.session.close()
+
+    def _request(self, method: str, endpoint: str, data: dict | None = None,
+                 params: dict | None = None) -> Response:
+        url = f"{self.base_url}/{endpoint.lstrip('/')}"
         try:
             response = self.session.request(
                 method=method.upper(),
                 url=url,
                 json=data,
                 params=params,
-                cert=self.cert,
-                verify=self.verify,
                 timeout=self.timeout
             )
 
             response.raise_for_status()
-            return response.json()
+            return response
         except requests.exceptions.SSLError as e:
             raise Exception(f"SSL verify failed: {e}") from e
         except requests.exceptions.HTTPError as e:
             raise Exception(f"http response error {e.response.status_code}, {e.response.text}") from e
         except Exception as e:
-            raise Exception("send request error.") from e
-
-    def get(self, endpoint: str, params: dict | None = None) -> dict[str, Any]:
-        return self.request('GET', endpoint, params=params)
-
-    def post(self, endpoint: str, data: dict | None = None) -> dict[str, Any]:
-        return self.request('POST', endpoint, data=data)
-
-    def close(self) -> None:
-        self.session.close()
+            raise Exception(f"send request {url} error: {e}") from e
 
 
 class AsyncSafeHTTPSClient():
-    
     def __init__(
-        self,
-        base_url: str,
-        cert_file: Optional[str] = None,
-        key_file: Optional[str] = None,
-        ca_file: Optional[str] = None,
-        **client_kwargs
+            self,
+            address: str,
+            tls_config: Optional[TLSConfig] = None,
+            **client_kwargs
     ):
-        
+
         self.verify = True
 
-        if cert_file and key_file and ca_file:
-            if not os.path.exists(cert_file) or not os.path.exists(key_file):
-                raise FileNotFoundError("can not find cert file or key file or CA cert file.")
-            ssl_context = ssl.create_default_context(cafile=ca_file)
-            ssl_context.load_cert_chain(certfile=cert_file, keyfile=key_file)
-            self.verify = ssl_context
-        
+        if tls_config and tls_config.tls_enable:
+            self.verify = CertUtil.create_ssl_context(tls_config=tls_config, purpose=Purpose.CLIENT_AUTH)
+            base_url = f"https://{address}"
+        else:
+            base_url = f"http://{address}"
         self._client: httpx.AsyncClient = httpx.AsyncClient(base_url=base_url,
                                                             verify=self.verify,
                                                             **client_kwargs)
-    
+
     async def __aenter__(self):
         return self._client
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 

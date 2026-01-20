@@ -487,8 +487,6 @@ def test_validate_config_errors(param, value, expected_error):
 def test_to_dict():
     """Test conversion to dictionary"""
     config = create_config_object()
-    config.api_config.controller_api_dns = "192.168.1.1"
-    config.api_config.controller_api_port = 9000
     config.basic_config.model_name = "test_model"
 
     config_dict = config.to_dict()
@@ -498,8 +496,6 @@ def test_to_dict():
     assert "basic_config" in config_dict
     assert "logging_config" in config_dict
 
-    assert config_dict["api_config"]["controller_api_dns"] == "192.168.1.1"
-    assert config_dict["api_config"]["controller_api_port"] == 9000
     assert config_dict["basic_config"]["model_name"] == "test_model"
 
     assert "config_path" not in config_dict
@@ -508,7 +504,6 @@ def test_to_dict():
 def test_save_to_json_success():
     """Test successful saving configuration to JSON file"""
     config = create_config_object()
-    config.api_config.controller_api_port = 9000
     config.config_path = "/tmp/test_config.json"
     config.hccl_path = "/tmp/test_hccl.json"
 
@@ -521,7 +516,7 @@ def test_save_to_json_success():
 
         with open(temp_path, 'r') as f:
             saved_config = json.load(f)
-        assert saved_config["api_config"]["controller_api_port"] == 9000
+        assert saved_config["api_config"][("node_manager_port")] == 1026
     finally:
         os.unlink(temp_path)
 
@@ -536,8 +531,6 @@ def test_save_to_json_no_path():
 def test_get_config_summary():
     """Test getting configuration summary"""
     config = create_config_object()
-    config.api_config.controller_api_dns = "192.168.1.1"
-    config.api_config.controller_api_port = 9000
     config.api_config.node_manager_port = 8080
     config.basic_config.model_name = "test_model"
     config.basic_config.role = PDRole.ROLE_U
@@ -546,7 +539,6 @@ def test_get_config_summary():
 
     summary = config.get_config_summary()
 
-    assert "192.168.1.1:9000" in summary
     assert "8080" in summary
     assert "test_model" in summary
     assert "127.0.0.1" in summary
@@ -557,8 +549,6 @@ def test_from_json_success():
     """Test loading configuration from JSON data"""
     test_config = {
         "api_config": {
-            "controller_api_dns": "192.168.1.1",
-            "controller_api_port": 9000,
             "node_manager_port": 8080
         },
         "basic_config": {
@@ -580,8 +570,6 @@ def test_from_json_success():
     NodeManagerConfig._update_from_hccl_data(config, hccl_data)
     NodeManagerConfig._generate_endpoint_ports(config)
 
-    assert config.api_config.controller_api_dns == "192.168.1.1"
-    assert config.api_config.controller_api_port == 9000
     assert config.api_config.node_manager_port == 8080
     assert config.basic_config.model_name == "test_model"
     assert config.logging_config.log_level == "DEBUG"

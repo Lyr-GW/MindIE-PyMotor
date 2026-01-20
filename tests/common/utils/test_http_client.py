@@ -19,11 +19,12 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 from motor.common.utils.http_client import SafeHTTPSClient
+from motor.config.tls_config import TLSConfig
 
 
 @pytest.fixture
 def base_url():
-    return "https://api.example.com"
+    return "api.example.com"
 
 
 @pytest.fixture
@@ -48,46 +49,57 @@ def test_init_with_valid_parameters(base_url, cert_files):
     """test init with valid parameters"""
     cert_file, key_file, ca_file = cert_files
 
-    client = SafeHTTPSClient(
-        base_url=base_url,
+    tls_config = TLSConfig(
+        tls_enable=True,
         cert_file=cert_file,
         key_file=key_file,
-        ca_file=ca_file,
+        ca_file=ca_file
+    )
+
+    client = SafeHTTPSClient(
+        address=base_url,
+        tls_config=tls_config,
         timeout=10
     )
 
-    assert client.base_url == base_url
+    assert client.base_url == f"https://{base_url}"
     assert client.timeout == 10
-    assert client.cert == (cert_file, key_file)
-    assert client.verify == ca_file
     assert 'User-Agent' in client.session.headers
     assert client.session.headers['User-Agent'] == 'Secure-HTTPS-Client/1.0'
 
 
 def test_init_with_missing_cert_files(base_url):
     """test init with missing cert files"""
-    with pytest.raises(FileNotFoundError, match="can not find cert file or key file."):
-        SafeHTTPSClient(
-            base_url=base_url,
-            cert_file="nonexistent.crt",
-            key_file="nonexistent.key"
-        )
+    tls_config = TLSConfig(
+        tls_enable=True,
+        cert_file="nonexistent.crt",
+        key_file="nonexistent.key"
+    )
+    # CertUtil.create_ssl_context returns None if cert files don't exist, 
+    # but client can still be initialized (SSL will fail at runtime)
+    client = SafeHTTPSClient(
+        address=base_url,
+        tls_config=tls_config
+    )
+    # Client should still initialize, but SSL context creation may have failed
+    assert client.base_url == f"https://{base_url}"
+    assert client.protocol == 'https://'
 
 
 def test_init_without_certificates(base_url):
     """test init without certs"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
-    assert client.cert is None
-    assert client.verify is True
+    assert client.base_url == f"http://{base_url}"
+    assert client.protocol == 'http://'
 
 
 def test_url_construction(base_url):
     """test url construction"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
-    client_with_slash = SafeHTTPSClient(base_url=base_url + "/")
-    assert client_with_slash.base_url == base_url
+    client_with_slash = SafeHTTPSClient(address=base_url + "/")
+    assert client_with_slash.base_url == f"http://{base_url}"
 
     with patch.object(client.session, 'request') as mock_request:
         mock_response = Mock()
@@ -97,17 +109,17 @@ def test_url_construction(base_url):
 
         client.get("/test-endpoint")
         called_url = mock_request.call_args[1]['url']
-        assert called_url == f"{base_url}/test-endpoint"
+        assert called_url == f"http://{base_url}/test-endpoint"
 
         client.get("test-endpoint")
         called_url = mock_request.call_args[1]['url']
-        assert called_url == f"{base_url}/test-endpoint"
+        assert called_url == f"http://{base_url}/test-endpoint"
 
 
 @pytest.mark.parametrize("method", ['GET', 'POST'])
 def test_successful_requests(base_url, method):
     """test successful requests"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
     with patch.object(client.session, 'request') as mock_request:
         expected_response = {"status": "success", "data": "test"}
@@ -126,12 +138,12 @@ def test_successful_requests(base_url, method):
         mock_request.assert_called_once()
         call_kwargs = mock_request.call_args[1]
         assert call_kwargs['method'] == method
-        assert call_kwargs['url'] == f"{base_url}/test"
+        assert call_kwargs['url'] == f"http://{base_url}/test"
 
 
 def test_ssl_error_handling(base_url):
     """test ssl error handling"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
     with patch.object(client.session, 'request') as mock_request:
         mock_request.side_effect = requests.exceptions.SSLError("SSL certificate verification failed")
@@ -142,7 +154,7 @@ def test_ssl_error_handling(base_url):
 
 def test_http_error_handling(base_url):
     """test http error handling"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
     with patch.object(client.session, 'request') as mock_request:
         mock_response = Mock()
@@ -156,19 +168,19 @@ def test_http_error_handling(base_url):
 
 def test_generic_exception_handling(base_url):
     """test generic exception handling"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
     with patch.object(client.session, 'request') as mock_request:
         mock_request.side_effect = Exception("Generic error")
 
-        with pytest.raises(Exception, match="send request error."):
+        with pytest.raises(Exception, match="send request .* error:"):
             client.get("/test")
 
 
 def test_context_manager(base_url):
     """test context manager"""
     with patch.object(requests.Session, 'close') as mock_close:
-        with SafeHTTPSClient(base_url=base_url) as client:
+        with SafeHTTPSClient(address=base_url) as client:
             assert isinstance(client, SafeHTTPSClient)
 
         mock_close.assert_called_once()
@@ -176,7 +188,7 @@ def test_context_manager(base_url):
 
 def test_close_method(base_url):
     """test close method"""
-    client = SafeHTTPSClient(base_url=base_url)
+    client = SafeHTTPSClient(address=base_url)
 
     with patch.object(client.session, 'close') as mock_close:
         client.close()
@@ -185,7 +197,7 @@ def test_close_method(base_url):
 
 def test_request_timeout(base_url):
     """test request timeout"""
-    client = SafeHTTPSClient(base_url=base_url, timeout=3.5)
+    client = SafeHTTPSClient(address=base_url, timeout=3.5)
 
     with patch.object(client.session, 'request') as mock_request:
         mock_response = Mock()

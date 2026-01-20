@@ -265,9 +265,9 @@ def test_to_dict():
     # Check that all config sections are present
     expected_keys = [
         'logging_config', 'prometheus_metrics_config', 'exception_config',
-        'scheduler_config', 'tls_config', 'timeout_config',
-        'api_key_config', 'rate_limit_config', 'standby_config', 'etcd_config',
-        'http_config', 'aigw_model'
+        'scheduler_config', 'infer_tls_config', 'mgmt_tls_config', 'etcd_tls_config',
+        'timeout_config', 'api_key_config', 'rate_limit_config', 'standby_config',
+        'etcd_config', 'http_config', 'aigw_model', 'api_config'
     ]
 
     for key in expected_keys:

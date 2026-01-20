@@ -1,18 +1,16 @@
 # coding=utf-8
 # Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
 
-import time
 import queue
 import threading
+import time
 from dataclasses import dataclass
 
-from motor.config.controller import ControllerConfig
 from motor.common.resources import Instance, ReadOnlyInstance, InsEventMsg, EventType
-from motor.common.utils.http_client import SafeHTTPSClient
 from motor.common.utils.logger import get_logger
-from motor.controller.core import Observer, ObserverEvent
+from motor.config.controller import ControllerConfig
 from motor.controller.api_client.coordinator_api_client import CoordinatorApiClient
-
+from motor.controller.core import Observer, ObserverEvent
 
 logger = get_logger(__name__)
 
@@ -28,7 +26,9 @@ class EventPusher(Observer):
         super().__init__()
         # Use default config if not provided
         if config is None:
-            config = ControllerConfig()
+            self.config = ControllerConfig()
+        else:
+            self.config = config
 
         self.is_coordinator_reset = False
         self.is_first_heartbeat_success = False  # Track if we've ever successfully connected to coordinator
@@ -40,22 +40,8 @@ class EventPusher(Observer):
 
         # Extract required config fields
         with self.config_lock:
-            self.coordinator_api_dns = config.api_config.coordinator_api_dns
-            self.coordinator_api_port = config.api_config.coordinator_api_port
             self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
             self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
-
-        with self.config_lock:
-            self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
-            logger.info("Coordinator API URL: %s", self.base_url)
-
-            self.heart_client = SafeHTTPSClient(
-                base_url=self.base_url,
-                cert_file=None,
-                key_file=None,
-                ca_file=None,
-                timeout=0.5
-            )
 
         self.event_consumer_thread = None
         self.heartbeat_detector_thread = None
@@ -91,15 +77,15 @@ class EventPusher(Observer):
             self.event_queue.put(None)
         # Only join threads that have been started
         if (
-            hasattr(self, 'event_consumer_thread')
-            and self.event_consumer_thread is not None
-            and self.event_consumer_thread.is_alive()
+                hasattr(self, 'event_consumer_thread')
+                and self.event_consumer_thread is not None
+                and self.event_consumer_thread.is_alive()
         ):
             self.event_consumer_thread.join()
         if (
-            hasattr(self, 'heartbeat_detector_thread')
-            and self.heartbeat_detector_thread is not None
-            and self.heartbeat_detector_thread.is_alive()
+                hasattr(self, 'heartbeat_detector_thread')
+                and self.heartbeat_detector_thread is not None
+                and self.heartbeat_detector_thread.is_alive()
         ):
             self.heartbeat_detector_thread.join()
         if hasattr(self, 'heart_client'):
@@ -109,29 +95,15 @@ class EventPusher(Observer):
     def is_alive(self) -> bool:
         """Check if the event_pusher threads are alive"""
         return (
-            (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive())
-            and (self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
+                (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive())
+                and (self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
         )
 
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the event pusher"""
         with self.config_lock:
-            # Update config fields
-            self.coordinator_api_dns = config.api_config.coordinator_api_dns
-            self.coordinator_api_port = config.api_config.coordinator_api_port
             self.event_consumer_sleep_interval = config.event_config.event_consumer_sleep_interval
             self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
-
-            # Update base URL and HTTP client if API config changed
-            self.base_url = f"http://{self.coordinator_api_dns}:{self.coordinator_api_port}"
-            self.heart_client = SafeHTTPSClient(
-                base_url=self.base_url,
-                cert_file=None,
-                key_file=None,
-                ca_file=None,
-                timeout=0.5
-            )
-            logger.info("EventPusher configuration updated, new coordinator URL: %s", self.base_url)
 
     def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
         # Event pusher will interact with coordinator and send instances.
@@ -192,7 +164,7 @@ class EventPusher(Observer):
                     continue
 
                 if event_msg is not None:
-                    CoordinatorApiClient.send_instance_refresh(self.base_url, event_msg)
+                    CoordinatorApiClient.send_instance_refresh(event_msg)
 
             with self.config_lock:
                 sleep_interval = self.event_consumer_sleep_interval
@@ -206,7 +178,8 @@ class EventPusher(Observer):
 
         while not self.stop_event.is_set():
             try:
-                response = self.heart_client.get("/readiness", params={"status": "normal"})
+                params = {"status": "normal"}
+                response = CoordinatorApiClient.query_status(params)
                 # Mark that we've successfully connected to coordinator at least once
                 if not self.is_first_heartbeat_success:
                     self.is_first_heartbeat_success = True

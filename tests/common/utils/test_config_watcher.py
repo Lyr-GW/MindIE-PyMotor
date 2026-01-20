@@ -100,7 +100,9 @@ def test_watcher_with_controller_config():
 
     # Create a unique config file for this test to avoid parallel test interference
     unique_id = str(uuid.uuid4())[:8]
-    config_path = f"/tmp/test_watcher_config_{unique_id}.json"
+    temp_dir = tempfile.gettempdir()
+    config_path = os.path.join(temp_dir, f"test_watcher_config_{unique_id}.json")
+    watcher = None
 
     try:
         # Create initial config
@@ -141,7 +143,8 @@ def test_watcher_with_controller_config():
         assert reloaded, f"Config reload failed after {max_attempts} attempts. Current log_level: {config.logging_config.log_level}"
 
     finally:
-        watcher.stop()
+        if watcher:
+            watcher.stop()
         try:
             os.unlink(config_path)
         except FileNotFoundError:
@@ -171,8 +174,9 @@ def test_watcher_callback_execution():
          patch('motor.common.utils.config_watcher.Observer') as mock_observer_class:
 
         # Create watcher
+        fake_path = "/fake/path.json"
         watcher = ConfigWatcher(
-            config_path="/fake/path.json",
+            config_path=fake_path,
             reload_callback=mock_reload,
             config_update_callback=mock_callback
         )
@@ -185,9 +189,12 @@ def test_watcher_callback_execution():
         assert handler_instance is not None
 
         # Call on_modified directly on the handler
+        # The handler stores config_path as absolute path, so we need to match that
         mock_event = MagicMock()
-        with patch('os.path.abspath', return_value="/fake/path.json"):
-            handler_instance.on_modified(mock_event)
+        # Use the handler's config_path to ensure path matching works
+        mock_event.src_path = handler_instance.config_path
+        
+        handler_instance.on_modified(mock_event)
 
         # Verify callback was called
         mock_callback.assert_called_once()

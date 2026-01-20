@@ -83,8 +83,6 @@ def engine_manager(config_data, hccl_data):
         config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])
         config.basic_config.job_name = config_data.get("model_name", "test_job")
         config.basic_config.role = PDRole(config_data.get("role", "both"))
-        config.api_config.controller_api_dns = config_data.get("controller_api_dns", "localhost")
-        config.api_config.controller_api_port = config_data.get("controller_api_port", 8080)
         config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
 
         # Set device info from hccl_data
@@ -265,8 +263,9 @@ class TestEngineManager:
         with pytest.raises(TypeError):
             engine_manager._gen_reregister_msg()
     
-    @patch('motor.node_manager.core.engine_manager.SafeHTTPSClient')
-    def test_post_register_msg_success(self, mock_client_class, engine_manager):
+    @patch('motor.node_manager.core.engine_manager.ControllerApiClient.register')
+    @patch('motor.node_manager.core.engine_manager.EngineManager._get_ranktable')
+    def test_post_register_msg_success(self, mock_get_ranktable, mock_register, engine_manager):
         """Test post_register_msg with successful response"""
         engine_manager._config.basic_config.job_name = "test_job"
         engine_manager._config.basic_config.model_name = "test_model"
@@ -282,27 +281,17 @@ class TestEngineManager:
         device_info = DeviceInfo(device_id="0", device_ip="192.168.0.1", rank_id="0")
         server_info = ServerInfo(server_id="1", container_ip="192.168.1.200", device=[device_info])
         ranktable = Ranktable(version="1.0", status="normal", server_count="1", server_list=[server_info])
-        engine_manager.ranktable = ranktable
+        mock_get_ranktable.return_value = ranktable
         
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_client.post.return_value = mock_response
-        mock_client_class.return_value.__enter__.return_value = mock_client
+        mock_register.return_value = True
         
         result = engine_manager.post_register_msg()
-        # The method may have additional validation, so allow either result
-        # but ensure the HTTP client was attempted to be called
-        assert isinstance(result, bool)
-        # Check if post was called at least once (may be called or not depending on validation)
-        if result:
-            mock_client.post.assert_called_once()
-        else:
-            # If result is False, post may or may not have been called
-            pass
+        assert result is True
+        mock_register.assert_called_once()
     
-    @patch('motor.node_manager.core.engine_manager.SafeHTTPSClient')
-    def test_post_register_msg_failure(self, mock_client_class, engine_manager):
+    @patch('motor.node_manager.core.engine_manager.ControllerApiClient.register')
+    @patch('motor.node_manager.core.engine_manager.EngineManager._get_ranktable')
+    def test_post_register_msg_failure(self, mock_get_ranktable, mock_register, engine_manager):
         """Test post_register_msg with exception"""
         engine_manager._config.basic_config.job_name = "test_job"
         engine_manager._config.basic_config.model_name = "test_model"
@@ -318,52 +307,44 @@ class TestEngineManager:
         device_info = DeviceInfo(device_id="0", device_ip="192.168.0.1", rank_id="0")
         server_info = ServerInfo(server_id="1", container_ip="192.168.1.200", device=[device_info])
         ranktable = Ranktable(version="1.0", status="normal", server_count="1", server_list=[server_info])
-        engine_manager.ranktable = ranktable
+        mock_get_ranktable.return_value = ranktable
         
-        mock_client_class.side_effect = Exception("Connection error")
+        mock_register.return_value = False
         
         result = engine_manager.post_register_msg()
         assert result is False
     
-    @patch('motor.node_manager.core.engine_manager.SafeHTTPSClient')
-    def test_post_reregister_msg_success(self, mock_client_class, engine_manager, sample_endpoints):
+    @patch('motor.node_manager.core.engine_manager.ControllerApiClient.re_register')
+    def test_post_reregister_msg_success(self, mock_re_register, engine_manager, sample_endpoints):
         """Test post_reregister_msg with successful response"""
         engine_manager._config.basic_config.job_name = "test_job"
         engine_manager._config.basic_config.role = PDRole.ROLE_U
         engine_manager._config.api_config.pod_ip = "192.168.1.100"
         engine_manager._config.api_config.host_ip = "192.168.1.200"
         engine_manager._config.api_config.node_manager_port = 8080
-        engine_manager._config.api_config.controller_api_dns = "localhost"
-        engine_manager._config.api_config.controller_api_port = 8080
         engine_manager._config.basic_config.parallel_config = ParallelConfig(tp_size=2, pp_size=1)
         engine_manager.endpoints = sample_endpoints
         engine_manager.instance_id = 1
         
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_client.post.return_value = mock_response
-        mock_client_class.return_value.__enter__.return_value = mock_client
+        mock_re_register.return_value = True
         
         result = engine_manager.post_reregister_msg()
         assert result is True
-        mock_client.post.assert_called_once()
+        mock_re_register.assert_called_once()
     
-    @patch('motor.node_manager.core.engine_manager.SafeHTTPSClient')
-    def test_post_reregister_msg_failure(self, mock_client_class, engine_manager, sample_endpoints):
+    @patch('motor.node_manager.core.engine_manager.ControllerApiClient.re_register')
+    def test_post_reregister_msg_failure(self, mock_re_register, engine_manager, sample_endpoints):
         """Test post_reregister_msg with exception"""
         engine_manager._config.basic_config.job_name = "test_job"
         engine_manager._config.basic_config.role = PDRole.ROLE_U
         engine_manager._config.api_config.pod_ip = "192.168.1.100"
         engine_manager._config.api_config.host_ip = "192.168.1.200"
         engine_manager._config.api_config.node_manager_port = 8080
-        engine_manager._config.api_config.controller_api_dns = "localhost"
-        engine_manager._config.api_config.controller_api_port = 8080
         engine_manager._config.basic_config.parallel_config = ParallelConfig(tp_size=2, pp_size=1)
         engine_manager.endpoints = sample_endpoints
         engine_manager.instance_id = 1
         
-        mock_client_class.side_effect = Exception("Connection error")
+        mock_re_register.return_value = False
         
         result = engine_manager.post_reregister_msg()
         assert result is False

@@ -26,16 +26,13 @@ from motor.common.resources.http_msg_spec import EventType
 @pytest.fixture
 def event_pusher():
     """create EventPusher object fixture"""
-    with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:
-        with patch('threading.Thread') as mock_thread_class:
-            mock_thread = MagicMock()
-            mock_thread_class.return_value = mock_thread
+    with patch('threading.Thread') as mock_thread_class:
+        mock_thread = MagicMock()
+        mock_thread_class.return_value = mock_thread
 
-            mock_client = Mock()
-            mock_client_class.return_value = mock_client
-            # Create EventPusher instance (threads are created in __init__)
-            config = ControllerConfig()
-            return EventPusher(config)
+        # Create EventPusher instance (threads are created in __init__)
+        config = ControllerConfig()
+        return EventPusher(config)
 
 
 @pytest.fixture
@@ -66,34 +63,30 @@ def test_init(event_pusher):
 
 def test_start():
     """test start method creates and starts threads"""
-    with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:
-        with patch('threading.Thread') as mock_thread_class:
-            mock_thread = MagicMock()
-            mock_thread_class.return_value = mock_thread
+    with patch('threading.Thread') as mock_thread_class:
+        mock_thread = MagicMock()
+        mock_thread_class.return_value = mock_thread
 
-            mock_client = Mock()
-            mock_client_class.return_value = mock_client
+        # Create EventPusher instance
+        config = ControllerConfig()
+        event_pusher = EventPusher(config)
 
-            # Create EventPusher instance
-            config = ControllerConfig()
-            event_pusher = EventPusher(config)
+        # Before start, threads should be None
+        assert event_pusher.event_consumer_thread is None
+        assert event_pusher.heartbeat_detector_thread is None
 
-            # Before start, threads should be None
-            assert event_pusher.event_consumer_thread is None
-            assert event_pusher.heartbeat_detector_thread is None
+        # Call start
+        event_pusher.start()
 
-            # Call start
-            event_pusher.start()
+        # After start, threads should be created and started
+        assert event_pusher.event_consumer_thread is not None
+        assert event_pusher.heartbeat_detector_thread is not None
+        assert event_pusher.event_consumer_thread.daemon
+        assert event_pusher.heartbeat_detector_thread.daemon
 
-            # After start, threads should be created and started
-            assert event_pusher.event_consumer_thread is not None
-            assert event_pusher.heartbeat_detector_thread is not None
-            assert event_pusher.event_consumer_thread.daemon
-            assert event_pusher.heartbeat_detector_thread.daemon
-
-            # Verify threads were started
-            mock_thread.start.assert_called()
-            assert mock_thread.start.call_count == 2
+        # Verify threads were started
+        mock_thread.start.assert_called()
+        assert mock_thread.start.call_count == 2
 
 def test_event_consumer_add_event(event_pusher, mock_http_client):
     """test event consumer add event"""
@@ -300,79 +293,77 @@ def test_event_consumer_exception_handling(event_pusher, mock_http_client):
         # check send_instance_refresh is called
         mock_http_client.assert_called_once()
 
-def test_heartbeat_detector_normal(event_pusher, mock_http_client):
+def test_heartbeat_detector_normal(event_pusher):
     """test heartbeat detector"""
-    mock_client_instance = Mock()
-    mock_http_client.return_value = mock_client_instance
-    mock_response = Mock(status_code=200, text="ok")
-    mock_http_client.get.return_value = mock_response
+    # Mock CoordinatorApiClient.query_status to return successful response
+    with patch('motor.controller.core.event_pusher.CoordinatorApiClient.query_status') as mock_query_status:
+        mock_query_status.return_value = {"ready": True}
 
-    # mock reset flag，重置为 True 时应发送一次 SET 事件并清零标志
-    event_pusher.is_coordinator_reset = True
+        # mock reset flag，重置为 True 时应发送一次 SET 事件并清零标志
+        event_pusher.is_coordinator_reset = True
 
-    # set loop count
-    call_count = 0
+        # set loop count
+        call_count = 0
 
-    def mock_sleep(seconds):
-        nonlocal call_count
-        call_count += 1
-        if call_count >= 2:
-            raise StopIteration
+        def mock_sleep(seconds):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                raise StopIteration
 
-    with patch('motor.controller.core.event_pusher.time') as mock_time:
-        mock_time.sleep.side_effect = mock_sleep
-
-        try:
-            event_pusher._coordinator_heartbeat_detector()
-        except StopIteration:
-            pass
-
-        # check reset flag
-        assert event_pusher.is_coordinator_reset == False
-        # 当检测到重置时，应推送一次 SET 事件
-        assert not event_pusher.event_queue.empty()
-        evt = event_pusher.event_queue.get()
-        assert evt.event_type == EventType.SET
-        assert evt.instance is None
-
-def test_heartbeat_detector_failure(event_pusher, mock_http_client):
-    """test heartbeat detector failure"""
-    call_count = 0
-    def mock_get(endpoint: str, params: dict = None):
-        nonlocal call_count
-        call_count += 1
-        if call_count == 1:
-            # First call succeeds to establish connection
-            return Mock(status_code=200)
-        else:
-            # Subsequent calls fail
-            raise Exception("Connection failed")
-
-    mock_client_instance = Mock()
-    mock_http_client.return_value = mock_client_instance
-    event_pusher.heart_client.get.side_effect = mock_get
-
-    sleep_count = 0
-    def mock_sleep(seconds):
-        nonlocal sleep_count
-        sleep_count += 1
-        if sleep_count >= 5:  # Run enough iterations to trigger reset detection
-            raise StopIteration
-
-    with patch('motor.controller.core.event_pusher.logger') as mock_logger:
         with patch('motor.controller.core.event_pusher.time') as mock_time:
             mock_time.sleep.side_effect = mock_sleep
+
             try:
                 event_pusher._coordinator_heartbeat_detector()
             except StopIteration:
                 pass
 
-            # Check that coordinator reset detection was triggered at least once
-            assert mock_logger.warning.call_count >= 1
-            # Check that the warning message indicates restart detection
-            warning_calls = [call for call in mock_logger.warning.call_args_list
-                           if "Coordinator heartbeat lost. Possible restart detected" in str(call)]
-            assert len(warning_calls) >= 1
+            # check reset flag
+            assert event_pusher.is_coordinator_reset == False
+            # 当检测到重置时，应推送一次 SET 事件
+            assert not event_pusher.event_queue.empty()
+            evt = event_pusher.event_queue.get()
+            assert evt.event_type == EventType.SET
+            assert evt.instance is None
+
+def test_heartbeat_detector_failure(event_pusher):
+    """test heartbeat detector failure"""
+    # Mock CoordinatorApiClient.query_status to raise exception after first success
+    call_count = 0
+    def mock_query_status(params: dict = None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call succeeds to establish connection
+            event_pusher.is_first_heartbeat_success = True
+            return {"ready": True}
+        else:
+            # Subsequent calls fail
+            raise Exception("Connection failed")
+
+    with patch('motor.controller.core.event_pusher.CoordinatorApiClient.query_status', side_effect=mock_query_status):
+        sleep_count = 0
+        def mock_sleep(seconds):
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count >= 5:  # Run enough iterations to trigger reset detection
+                raise StopIteration
+
+        with patch('motor.controller.core.event_pusher.logger') as mock_logger:
+            with patch('motor.controller.core.event_pusher.time') as mock_time:
+                mock_time.sleep.side_effect = mock_sleep
+                try:
+                    event_pusher._coordinator_heartbeat_detector()
+                except StopIteration:
+                    pass
+
+                # Check that coordinator reset detection was triggered at least once
+                assert mock_logger.warning.call_count >= 1
+                # Check that the warning message indicates restart detection
+                warning_calls = [call for call in mock_logger.warning.call_args_list
+                               if "Coordinator heartbeat lost. Possible restart detected" in str(call)]
+                assert len(warning_calls) >= 1
 
 def test_update_add_instance(event_pusher):
     """test update add instance"""
@@ -548,41 +539,29 @@ def test_update_seperated_instance_initial_stage_abnormal(event_pusher):
 
 
 def test_update_config():
-    """Test update_config method updates configuration and recreates HTTP client"""
-    with patch('motor.controller.core.event_pusher.SafeHTTPSClient') as mock_client_class:
-        with patch('threading.Thread') as mock_thread_class:
-            mock_thread = MagicMock()
-            mock_thread_class.return_value = mock_thread
+    """Test update_config method updates configuration"""
+    with patch('threading.Thread') as mock_thread_class:
+        mock_thread = MagicMock()
+        mock_thread_class.return_value = mock_thread
 
-            mock_client = Mock()
-            mock_client_class.return_value = mock_client
+        # Create EventPusher instance
+        config = ControllerConfig()
+        event_pusher = EventPusher(config)
 
-            # Create EventPusher instance
-            config = ControllerConfig()
-            event_pusher = EventPusher(config)
+        # Store original config fields
+        original_event_consumer_sleep_interval = event_pusher.event_consumer_sleep_interval
+        original_coordinator_heartbeat_interval = event_pusher.coordinator_heartbeat_interval
 
-            # Store original config fields, base_url and heart_client
-            original_coordinator_api_dns = event_pusher.coordinator_api_dns
-            original_coordinator_api_port = event_pusher.coordinator_api_port
-            original_base_url = event_pusher.base_url
-            original_heart_client = event_pusher.heart_client
+        # Create new config with different event settings
+        new_config = ControllerConfig()
+        new_config.event_config.event_consumer_sleep_interval = 2.0
+        new_config.event_config.coordinator_heartbeat_interval = 10.0
 
-            # Create new config with different API settings
-            new_config = ControllerConfig()
-            new_config.api_config.coordinator_api_dns = "new-coordinator.example.com"
-            new_config.api_config.coordinator_api_port = 9090
+        # Update config
+        event_pusher.update_config(new_config)
 
-            # Update config
-            event_pusher.update_config(new_config)
-
-            # Verify config was updated
-            assert event_pusher.coordinator_api_dns == "new-coordinator.example.com"
-            assert event_pusher.coordinator_api_port == 9090
-
-            # Verify base_url was updated
-            expected_new_url = "http://new-coordinator.example.com:9090"
-            assert event_pusher.base_url == expected_new_url
-            assert event_pusher.base_url != original_base_url
-
-            # Verify HTTP client was recreated (SafeHTTPSClient constructor should be called again)
-            # Note: We can't easily check if it's a different instance since it's mocked
+        # Verify config was updated
+        assert event_pusher.event_consumer_sleep_interval == 2.0
+        assert event_pusher.coordinator_heartbeat_interval == 10.0
+        assert event_pusher.event_consumer_sleep_interval != original_event_consumer_sleep_interval
+        assert event_pusher.coordinator_heartbeat_interval != original_coordinator_heartbeat_interval

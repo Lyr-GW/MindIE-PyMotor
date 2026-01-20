@@ -13,41 +13,36 @@
     "env_path": "./conf/env.json",
     "weight_mount_path": "/mnt/weight/",
     "tls_config": {
-      "tls_enable": true,
-      "kmc_ksf_master": "./security/master/tools/pmt/master/ksfa",
-      "kmc_ksf_standby": "./security/standby/tools/pmt/standby/ksfb",
-      "infer_tls_enable": true,
-      "infer_tls_items": {
-        "ca_cert": "./security/infer/security/certs/ca.pem",
-        "tls_cert": "./security/infer/security/certs/cert.pem",
-        "tls_key": "./security/infer/security/keys/cert.key.pem",
-        "tls_passwd": "./security/infer/security/pass/key_pwd.txt",
+      "infer_tls_config": {
+        "tls_enable": false,
+        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/infer/ca.pem",
+        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/infer/cert.pem",
+        "key_file": "/usr/local/Ascend/pyMotor/conf/security/infer/nopass.cert.key.pem",
+        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/infer/key_pwd.txt",
         "tls_crl": ""
       },
-      "management_tls_enable": true,
-      "management_tls_items": {
-        "ca_cert": "./security/management/security/certs/management_ca.pem",
-        "tls_cert": "./security/management/security/certs/cert.pem",
-        "tls_key": "./security/management/security/keys/cert.key.pem",
-        "tls_passwd": "./security/management/security/pass/key_pwd.txt",
+      "mgmt_tls_config": {
+        "tls_enable": false,
+        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/ca.pem",
+        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/cert.pem",
+        "key_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/nopass.cert.key.pem",
+        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/key_pwd.txt",
         "tls_crl": ""
       },
-      "cluster_tls_enable": true,
-      "cluster_tls_items": {
-        "ca_cert": "./security/clusterd/security/certs/ca.pem",
-        "tls_cert": "./security/clusterd/security/certs/cert.pem",
-        "tls_key": "./security/clusterd/security/keys/cert.key.pem",
-        "tls_passwd": "./security/clusterd/security/pass/key_pwd.txt",
+      "etcd_tls_config": {
+        "tls_enable": false,
+        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/ca.pem",
+        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/cert.pem",
+        "key_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/nopass.cert.key.pem",
+        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/key_pwd.txt",
         "tls_crl": ""
       },
-      "etcd_server_tls_enable": true,
-      "etcd_server_tls_items": {
-        "ca_cert": "./security/etcd_server/security/certs/ca.pem",
-        "tls_cert": "./security/etcd_server/security/certs/cert.pem",
-        "tls_key": "./security/etcd_server/security/keys/cert.key.pem",
-        "tls_passwd": "./security/etcd_server/security/pass/key_pwd.txt",
-        "kmc_ksf_master": "./security/etcd_server/tools/pmt/master/ksfa",
-        "kmc_ksf_standby": "./security/etcd_server/tools/pmt/standby/ksfb",
+      "grpc_tls_config": {
+        "tls_enable": false,
+        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/ca.pem",
+        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/cert.pem",
+        "key_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/nopass.cert.key.pem",
+        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/key_pwd.txt",
         "tls_crl": ""
       }
     }
@@ -64,7 +59,7 @@
     "request_limit": {
       "single_node_max_requests": 4096,
       "max_requests": 10000
-    }   
+    }
   },
   "motor_nodemanger_config": {
   },

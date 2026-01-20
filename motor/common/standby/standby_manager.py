@@ -39,9 +39,7 @@ class StandbyManager(ThreadSafeSingleton):
         self.etcd_client = EtcdClient(
             host=config.etcd_config.etcd_host,
             port=config.etcd_config.etcd_port,
-            ca_cert=config.etcd_config.etcd_ca_cert,
-            cert_key=config.etcd_config.etcd_cert_key,
-            cert_cert=config.etcd_config.etcd_cert_cert,
+            tls_config=config.etcd_tls_config,
             timeout=config.etcd_config.etcd_timeout
         )
         standby_config = config.standby_config

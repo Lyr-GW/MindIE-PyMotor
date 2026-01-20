@@ -817,12 +817,11 @@ def test_update_config():
         assert manager.etcd_config.etcd_timeout == 30.0
 
         # Verify ETCD client constructor was called with new config
+        # Note: update_config updates etcd_tls_config, so it uses the new one
         mock_etcd_class.assert_called_once_with(
             host="new-etcd-host",
             port=2380,
-            ca_cert=new_config.etcd_config.etcd_ca_cert,
-            cert_key=new_config.etcd_config.etcd_cert_key,
-            cert_cert=new_config.etcd_config.etcd_cert_cert,
+            tls_config=new_config.etcd_tls_config,
             timeout=30.0
         )
 
