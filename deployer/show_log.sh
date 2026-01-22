@@ -1,29 +1,7 @@
 #!/usr/bin/env bash
 
-# Get the current time, formatted as YYYY-MM-DD_HH-MM-SS
-time=$(date +"%Y-%m-%d_%H-%M-%S")
-log_dir="./log/log_${time}"
+cd ./log_collect
 
-# Creating a Log Directory
-mkdir -p "$log_dir"
+setsid nohup python3 -u log_monitor.py > output.log 2>&1 </dev/null &
 
-# Get all Pods of mindie-motor: namespace name node
-pods=$(kubectl get pods -A -o wide | grep "mindie-motor" | awk '{print $1 " " $2 " " $8}')
-
-# Check if a matching Pod is found
-if [[ -z "$pods" ]]; then
-    echo "No Pods for mindie-motor found."
-    exit 1
-fi
-
-# Capture the interrupt signal and stop all child processes.
-trap 'echo "Stop logging..."; pkill -P $$ || true; exit 0' INT TERM
-
-# Process each pod in a loop, logging asynchronously.
-echo "$pods" | while read -r namespace podname nodename; do
-    logfile="${log_dir}/${podname}_${nodename}.log"
-    echo "Logging for Pod [$podname] (Namespace: $namespace) is being recorded to $logfile"
-    kubectl logs -f -n "$namespace" "$podname" > "$logfile" 2>&1 &
-done
-
-echo "Log recording completed. Logs are saved at $log_dir"
+timeout 2 tail -f output.log
