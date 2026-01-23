@@ -132,6 +132,16 @@ class EngineManager(ThreadSafeSingleton):
         return True
 
     def _register(self) -> None:
+        # Wait for NodeManagerAPI to be ready before registering
+        # Import here to avoid circular import
+        from motor.node_manager.api_server.node_manager_api import NodeManagerAPI
+        
+        logger.info("Waiting for NodeManagerAPI to be ready before registering...")
+        if not NodeManagerAPI.wait_until_ready(timeout=30.0):
+            logger.error("NodeManagerAPI did not become ready within timeout, registration may fail")
+        else:
+            logger.info("NodeManagerAPI is ready, proceeding with registration")
+
         max_retries = 5
         retry_interval = 2
         retries = 0

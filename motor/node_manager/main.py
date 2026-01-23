@@ -55,10 +55,10 @@ def init_all_modules(config_path: str | None = None, hccl_path: str | None = Non
         config = NodeManagerConfig.from_json(config_path, hccl_path)
 
     modules.append(config)
+    modules.append(NodeManagerAPI(config=config))
     modules.append(Daemon(config))
     modules.append(EngineManager(config))
     modules.append(HeartbeatManager(config))
-    modules.append(NodeManagerAPI(config=config))
     logger.info("All modules initialized")
 
 
