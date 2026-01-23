@@ -97,7 +97,8 @@ class SeparateCDPRouter(BaseRouter):
                 return
 
             except asyncio.CancelledError:
-                self.logger.debug("Stream request was cancelled")
+                self.logger.debug("The streaming request was terminated because of "
+                                  "infer timeout or client disconnect.")
                 await self.req_info.close_clients()
                 raise
             except Exception as e:
@@ -140,7 +141,8 @@ class SeparateCDPRouter(BaseRouter):
                     return JSONResponse(content=response.json())
 
             except asyncio.CancelledError:
-                self.logger.debug("Post request was cancelled")
+                self.logger.debug("The non streaming request was terminated because of "
+                                  "infer timeout or client disconnect.")
                 await self.req_info.close_clients()
                 raise
             except Exception as e:

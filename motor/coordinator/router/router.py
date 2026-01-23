@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
+from functools import wraps
 
 from fastapi import HTTPException, Request, status
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -32,6 +34,61 @@ _ROUTER_MAP: dict[DeployMode, type['BaseRouter']] = {
 }
 
 
+async def listen_for_disconnect(request: Request) -> None:
+    """Returns if a disconnect message is received"""
+    while True:
+        message = await request.receive()
+        # detect http disconnect
+        if message["type"] == "http.disconnect":
+            break
+
+
+def with_cancellation(handler_func):
+    """Decorator that allows router to be cancelled by client
+    disconnections.
+
+    Simultaneously awaits on two tasks
+        - one to wait for an http disconnect message
+        - the other to do the work that we want done
+    When the first task finishes, the other is cancelled.
+
+    In the case where a `StreamingResponse` is returned by the router, this
+    wrapper will stop listening for disconnects and instead the response object
+    will start listening for disconnects.
+    """
+
+    @wraps(handler_func)
+    async def wrapper(*args, **kwargs):
+        
+        # Handles two parameter-passing scenarios:
+        # (1) func(request), where params in args.
+        # (2) func(raw_request=request), where params in kwargs.
+        request = args[0] if len(args) >= 1 else kwargs["raw_request"]
+
+        handler_task = asyncio.create_task(handler_func(*args, **kwargs))
+        cancellation_task = asyncio.create_task(listen_for_disconnect(request))
+
+        try:
+            done, pending = await asyncio.wait(
+                [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending:
+                task.cancel()
+
+            if handler_task in done:
+                return handler_task.result()
+            return None
+        except (Exception, asyncio.CancelledError):
+            if not handler_task.done():
+                handler_task.cancel()
+            if not cancellation_task.done():
+                cancellation_task.cancel()
+            raise
+
+    return wrapper
+
+
+@with_cancellation
 async def handle_request(raw_request: Request, 
                          config: CoordinatorConfig
                          ) -> StreamingResponse | JSONResponse:
@@ -73,6 +130,7 @@ async def handle_request(raw_request: Request,
         ) from e
 
 
+@with_cancellation
 async def handle_metaserver_request(raw_request: Request, config: CoordinatorConfig) -> httpx.Response:
     """Only for CDP mode
     Handle incoming requests from D Instance and route them to P instance
