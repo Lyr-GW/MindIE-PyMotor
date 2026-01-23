@@ -2,6 +2,20 @@
 
 # Script to generate Python code from .proto files
 # This script generates _pb2.py and _pb2_grpc.py files from .proto files
+#
+# Example .proto file structure (motor/common/utils/proto/kv.proto):
+#   syntax = "proto3";
+#   package motor.common.utils.proto;
+#
+#   message KVPair {
+#     string key = 1;
+#     string value = 2;
+#   }
+#
+#   service KVService {
+#     rpc Get(KVPair) returns (KVPair);
+#     rpc Put(KVPair) returns (KVPair);
+#   }
 
 set -e  # Exit on error
 
@@ -50,7 +64,7 @@ for proto_file in $PROTO_FILES; do
         # Fix import paths in _pb2_grpc.py if it exists
         pb2_grpc_file="${proto_dir}/${proto_base}_pb2_grpc.py"
         if [ -f "$pb2_grpc_file" ]; then
-            # Get the Python package path (e.g., motor/controller/ft/cluster_grpc/cluster_fault.proto -> motor.controller.ft.cluster_grpc)
+            # Get the Python package path (e.g., motor/common/utils/proto/kv.proto -> motor.common.utils.proto)
             # Remove leading ./ and .proto extension, get directory path, then convert / to .
             proto_rel_path=$(echo "$proto_file" | sed 's|^\./||' | sed 's|\.proto$||')
             package_path=$(dirname "$proto_rel_path" | sed 's|/|.|g')
@@ -59,7 +73,7 @@ for proto_file in $PROTO_FILES; do
             fi
 
             # Replace relative import with absolute import
-            # Pattern: import cluster_fault_pb2 -> from motor.controller.ft.cluster_grpc import cluster_fault_pb2
+            # Pattern: import kv_pb2 -> from motor.common.utils.proto import kv_pb2
             # Use sed with word boundary to avoid double replacement
             if [ -n "$package_path" ]; then
                 # First check if already replaced to avoid double replacement
