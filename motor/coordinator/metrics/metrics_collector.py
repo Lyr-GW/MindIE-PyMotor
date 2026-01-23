@@ -488,7 +488,7 @@ class MetricsCollector(ThreadSafeSingleton):
     def _aggregate_metrics_by_instance(
         self,
         collects: dict[int, dict[str, dict[int, dict[str, list[SingleMetric]]]]]
-    ) -> bool:
+    ) -> None:
         """
         For each instance, aggreagte metrics of all endpoints.
 
