@@ -35,7 +35,8 @@ INFER_TLS_CONFIG = 'infer_tls_config'
 GRPC_TLS_CONFIG = 'grpc_tls_config'
 ETCD_TLS_CONFIG = 'etcd_tls_config'
 MGMT_TLS_CONFIG = 'mgmt_tls_config'
-ADDITIONAL_CONFIG = 'additional_config'
+KV_TRANSFER_CONFIG = "kv_transfer_config"
+KV_CONNECTOR_EXTRA_CONFIG = "kv_connector_extra_config"
 AIGW = 'aigw'
 ID = 'id'
 MOTOR_ENGINE_PREFILL_CONFIG = 'motor_engine_prefill_config'
@@ -221,12 +222,21 @@ def _update_engine_server_tls_config(updated_config: dict[Any, Any], user_config
         updated_config[ENGINE_CONFIG][SSL_KEYFILE] = infer_tls_config[KEY_FILE]
         updated_config[ENGINE_CONFIG][SSL_CERTFILE] = infer_tls_config[CERT_FILE]
         updated_config[ENGINE_CONFIG][SSL_CA_CERTS] = infer_tls_config[CA_FILE]
-        if ADDITIONAL_CONFIG not in updated_config[ENGINE_CONFIG]:
-            updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG] = {}
-        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_ENABLE] = True
-        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_KEYFILE] = infer_tls_config[KEY_FILE]
-        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_CERTFILE] = infer_tls_config[CERT_FILE]
-        updated_config[ENGINE_CONFIG][ADDITIONAL_CONFIG][SSL_CA_CERTS] = infer_tls_config[CA_FILE]
+
+        engine_config = updated_config[ENGINE_CONFIG]
+        if KV_TRANSFER_CONFIG not in engine_config:
+            engine_config[KV_TRANSFER_CONFIG] = {}
+        kv_transfer_config = engine_config[KV_TRANSFER_CONFIG]
+        if KV_CONNECTOR_EXTRA_CONFIG not in kv_transfer_config:
+            kv_transfer_config[KV_CONNECTOR_EXTRA_CONFIG] = {}
+        kv_connector_config = kv_transfer_config[KV_CONNECTOR_EXTRA_CONFIG]
+        if TLS_CONFIG not in kv_connector_config:
+            kv_connector_config[TLS_CONFIG] = {}
+        tls_config = kv_connector_config[TLS_CONFIG]
+        tls_config[SSL_ENABLE] = True
+        tls_config[SSL_KEYFILE] = infer_tls_config[KEY_FILE]
+        tls_config[SSL_CERTFILE] = infer_tls_config[CERT_FILE]
+        tls_config[SSL_CA_CERTS] = infer_tls_config[CA_FILE]
 
 
 def main():
