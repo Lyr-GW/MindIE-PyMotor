@@ -5,6 +5,7 @@
 import asyncio
 import json
 import threading
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import Response
 import uvicorn
@@ -19,7 +20,24 @@ from motor.node_manager.core.daemon import Daemon
 from motor.common.resources.instance import PDRole
 
 logger = get_logger(__name__)
-app = FastAPI()
+
+# Global event to signal when NodeManagerAPI server is ready
+_api_ready_event = threading.Event()
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    """Lifespan context manager for FastAPI app"""
+    # Startup: signal that the server is ready
+    global _api_ready_event
+    _api_ready_event.set()
+    logger.info("NodeManagerAPI server is ready")
+    yield
+    # Shutdown: clear the ready event
+    _api_ready_event.clear()
+
+
+app = FastAPI(lifespan=lifespan)
 
 MAX_CONCURRENT_THREADS = 10
 thread_semaphore = asyncio.Semaphore(MAX_CONCURRENT_THREADS)
@@ -120,8 +138,26 @@ class NodeManagerAPI:
         self.serve_task = None
         self._thread = None
 
+        # Reset the ready event before starting
+        global _api_ready_event
+        _api_ready_event.clear()
+
         self._thread = threading.Thread(target=self._serve_in_thread, daemon=True, name="nm_api_server")
         self._thread.start()
+
+    @staticmethod
+    def wait_until_ready(timeout: float = None) -> bool:
+        """
+        Wait until the NodeManagerAPI server is ready.
+        
+        Args:
+            timeout: Maximum time to wait in seconds. None means wait indefinitely.
+            
+        Returns:
+            True if the server is ready, False if timeout occurred.
+        """
+        global _api_ready_event
+        return _api_ready_event.wait(timeout=timeout)
 
     async def stop(self):
         self.stop_sync()
