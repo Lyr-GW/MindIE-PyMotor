@@ -59,10 +59,10 @@ def engine_server_launch_vllm_core_engines(
         EngineZmqAddresses
     ]
 ]:
+    parallel_cfg = vllm_config.parallel_config 
     local_engine_num = parallel_cfg.data_parallel_size_local
     local_rank_start = parallel_cfg.data_parallel_rank_local
     master_ip = parallel_cfg.data_parallel_master_ip
-    parallel_cfg = vllm_config.parallel_config
     dp_rank_idx = parallel_cfg.data_parallel_rank
     data_parallel_size = parallel_cfg.data_parallel_size
     
