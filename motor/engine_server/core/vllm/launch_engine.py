@@ -1,7 +1,25 @@
 #!/usr/bin/env python3
-# coding=utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
+# -*- coding: utf-8 -*-
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+#
+# MindIE is licensed under both the Mulan PSL v2 and the Apache License, Version 2.0.
+# You may choose to use this software under the terms of either license.
+#
+# ---------------------------------------------------------------------------
+# Mulan PSL v2:
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#         http://license.coscl.org.cn/MulanPSL2
+#
+# Apache License, Version 2.0:
+# You may obtain a copy of the License at:
+#         http://www.apache.org/licenses/LICENSE-2.0
+# ---------------------------------------------------------------------------
+#
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the respective licenses for more details.
 
 import contextlib
 import signal
@@ -33,21 +51,21 @@ def engine_server_launch_vllm_core_engines(
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        num_api_servers: int = 1,
+        num_api_servers: int = 1
 ) -> Iterator[
     tuple[
         CoreEngineProcManager | CoreEngineActorManager | None,
         DPCoordinator | None,
-        EngineZmqAddresses,
+        EngineZmqAddresses
     ]
 ]:
-    parallel_cfg = vllm_config.parallel_config
-    data_parallel_size = parallel_cfg.data_parallel_size
     local_engine_num = parallel_cfg.data_parallel_size_local
     local_rank_start = parallel_cfg.data_parallel_rank_local
-    dp_rank_idx = parallel_cfg.data_parallel_rank
     master_ip = parallel_cfg.data_parallel_master_ip
-
+    parallel_cfg = vllm_config.parallel_config
+    dp_rank_idx = parallel_cfg.data_parallel_rank
+    data_parallel_size = parallel_cfg.data_parallel_size
+    
     is_local_only = (
             parallel_cfg.data_parallel_hybrid_lb
             or parallel_cfg.data_parallel_external_lb
@@ -89,9 +107,9 @@ def engine_server_launch_vllm_core_engines(
 
         actor_manager = CoreEngineActorManager(
             vllm_config=vllm_config,
-            addresses=zmq_addresses,
-            executor_class=executor_class,
             log_stats=log_stats,
+            executor_class=executor_class,
+            addresses=zmq_addresses,
         )
 
         yield actor_manager, dp_coordinator, zmq_addresses
@@ -122,32 +140,29 @@ def engine_server_launch_vllm_core_engines(
         from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
     except Exception:
         from vllm.utils import get_mp_context, get_open_zmq_ipc_path, zmq_socket_ctx
-
-    local_handshake_addr = handshake_addr
     client_handshake_addr = None
+    local_handshake_addr = handshake_addr
     if is_local_only and dp_rank_idx > 0:
         if handshake_local:
             raise RuntimeError("handshake_local must be False when is_local_only and dp_rank_idx > 0")
         local_handshake_addr = get_open_zmq_ipc_path()
         client_handshake_addr = local_handshake_addr
 
-    with zmq_socket_ctx(
-            local_handshake_addr, zmq.ROUTER, bind=True
-    ) as handshake_sock:
+    with zmq_socket_ctx(local_handshake_addr, zmq.ROUTER, bind=True) as handshake_sock:
 
         local_engine_mgr = None
         if local_engine_num > 0:
             local_engine_mgr = CoreEngineProcManager(
                 EngineServerEngineCoreProc.engine_server_run_engine_core,
-                vllm_config=vllm_config,
+                local_start_index=local_rank_start or 0,
+                client_handshake_address=client_handshake_addr,
+                start_index=dp_rank_idx,
                 executor_class=executor_class,
                 log_stats=log_stats,
                 handshake_address=handshake_addr,
-                client_handshake_address=client_handshake_addr,
                 local_client=True,
                 local_engine_count=local_engine_num,
-                start_index=dp_rank_idx,
-                local_start_index=local_rank_start or 0,
+                vllm_config=vllm_config,
             )
 
         yield local_engine_mgr, dp_coordinator, zmq_addresses
