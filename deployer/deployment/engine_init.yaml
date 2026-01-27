@@ -93,6 +93,8 @@ spec:
             mountPath: /etc/hccn.conf
           - name: weight-mount
             mountPath: /mnt/weight
+          - name: plog-path
+            mountPath: /root/ascend/log
       volumes:
       - name: data
         hostPath:
@@ -136,3 +138,7 @@ spec:
       - name: weight-mount
         hostPath:
           path: /mnt/weight
+      - name: plog-path
+        hostPath:
+          path: /root/ascend/log
+          type: DirectoryOrCreate
