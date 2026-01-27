@@ -607,27 +607,25 @@ class InstanceAssembler(ThreadSafeSingleton):
             return
 
         for node_mgr in node_managers:
-            if self._is_node_manager_abnormal(node_mgr, instance):
+            if not self._is_node_manager_alive(node_mgr, instance):
                 instance.del_endpoints(node_mgr.pod_ip)
                 instance.del_node_mgr(node_mgr.pod_ip, node_mgr.host_ip, node_mgr.port)
 
         logger.info("Endpoint filtering completed for instance %s(id:%d)",
                     instance.job_name, instance.id)
 
-    def _is_node_manager_abnormal(self, node_mgr, instance: Instance) -> bool:
-        """Check if a node manager is abnormal and log appropriate messages."""
+    def _is_node_manager_alive(self, node_mgr, instance: Instance) -> bool:
+        """ Check if a node manager is alive for instance"""
         try:
-            response = NodeManagerApiClient.query_status(node_mgr)
-            is_normal = response.get("status", False)
-            if not is_normal:
-                logger.warning("Node manager %s:%s reports abnormal endpoints for instance %s(id:%d), "
-                               "removing endpoints",
-                               node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id)
-            return not is_normal
-        except Exception as e:
-            logger.warning("Failed to check node manager %s:%s status for instance %s(id:%d): %s, "
-                           "removing endpoints", node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, e)
+            _ = NodeManagerApiClient.query_status(node_mgr)
+            # Only check if node manager is reachable and responsive, not endpoint status
+            logger.debug("Node manager %s:%s is reachable for instance %s(id:%d)",
+                         node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id)
             return True
+        except Exception as e:
+            logger.warning("Node manager %s:%s is not alive for instance %s(id:%d): %s",
+                           node_mgr.pod_ip, node_mgr.port, instance.job_name, instance.id, e)
+            return False
 
     def _get_next_version(self) -> int:
         """Get next data version for persistence"""

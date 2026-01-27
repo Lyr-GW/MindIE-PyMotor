@@ -29,6 +29,7 @@ class CoordinatorApiClient:
     @staticmethod
     def send_instance_refresh(event_msg: InsEventMsg) -> bool:
         is_succeed = True
+        client = None
 
         client_ars = CoordinatorApiClient._generate_client_args()
         try:
@@ -46,9 +47,11 @@ class CoordinatorApiClient:
                             event_msg.event, response_text)
         except Exception as e:
             is_succeed = False
-            logger.error("Exception occurred while pushing event, %s, %s", client_ars['base_url'], e)
+            address = client_ars.get('address', 'unknown')
+            logger.error("Exception occurred while pushing event, %s, %s", address, e)
         finally:
-            client.close()
+            if client is not None:
+                client.close()
 
         return is_succeed
 

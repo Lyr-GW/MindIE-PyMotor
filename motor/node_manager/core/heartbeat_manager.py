@@ -41,7 +41,6 @@ class HeartbeatManager(ThreadSafeSingleton):
         self._config = config
         self.heartbeat_interval_seconds = config.basic_config.heartbeat_interval_seconds
 
-
         self._job_name = ""
         self._role = "prefill"
         self._instance_id = -1
@@ -123,7 +122,7 @@ class HeartbeatManager(ThreadSafeSingleton):
         with self._endpoint_lock:
             for endpoint in self._endpoints:
                 if endpoint.status != EndpointStatus.NORMAL:
-                    logger.warning("Endpoint %d at %s:%d is in status %s",
+                    logger.warning("Endpoint %d at %s:%s is in status %s",
                                    endpoint.id, endpoint.ip, endpoint.mgmt_port, endpoint.status)
                     return False
         logger.debug("All endpoints are in normal status")

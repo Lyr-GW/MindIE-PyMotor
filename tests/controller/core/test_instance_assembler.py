@@ -1406,7 +1406,7 @@ def test_filter_abnormal_endpoints_all_normal(instance_assembler, test_config):
 
 
 def test_filter_abnormal_endpoints_with_abnormal(instance_assembler, test_config):
-    """Test _filter_abnormal_endpoints filters endpoints when some node managers report abnormal status"""
+    """Test _filter_abnormal_endpoints does not filter endpoints when node managers are reachable"""
     # Create instance with node managers
     instance = Instance(
         job_name="test_filter_abnormal",
@@ -1426,21 +1426,22 @@ def test_filter_abnormal_endpoints_with_abnormal(instance_assembler, test_config
     instance.add_endpoints("127.0.0.1", endpoints1)
     instance.add_endpoints("127.0.0.2", endpoints2)
 
-    # Mock NodeManagerApiClient.query_status - first normal, second abnormal
+    # Mock NodeManagerApiClient.query_status - both are reachable (no exceptions)
     with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
-        # First call returns normal, second returns abnormal
+        # Both calls succeed, regardless of status content
         mock_query_status.side_effect = [{"status": True}, {"status": False}]
 
         instance_assembler._filter_abnormal_endpoints(instance)
 
-        # Verify endpoints from abnormal node manager were removed
-        assert instance.get_endpoints_num() == 1  # Only one endpoint left
-        assert "127.0.0.2" not in instance.endpoints  # Abnormal node manager's endpoints removed
-        assert len(instance.node_managers) == 1  # Abnormal node manager removed
+        # No endpoints should be removed since both node managers are reachable
+        assert instance.get_endpoints_num() == 2  # Both endpoints remain
+        assert "127.0.0.1" in instance.endpoints
+        assert "127.0.0.2" in instance.endpoints
+        assert len(instance.node_managers) == 2  # Both node managers remain
 
 
 def test_filter_abnormal_endpoints_invalid_response(instance_assembler, test_config):
-    """Test _filter_abnormal_endpoints filters endpoints when node manager returns invalid response"""
+    """Test _filter_abnormal_endpoints does not filter endpoints when node manager responds (even with invalid response)"""
     # Create instance with node managers
     instance = Instance(
         job_name="test_filter_invalid",
@@ -1455,15 +1456,15 @@ def test_filter_abnormal_endpoints_invalid_response(instance_assembler, test_con
     endpoints = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
     instance.add_endpoints("127.0.0.1", endpoints)
 
-    # Mock NodeManagerApiClient.query_status to return invalid response
+    # Mock NodeManagerApiClient.query_status to return invalid response but no exception
     with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
-        mock_query_status.return_value = {"invalid": "response"}  # No 'status' field
+        mock_query_status.return_value = {"invalid": "response"}  # No 'status' field, but call succeeds
 
         instance_assembler._filter_abnormal_endpoints(instance)
 
-        # Verify endpoints were removed
-        assert instance.get_endpoints_num() == 0
-        assert len(instance.node_managers) == 0
+        # No endpoints should be removed since node manager is reachable
+        assert instance.get_endpoints_num() == 1
+        assert len(instance.node_managers) == 1
 
 
 def test_filter_abnormal_endpoints_connection_error(instance_assembler, test_config):
@@ -1488,9 +1489,42 @@ def test_filter_abnormal_endpoints_connection_error(instance_assembler, test_con
 
         instance_assembler._filter_abnormal_endpoints(instance)
 
-        # Verify endpoints were removed
+        # Verify endpoints were removed due to connection failure
         assert instance.get_endpoints_num() == 0
         assert len(instance.node_managers) == 0
+
+
+def test_filter_abnormal_endpoints_mixed_scenarios(instance_assembler, test_config):
+    """Test _filter_abnormal_endpoints with mixed reachable/unreachable node managers"""
+    # Create instance with multiple node managers
+    instance = Instance(
+        job_name="test_filter_mixed",
+        model_name="test_model",
+        id=1,
+        role=test_config['role'],
+        parallel_config=test_config['parallel_config']
+    )
+
+    # Add node managers and endpoints
+    instance.add_node_mgr("127.0.0.1", "127.0.0.1", "8088")  # Will be reachable
+    instance.add_node_mgr("127.0.0.2", "127.0.0.2", "8088")  # Will fail connection
+
+    endpoints1 = {1: Endpoint(id=1, ip="127.0.0.1", business_port="1001", mgmt_port="9001")}
+    endpoints2 = {2: Endpoint(id=2, ip="127.0.0.2", business_port="1002", mgmt_port="9002")}
+    instance.add_endpoints("127.0.0.1", endpoints1)
+    instance.add_endpoints("127.0.0.2", endpoints2)
+
+    # Mock NodeManagerApiClient.query_status - first succeeds, second fails
+    with patch('motor.controller.core.instance_assembler.NodeManagerApiClient.query_status') as mock_query_status:
+        mock_query_status.side_effect = [{"status": True}, Exception("Connection failed")]
+
+        instance_assembler._filter_abnormal_endpoints(instance)
+
+        # Only unreachable node manager's endpoints should be removed
+        assert instance.get_endpoints_num() == 1
+        assert "127.0.0.1" in instance.endpoints  # Reachable node manager's endpoints remain
+        assert "127.0.0.2" not in instance.endpoints  # Unreachable node manager's endpoints removed
+        assert len(instance.node_managers) == 1  # Only unreachable node manager removed
 
 
 def test_filter_abnormal_endpoints_no_node_managers(instance_assembler, test_config, caplog):

@@ -104,8 +104,8 @@ class EventPusher(Observer):
     def is_alive(self) -> bool:
         """Check if the event_pusher threads are alive"""
         return (
-                (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive())
-                and (self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
+            (self.event_consumer_thread is not None and self.event_consumer_thread.is_alive())
+            and (self.heartbeat_detector_thread is not None and self.heartbeat_detector_thread.is_alive())
         )
 
     def update_config(self, config: ControllerConfig) -> None:
@@ -173,7 +173,10 @@ class EventPusher(Observer):
                     continue
 
                 if event_msg is not None:
-                    CoordinatorApiClient.send_instance_refresh(event_msg)
+                    try:
+                        CoordinatorApiClient.send_instance_refresh(event_msg)
+                    except Exception as e:
+                        logger.error("Failed to send instance refresh event, error: %s", e)
 
             with self.config_lock:
                 sleep_interval = self.event_consumer_sleep_interval

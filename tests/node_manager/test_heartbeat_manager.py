@@ -398,7 +398,8 @@ class TestHeartBeatManager:
     
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
     @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    def test_reregister_lock_thread_safety(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.EngineManager')
+    def test_reregister_lock_thread_safety(self, mock_engine_manager_class, mock_report_heartbeat, mock_sleep, heart_beat_manager):
         """test that _reregister_lock prevents concurrent reregister attempts"""
         call_count = {"count": 0}
         
@@ -406,6 +407,11 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
             call_count["count"] += 1
+        
+        # Mock EngineManager
+        mock_engine_manager = MagicMock()
+        mock_engine_manager.post_reregister_msg.return_value = True
+        mock_engine_manager_class.return_value = mock_engine_manager
         
         # Mock report_heartbeat to raise 503 error
         mock_report_heartbeat.side_effect = Exception("503 Service Unavailable")
