@@ -74,17 +74,17 @@ class TestProcManager:
         proc_manager = ProcManager(main_pid)
 
         # Test existing process
-        assert proc_manager._is_process_exist(5678) is True
+        assert proc_manager.is_process_exist(5678) is True
 
         # Test non-existent process
         mock_psutil.Process.side_effect = Exception("Process not found")
-        assert proc_manager._is_process_exist(9999) is False
+        assert proc_manager.is_process_exist(9999) is False
 
         # Test zombie process
         mock_psutil.Process.side_effect = None
         mock_psutil.Process.return_value.is_running.return_value = True
         mock_psutil.Process.return_value.status.return_value = mock_psutil.STATUS_ZOMBIE
-        assert proc_manager._is_process_exist(5678) is False
+        assert proc_manager.is_process_exist(5678) is False
 
     def test_get_children_pids_by_depth(self, mock_psutil):
         """Test _get_children_pids_by_depth method"""
@@ -120,7 +120,7 @@ class TestProcManager:
         proc_manager = ProcManager(main_pid)
 
         # Test getting children pids with depth 1
-        children = proc_manager._get_children_pids_by_depth(5678, 1)
+        children = proc_manager.get_children_pids_by_depth(5678, 1)
         assert len(children) == 2
         assert 1001 in children  # Check if PID is in the set
         assert 1002 in children  # Check if PID is in the set
@@ -138,7 +138,7 @@ class TestProcManager:
                 return mock_child
         
         mock_psutil.Process.side_effect = process_side_effect_nosuch
-        children = proc_manager._get_children_pids_by_depth(5678, 1)
+        children = proc_manager.get_children_pids_by_depth(5678, 1)
         assert children == set()
 
         # Test exception handling - generic exception when getting children
@@ -157,7 +157,7 @@ class TestProcManager:
                 return mock_child
         
         mock_psutil.Process.side_effect = process_side_effect_children_error
-        children = proc_manager._get_children_pids_by_depth(5678, 1)
+        children = proc_manager.get_children_pids_by_depth(5678, 1)
         assert isinstance(children, set)
         assert len(children) == 0  # No children due to exception
 
@@ -259,7 +259,7 @@ class TestProcManager:
         proc_manager = ProcManager(main_pid)
 
         # Test normal termination
-        proc_manager._kill_process(5678)
+        proc_manager.kill_process(5678)
         mock_psutil.Process.return_value.terminate.assert_called_once()
         mock_psutil.Process.return_value.wait.assert_called_once_with(timeout=3)
         mock_psutil.Process.return_value.kill.assert_not_called()
@@ -272,7 +272,7 @@ class TestProcManager:
         mock_psutil.TimeoutExpired = type('TimeoutExpired', (Exception,), {})
         mock_psutil.Process.return_value.wait.side_effect = mock_psutil.TimeoutExpired(3)
         
-        proc_manager._kill_process(5678)
+        proc_manager.kill_process(5678)
         mock_psutil.Process.return_value.terminate.assert_called_once()
         mock_psutil.Process.return_value.wait.assert_called_once_with(timeout=3)
         mock_psutil.Process.return_value.kill.assert_called_once()
@@ -280,7 +280,7 @@ class TestProcManager:
         # Test exception handling
         mock_psutil.Process.reset_mock()
         mock_psutil.Process.side_effect = Exception("Error killing process")
-        proc_manager._kill_process(5678)
+        proc_manager.kill_process(5678)
         # Verify warning log is written
         mock_logger.warning.assert_called_once_with("process 5678 exited with error: Error killing process")
 
@@ -313,8 +313,8 @@ class TestProcManager:
             proc_manager.child_pids.add(1001)
             proc_manager.child_pids.add(1002)
 
-            # Make _is_process_exist return False for child pids
-            with patch.object(proc_manager, '_is_process_exist', return_value=False):
+            # Make is_process_exist return False for child pids
+            with patch.object(ProcManager, 'is_process_exist', return_value=False):
                 with patch.object(proc_manager, 'shutdown') as mock_shutdown:
                     proc_manager.join()
                     mock_shutdown.assert_called_once()
@@ -335,9 +335,9 @@ class TestProcManager:
         proc_manager._shutdown_triggered = False
         proc_manager.child_pids.clear()
 
-        # Test join with generic exception (instead of KeyboardInterrupt)
+        # Test join with generic exception
         with patch.object(proc_manager, 'shutdown') as mock_shutdown:
-            with patch.object(proc_manager, '_is_process_exist', return_value=True):
+            with patch.object(ProcManager, 'is_process_exist', return_value=True):
                 # Make _update_child_pids add child pids instead of clearing them
                 def mock_update_child_pids():
                     # Instead of clearing, add child pids
@@ -358,15 +358,15 @@ class TestProcManager:
                     # Verify error log is written
                     mock_logger.error.assert_called_once_with("exception occur while join: Some unexpected error")
 
-        # Test join with KeyboardInterrupt by mocking it as a custom exception
-        # This avoids interrupting pytest itself
+        # Test join with another exception type (RuntimeError)
+        # Since join catches generic Exception, all exceptions are handled the same way
         proc_manager._shutdown_triggered = False
         proc_manager.child_pids.clear()
         mock_logger.reset_mock()
         mock_time.reset_mock()
 
         with patch.object(proc_manager, 'shutdown') as mock_shutdown:
-            with patch.object(proc_manager, '_is_process_exist', return_value=True):
+            with patch.object(ProcManager, 'is_process_exist', return_value=True):
                 # Make _update_child_pids add child pids instead of clearing them
                 def mock_update_child_pids():
                     proc_manager.child_pids.add(1001)
@@ -374,20 +374,14 @@ class TestProcManager:
 
                 with patch.object(proc_manager, '_update_child_pids',
                                   side_effect=mock_update_child_pids) as mock_update:
-                    # Mock KeyboardInterrupt as a custom exception to avoid pytest interruption
-                    class MockKeyboardInterrupt(Exception):
-                        pass
-                    
-                    # Replace KeyboardInterrupt with our mock class in the module
-                    with patch('motor.engine_server.utils.proc.KeyboardInterrupt', MockKeyboardInterrupt):
-                        # Make time.sleep raise our mock KeyboardInterrupt
-                        mock_time.sleep.side_effect = MockKeyboardInterrupt()
+                    # Make time.sleep raise RuntimeError (similar to KeyboardInterrupt handling)
+                    mock_time.sleep.side_effect = RuntimeError("Interrupted")
 
-                        proc_manager.join()
+                    proc_manager.join()
 
-                        # Verify _update_child_pids is called at the beginning of join
-                        mock_update.assert_called_once()
-                        # Verify shutdown is called when KeyboardInterrupt is raised
-                        mock_shutdown.assert_called_once()
-                        # Verify error log is written
-                        mock_logger.error.assert_called_once()
+                    # Verify _update_child_pids is called at the beginning of join
+                    mock_update.assert_called_once()
+                    # Verify shutdown is called when exception is raised
+                    mock_shutdown.assert_called_once()
+                    # Verify error log is written
+                    mock_logger.error.assert_called_once_with("exception occur while join: Interrupted")
