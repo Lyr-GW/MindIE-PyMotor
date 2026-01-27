@@ -30,11 +30,11 @@ class ProcManager:
         self.child_pids: Set[int] = set()
         self._shutdown_triggered = False
 
-        if not self._is_process_exist(main_pid):
+        if not ProcManager.is_process_exist(main_pid):
             raise ValueError(f"process {main_pid} does not exist")
 
     @staticmethod
-    def _kill_process(pid: int) -> None:
+    def kill_process(pid: int) -> None:
         try:
             proc = psutil.Process(pid)
             proc.terminate()
@@ -46,7 +46,7 @@ class ProcManager:
             logger.warning(f"process {pid} exited with error: {e}")
 
     @staticmethod
-    def _is_process_exist(pid: int) -> bool:
+    def is_process_exist(pid: int) -> bool:
         try:
             proc = psutil.Process(pid)
             return proc.is_running() and not proc.status() == psutil.STATUS_ZOMBIE
@@ -55,7 +55,7 @@ class ProcManager:
             return False
 
     @staticmethod
-    def _get_children_pids_by_depth(pid: int, depth: int) -> Set[int]:
+    def get_children_pids_by_depth(pid: int, depth: int) -> Set[int]:
         if depth <= 0:
             logger.warning("Recursive depth must be greater than 0, current input: %d, return empty set", depth)
             return set()
@@ -96,6 +96,9 @@ class ProcManager:
 
         return children_pids
 
+    def is_shutting_down(self) -> bool:
+        return self._shutdown_triggered
+
     def shutdown(self) -> None:
         if self._shutdown_triggered:
             return
@@ -103,8 +106,8 @@ class ProcManager:
         self._shutdown_triggered = True
 
         for pid in self.child_pids:
-            self._kill_process(pid)
-        self._kill_process(self.main_pid)
+            ProcManager.kill_process(pid)
+        ProcManager.kill_process(self.main_pid)
 
     def join(self) -> None:
         if self._shutdown_triggered:
@@ -114,7 +117,7 @@ class ProcManager:
             while len(self.child_pids) > 0:
                 dead_pids = []
                 for pid in self.child_pids:
-                    if not self._is_process_exist(pid):
+                    if not ProcManager.is_process_exist(pid):
                         logger.warning(f"process {pid} exited, prepare to shutdown")
                         dead_pids.append(pid)
 
@@ -131,6 +134,6 @@ class ProcManager:
         if self._shutdown_triggered:
             return
         self.child_pids.clear()
-        if self._is_process_exist(self.main_pid):
+        if ProcManager.is_process_exist(self.main_pid):
             # get children and grandchildren pids
-            self.child_pids.update(self._get_children_pids_by_depth(self.main_pid, 2))
+            self.child_pids.update(ProcManager.get_children_pids_by_depth(self.main_pid, 2))

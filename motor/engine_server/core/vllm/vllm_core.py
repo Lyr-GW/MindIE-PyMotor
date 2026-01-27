@@ -31,6 +31,7 @@ from motor.common.utils.logger import get_logger
 from motor.engine_server.constants import constants
 from motor.engine_server.core.vllm.launch_engine import engine_server_launch_vllm_core_engines
 from motor.engine_server.core.vllm.launch_server import engine_server_run_api_server_worker_proc
+from motor.engine_server.utils.proc import ProcManager
 
 logger = get_logger("engine_server")
 
@@ -64,6 +65,8 @@ class VLLMServerCore(BaseServerCore):
         logger.info(f"[VLLMServerCore] vLLM shutdown completed")
 
     def status(self) -> str:
+        if super().is_shutting_down():
+            return constants.ABNORMAL_STATUS
         return self._status
 
     def _signal_handler(self, sig: int, frame) -> None:
@@ -129,10 +132,29 @@ class VLLMServerCore(BaseServerCore):
             )
             self.api_server_manager = APIServerProcessManager(**api_server_settings)
 
+        if len(self.api_server_manager.processes) < 0:
+            logger.error(f"Failed to start API server process, exit")
+            self.status = constants.ABNORMAL_STATUS
+            self.shutdown()
+            return
+
+        # triggered when weights loaded
+        api_server_pid = self.api_server_manager.processes[0].pid
+        logger.info(f"API server process pid: {api_server_pid}")
+
         retry = 0
         while self._status == constants.INIT_STATUS and retry < constants.API_READY_CHECK_TIMES:
-            retry += 1
+            if super().is_shutting_down():
+                self._status = constants.ABNORMAL_STATUS
+                break
             self._check_api_server_ready()
+
+            # check api server process
+            if retry > constants.API_SERVER_PROC_CHECK_TIMES and not ProcManager.is_process_exist(api_server_pid):
+                message = f"API server process {api_server_pid} is not alive"
+                raise Exception(message)
+
+            retry += 1
             time.sleep(1)
 
     def _check_api_server_ready(self):

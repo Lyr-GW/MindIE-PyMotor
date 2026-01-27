@@ -114,3 +114,4 @@ HEALTH_SERVICE = "health_service"
 
 # vllm api server ready check times
 API_READY_CHECK_TIMES = 3600
+API_SERVER_PROC_CHECK_TIMES = 20

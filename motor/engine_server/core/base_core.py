@@ -74,5 +74,8 @@ class BaseServerCore(IServerCore):
         self.data_controller.shutdown()
         self.proc_manager.shutdown()
 
+    def is_shutting_down(self) -> bool:
+        return self.proc_manager.is_shutting_down()
+
     def status(self) -> str:
         pass
