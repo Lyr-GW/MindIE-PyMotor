@@ -15,6 +15,7 @@ from enum import Enum
 from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field, PrivateAttr
 
+import anyio
 from httpx import AsyncClient
 
 from motor.common.resources.endpoint import Endpoint
@@ -51,28 +52,33 @@ class RequestInfo(BaseModel):
     api: str = Field(..., description="API need to be forwarded")
     state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
-    _prefill_client: Optional[AsyncClient] = PrivateAttr(default=None)
-    _decode_client: Optional[AsyncClient] = PrivateAttr(default=None)
+    _p_cancel_scope: Optional[anyio.CancelScope] = PrivateAttr(default=None)
+    _d_cancel_scope: Optional[anyio.CancelScope] = PrivateAttr(default=None)
 
     def __init__(self, **data):
         super().__init__(**data)
         self.status[ReqState.ARRIVE] = time.time()
+        
+    @property
+    def is_cancelled(self) -> bool:
+        return (self._p_cancel_scope and self._p_cancel_scope.cancel_called) \
+            or (self._d_cancel_scope and self._d_cancel_scope.cancel_called)
 
     def update_state(self, new_state: ReqState):
         self.state = new_state
         self.status[new_state] = time.time()
 
-    def set_client(self, client: AsyncClient, role: PDRole):
+    def set_cancel_scope(self, cancel_scope: anyio.CancelScope, role: PDRole):
         if role == PDRole.ROLE_P:
-            self._prefill_client = client
-        if role == PDRole.ROLE_D:
-            self._decode_client = client
+            self._p_cancel_scope = cancel_scope
+        elif role == PDRole.ROLE_D:
+            self._d_cancel_scope = cancel_scope
     
-    async def close_clients(self):
-        if self._prefill_client and not self._prefill_client.is_closed:
-            await self._prefill_client.aclose()
-        if self._decode_client and not self._decode_client.is_closed:
-            await self._decode_client.aclose()
+    def cancell_scope(self):
+        if self._p_cancel_scope and not self._p_cancel_scope.cancel_called:
+            self._p_cancel_scope.cancel()
+        if self._d_cancel_scope and not self._d_cancel_scope.cancel_called:
+            self._d_cancel_scope.cancel()
 
 
 class ScheduledResource(BaseModel):

@@ -16,6 +16,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional, AsyncGenerator
 
+import asyncio
 import httpx
 from fastapi import status, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -66,7 +67,7 @@ class BaseRouter(ABC):
         """
         resource: Optional[ScheduledResource] = None
         try:
-            resource = self.prepare_resource(role)
+            resource = await self.prepare_resource(role)
             yield resource
         finally:
             if resource and not release_func(resource):
@@ -76,18 +77,20 @@ class BaseRouter(ABC):
                 )
 
     @contextlib.asynccontextmanager
-    async def _manage_client_context(self, resource: ScheduledResource, timeout: int):
+    async def _manage_client_context(self, resource: ScheduledResource):
         """
         Manage schedule resource and http client
         :param resource: ScheduledResource
         :param timeout: http client timeout
         """
         endpoint = resource.endpoint
-        address = f"{endpoint.ip}:{endpoint.business_port}"
-        async with AsyncSafeHTTPSClient(address=address,
-                                        tls_config=self.config.infer_tls_config,
-                                        timeout=timeout) as client:
-            yield client
+        client = endpoint.get_client()
+        if not client or client.is_closed:
+            address = f"{endpoint.ip}:{endpoint.business_port}"
+            client = AsyncSafeHTTPSClient.create_client(address=address,
+                                        tls_config=self.config.infer_tls_config)
+            endpoint.set_client(client)
+        yield client
 
     @abstractmethod
     async def handle_request(self) -> StreamingResponse | JSONResponse:
@@ -98,7 +101,7 @@ class BaseRouter(ABC):
         """
         pass
 
-    def prepare_resource(self, role: PDRole) -> ScheduledResource:
+    async def prepare_resource(self, role: PDRole) -> ScheduledResource:
         """Prepare resource for the given role by scheduling an instance
 
         Args:
@@ -127,7 +130,7 @@ class BaseRouter(ABC):
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
                     detail=f"Scheduling failed, role:{role}"
                 )
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
         self.logger.info(
             "Dispatch request api=%s len=%d -> endpoint_id=%s endpoint=%s:%s status=%s | "
             "instance_id=%s job=%s model=%s role=%s",
@@ -151,6 +154,7 @@ class BaseRouter(ABC):
     async def forward_stream_request(self,
                                      req_data: dict,
                                      client: httpx.AsyncClient,
+                                     timeout: int
                                      ) -> AsyncGenerator[str, None]:
         """Forward streaming request to the given endpoint
 
@@ -167,14 +171,15 @@ class BaseRouter(ABC):
             'X-Request-Id': self.req_info.req_id
         }
         self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
-                          client.base_url, self.req_info.api, headers, req_data, client.timeout)
+                          client.base_url, self.req_info.api, headers, req_data, timeout)
 
         self.first_chunk_sent = False
         async with client.stream(
             "POST",
             f"/{self.req_info.api}",
             json=req_data,
-            headers=headers
+            headers=headers,
+            timeout=timeout
         ) as response:
             if not response.is_success:
                 await response.aread()
@@ -189,6 +194,7 @@ class BaseRouter(ABC):
     async def forward_post_request(self,
                                    req_data: dict,
                                    client: httpx.AsyncClient,
+                                   timeout: int
                                    ) -> httpx.Response:
         """Forward non-streaming request to the given resource
 
@@ -206,11 +212,12 @@ class BaseRouter(ABC):
         filtered_headers = filter_sensitive_headers(headers)
         filtered_body = filter_sensitive_body(req_data)
         self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
-                          client.base_url, self.req_info.api, filtered_headers, filtered_body, client.timeout)
+                          client.base_url, self.req_info.api, filtered_headers, filtered_body, timeout)
 
         response = await client.post(f"/{self.req_info.api}",
                                         json=req_data,
-                                        headers=headers)
+                                        headers=headers,
+                                        timeout=timeout)
         response.raise_for_status()
         return response
 

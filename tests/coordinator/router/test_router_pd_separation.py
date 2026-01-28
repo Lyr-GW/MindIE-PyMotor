@@ -43,6 +43,7 @@ class MockAsyncClient:
         
         self.base_url = "test-base-url"
         self.timeout = 1
+        self.is_closed = False
 
     async def __aenter__(self):
         return self
@@ -53,7 +54,7 @@ class MockAsyncClient:
     async def aclose(self):
         pass
 
-    def stream(self, method, url, json=None, headers=None):
+    def stream(self, method, url, json=None, headers=None, timeout=None):
         if self.fail_count < self.fail_times:
             self.fail_count += 1
             return MockStreamResponse(json or {}, self.recomputed, httpx.HTTPStatusError(
@@ -148,7 +149,7 @@ class TestRouterPDSeparation:
     @pytest.fixture
     def setup_forward_post_request(self, monkeypatch: MonkeyPatch):
         # Mock the HTTP forwarding functions
-        async def mock_forward_post_request(self, req_data: dict, client: httpx.AsyncClient):
+        async def mock_forward_post_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
             # Return a mock response for P request
             mock_response = Mock()
             mock_response.json.return_value = {
@@ -204,7 +205,8 @@ class TestRouterPDSeparation:
         req_info = await create_mock_request_info(max_tokens=max_tokens, stream=stream)
         
         generated_prefill_request = {}
-        async def mock_forward_post_request(self, req_data: dict, client: httpx.AsyncClient):
+        
+        async def mock_forward_post_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
             nonlocal generated_prefill_request
             generated_prefill_request = req_data
             # Return a mock response for P request
@@ -221,7 +223,8 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(SeparatePDRouter, "forward_post_request", mock_forward_post_request)
         
         generated_decode_request = {}
-        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient):
+        
+        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
             nonlocal generated_decode_request
             generated_decode_request = req_data
             # Yield a simple response for D request
@@ -362,7 +365,8 @@ class TestRouterPDSeparation:
         mock_async_client.post = AsyncMock(side_effect=[mock_response_fail, mock_response_success])
 
         decode_count = 0
-        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient):
+        
+        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
             # Yield a simple response for D request
             nonlocal decode_count
             decode_count += 1
@@ -476,7 +480,7 @@ class TestRouterPDSeparation:
         2) Return normal response
         """
         # Mock the HTTP forwarding functions
-        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient):
+        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
             # Yield a simple response for D request
             yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
 

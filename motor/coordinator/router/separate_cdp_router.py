@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 from typing import Dict, AsyncGenerator, Any
 
+import anyio
 from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -59,25 +60,28 @@ class SeparateCDPRouter(BaseRouter):
         try:
             # Schedule Prefill instance and forward the request
             async with self._manage_resource_context(PDRole.ROLE_P, self.release_all) as resource, \
-                       self._manage_client_context(resource, 
-                                                    self.config.exception_config.first_token_timeout
-                                                   ) as client:
-
-                self.req_info.set_client(client, PDRole.ROLE_P)
-                response = await self.forward_post_request(req_data, client)
-                resp_json = response.json()
+                       self._manage_client_context(resource) as client:
                 
-                self.logger.debug("Prefill response received: %s", resp_json)
-                self.req_info.update_state(ReqState.PREFILL_END)
-                return resp_json
-
+                cancel_scope = anyio.CancelScope()
+                self.req_info.set_cancel_scope(cancel_scope, PDRole.ROLE_P)
+                with cancel_scope:
+                    response = await self.forward_post_request(
+                            req_data, client, self.config.exception_config.first_token_timeout
+                        )
+                    resp_json = response.json()
+                    
+                    self.logger.debug("Prefill response received: %s", resp_json)
+                    self.req_info.update_state(ReqState.PREFILL_END)
+                    return resp_json
+                if self.req_info.is_cancelled:
+                    raise Exception("exception occurred in Decode request")
         except asyncio.CancelledError:
             self.logger.warning("Metaserver request was cancelled")
-            await self.req_info.close_clients()
+            self.req_info.cancell_scope()
             raise
         except Exception as e:
             self.logger.error("Failed to forward Prefill request: %s", e)
-            await self.req_info.close_clients()
+            self.req_info.cancell_scope()
             self.req_info.update_state(ReqState.EXCEPTION)
             raise e
 
@@ -93,29 +97,31 @@ class SeparateCDPRouter(BaseRouter):
                 # Use context managers to ensure resource locking and client cleanup
                 async with self._manage_request_context(), \
                            self._manage_resource_context(PDRole.ROLE_D, self.release_tokens) as resource, \
-                           self._manage_client_context(resource, 
-                                                        self.config.exception_config.first_token_timeout
-                                                       ) as client:
+                           self._manage_client_context(resource) as client:
                             
-                    self.req_info.set_client(client, PDRole.ROLE_D)
+                    cancel_scope = anyio.CancelScope()
+                    self.req_info.set_cancel_scope(cancel_scope, PDRole.ROLE_D)
+                    with cancel_scope:
+                        async for chunk in self.forward_stream_request(
+                                req_data, client, self.config.exception_config.first_token_timeout
+                            ):
+                            yield chunk
                     
-                    async for chunk in self.forward_stream_request(req_data, client):
-                        yield chunk
-                    
-                    self.req_info.update_state(ReqState.DECODE_END)
-                return
-
+                        self.req_info.update_state(ReqState.DECODE_END)
+                        return
+                    if self.req_info.is_cancelled:
+                        raise Exception("exception occurred in Prefill request")
             except asyncio.CancelledError:
                 self.logger.debug("The streaming request was terminated because of "
                                   "infer timeout or client disconnect.")
-                await self.req_info.close_clients()
+                self.req_info.cancell_scope()
                 raise
             except Exception as e:
                 self.logger.error(
                     "Error in streaming Decode (attempt %d/%d): %s",
                     attempt + 1, max_retry, str(e), exc_info=True
                 )
-                await self.req_info.close_clients()
+                self.req_info.cancell_scope()
 
                 # If chunk was already sent, cannot retry the HTTP stream.
                 # Send error chunk and terminate.
@@ -139,27 +145,30 @@ class SeparateCDPRouter(BaseRouter):
             try:
                 async with self._manage_request_context(), \
                            self._manage_resource_context(PDRole.ROLE_D, self.release_tokens) as resource, \
-                           self._manage_client_context(resource, 
-                                                        self.config.exception_config.infer_timeout
-                                                       ) as client:
+                           self._manage_client_context(resource) as client:
                             
-                    self.req_info.set_client(client, PDRole.ROLE_D)
-                    response = await self.forward_post_request(req_data, client)
+                    cancel_scope = anyio.CancelScope()
+                    self.req_info.set_cancel_scope(cancel_scope, PDRole.ROLE_D)
+                    with cancel_scope:
+                        response = await self.forward_post_request(
+                                req_data, client, self.config.exception_config.infer_timeout
+                            )
                     
-                    self.req_info.update_state(ReqState.DECODE_END)
-                    return JSONResponse(content=response.json())
-
+                        self.req_info.update_state(ReqState.DECODE_END)
+                        return JSONResponse(content=response.json())
+                    if self.req_info.is_cancelled:
+                        raise Exception("exception occurred in Prefill request")
             except asyncio.CancelledError:
                 self.logger.debug("The non streaming request was terminated because of "
                                   "infer timeout or client disconnect.")
-                await self.req_info.close_clients()
+                self.req_info.cancell_scope()
                 raise
             except Exception as e:
                 self.logger.error(
                     "Error in post Decode (attempt %d/%d): %s",
                     attempt + 1, max_retries, str(e)
                 )
-                await self.req_info.close_clients()
+                self.req_info.cancell_scope()
 
                 if attempt < max_retries - 1:
                     wait_time = self.config.exception_config.retry_delay * (2 ** attempt)

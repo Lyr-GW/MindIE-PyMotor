@@ -111,30 +111,21 @@ class SafeHTTPSClient:
 
 
 class AsyncSafeHTTPSClient():
-    def __init__(
-            self,
+    
+    @staticmethod
+    def create_client(
             address: str,
             tls_config: Optional[TLSConfig] = None,
             **client_kwargs
     ):
 
-        self.verify = True
+        verify = True
 
         if tls_config and tls_config.tls_enable:
-            self.verify = CertUtil.create_ssl_context(tls_config=tls_config, purpose=Purpose.CLIENT_AUTH)
+            verify = CertUtil.create_ssl_context(tls_config=tls_config, purpose=Purpose.CLIENT_AUTH)
             base_url = f"https://{address}"
         else:
             base_url = f"http://{address}"
-        self._client: httpx.AsyncClient = httpx.AsyncClient(base_url=base_url,
-                                                            verify=self.verify,
-                                                            **client_kwargs)
-
-    async def __aenter__(self):
-        return self._client
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.close()
-
-    async def close(self):
-        await self._client.aclose()
-        self._client = None
+        return httpx.AsyncClient(base_url=base_url,
+                                    verify=verify,
+                                    **client_kwargs)

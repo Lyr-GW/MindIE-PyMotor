@@ -9,8 +9,11 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
+from unittest.mock import patch, AsyncMock
 
 import pytest
+import httpx
+
 from motor.coordinator.scheduler.scheduler import Scheduler, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
 from motor.config.coordinator import CoordinatorConfig
@@ -18,6 +21,7 @@ from motor.common.resources.instance import Instance, InsStatus, PDRole, Paralle
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction
 from motor.common.resources.http_msg_spec import EventType
 from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.utils.http_client import AsyncSafeHTTPSClient
 
 
 @pytest.fixture
@@ -71,6 +75,15 @@ def mix_instances():
     return instances
 
 
+def mock_init(self, address, tls_config=None, **kwargs):
+    client = AsyncMock()
+    client.base_url = f"http://{address}"
+    client.is_closed = False
+    client.post = AsyncMock(return_value=httpx.Response(200))
+    client.aclose = AsyncMock()
+    self.set_client(client)
+
+
 @pytest.fixture
 def scheduler_setup(prefill_instances, decode_instances, mix_instances):
     """Setup scheduler with instances and endpoints."""
@@ -100,7 +113,8 @@ def scheduler_setup(prefill_instances, decode_instances, mix_instances):
             endpoints[j] = endpoint
         instance.add_endpoints(f"192.168.1.{instance.id}", endpoints)
 
-    instance_manager.refresh_instances(EventType.ADD, all_instances)
+    with patch.object(AsyncSafeHTTPSClient, '__init__', mock_init):
+        instance_manager.refresh_instances(EventType.ADD, all_instances)
 
     # Clear singleton instance to ensure fresh state for each test
     if Scheduler in ThreadSafeSingleton._instances:

@@ -26,7 +26,7 @@ class PDHybridRouter(BaseRouter):
         resource: ScheduledResource = None
         try:
             # Schedule PD instance
-            resource = self.prepare_resource(PDRole.ROLE_U)
+            resource = await self.prepare_resource(PDRole.ROLE_U)
             
             # Forward request to PD hybrid instance
             return StreamingResponse(self.__forward_pd_hybrid_request(resource),

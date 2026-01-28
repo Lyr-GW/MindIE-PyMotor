@@ -12,7 +12,11 @@
 
 import time
 from enum import Enum
-from pydantic import BaseModel, Field
+from typing import Optional
+
+from pydantic import BaseModel, Field, PrivateAttr
+from httpx import AsyncClient
+
 from motor.common.utils.logger import get_logger
 
 HEARTBEAT_TIMEOUT = 5 # 5 second
@@ -90,6 +94,7 @@ class Endpoint(BaseModel):
     device_infos: list[DeviceInfo] = Field(default_factory=list, description="List of DeviceInfo") 
     hb_timestamp: float = Field(default=0, description="Last heartbeat timestamp")
     workload: Workload = Field(default_factory=Workload, description="Current workload of the endpoint")
+    _client: Optional[AsyncClient] = PrivateAttr(default=None)
 
     def __init__(
         self,
@@ -113,6 +118,16 @@ class Endpoint(BaseModel):
             workload=workload if workload is not None else Workload()
         )
         logger.debug("Init endpoint with id:%s ip:%s business_port:%s mgmt_port:%s", id, ip, business_port, mgmt_port)
+
+    def get_client(self) -> AsyncClient:
+        return self._client
+    
+    def set_client(self, client: AsyncClient):
+        self._client = client
+    
+    async def close_client(self):
+        if self._client:
+            await self._client.aclose()
 
     def add_device(self, device_info: DeviceInfo) -> None:
         if device_info not in self.device_infos:

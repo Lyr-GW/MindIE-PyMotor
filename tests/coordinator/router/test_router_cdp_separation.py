@@ -19,7 +19,7 @@ import pytest
 
 from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.coordinator.models.request import ReqState, ScheduledResource
+from motor.coordinator.models.request import ReqState, ScheduledResource, RequestInfo
 from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
 from motor.common.resources.endpoint import WorkloadAction
@@ -69,7 +69,7 @@ class MockAsyncClient:
     async def aclose(self):
         pass
 
-    async def post(self, url, json=None, headers=None):
+    async def post(self, url, json=None, headers=None, **kwargs):
         self.post_count += 1
         if self.post_exc and self.post_fail_count < self.post_fail_times:
             self.post_fail_count += 1
@@ -88,7 +88,7 @@ class MockAsyncClient:
             request=request
         )
     
-    def stream(self, method, url, json=None, headers=None):
+    def stream(self, method, url, json=None, headers=None, **kwargs):
         self.stream_count += 1
         # logger.info(f"----------req_data_from_coordinator:{json}")
         if self.stream_exc and self.stream_fail_count < self.stream_fail_times:
@@ -194,11 +194,15 @@ class TestRouterCDPSeparation:
         mock_http_config = MagicMock()
         mock_http_config.coordinator_api_host = "127.0.0.1"
         mock_http_config.coordinator_api_mgmt_port = 1025
+        mock_tls_config = MagicMock()
+        mock_tls_config.tls_enable = False
 
         mock_config = MagicMock()
         mock_config.scheduler_config = mock_scheduler_config
         mock_config.exception_config = mock_exception_config
         mock_config.http_config = mock_http_config
+        mock_config.infer_tls_config = mock_tls_config
+        mock_config.mgmt_tls_config = mock_tls_config
 
         monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
     
@@ -423,17 +427,31 @@ class TestRouterCDPSeparation:
         # mock AsyncClient in router
         mock_async_client = MockAsyncClient(post_exc=httpx.ConnectError(message=error_message, request=MagicMock()), 
                                             post_fail_times=retry_times)
-        req_info = await create_mock_request_info()
+        
+        state: ReqState = None
+        
+        def mock_update_state(self, new_state: ReqState):
+            nonlocal state
+            state = new_state
+        monkeypatch.setattr(RequestInfo, "update_state", mock_update_state)
+        
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            cdp_router = SeparateCDPRouter(req_info, CoordinatorConfig())
-            response = await cdp_router.handle_request()
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk)
-            chunk_str = "".join(chunks)
+            
+            with client.stream(
+                "POST",
+                "/v1/chat/completions",
+                json={
+                    "model": "test-model", 
+                    "messages": [{"role": "user", "content": "Hello"}]
+                },
+            ) as response:
+                chunks = []
+                for chunk in response.iter_lines():
+                    chunks.append(chunk)
+                chunk_str = "".join(chunks)
             
         assert error_message in chunk_str
         assert mock_async_client.post_count == retry_times
         assert mock_async_client.post_fail_count == retry_times
-        assert req_info.state == ReqState.EXCEPTION
+        assert state == ReqState.EXCEPTION

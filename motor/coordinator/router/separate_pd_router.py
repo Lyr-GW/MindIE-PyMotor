@@ -54,7 +54,7 @@ class SeparatePDRouter(BaseRouter):
         prefill_resource: ScheduledResource = None
         try:
             # Schedule P instance
-            prefill_resource = self.prepare_resource(PDRole.ROLE_P)
+            prefill_resource = await self.prepare_resource(PDRole.ROLE_P)
             # Forward P request
             p_resp_json = await self._forward_p_request(prefill_resource)
             self.logger.debug("Prefill response received: %s", p_resp_json)
@@ -77,7 +77,7 @@ class SeparatePDRouter(BaseRouter):
         decode_resource: ScheduledResource = None
         try:
             # Schedule D instance
-            decode_resource = self.prepare_resource(PDRole.ROLE_D)
+            decode_resource = await self.prepare_resource(PDRole.ROLE_D)
             # Forward D request
             async for chunk in self._forward_d_request(p_resp_json, prefill_resource, decode_resource):
                 yield chunk
@@ -119,11 +119,13 @@ class SeparatePDRouter(BaseRouter):
         req_data = self._gen_p_request()
 
         async with self._manage_client_context(
-                resource,
-                self.config.exception_config.infer_timeout
+                resource
             ) as prefill_client:
             # P non-streaming request
-            response = await self.forward_post_request(req_data=req_data, client=prefill_client)
+            response = await self.forward_post_request(
+                req_data=req_data, 
+                client=prefill_client,
+                timeout=self.config.exception_config.infer_timeout)
             resp_json = response.json()
             self.req_info.update_state(ReqState.PREFILL_END)
             self.release_tokens(resource)
@@ -198,10 +200,12 @@ class SeparatePDRouter(BaseRouter):
         release_kv = False
 
         async with self._manage_client_context(
-                decode_resource,
-                self.config.exception_config.infer_timeout
+                decode_resource
             ) as decode_client:
-            async for chunk in self.forward_stream_request(req_data=req_data, client=decode_client):
+            async for chunk in self.forward_stream_request(
+                req_data=req_data, 
+                client=decode_client,
+                timeout=self.config.exception_config.infer_timeout):
                 if not release_kv and chunk:
                     release_kv = True
                     self.release_kv(prefill_resource)

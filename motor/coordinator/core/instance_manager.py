@@ -10,9 +10,11 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import asyncio
 import threading
 from enum import Enum
 
+from motor.common.utils.http_client import AsyncSafeHTTPSClient
 from motor.common.utils.logger import get_logger
 from motor.common.resources.instance import Instance, PDRole, Workload, Endpoint
 from motor.common.resources.http_msg_spec import EventType
@@ -40,6 +42,7 @@ class InstanceManager(ThreadSafeSingleton):
         if config is None:
             config = CoordinatorConfig()
         self._scheduler_config = config.scheduler_config
+        self._infer_tls_config = config.infer_tls_config
         self._config_lock = threading.RLock()
 
         self._lock = threading.Lock()
@@ -104,6 +107,7 @@ class InstanceManager(ThreadSafeSingleton):
         """Update configuration for the instance manager"""
         with self._config_lock:
             self._scheduler_config = config.scheduler_config
+            self._infer_tls_config = config.infer_tls_config
         logger.info("InstanceManager configuration updated")
 
     def get_available_instances(self, role: PDRole) -> dict[int, Instance]:
@@ -258,6 +262,11 @@ class InstanceManager(ThreadSafeSingleton):
                            instance.id, instance.role, instance.job_name)
             return False
 
+        for endpoint in instance.endpoints.values():
+            for ep in endpoint.values():
+                client = AsyncSafeHTTPSClient.create_client(address=f"{ep.ip}:{ep.business_port}",
+                                    tls_config=self._infer_tls_config)
+                ep.set_client(client)
         update_pool[instance.id] = instance
         self._available_pool[instance.id] = instance
 
@@ -272,7 +281,13 @@ class InstanceManager(ThreadSafeSingleton):
             logger.warning(f"Instance ID {instance_id} not found in available instance pool yet, cannot delete")
             return False
 
+        self._release_instance_resource(update_pool[instance_id])
         del update_pool[instance_id]
         del self._available_pool[instance_id]
         logger.debug(f"Instance ID {instance_id} deleted from available pool successfully")
         return True
+    
+    def _release_instance_resource(self, instance: Instance):
+        for endpoint in instance.endpoints.values():
+            for ep in endpoint.values():
+                asyncio.run(ep.close_client())
