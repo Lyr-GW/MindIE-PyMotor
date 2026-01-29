@@ -10,6 +10,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import asyncio
 import time
 from enum import Enum
 from typing import Optional
@@ -125,9 +126,16 @@ class Endpoint(BaseModel):
     def set_client(self, client: AsyncClient):
         self._client = client
     
-    async def close_client(self):
-        if self._client:
-            await self._client.aclose()
+    def close_client(self):
+        if not self._client:
+            return
+        try:
+            _ = asyncio.get_running_loop()
+            logger.debug("Closing endpoint[id:%s ip:%s] client in EventLoop", self.id, self.ip)
+            asyncio.create_task(self._client.aclose())
+        except RuntimeError:
+            logger.debug("Closing endpoint[id:%s ip:%s] client without EventLoop", self.id, self.ip)
+            asyncio.run(self._client.aclose())
 
     def add_device(self, device_info: DeviceInfo) -> None:
         if device_info not in self.device_infos:

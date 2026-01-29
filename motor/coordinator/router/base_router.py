@@ -90,6 +90,8 @@ class BaseRouter(ABC):
             client = AsyncSafeHTTPSClient.create_client(address=address,
                                         tls_config=self.config.infer_tls_config)
             endpoint.set_client(client)
+            self.logger.info("Initialized new client for Instance ID %d, Endpoint ID %d, address %s",
+                     resource.instance.id, endpoint.id, address)
         yield client
 
     @abstractmethod

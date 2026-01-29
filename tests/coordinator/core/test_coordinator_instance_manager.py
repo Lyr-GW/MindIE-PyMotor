@@ -10,9 +10,14 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+from unittest.mock import patch, AsyncMock
 import threading
 
+import httpx
+import pytest
+
 from motor.common.resources import Instance, PDRole, Workload, Endpoint, EventType
+from motor.common.utils.http_client import AsyncSafeHTTPSClient
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.core.instance_manager import (
@@ -471,15 +476,29 @@ class TestInstanceManager:
         # Verify error was logged
         assert "Unknown role for instance ID 1" in caplog.text
 
-    def test_refresh_instances_del_success(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_del_success(self, caplog):
         """Test refresh_instances method with DEL event"""
-        # Add instances first properly
-        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
         
-        # Refresh instances with DEL event
-        instances = [self.prefill_instance]
-        self.instance_manager.refresh_instances(EventType.DEL, instances)
+        self.prefill_instance.add_endpoints(f"192.168.1.{self.prefill_instance.id}", {0: self.endpoint})
+        self.decode_instance.add_endpoints(f"192.168.1.{self.decode_instance.id}", {0: self.endpoint})
+        
+        def mock_create_client(address, tls_config=None, **kwargs):
+            client = AsyncMock()
+            client.base_url = f"http://{address}"
+            client.is_closed = False
+            client.post = AsyncMock(return_value=httpx.Response(200))
+            client.aclose = AsyncMock()
+            return client
+        
+        with patch.object(AsyncSafeHTTPSClient, 'create_client', mock_create_client):
+            # Add instances first properly
+            self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+            self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+            
+            # Refresh instances with DEL event
+            instances = [self.prefill_instance]
+            self.instance_manager.refresh_instances(EventType.DEL, instances)
         
         # Verify instance was deleted
         assert 1 not in self.instance_manager._prefill_pool
