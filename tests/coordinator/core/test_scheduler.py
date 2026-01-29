@@ -75,13 +75,13 @@ def mix_instances():
     return instances
 
 
-def mock_init(self, address, tls_config=None, **kwargs):
+def mock_create_client(address, tls_config=None, **kwargs):
     client = AsyncMock()
     client.base_url = f"http://{address}"
     client.is_closed = False
     client.post = AsyncMock(return_value=httpx.Response(200))
     client.aclose = AsyncMock()
-    self.set_client(client)
+    return client
 
 
 @pytest.fixture
@@ -113,7 +113,7 @@ def scheduler_setup(prefill_instances, decode_instances, mix_instances):
             endpoints[j] = endpoint
         instance.add_endpoints(f"192.168.1.{instance.id}", endpoints)
 
-    with patch.object(AsyncSafeHTTPSClient, '__init__', mock_init):
+    with patch.object(AsyncSafeHTTPSClient, 'create_client', mock_create_client):
         instance_manager.refresh_instances(EventType.ADD, all_instances)
 
     # Clear singleton instance to ensure fresh state for each test

@@ -10,7 +10,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import asyncio
 import threading
 from enum import Enum
 
@@ -288,6 +287,9 @@ class InstanceManager(ThreadSafeSingleton):
         return True
     
     def _release_instance_resource(self, instance: Instance):
-        for endpoint in instance.endpoints.values():
-            for ep in endpoint.values():
-                asyncio.run(ep.close_client())
+        try:
+            for endpoint in instance.endpoints.values():
+                for ep in endpoint.values():
+                    ep.close_client()
+        except Exception as e:
+            logger.warning(f"Failed to release instance resource for instance {instance}: {e}")
