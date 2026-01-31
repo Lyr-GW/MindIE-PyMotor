@@ -122,7 +122,9 @@ def main() -> int:
     signal.signal(signal.SIGTERM, signal_handler)  # kill
 
     # Initialize all modules
-    init_all_modules(Env.config_path, Env.hccl_path)
+    # Prefer mounted user_config when provided, fallback to CONFIG_PATH
+    config_path = Env.user_config_path or Env.config_path
+    init_all_modules(config_path, Env.hccl_path)
 
     # Log configuration summary
     log_config_summary()

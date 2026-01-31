@@ -26,6 +26,46 @@ fi
 
 # Define configuration file paths
 USER_CONFIG_FILE="$CONFIGMAP_PATH/user_config.json"
+export USER_CONFIG_PATH="$USER_CONFIG_FILE"
+
+mkdir $CONFIG_PATH -p
+chmod 750 $CONFIG_PATH
+
+# Avoid using a symlinked ConfigMap file directly (security check rejects it).
+# Copy user_config.json from CONFIGMAP_PATH to CONFIG_PATH and use the real file path.
+# Periodically sync the file to enable dynamic configuration updates from host side to container side
+# without requiring container restart. This allows runtime configuration changes to take effect automatically.
+USER_CONFIG_DST="$CONFIG_PATH/user_config.json"
+CONFIG_SYNC_INTERVAL="${CONFIG_SYNC_INTERVAL:-10}"
+CONFIG_SYNC_PID_FILE="$CONFIG_PATH/user_config_sync.pid"
+
+sync_user_config() {
+    if [ -f "$USER_CONFIG_FILE" ]; then
+        if [ ! -f "$USER_CONFIG_DST" ] || ! cmp -s "$USER_CONFIG_FILE" "$USER_CONFIG_DST"; then
+            cp -f "$USER_CONFIG_FILE" "$USER_CONFIG_DST"
+            chmod 640 "$USER_CONFIG_DST"
+        fi
+        export USER_CONFIG_PATH="$USER_CONFIG_DST"
+    else
+        export USER_CONFIG_PATH="$USER_CONFIG_FILE"
+    fi
+}
+
+sync_user_config
+if [ -f "$USER_CONFIG_FILE" ]; then
+    # Periodically refresh local copy to reflect ConfigMap updates.
+    if [ -f "$CONFIG_SYNC_PID_FILE" ] && kill -0 "$(cat "$CONFIG_SYNC_PID_FILE")" 2>/dev/null; then
+        echo "Config sync loop already running (pid=$(cat "$CONFIG_SYNC_PID_FILE"))"
+    else
+        (
+            while true; do
+                sleep "$CONFIG_SYNC_INTERVAL"
+                sync_user_config
+            done
+        ) &
+        echo $! > "$CONFIG_SYNC_PID_FILE"
+    fi
+fi
 
 # Core dump settings
 if [ "$SAVE_CORE_DUMP_FILE_ENABLE" = "1" ]; then
@@ -37,29 +77,9 @@ else
     ulimit -c 0
 fi
 
-mkdir $CONFIG_PATH -p
-chmod 750 $CONFIG_PATH
-
 if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
-    # Update configuration files based on user configuration
-    echo "Updating nodemanager configuration file..."
-    export MOTOR_NODE_MANAGER_CONFIG_PATH=$CONFIG_PATH/node_manager_config.json
-    python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_NODE_MANAGER_CONFIG_PATH" "$USER_CONFIG_FILE" "motor_nodemanger_config"
-    export MOTOR_ENGINE_PATH=$CONFIG_PATH/motor_engine.json
-    if [ "$ROLE" == "prefill" ]; then
-        echo "Updating prefill server configuration file..."
-        python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_ENGINE_PATH" "$USER_CONFIG_FILE" "motor_engine_prefill_config"
-    elif [ "$ROLE" == "decode" ]; then
-        echo "Updating decode server configuration file..."
-        python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_ENGINE_PATH" "$USER_CONFIG_FILE" "motor_engine_decode_config"
-    fi
-
-    if [ -n "$KVP_MASTER_SERVICE" ]; then
-        echo "Updating kv cache pool configuration file..."
-        export MOONCAKE_CONFIG_PATH=$CONFIG_PATH/kv_cache_pool_config.json
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-        python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOONCAKE_CONFIG_PATH" "$USER_CONFIG_FILE" "kv_cache_pool_config"
-    fi
+    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
+    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
 
     # Use hccl_tools.py to generate ranktable.json
     if [ -f "$CONFIGMAP_PATH/hccl_tools.py" ]; then
@@ -123,9 +143,7 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
 fi
 
 if [ "$ROLE" = "controller" ]; then
-    echo "Updating controller configuration file..."
-    export MOTOR_CONTROLLER_CONFIG_PATH=$CONFIG_PATH/controller_config.json
-    python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_CONTROLLER_CONFIG_PATH" "$USER_CONFIG_FILE" "motor_controller_config"
+    export MOTOR_CONTROLLER_CONFIG_PATH="$USER_CONFIG_PATH"
     
     if [ -n "$CONTROLLER_LOG_CONFIG_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$MODEL_ID" ]; then
         chmod 750 "$CONTROLLER_LOG_CONFIG_PATH"
@@ -141,9 +159,7 @@ if [ "$ROLE" = "controller" ]; then
 fi
 
 if [ "$ROLE" == "coordinator" ]; then
-    echo "Updating coordinator configuration file..."
-    export MOTOR_COORDINATOR_CONFIG_PATH=$CONFIG_PATH/coordinator_config.json
-    python3 "$CONFIGMAP_PATH/update_config_from_user_config.py" "$MOTOR_COORDINATOR_CONFIG_PATH" "$USER_CONFIG_FILE" "motor_coordinator_config"
+    export MOTOR_COORDINATOR_CONFIG_PATH="$USER_CONFIG_PATH"
     
     if [ -n "$COORDINATOR_LOG_CONFIG_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$MODEL_ID" ]; then
         chmod 750 "$COORDINATOR_LOG_CONFIG_PATH"

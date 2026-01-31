@@ -79,46 +79,17 @@ spec:
               memory: "8Gi"
               cpu: "64"
           volumeMounts:
-          - name: boot-bash-script
-            mountPath: /mnt/configmap/boot.sh
-            subPath: boot.sh
-          - name: update-config-script
-            mountPath: /mnt/configmap/update_config_from_user_config.py
-            subPath: update_config_from_user_config.py
-          - name: probe-shell-script
-            mountPath: /mnt/configmap/probe.sh
-            subPath: probe.sh
-          - name: probe-python-script
-            mountPath: /mnt/configmap/probe.py
-            subPath: probe.py
-          - name: user-config
-            mountPath: /mnt/configmap/user_config.json
-            subPath: user_config.json
+          - name: motor-config
+            mountPath: /mnt/configmap
           - name: coredump
             mountPath: /var/coredump
           - name: mnt
             mountPath: /mnt
       volumes:
-      - name: boot-bash-script
+      - name: motor-config
         configMap:
-          name: boot-bash-script
+          name: motor-config
           defaultMode: 0550
-      - name: update-config-script
-        configMap:
-          name: update-config-script
-          defaultMode: 0640
-      - name: probe-shell-script
-        configMap:
-          name: probe-shell-script
-          defaultMode: 0550
-      - name: probe-python-script
-        configMap:
-          name: probe-python-script
-          defaultMode: 0550
-      - name: user-config
-        configMap:
-          name: user-config
-          defaultMode: 0640
       - name: coredump
         hostPath:
           path: /var/coredump

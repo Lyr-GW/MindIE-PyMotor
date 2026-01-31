@@ -114,6 +114,11 @@ def safe_exec_cmd(command):
         raise
 
 
+def apply_configmap(create_cmd: str):
+    """Create or update a configmap by applying the generated manifest."""
+    safe_exec_cmd(f"{create_cmd} --dry-run=client -o yaml | kubectl apply -f -")
+
+
 def shell_escape(value):
     if not isinstance(value, str):
         return str(value)
@@ -415,17 +420,7 @@ def exec_all_kubectl_multi(deploy_config, out_path, user_config_path):
     job_id = deploy_config[CONFIG_JOB_ID]
     out_deploy_yaml_path = os.path.join(out_path, 'deployment')
     
-    # Create base configmaps
-    safe_exec_cmd("kubectl create configmap boot-bash-script --from-file=./boot_helper/boot.sh"
-                + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap hccl-tools-script --from-file=./boot_helper/hccl_tools.py"
-                + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap update-config-script "
-                  "--from-file=./boot_helper/update_config_from_user_config.py" + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap probe-shell-script --from-file=./probe/probe.sh" + NAME_FLAG + job_id)
-    safe_exec_cmd("kubectl create configmap probe-python-script --from-file=./probe/probe.py" + NAME_FLAG + job_id)
-    safe_exec_cmd(f"kubectl create configmap user-config --from-file=user_config.json={user_config_path}"
-                + NAME_FLAG + job_id)
+    create_base_configmap(job_id, user_config_path)
     
     # Apply YAML files
     for yaml_file in g_generate_yaml_list:
@@ -444,6 +439,19 @@ def set_env_to_shell(deploy_config):
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
 
 
+def create_base_configmap(job_id, user_config_path):
+    # Create base configmap with all mounted files
+    apply_configmap(
+        "kubectl create configmap motor-config "
+        "--from-file=./boot_helper/boot.sh "
+        "--from-file=./boot_helper/hccl_tools.py "
+        "--from-file=./probe/probe.sh "
+        "--from-file=./probe/probe.py "
+        f"--from-file=user_config.json={user_config_path}"
+        + NAME_FLAG + job_id
+    )
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -454,6 +462,11 @@ def parse_arguments():
     )
     parser.add_argument("--deploy_yaml_path", type=str, default='./deployment', help="Path of yaml")
     parser.add_argument("--output_path", type=str, default="./output", help="Path of output")
+    parser.add_argument(
+        "--update_config",
+        action="store_true",
+        help="Only refresh configmap without applying deployments"
+    )
     return parser.parse_args()
 
 
@@ -472,6 +485,11 @@ def main():
 
     user_config = read_json(user_config_path)
     deploy_config = user_config["motor_deploy_config"]
+
+    if args.update_config:
+        create_base_configmap(deploy_config[CONFIG_JOB_ID], user_config_path)
+        logger.info("configmap refresh end.")
+        return
 
     update_kv_pool_enabled_flag(user_config)
     update_engine_base_name(user_config)

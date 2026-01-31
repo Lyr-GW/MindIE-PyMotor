@@ -14,8 +14,26 @@ import json
 import logging
 import os
 import sys
+from enum import Enum
 
 import httpx
+
+MOTOR_DEPLOY_CONFIG = "motor_deploy_config"
+TLS_CONFIG = "tls_config"
+MGMT_TLS_CONFIG = "mgmt_tls_config"
+TLS_ENABLE = "tls_enable"
+CA_FILE = "ca_file"
+CERT_FILE = "cert_file"
+KEY_FILE = "key_file"
+
+
+class ConfigKey(Enum):
+    MOTOR_CONTROLLER = "motor_controller_config"
+    MOTOR_COORDINATOR = "motor_coordinator_config"
+    MOTOR_ENGINE_PREFILL = "motor_engine_prefill_config"
+    MOTOR_ENGINE_DECODE = "motor_engine_decode_config"
+    MOTOR_NODEMANAGER = "motor_nodemanger_config"
+    MOTOR_KV_POOL = "kv_cache_pool_config"
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -42,9 +60,9 @@ def get_val_by_key_path(config, key_path):
     keys = key_path.split('.')
     config_element = config
     for key in keys:
-        if key not in config_element:
+        if not isinstance(config_element, dict) or key not in config_element:
             logger.info(f"Key '{key}' not found in config: {key_path}")
-            return -1
+            return None
         config_element = config_element[key]
     return config_element
 
@@ -68,24 +86,65 @@ def get_builtin_default_port(role):
         return -1
 
 
+def _get_mgmt_tls_config(user_config):
+    if not isinstance(user_config, dict):
+        return None
+    deploy_config = user_config.get(MOTOR_DEPLOY_CONFIG)
+    if not isinstance(deploy_config, dict):
+        return None
+    tls_config = deploy_config.get(TLS_CONFIG)
+    if not isinstance(tls_config, dict):
+        return None
+    mgmt_tls_config = tls_config.get(MGMT_TLS_CONFIG)
+    if not isinstance(mgmt_tls_config, dict):
+        return None
+    return mgmt_tls_config
+
+
 def get_config(role):
     config_path = os.environ.get('CONFIG_PATH')
     if not config_path:
         logger.error("CONFIG_PATH environment variable not set")
         return -1
 
-    config_file = os.path.join(config_path, f'{role}_config.json')
+    user_config_path = config_path
+    if os.path.isdir(user_config_path):
+        user_config_path = os.path.join(user_config_path, 'user_config.json')
 
-    if not os.path.exists(config_file):
-        logger.info(f"Config file does not exist: {config_file}")
+    if not os.path.exists(user_config_path):
+        logger.error(f"User config file does not exist: {user_config_path}")
         return -1
 
     try:
-        with open(config_file, 'r', encoding='utf-8') as file:
-            config = json.load(file)
+        with open(user_config_path, 'r', encoding='utf-8') as file:
+            user_config = json.load(file)
     except Exception as e:
-        logger.error(f"Failed to load JSON config {config_file}: {e}")
+        logger.error(f"Failed to load JSON config {user_config_path}: {e}")
         return -1
+
+    if not isinstance(user_config, dict):
+        logger.error(f"Invalid config format in {user_config_path}, expected JSON object")
+        return -1
+
+    role_key = {
+        "controller": ConfigKey.MOTOR_CONTROLLER.value,
+        "coordinator": ConfigKey.MOTOR_COORDINATOR.value,
+    }.get(role)
+
+    role_config = user_config.get(role_key)
+    if isinstance(role_config, dict):
+        config = dict(role_config)
+    else:
+        # Fallback: treat USER_CONFIG_PATH as a raw role config
+        config = dict(user_config)
+        logger.warning(
+            f"Role config '{role_key}' not found, using raw config from {user_config_path}"
+        )
+
+    mgmt_tls_config = _get_mgmt_tls_config(user_config)
+    if isinstance(mgmt_tls_config, dict) and MGMT_TLS_CONFIG not in config:
+        config[MGMT_TLS_CONFIG] = mgmt_tls_config
+
     return config
 
 
@@ -107,15 +166,16 @@ def send_http_request(ip, port, url_path, config):
         'Content-Type': 'application/json'
     }
 
-    enable_tls = get_val_by_key_path(config, f'mgmt_tls_config.tls_enable')
+    enable_tls = get_val_by_key_path(config, f'{MGMT_TLS_CONFIG}.{TLS_ENABLE}')
+    
     try:
         if enable_tls:
             url = f"https://{ip}:{port}{url_path}"
 
-            cert_file = get_val_by_key_path(config, f'mgmt_tls_config.cert_file')
-            key_file = get_val_by_key_path(config, f'mgmt_tls_config.key_file')
-            ca_file = get_val_by_key_path(config, f'mgmt_tls_config.ca_file')
-            password = get_val_by_key_path(config, f'mgmt_tls_config.passwd_file')
+            cert_file = get_val_by_key_path(config, f'{MGMT_TLS_CONFIG}.{CERT_FILE}')
+            key_file = get_val_by_key_path(config, f'{MGMT_TLS_CONFIG}.{KEY_FILE}')
+            ca_file = get_val_by_key_path(config, f'{MGMT_TLS_CONFIG}.{CA_FILE}')
+            password = get_val_by_key_path(config, f'{MGMT_TLS_CONFIG}.passwd_file')
 
             client = httpx.Client(
                 headers=headers,

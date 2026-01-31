@@ -121,7 +121,7 @@ class TestServerConfig:
         # Verify results
         assert config.deploy_config == mock_deploy_config
         assert config.engine_type == "vllm"
-        mock_load.assert_called_once_with("/valid/path.json")
+        mock_load.assert_called_once_with("/valid/path.json", role="union")
 
     @patch('argparse.ArgumentParser.parse_args')
     def test_parse_cli_args(self, mock_parse_args):

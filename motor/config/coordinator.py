@@ -24,6 +24,31 @@ from motor.common.utils.env import Env
 from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
 from motor.config.tls_config import TLSConfig
+from motor.config.config_utils import (
+    ConfigKey,
+    save_config_to_json,
+    _update_tls_config,
+    MGMT_TLS_CONFIG,
+    INFER_TLS_CONFIG,
+    ETCD_TLS_CONFIG,
+)
+
+FILE_ENCODING = "utf-8"
+
+AIGW = "aigw"
+MODEL_CONFIG = "model_config"
+MODEL_NAME = "model_name"
+ENGINE_CONFIG = "engine_config"
+MAX_MODEL_LEN = "max_model_len"
+AIGW_ID = "id"
+AIGW_OBJECT = "object"
+AIGW_OWNED_BY = "owned_by"
+AIGW_OBJECT_MODEL = "model"
+AIGW_OWNED_BY_MOTOR = "motor"
+AIGW_P_MAX_SEQLEN = "p_max_seqlen"
+AIGW_D_MAX_SEQLEN = "d_max_seqlen"
+SLO_TTFT = "slo_ttft"
+SLO_TPOT = "slo_tpot"
 
 logger = get_logger(__name__)
 
@@ -200,12 +225,20 @@ class CoordinatorConfig:
         config_path = Path(json_path) if json_path else None
 
         cfg = {}
+        user_config_data = None
         try:
             if config_path and config_path.exists():
                 with open(config_path, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     if content:  # Only parse if file is not empty
-                        cfg = json.loads(content)
+                        raw = json.loads(content)
+                        if isinstance(raw, dict) and "motor_coordinator_config" in raw:
+                            user_config_data = raw
+                            cfg = raw.get("motor_coordinator_config", {})
+                        else:
+                            cfg = raw
+                        tls_configs = [MGMT_TLS_CONFIG, INFER_TLS_CONFIG, ETCD_TLS_CONFIG]
+                        _update_tls_config(tls_configs, cfg, raw)   
         except json.JSONDecodeError as e:
             # If JSON parsing fails, use default configuration
             logger.warning(f"Configuration file {json_path} format error: {e}, using default configuration")
@@ -235,6 +268,21 @@ class CoordinatorConfig:
                 'deploy_mode': lambda obj, key, value: set_enum_field(obj, key, value, DeployMode),
                 'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType)
             }
+
+            # Enrich AIGW fields from user_config if present
+            if user_config_data and AIGW in cfg:
+                try:
+                    prefill = user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value]
+                    decode = user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value]
+                    cfg[AIGW][AIGW_ID] = prefill[MODEL_CONFIG][MODEL_NAME]
+                    cfg[AIGW][AIGW_OBJECT] = AIGW_OBJECT_MODEL
+                    cfg[AIGW][AIGW_OWNED_BY] = AIGW_OWNED_BY_MOTOR
+                    cfg[AIGW][AIGW_P_MAX_SEQLEN] = prefill[ENGINE_CONFIG][MAX_MODEL_LEN]
+                    cfg[AIGW][AIGW_D_MAX_SEQLEN] = decode[ENGINE_CONFIG][MAX_MODEL_LEN]
+                    cfg[AIGW].setdefault(SLO_TTFT, 1000)
+                    cfg[AIGW].setdefault(SLO_TPOT, 50)
+                except Exception as e:
+                    logger.warning(f"Failed to enrich aigw from user_config: {e}")
 
             # Update configuration sections if they exist in JSON
             config_mappings = [
@@ -437,8 +485,14 @@ class CoordinatorConfig:
 
         try:
             config_dict = self.to_dict()
-            with open(save_path, 'w', encoding='utf-8') as f:
-                json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            save_config_to_json(
+                save_path,
+                ConfigKey.MOTOR_COORDINATOR,
+                config_dict,
+                logger,
+                file_encoding=FILE_ENCODING,
+                component_name="coordinator",
+            )
             logger.info(f"Configuration saved to: {save_path}")
             return True
         except Exception as e:

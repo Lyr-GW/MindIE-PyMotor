@@ -33,6 +33,10 @@ class Env:
     @property
     def motor_engine_path(self):
         return os.getenv("MOTOR_ENGINE_PATH", None)
+
+    @property
+    def user_config_path(self):
+        return os.getenv("USER_CONFIG_PATH", None)
     
     @property
     def role(self):

@@ -16,6 +16,13 @@ import json
 from pathlib import Path
 
 from motor.config.tls_config import TLSConfig
+from motor.config.config_utils import _update_engine_server_tls_config
+
+MOTOR_ENGINE_PREFILL_CONFIG_KEY = "motor_engine_prefill_config"
+MOTOR_ENGINE_DECODE_CONFIG_KEY = "motor_engine_decode_config"
+MODEL_CONFIG_KEY = "model_config"
+PREFILL_PARALLEL_CONFIG_KEY = "prefill_parallel_config"
+DECODE_PARALLEL_CONFIG_KEY = "decode_parallel_config"
 
 
 @dataclass
@@ -78,8 +85,22 @@ class DeployConfig:
     mgmt_tls_config: TLSConfig
     infer_tls_config: TLSConfig
 
+    @staticmethod
+    def _sync_parallel_config(role: str | None, data: Dict[str, Any]) -> None:
+        if role not in ("prefill", "decode"):
+            return
+        model_cfg = data.get(MODEL_CONFIG_KEY)
+        if not isinstance(model_cfg, dict):
+            return
+        has_prefill = PREFILL_PARALLEL_CONFIG_KEY in model_cfg
+        has_decode = DECODE_PARALLEL_CONFIG_KEY in model_cfg
+        if role == "decode" and not has_prefill and has_decode:
+            model_cfg[PREFILL_PARALLEL_CONFIG_KEY] = model_cfg[DECODE_PARALLEL_CONFIG_KEY]
+        if role == "prefill" and not has_decode and has_prefill:
+            model_cfg[DECODE_PARALLEL_CONFIG_KEY] = model_cfg[PREFILL_PARALLEL_CONFIG_KEY]
+
     @classmethod
-    def load(cls, file_path: str | Path) -> "DeployConfig":
+    def load(cls, file_path: str | Path, role: str | None = None) -> "DeployConfig":
         """
         Load configuration from a JSON file and parse into a DeployConfig instance
 
@@ -87,7 +108,20 @@ class DeployConfig:
         :return: Parsed DeployConfig instance
         """
         with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            raw_data = json.load(f)
+        data = raw_data
+        if isinstance(raw_data, dict) and (
+            MOTOR_ENGINE_PREFILL_CONFIG_KEY in raw_data
+            or MOTOR_ENGINE_DECODE_CONFIG_KEY in raw_data
+        ):
+            key = (
+                MOTOR_ENGINE_DECODE_CONFIG_KEY
+                if role == "decode"
+                else MOTOR_ENGINE_PREFILL_CONFIG_KEY
+            )
+            data = raw_data.get(key, {})
+            _update_engine_server_tls_config(data, raw_data)
+        cls._sync_parallel_config(role, data)
         return cls(
             engine_type=data["engine_type"],
             model_config=ModelConfig.from_dict(data["model_config"]),

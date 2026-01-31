@@ -89,7 +89,7 @@ class ServerConfig:
             raise ValueError(f"{self.config_path} is not a valid file path.")
 
     def load_deploy_config(self):
-        self.deploy_config = config_loader.DeployConfig.load(self.config_path)
+        self.deploy_config = config_loader.DeployConfig.load(self.config_path, role=self.role)
         self.engine_type = str(self.deploy_config.engine_type)
         if self.engine_type not in supported_engine:
             raise ValueError(f"engine type {self.engine_type} is not supported.")

@@ -67,18 +67,8 @@ spec:
           - name: data
             mountPath: /data
             readOnly: true
-          - name: boot-bash-script
-            mountPath: /mnt/configmap/boot.sh
-            subPath: boot.sh
-          - name: hccl-tools-script
-            mountPath: /mnt/configmap/hccl_tools.py
-            subPath: hccl_tools.py
-          - name: update-config-script
-            mountPath: /mnt/configmap/update_config_from_user_config.py
-            subPath: update_config_from_user_config.py
-          - name: user-config
-            mountPath: /mnt/configmap/user_config.json
-            subPath: user_config.json
+          - name: motor-config
+            mountPath: /mnt/configmap
           - name: queue-schedule
             mountPath: /var/queue_schedule
           - name: dshm
@@ -99,22 +89,10 @@ spec:
       - name: data
         hostPath:
           path: /data
-      - name: boot-bash-script
+      - name: motor-config
         configMap:
-          name: boot-bash-script
+          name: motor-config
           defaultMode: 0550
-      - name: hccl-tools-script
-        configMap:
-          name: hccl-tools-script
-          defaultMode: 0640
-      - name: update-config-script
-        configMap:
-          name: update-config-script
-          defaultMode: 0640
-      - name: user-config
-        configMap:
-          name: user-config
-          defaultMode: 0640
       - name: queue-schedule
         hostPath:
           path: /var/queue_schedule

@@ -22,9 +22,26 @@ from motor.config.tls_config import TLSConfig
 from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
 from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
+from motor.config.config_utils import (
+    ConfigKey,
+    save_config_to_json,
+    _update_tls_config,
+    MGMT_TLS_CONFIG,
+)
+
+FILE_ENCODING = "utf-8"
 
 PP = "pp_size"
 TP = "tp_size"
+BASIC_CONFIG_KEY = "basic_config"
+MODEL_CONFIG_KEY = "model_config"
+PREFILL_PARALLEL_CONFIG_KEY = "prefill_parallel_config"
+DECODE_PARALLEL_CONFIG_KEY = "decode_parallel_config"
+MOTOR_NODE_MANAGER_CONFIG_KEY = "motor_nodemanger_config"
+MOTOR_ENGINE_PREFILL_CONFIG_KEY = "motor_engine_prefill_config"
+MOTOR_ENGINE_DECODE_CONFIG_KEY = "motor_engine_decode_config"
+HARDWARE_TYPE_KEY = "hardware_type"
+MODEL_NAME_KEY = "model_name"
 
 logger = get_logger(__name__)
 
@@ -128,7 +145,11 @@ class NodeManagerConfig:
     def from_json(cls, config_path: str | None = None, hccl_path: str | None = None) -> 'NodeManagerConfig':
         """Load configuration from config and HCCL files"""
         if config_path is None:
-            config_path = os.path.join(Env.config_path or os.getcwd(), "node_manager_config.json")
+            env_config_path = os.getenv("MOTOR_NODE_MANAGER_CONFIG_PATH") or Env.user_config_path
+            if env_config_path:
+                config_path = env_config_path
+            else:
+                config_path = os.path.join(Env.config_path or os.getcwd(), "node_manager_config.json")
         else:
             # If config_path is a directory, append the default config filename
             config_path_obj = Path(config_path)
@@ -164,8 +185,27 @@ class NodeManagerConfig:
             if os.path.exists(str(config_path_obj)):
                 try:
                     with safe_open(str(config_path_obj), "r") as f:
-                        config_data = json.load(f)
+                        raw = json.load(f)
                     logger.info("Successfully loaded config file: %s", config_path_obj)
+                    if isinstance(raw, dict) and MOTOR_NODE_MANAGER_CONFIG_KEY in raw:
+                        user_cfg = raw
+                        config_data = user_cfg.get(MOTOR_NODE_MANAGER_CONFIG_KEY, {})
+                        if BASIC_CONFIG_KEY not in config_data:
+                            config_data[BASIC_CONFIG_KEY] = {}
+                        config_data[BASIC_CONFIG_KEY][MODEL_NAME_KEY] = \
+                            user_cfg[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][MODEL_NAME_KEY]
+                        config_data[BASIC_CONFIG_KEY][HARDWARE_TYPE_KEY] = \
+                            user_cfg["motor_deploy_config"][HARDWARE_TYPE_KEY]
+                        if Env.role == "prefill":
+                            config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
+                                user_cfg[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][PREFILL_PARALLEL_CONFIG_KEY]
+                        elif Env.role == "decode":
+                            config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
+                                user_cfg[MOTOR_ENGINE_DECODE_CONFIG_KEY][MODEL_CONFIG_KEY][DECODE_PARALLEL_CONFIG_KEY]
+                        tls_configs = [MGMT_TLS_CONFIG]
+                        _update_tls_config(tls_configs, config_data, user_cfg)
+                    else:
+                        config_data = raw
                     # Update configuration from loaded data
                     cls._update_from_config_data(config, config_data)
                 except Exception as e:
@@ -219,24 +259,24 @@ class NodeManagerConfig:
                     setattr(config_obj, key, value)
 
         # Update configuration sections if they exist in JSON
-        if 'logging_config' in cfg:
-            update_config_from_dict(config.logging_config, cfg['logging_config'])
+        if "logging_config" in cfg:
+            update_config_from_dict(config.logging_config, cfg["logging_config"])
 
-        if 'api_config' in cfg:
-            update_config_from_dict(config.api_config, cfg['api_config'])
+        if "api_config" in cfg:
+            update_config_from_dict(config.api_config, cfg["api_config"])
 
         if 'mgmt_tls_config' in cfg:
             update_config_from_dict(config.mgmt_tls_config, cfg['mgmt_tls_config'])
 
-        if 'endpoint_config' in cfg:
-            update_config_from_dict(config.endpoint_config, cfg['endpoint_config'])
+        if "endpoint_config" in cfg:
+            update_config_from_dict(config.endpoint_config, cfg["endpoint_config"])
 
-        if 'basic_config' in cfg:
-            basic_cfg = cfg['basic_config']
+        if BASIC_CONFIG_KEY in cfg:
+            basic_cfg = cfg[BASIC_CONFIG_KEY]
             update_config_from_dict(config.basic_config, basic_cfg)
             # Handle parallel_config specially
-            if 'parallel_config' in basic_cfg:
-                pc = basic_cfg['parallel_config']
+            if "parallel_config" in basic_cfg:
+                pc = basic_cfg["parallel_config"]
                 if isinstance(pc, dict):
                     config.basic_config.parallel_config = ParallelConfig(**pc)
 
@@ -388,8 +428,14 @@ class NodeManagerConfig:
         try:
             # Save config file
             config_dict = self.to_dict()
-            with open(save_config_path, 'w', encoding='utf-8') as f:
-                json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            save_config_to_json(
+                save_config_path,
+                ConfigKey.MOTOR_NODEMANAGER,
+                config_dict,
+                logger,
+                file_encoding=FILE_ENCODING,
+                component_name="node manager",
+            )
             logger.info("Configuration saved to: %s", save_config_path)
 
             # Note: HCCL file saving is not implemented as it's typically read-only

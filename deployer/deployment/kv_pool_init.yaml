@@ -50,17 +50,16 @@ spec:
               memory: "4Gi"
               cpu: "8"
           volumeMounts:
-            - name: boot-bash-script
-              mountPath: /mnt/configmap/boot.sh
-              subPath: boot.sh
+            - name: motor-config
+              mountPath: /mnt/configmap
             - name: coredump
               mountPath: /var/coredump
             - name: ascend-driver
               mountPath: /usr/local/Ascend/driver
       volumes:
-        - name: boot-bash-script
+        - name: motor-config
           configMap:
-            name: boot-bash-script
+            name: motor-config
             defaultMode: 0550
         - name: coredump
           hostPath:

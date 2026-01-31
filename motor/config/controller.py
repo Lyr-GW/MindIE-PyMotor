@@ -21,6 +21,17 @@ from motor.common.utils.env import Env
 from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
 from motor.config.tls_config import TLSConfig
+from motor.config.config_utils import (
+    ConfigKey,
+    save_config_to_json,
+    _update_tls_config,
+    MGMT_TLS_CONFIG,
+    ETCD_TLS_CONFIG,
+    GRPC_TLS_CONFIG,
+)
+
+
+FILE_ENCODING = "utf-8"
 
 logger = get_logger(__name__)
 
@@ -121,7 +132,13 @@ class ControllerConfig:
                 with open(config_path, 'r', encoding='utf-8') as f:
                     content = f.read().strip()
                     if content:  # Only parse if file is not empty
-                        cfg = json.loads(content)
+                        raw = json.loads(content)
+                        if isinstance(raw, dict) and "motor_controller_config" in raw:
+                            cfg = raw.get("motor_controller_config", {})
+                        else:
+                            cfg = raw
+                        tls_configs = [MGMT_TLS_CONFIG, ETCD_TLS_CONFIG, GRPC_TLS_CONFIG]
+                        _update_tls_config(tls_configs, cfg, raw)
         except json.JSONDecodeError as e:
             # If JSON parsing fails, use default configuration
             logger.warning(f"Configuration file {json_path} format error: {e}, using default configuration")
@@ -313,8 +330,14 @@ class ControllerConfig:
 
         try:
             config_dict = self.to_dict()
-            with open(save_path, 'w', encoding='utf-8') as f:
-                json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            save_config_to_json(
+                save_path,
+                ConfigKey.MOTOR_CONTROLLER,
+                config_dict,
+                logger,
+                file_encoding=FILE_ENCODING,
+                component_name="controller",
+            )
             logger.info(f"Configuration saved to: {save_path}")
             return True
         except Exception as e:
