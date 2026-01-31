@@ -166,10 +166,16 @@ def test_from_json_success(temp_json_file):
             "deploy_mode": "single_node"
         },
         "api_key_config": {
-            "enable_api_key": True
+            "enable_api_key": True,
+            "valid_keys": ["test-key"],
+            "header_name": "X-API-Key",
+            "key_prefix": "Bearer "
         },
         "rate_limit_config": {
-            "enable_rate_limit": True
+            "enable_rate_limit": True,
+            "max_requests": 100,
+            "window_size": 60,
+            "error_status_code": 429
         }
     }
 

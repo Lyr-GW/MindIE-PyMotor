@@ -129,6 +129,7 @@
     "api_key_config": {
       "enable_api_key": false,
       "valid_keys": [],
+      "encryption_algorithm": "PBKDF2_SHA256",
       "header_name": "Authorization",
       "key_prefix": "Bearer ",
       "skip_paths": [

@@ -30,6 +30,7 @@ from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.utils.cert_util import (
     CertUtil,
 )
+from motor.common.utils.key_encryption import verify_api_key_against_valid_keys
 from motor.common.utils.logger import get_logger, ApiAccessFilter
 from motor.common.utils.security_utils import sanitize_error_message, log_audit_event
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
@@ -289,7 +290,7 @@ class CoordinatorServer:
         if self._api_key_config.key_prefix and authorization.startswith(self._api_key_config.key_prefix):
             api_key = authorization[len(self._api_key_config.key_prefix):]
         
-        if api_key not in self._api_key_config.valid_keys:
+        if not verify_api_key_against_valid_keys(api_key, self._api_key_config.valid_keys):
             logger.warning("API Key validation failed: invalid key")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

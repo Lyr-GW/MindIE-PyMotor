@@ -21,6 +21,7 @@ from pathlib import Path
 
 from motor.common.utils.logger import LoggingConfig, reconfigure_logging, get_logger
 from motor.common.utils.env import Env
+from motor.common.utils.key_encryption import set_default_key_encryption_by_name
 from motor.config.etcd import EtcdConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
 from motor.config.tls_config import TLSConfig
@@ -149,6 +150,21 @@ class APIKeyConfig:
     header_name: str = "Authorization"
     key_prefix: str = "Bearer "
     skip_paths: set[str] = field(default_factory=_default_skip_paths)
+    encryption_algorithm: str = "PBKDF2_SHA256"  # Encryption algorithm to use
+
+    def __post_init__(self):
+        """Initialize encryption algorithm after dataclass creation"""
+        self._setup_encryption()
+
+    def _setup_encryption(self):
+        """Setup the encryption algorithm based on configuration"""
+
+        try:
+            set_default_key_encryption_by_name(self.encryption_algorithm)
+            logger.info(f"Using encryption algorithm: {self.encryption_algorithm}")
+        except ValueError as e:
+            logger.error(f"Invalid encryption algorithm: {e}")
+            raise ValueError(f"Invalid encryption algorithm '{self.encryption_algorithm}': {e}") from e
 
 
 @dataclass
@@ -316,6 +332,9 @@ class CoordinatorConfig:
                     config.last_modified = config_path.stat().st_mtime
             else:
                 config.config_path = None
+
+            # Re-validate configuration after applying values from JSON
+            config.validate_config()
 
             reconfigure_logging(config.logging_config)
 

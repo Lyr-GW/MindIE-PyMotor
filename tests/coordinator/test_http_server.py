@@ -27,6 +27,7 @@ from motor.coordinator.api_server.coordinator_server import (
 )
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.core.instance_manager import InstanceManager
+from motor.common.utils.key_encryption import encrypt_api_key, set_default_key_encryption_by_name
 
 
 class TestCoordinatorServer:
@@ -103,7 +104,18 @@ class TestCoordinatorServer:
         coordinator_config = CoordinatorConfig()
         # Enable API key validation for this test
         coordinator_config.api_key_config.enable_api_key = True
-        coordinator_config.api_key_config.valid_keys = {"sk-test123456789", "sk-coordinator2024"}
+        # Use PBKDF2 as the encryption algorithm to align with default/documentation
+        coordinator_config.api_key_config.encryption_algorithm = "PBKDF2_SHA256"
+        
+        # Encrypt the API keys using the configured encryption algorithm
+        # This ensures the keys are stored in the same format as they would be in production
+        set_default_key_encryption_by_name(coordinator_config.api_key_config.encryption_algorithm)
+        plain_key1 = "sk-test123456789"
+        plain_key2 = "sk-coordinator2024"
+        encrypted_key1 = encrypt_api_key(plain_key1)
+        encrypted_key2 = encrypt_api_key(plain_key2)
+        coordinator_config.api_key_config.valid_keys = {encrypted_key1, encrypted_key2}
+        
         self.coordinator_config = coordinator_config
         
         # Create CoordinatorServer instance (only pass unified configuration)
