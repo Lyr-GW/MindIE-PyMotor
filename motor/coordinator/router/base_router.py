@@ -59,6 +59,7 @@ class BaseRouter(ABC):
             logger, 
             extra={REQUEST_ID_KEY: req_info.req_id}
         )
+        self.is_meta = False
 
     @contextlib.asynccontextmanager
     async def _manage_resource_context(self, role: PDRole, release_func):
@@ -67,7 +68,17 @@ class BaseRouter(ABC):
         """
         resource: Optional[ScheduledResource] = None
         try:
+            self.req_info.trace_obj.add_trace_event("Begin Scheduled Resource", is_meta=self.is_meta)
+
             resource = await self.prepare_resource(role)
+
+            attributes = {
+                "instance": f"{resource.instance.id}-{resource.instance.role}",
+                "endpoint": f"{resource.endpoint.id}-{resource.endpoint.ip}:{resource.endpoint.business_port}",
+            }
+            self.req_info.trace_obj.add_trace_event(f"Scheduled Resource ok", 
+                                                    attributes=attributes, 
+                                                    is_meta=self.is_meta)
             yield resource
         finally:
             if resource and not release_func(resource):
@@ -168,14 +179,20 @@ class BaseRouter(ABC):
             The stream response from the endpoint
         """
 
+        trace_obj = self.req_info.trace_obj
+        trace_obj.set_trace_attribute("server.path", self.req_info.api, self.is_meta)
         headers = {
             'Content-Type': 'application/json',
             'X-Request-Id': self.req_info.req_id
         }
+        headers.update(trace_obj.get_trace_headers_dict(self.is_meta))
+
         self.logger.debug("Forward stream request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
                           client.base_url, self.req_info.api, headers, req_data, timeout)
 
         self.first_chunk_sent = False
+        trace_obj.add_trace_event(f"Begin to stream: {client.base_url}/{self.req_info.api}, {client.timeout}",
+                                  is_meta=self.is_meta)
         async with client.stream(
             "POST",
             f"/{self.req_info.api}",
@@ -183,14 +200,20 @@ class BaseRouter(ABC):
             headers=headers,
             timeout=timeout
         ) as response:
+            trace_obj.add_trace_event(f"Stream ok: {response.status_code}", is_meta=self.is_meta)
             if not response.is_success:
                 await response.aread()
                 response.raise_for_status()
+            count_token = 0
             async for chunk in response.aiter_bytes():
                 if not self.first_chunk_sent and chunk:
                     self.first_chunk_sent = True
                     self.req_info.update_state(ReqState.FIRST_TOKEN_FINISH)
+                    trace_obj.set_time_first_token()
+                else:
+                    count_token += 1
                 yield chunk
+            trace_obj.set_count_token(count_token)
             return
 
     async def forward_post_request(self,
@@ -207,19 +230,27 @@ class BaseRouter(ABC):
         Returns:
             The response from the endpoint
         """
+        trace_obj = self.req_info.trace_obj
+        trace_obj.set_trace_attribute("server.path", self.req_info.api, self.is_meta)
+
         headers = {
             'Content-Type': 'application/json',
             'X-Request-Id': self.req_info.req_id
         }
+        headers.update(trace_obj.get_trace_headers_dict(self.is_meta))
+
         filtered_headers = filter_sensitive_headers(headers)
         filtered_body = filter_sensitive_body(req_data)
         self.logger.debug("Forward post request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
                           client.base_url, self.req_info.api, filtered_headers, filtered_body, timeout)
 
+        trace_obj.add_trace_event(f"Begin to post: {client.base_url}/{self.req_info.api}, {client.timeout}",
+                                  is_meta=self.is_meta)
         response = await client.post(f"/{self.req_info.api}",
                                         json=req_data,
                                         headers=headers,
                                         timeout=timeout)
+        trace_obj.add_trace_event(f"Post ok: {response.status_code}", is_meta=self.is_meta)  
         response.raise_for_status()
         return response
 

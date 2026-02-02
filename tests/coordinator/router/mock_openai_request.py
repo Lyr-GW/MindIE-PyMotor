@@ -14,7 +14,7 @@ import asyncio
 import json
 import time
 
-from fastapi import Request
+from fastapi import Request, status
 import httpx
 
 from motor.coordinator.models.request import RequestInfo, ReqState
@@ -196,6 +196,7 @@ class MockStreamResponse:
         self.exc = exc
         self.request_data = request_data
         self.is_success = exc is None
+        self.status_code = status.HTTP_200_OK
         
     async def aread(self):
         if isinstance(self.exc, httpx.HTTPStatusError):

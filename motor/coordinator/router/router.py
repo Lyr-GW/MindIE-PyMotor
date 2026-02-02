@@ -36,6 +36,7 @@ from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
+from motor.coordinator.tracer.tracing import TracerManager
 from motor.common.utils.security_utils import (
     sanitize_error_message,
     filter_sensitive_headers,
@@ -126,6 +127,9 @@ async def handle_request(raw_request: Request,
     """
 
     req_info = await __create_request_info(raw_request)
+
+    if TracerManager().contains_trace_headers(raw_request.headers):
+        req_info.trace_obj.parent_context = TracerManager().extract_trace_context(raw_request.headers)
 
     deploy_mode = config.scheduler_config.deploy_mode
     router_impl_class = _ROUTER_MAP.get(deploy_mode)

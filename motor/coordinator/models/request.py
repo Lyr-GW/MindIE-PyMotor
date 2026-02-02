@@ -20,6 +20,7 @@ from httpx import AsyncClient
 
 from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.instance import Instance, PDRole
+from motor.coordinator.tracer.tracing import TraceObj
 
 
 class RequestType(Enum):
@@ -52,6 +53,7 @@ class RequestInfo(BaseModel):
     api: str = Field(..., description="API need to be forwarded")
     state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
+    trace_obj: TraceObj = Field(default=TraceObj(), description="Tracing object")
     _p_cancel_scope: Optional[anyio.CancelScope] = PrivateAttr(default=None)
     _d_cancel_scope: Optional[anyio.CancelScope] = PrivateAttr(default=None)
 
