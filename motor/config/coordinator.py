@@ -201,6 +201,17 @@ class ApiConfig:
 
 
 @dataclass
+class TracerConfig:
+    """Tracer configuration class"""
+    endpoint: str = ""
+    root_sampling_rate: float = 1.0
+    remote_parent_sampled: float = 1.0
+    remote_parent_not_sampled: float = 1.0
+    local_parent_sampled: float = 1.0
+    local_parent_not_sampled: float = 1.0
+
+
+@dataclass
 class CoordinatorConfig:
     """Coordinator configuration class with validation, reload and error handling support"""
 
@@ -219,6 +230,7 @@ class CoordinatorConfig:
     http_config: HttpConfig = field(default_factory=HttpConfig)
     aigw_model: dict[str, Any] | None = None
     api_config: ApiConfig = field(default_factory=ApiConfig)
+    tracer_config: TracerConfig = field(default_factory=TracerConfig)
 
     # internal fields
     config_path: str | None = field(default=None, init=False)
@@ -316,6 +328,7 @@ class CoordinatorConfig:
                 ('mgmt_tls_config', config.mgmt_tls_config, None),
                 ('etcd_tls_config', config.etcd_tls_config, None),
                 ('api_config', config.api_config, None),
+                ('tracer_config', config.tracer_config, None),
             ]
 
             for section_name, config_obj, special_handlers in config_mappings:
@@ -378,6 +391,13 @@ class CoordinatorConfig:
         self._validate_positive_number(self.exception_config.retry_delay, "retry_delay")
         self._validate_positive_number(self.exception_config.first_token_timeout, "first_token_timeout")
         self._validate_positive_number(self.exception_config.infer_timeout, "infer_timeout")
+
+        # Validate tracer_config configuration
+        self._validate_positive_number(self.tracer_config.root_sampling_rate, "root_sampling_rate")
+        self._validate_positive_number(self.tracer_config.remote_parent_sampled, "remote_parent_sampled")
+        self._validate_positive_number(self.tracer_config.remote_parent_not_sampled, "remote_parent_not_sampled")
+        self._validate_positive_number(self.tracer_config.local_parent_sampled, "local_parent_sampled")
+        self._validate_positive_number(self.tracer_config.local_parent_not_sampled, "local_parent_not_sampled")
 
         # Validate HTTP configuration
         self._validate_port_range(self.http_config.coordinator_api_infer_port, "coordinator_api_infer_port")
