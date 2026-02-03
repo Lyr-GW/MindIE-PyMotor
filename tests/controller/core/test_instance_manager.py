@@ -529,20 +529,29 @@ def test_state_transitions(instance_manager, test_config):
 
 def test_separate_instance(instance_manager):
     """Test separating instances"""
+    # Enable persistence for this test
+    instance_manager.etcd_config.enable_etcd_persistence = True
+    
     instance = create_test_instance(100, "test_separate", ["192.168.1.1"])
     instance_manager.add_instance(instance)
     instance.update_instance_status(InsStatus.ACTIVE)
 
-    # Test separating active instance
-    instance_manager.separate_instance(instance.id)
-    assert instance.status == InsStatus.INACTIVE
-    assert instance.id in instance_manager.forced_separated_instances
+    # Test separating active instance - should trigger persistence
+    with patch.object(instance_manager, 'persist_data', return_value=True) as mock_persist:
+        instance_manager.separate_instance(instance.id)
+        assert instance.status == InsStatus.INACTIVE
+        assert instance.id in instance_manager.forced_separated_instances
+        # Verify persistence was called once for ACTIVE -> INACTIVE transition
+        mock_persist.assert_called_once()
 
-    # Test separating already inactive instance (should not notify again)
-    original_status = instance.status
-    instance_manager.separate_instance(instance.id)
-    assert instance.status == original_status  # Should remain INACTIVE
-    assert instance.id in instance_manager.forced_separated_instances
+    # Test separating already inactive instance (should not notify again or trigger persistence)
+    with patch.object(instance_manager, 'persist_data', return_value=True) as mock_persist:
+        original_status = instance.status
+        instance_manager.separate_instance(instance.id)
+        assert instance.status == original_status  # Should remain INACTIVE
+        assert instance.id in instance_manager.forced_separated_instances
+        # Verify persistence was NOT called since status didn't change
+        mock_persist.assert_not_called()
 
 
 def test_separate_nonexistent_instance(instance_manager):
@@ -810,11 +819,19 @@ def test_prevent_forced_separation_reactivation():
     # Make instance active and then force separate
     instance.update_instance_status(InsStatus.ACTIVE)
     manager.separate_instance(instance.id)
+    assert instance.status == InsStatus.INACTIVE
+    assert instance.id in manager.forced_separated_instances
 
-    # Try to transition back to ACTIVE - should be prevented
+    # Set endpoints to ready state to trigger INSTANCE_NORMAL event
+    # This would normally transition to ACTIVE, but should be prevented
+    for endpoints in instance.endpoints.values():
+        for endpoint in endpoints.values():
+            endpoint.status = EndpointStatus.NORMAL
+
+    # Try to transition back to ACTIVE via INSTANCE_NORMAL event - should be prevented
     result = manager._handle_state_transition(instance)
     assert result is True  # Returns success but doesn't change state
-    assert instance.status == InsStatus.INACTIVE  # Still INACTIVE
+    assert instance.status == InsStatus.INACTIVE  # Still INACTIVE, not ACTIVE
 
 
 def test_update_config():

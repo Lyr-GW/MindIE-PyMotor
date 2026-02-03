@@ -188,7 +188,7 @@ class InstanceManager(ThreadSafeSingleton):
                 # Prepare instance manager data - all instances in one dict
                 instances_data = {}
                 for ins_id, instance in self.instances.items():
-                    instances_data[str(ins_id)] = instance.model_dump()
+                    instances_data[str(ins_id)] = instance.model_dump(mode='json')
                 logger.debug("Persisting instance manager data - full data: %s", instances_data)
 
                 # Create persistent state with version control and checksum
@@ -376,9 +376,19 @@ class InstanceManager(ThreadSafeSingleton):
                 # Only transition ACTIVE -> INACTIVE and notify to avoid status flapping
                 # (e.g., INITIAL -> INACTIVE -> INITIAL) and noisy logs.
                 if instance.status == InsStatus.ACTIVE:
+                    old_status = instance.status
                     instance.update_instance_status(InsStatus.INACTIVE)
                     self.notify(instance, ObserverEvent.INSTANCE_SEPERATED)
-
+                    
+                    # Trigger persistence on state change
+                    with self.config_lock:
+                        enable_persistence = self.etcd_config.enable_etcd_persistence
+                    if enable_persistence:
+                        logger.info("Instance %d state changed from %s to %s via separate_instance, "
+                                    "triggering persistence", instance.id, old_status, instance.status)
+                        if not self.persist_data():
+                            logger.error("Failed to persist instance %d state change from %s to "
+                                         "%s via separate_instance", instance.id, old_status, instance.status)
                 logger.info("Successfully separated instance %s (id:%d) in state %s",
                             instance.job_name, instance.id, instance.status)
             else:
@@ -484,18 +494,10 @@ class InstanceManager(ThreadSafeSingleton):
                     continue
                 if instance.is_all_endpoints_alive():
                     continue
-                # Instance heartbeat timeout, handle state transition
-                from_state = instance.status
-                event = InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT
-                to_state = self.transitions.get((from_state, event), None)
-                if to_state is None:
-                    logger.error("No valid state transition for instance %d from %s on event %s.",
-                                 instance.id, from_state, event)
-                    continue
-
-                state_handler = self.states.get(to_state, None)
-                if state_handler:
-                    state_handler(from_state, event, instance)
+                # Use _handle_state_transition with heartbeat timeout event to ensure persistence is triggered
+                if not self._handle_state_transition(instance, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT):
+                    logger.error("Failed to handle state transition for instance %d on heartbeat timeout",
+                                 instance.id)
 
             with self.config_lock:
                 check_interval = self.instance_manager_check_interval
@@ -509,13 +511,11 @@ class InstanceManager(ThreadSafeSingleton):
     ) -> None:
         if from_state == InsStatus.INITIAL:
             return
-        # When transitioning from INACTIVE to INITIAL (re-initialization),
-        # remove from forced separated instances set to allow re-activation
+        
+        # Sometimes an instance may briefly enter an abnormal state 
+        # during initialization, then revert to the initial state.
         if from_state == InsStatus.INACTIVE and condition_event == InsConditionEvent.INSTANCE_INIT:
-            with self.ins_lock:
-                self.forced_separated_instances.discard(instance.id)
-            logger.info("Instance %d (%s) re-initializing, removed from forced separated set",
-                        instance.id, instance.job_name)
+            instance.update_instance_status(InsStatus.INITIAL)
         return
 
     def _handle_active(
@@ -618,14 +618,26 @@ class InstanceManager(ThreadSafeSingleton):
             self.del_instance(instance.id)
         return
 
-    def _handle_state_transition(self, instance: Instance) -> bool:
+    def _handle_state_transition(
+        self,
+        instance: Instance,
+        event_override: InsConditionEvent | None = None
+    ) -> bool:
         """
         Handle state transition based on current state and condition event
+        Args:
+            instance: Instance to handle state transition for
+            event_override: Optional event to use instead of auto-detection
         Returns:
             bool: Whether handle state transition is successful
         """
         from_state = instance.status
-        if instance.is_all_endpoints_ready():
+        
+        # Use override event if provided, otherwise detect event based on instance status
+        if event_override is not None:
+            event = event_override
+            to_state = self.transitions.get((from_state, event), None)
+        elif instance.is_all_endpoints_ready():
             event = InsConditionEvent.INSTANCE_NORMAL
             to_state = self.transitions.get((from_state, event), None)
         elif instance.is_have_one_endpoint_abnormal():
@@ -650,15 +662,15 @@ class InstanceManager(ThreadSafeSingleton):
         if state_handler:
             state_handler(from_state, event, instance)
 
-            # Active persistence on state change
+            # Check actual state change after handler execution (handler may not update state)
             with self.config_lock:
                 enable_persistence = self.etcd_config.enable_etcd_persistence
-            if from_state != to_state and enable_persistence:
+            if from_state != instance.status and enable_persistence:
                 logger.info("Instance %d state changed from %s to %s, triggering persistence",
-                            instance.id, from_state, to_state)
+                            instance.id, from_state, instance.status)
                 if not self.persist_data():
                     logger.error("Failed to persist instance %d state change from %s to %s",
-                                 instance.id, from_state, to_state)
+                                 instance.id, from_state, instance.status)
 
             # Remove from forced separated set if transitioning to DELETED
             if to_state == InsStatus.DELTETED and instance.id in self.forced_separated_instances:
