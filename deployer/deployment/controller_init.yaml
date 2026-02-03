@@ -13,9 +13,12 @@ spec:
   template:
     metadata:
       labels:
+        fault-scheduling: force
+        fault-retry-times: "10000"
         app: mindie-motor-controller
         deploy-name: mindie-motor-controller
     spec:
+      schedulerName: volcano
       terminationGracePeriodSeconds: 0
       automountServiceAccountToken: false
       securityContext:
