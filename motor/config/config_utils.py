@@ -106,15 +106,20 @@ def _update_engine_server_tls_config(
     updated_config: dict[str, Any],
     user_config_data: dict[str, Any],
 ) -> None:
-    updated_config[MGMT_TLS_CONFIG] = user_config_data[MOTOR_DEPLOY_CONFIG][TLS_CONFIG][MGMT_TLS_CONFIG]
+    mgmt_tls_config = user_config_data[MOTOR_DEPLOY_CONFIG][TLS_CONFIG][MGMT_TLS_CONFIG]
+    updated_config[MGMT_TLS_CONFIG] = mgmt_tls_config
+
     infer_tls_config = user_config_data[MOTOR_DEPLOY_CONFIG][TLS_CONFIG][INFER_TLS_CONFIG]
     updated_config[INFER_TLS_CONFIG] = infer_tls_config
-    if infer_tls_config and infer_tls_config[TLS_ENABLE]:
-        updated_config[ENGINE_CONFIG][SSL_KEYFILE] = infer_tls_config[KEY_FILE]
-        updated_config[ENGINE_CONFIG][SSL_CERTFILE] = infer_tls_config[CERT_FILE]
-        updated_config[ENGINE_CONFIG][SSL_CA_CERTS] = infer_tls_config[CA_FILE]
 
-        engine_config = updated_config[ENGINE_CONFIG]
+    engine_config = updated_config[ENGINE_CONFIG]
+
+    if infer_tls_config and infer_tls_config[TLS_ENABLE]:
+        engine_config[SSL_KEYFILE] = infer_tls_config[KEY_FILE]
+        engine_config[SSL_CERTFILE] = infer_tls_config[CERT_FILE]
+        engine_config[SSL_CA_CERTS] = infer_tls_config[CA_FILE]
+
+    if mgmt_tls_config and mgmt_tls_config[TLS_ENABLE]:
         if KV_TRANSFER_CONFIG not in engine_config:
             engine_config[KV_TRANSFER_CONFIG] = {}
         kv_transfer_config = engine_config[KV_TRANSFER_CONFIG]

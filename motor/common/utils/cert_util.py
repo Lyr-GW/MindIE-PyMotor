@@ -161,7 +161,7 @@ def validate_server_certs(server_cert: CryptoX509) -> bool:
         check_key_cert_sign = False
         check_crl_sign = False
         check_ca_true = False
-        
+
         try:
             crypto_cert = server_cert.to_cryptography()
             try:
@@ -172,7 +172,7 @@ def validate_server_certs(server_cert: CryptoX509) -> bool:
                     check_ca_true = True
             except crypt_x509.ExtensionNotFound:
                 pass
-            
+
             try:
                 key_usage = crypto_cert.extensions.get_extension_for_oid(
                     ExtensionOID.KEY_USAGE
@@ -185,9 +185,9 @@ def validate_server_certs(server_cert: CryptoX509) -> bool:
                 pass
         except Exception as e:
             logger.error(f"Failed to check certificate extensions: {e}")
-        
+
         if check_key_cert_sign or check_crl_sign or check_ca_true:
-            logger.warning(
+            logger.debug(
                 f"The cert is not End Entity cert with check_certificate_sign: "
                 f"{check_key_cert_sign}, check_crl_sign: {check_crl_sign}, "
                 f"check_ca_true: {check_ca_true}"
@@ -450,7 +450,7 @@ class CertValidationUtil:
                     }
                     data.append(item)
             else:
-                logger.info("No revoked certificates found in the CRL")
+                logger.debug("No revoked certificates found in the CRL")
             return data
         except Exception as e:
             logger.error(f"CRL info query failed: {str(e)}")
@@ -491,13 +491,13 @@ class CertValidationUtil:
                     if not plain_text:
                         # Try to load unencrypted private key
                         server_key = crypto.load_privatekey(crypto.FILETYPE_PEM, key_data)
-                        logger.info("Loaded unencrypted private key")
+                        logger.debug("Loaded unencrypted private key")
                     else:
                         # Try to load encrypted private key with provided password
                         server_key = crypto.load_privatekey(
                             crypto.FILETYPE_PEM, key_data, passphrase=plain_text
                         )
-                        logger.info("Loaded encrypted private key")
+                        logger.debug("Loaded encrypted private key")
                 except crypto.Error as e:
                     # If loading fails, try another method only if password was provided
                     if plain_text:
@@ -542,7 +542,7 @@ class CertValidationUtil:
                             "server certificate is not signed by the provided CA"
                         )
                         return False
-                    logger.info("Certificate chain validation passed")
+                    logger.debug("Certificate chain validation passed")
                 except Exception as e:
                     logger.error(f"Failed to validate certificate chain: {e}")
                     return False
@@ -656,7 +656,7 @@ class CertUtil:
                 logger.error("Certificate and key validation failed")
                 return False
             
-            logger.info("Certificate chain validation completed successfully")
+            logger.debug("Certificate chain validation completed successfully")
             return True
             
         except Exception as e:
@@ -681,7 +681,7 @@ class CertUtil:
             if hasattr(context, 'set_ciphersuites'):
                 try:
                     context.set_ciphersuites(':'.join(tls13_ciphersuites))
-                    logger.info(f"TLS 1.3 cipher suites configured: {', '.join(tls13_ciphersuites)}")
+                    logger.debug(f"TLS 1.3 cipher suites configured: {', '.join(tls13_ciphersuites)}")
                 except ssl.SSLError as e:
                     logger.warning(f"Failed to set TLS 1.3 cipher suites: {e}, using default")
             else:
@@ -750,7 +750,7 @@ class CertUtil:
             context.ca_file = config.get(CA_CERTS, "")
             context.password = password.decode(UTF8_ENCODING)
             
-            logger.info(
+            logger.debug(
                 "SSL certificate context constructed successfully with full validation"
             )
             return context
@@ -919,7 +919,7 @@ class CertUtil:
                 password=password_bytes if password_bytes else None
             )
             
-            logger.info("SSL context created successfully (no client cert verification)")
+            logger.debug("SSL context created successfully (no client cert verification)")
             return context
             
         except Exception as e:
