@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -14,25 +13,6 @@
 Fault tolerance module - contains fault detection and recovery mechanisms.
 """
 
-__all__ = [
-    # Fault management
-    "FaultManager",
-    "Status",
-    "DeviceFaultInfo",
-    "ServerMetadata",
-    "InstanceMetadata",
+__all__ = ["FaultManager"]
 
-    # Submodules
-    "strategy",
-    "cluster_grpc",
-]
-
-from .fault_manager import (
-    FaultManager,
-    Status,
-    DeviceFaultInfo,
-    ServerMetadata,
-    InstanceMetadata,
-)
-from . import strategy
-from . import cluster_grpc
+from .fault_manager import FaultManager

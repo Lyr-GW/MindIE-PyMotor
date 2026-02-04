@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -10,16 +9,20 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""
-Fault tolerance cluster gRPC module - contains gRPC client for cluster communication.
-"""
+from motor.common.utils.logger import get_logger
+from motor.controller.fault_tolerance.strategy import StrategyBase
 
-__all__ = [
-    "ClusterNodeClient",
-    "cluster_fault_pb2",
-    "cluster_fault_pb2_grpc",
-]
 
-from .cluster_grpc_client import ClusterNodeClient
-from . import cluster_fault_pb2
-from . import cluster_fault_pb2_grpc
+logger = get_logger(__name__)
+
+
+class LingquNetworkRecoverStrategy(StrategyBase):
+    def __init__(self) -> None:
+        super().__init__()
+    
+    def execute(self, instance_id: int) -> None:
+        while not self.event.is_set():
+            pass
+    
+    def stop(self) -> None:
+        logger.info("Lingqu Network Recover strategy can not be stopped.")
