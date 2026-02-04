@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -9,7 +8,6 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
-
 from abc import ABC, abstractmethod
 import threading
 from collections.abc import Callable
@@ -65,7 +63,7 @@ def specific_level2_strategy(
 ) -> type[StrategyBase] | None:
     # Only handle whitelisted fault codes for L2 strategy and check config switch
     if fault_code in [0x00f1fef5, 0x08520003] and config.fault_tolerance_config.enable_lingqu_network_recover:
-        from motor.controller.ft.strategy.lingqu_network_recover import LingquNetworkRecoverStrategy
+        from motor.controller.fault_tolerance.strategy.lingqu_network_recover import LingquNetworkRecoverStrategy
         return LingquNetworkRecoverStrategy
     else:
         return None
@@ -77,7 +75,7 @@ def general_level3_to_level6_strategy(
     config: ControllerConfig
 ) -> type[StrategyBase] | None:
     from motor.controller.core.instance_manager import InstanceManager
-    from motor.controller.ft.strategy.scale_p2d import ScaleP2DStrategy
+    from motor.controller.fault_tolerance.strategy.scale_p2d import ScaleP2DStrategy
     instance = InstanceManager().get_instance(instance_id)
     if instance is not None and instance.role == "decode" and config.fault_tolerance_config.enable_scale_p2d:
         return ScaleP2DStrategy

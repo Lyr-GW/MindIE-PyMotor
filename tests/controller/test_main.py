@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -9,7 +8,6 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
-
 import signal
 import pytest
 from unittest.mock import MagicMock, patch
@@ -203,7 +201,7 @@ def test_init_all_modules_fault_tolerance_enabled():
          patch('motor.controller.main.InstanceAssembler'), \
          patch('motor.controller.main.EventPusher'), \
          patch('motor.controller.main.ControllerAPI'), \
-         patch('motor.controller.ft.fault_manager.FaultManager', return_value=mock_fault_manager):
+         patch('motor.controller.fault_tolerance.fault_manager.FaultManager', return_value=mock_fault_manager):
 
         init_all_modules()
 
@@ -237,7 +235,7 @@ def test_on_config_updated_enable_fault_tolerance(mock_logger):
     with patch('motor.controller.main.config', mock_config), \
          patch('motor.controller.main.modules', modules_copy), \
          patch('motor.controller.main.previous_fault_tolerance_enabled', False), \
-         patch('motor.controller.ft.fault_manager.FaultManager', return_value=mock_fault_manager):
+         patch('motor.controller.fault_tolerance.fault_manager.FaultManager', return_value=mock_fault_manager):
 
         on_config_updated()
 
@@ -310,7 +308,7 @@ def test_on_config_updated_enable_fault_tolerance_exception(mock_logger):
     with patch('motor.controller.main.config', mock_config), \
          patch('motor.controller.main.modules', modules_copy), \
          patch('motor.controller.main.previous_fault_tolerance_enabled', False), \
-         patch('motor.controller.ft.fault_manager.FaultManager', side_effect=Exception("Test error")):
+         patch('motor.controller.fault_tolerance.fault_manager.FaultManager', side_effect=Exception("Test error")):
 
         on_config_updated()
 

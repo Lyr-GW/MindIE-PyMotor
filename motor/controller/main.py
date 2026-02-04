@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -9,15 +8,14 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
-
-import argparse
 import os
+import argparse
+import select
 import signal
 import sys
 import threading
 from typing import Any
 
-import select
 
 from motor.common.standby.standby_manager import StandbyManager
 from motor.common.utils.config_watcher import ConfigWatcher
@@ -73,7 +71,7 @@ def on_config_updated() -> None:
             # Fault tolerance was enabled
             logger.info("Fault tolerance feature enabled, starting FaultManager...")
             try:
-                from motor.controller.ft.fault_manager import FaultManager
+                from motor.controller.fault_tolerance.fault_manager import FaultManager
                 fault_manager = FaultManager(config)
                 modules["FaultManager"] = fault_manager
 
@@ -149,7 +147,7 @@ def init_all_modules() -> None:
     modules["EventPusher"] = EventPusher(config)
     modules["ControllerAPI"] = ControllerAPI(config, modules)
     if config.fault_tolerance_config.enable_fault_tolerance:
-        from motor.controller.ft.fault_manager import FaultManager
+        from motor.controller.fault_tolerance.fault_manager import FaultManager
         modules["FaultManager"] = FaultManager(config)
     modules["InstanceManager"] = InstanceManager(config)
 
