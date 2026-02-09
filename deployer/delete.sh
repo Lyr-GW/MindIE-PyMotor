@@ -14,19 +14,21 @@ echo -e "NOW EXECUTING [kubectl delete] COMMANDS. THE RESULT IS: \n\n"
 DEFAULT_NAME_SPACE="mindie-motor"
 USER_CONFIG_FILE="./user_config.json"
 
+user_config_namespace="$DEFAULT_NAME_SPACE"
 if [ -f "$USER_CONFIG_FILE" ] && [ -r "$USER_CONFIG_FILE" ]; then
     JOB_ID=$(grep -o '"job_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$USER_CONFIG_FILE" | sed -E 's/"job_id"[[:space:]]*:[[:space:]]*"([^"]*)"/\1/')
     if [ -n "$JOB_ID" ]; then
-        DEFAULT_NAME_SPACE="$JOB_ID"
+        user_config_namespace="$JOB_ID"
     fi
 fi
 
-NAME_SPACE="$DEFAULT_NAME_SPACE"
 if [ -n "$1" ]; then
     NAME_SPACE="$1"
+    kubectl delete cm motor-config -n "$NAME_SPACE";
+else
+    kubectl delete cm motor-config -n "$DEFAULT_NAME_SPACE";
+    kubectl delete cm motor-config -n "$user_config_namespace";
 fi
-
-kubectl delete cm motor-config -n "$NAME_SPACE";
 
 YAML_DIR=./output/deployment
 
