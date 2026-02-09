@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 import threading
 from collections.abc import Callable
 from motor.config.controller import ControllerConfig
+from motor.controller.fault_tolerance.k8s.cluster_fault_codes import FaultLevel
 
 
 class StrategyBase(ABC):
@@ -39,16 +40,16 @@ class StrategyBase(ABC):
             return self._is_finished
 
 
-def general_level0_strategy(
+def healthy_strategy(
     fault_code: int,
     instance_id: int,
     config: ControllerConfig
 ) -> type[StrategyBase] | None:
-    "level0 means healthy, so no strategy is needed."
+    "level healthy means this instance is healthy, so no strategy is needed."
     return None
 
 
-def general_level1_strategy(
+def level1_strategy(
     fault_code: int,
     instance_id: int,
     config: ControllerConfig
@@ -56,40 +57,75 @@ def general_level1_strategy(
     return None
 
 
-def specific_level2_strategy(
+def level2_strategy(
     fault_code: int,
     instance_id: int,
     config: ControllerConfig
 ) -> type[StrategyBase] | None:
-    # Only handle whitelisted fault codes for L2 strategy and check config switch
-    if fault_code in [0x00f1fef5, 0x08520003] and config.fault_tolerance_config.enable_lingqu_network_recover:
+    # Check if strategy is enabled first
+    if not config.fault_tolerance_config.enable_lingqu_network_recover:
+        return None
+    
+    # Only handle whitelisted fault codes for L2 strategy
+    if fault_code in [0x00f1fef5, 0x08520003]:
         from motor.controller.fault_tolerance.strategy.lingqu_network_recover import LingquNetworkRecoverStrategy
         return LingquNetworkRecoverStrategy
     else:
         return None
 
 
-def general_level3_to_level6_strategy(
+def level3_strategy(
     fault_code: int,
     instance_id: int,
     config: ControllerConfig
 ) -> type[StrategyBase] | None:
+    # L3 faults call L1 strategy logic
+    return level1_strategy(fault_code, instance_id, config)
+
+
+def level4_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
+    # Check if strategy is enabled first
+    if not config.fault_tolerance_config.enable_scale_p2d:
+        return None
+    
     from motor.controller.core.instance_manager import InstanceManager
     from motor.controller.fault_tolerance.strategy.scale_p2d import ScaleP2DStrategy
     instance = InstanceManager().get_instance(instance_id)
-    if instance is not None and instance.role == "decode" and config.fault_tolerance_config.enable_scale_p2d:
+    if instance is not None and instance.role == "decode":
         return ScaleP2DStrategy
     else:
         return None
-    
 
-def generate_strategy_map() -> dict[str, Callable[[int, int, ControllerConfig], type[StrategyBase] | None] | None]:
+
+def level5_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
+    # Note: Currently L5 faults call L4 strategy logic
+    return level4_strategy(fault_code, instance_id, config)
+
+
+def level6_strategy(
+    fault_code: int,
+    instance_id: int,
+    config: ControllerConfig
+) -> type[StrategyBase] | None:
+    # Note: Currently L6 faults call L4 strategy logic
+    return level4_strategy(fault_code, instance_id, config)
+
+
+def generate_strategy_map() -> dict[int, Callable[[int, int, ControllerConfig], type[StrategyBase] | None] | None]:
     return {
-        "L0": general_level0_strategy,
-        "L1": general_level1_strategy,
-        "L2": specific_level2_strategy,
-        "L3": general_level3_to_level6_strategy,
-        "L4": general_level3_to_level6_strategy,
-        "L5": general_level3_to_level6_strategy,
-        "L6": general_level3_to_level6_strategy,
+        FaultLevel.HEALTHY: healthy_strategy,
+        FaultLevel.L1: level1_strategy,
+        FaultLevel.L2: level2_strategy,
+        FaultLevel.L3: level3_strategy,
+        FaultLevel.L4: level4_strategy,
+        FaultLevel.L5: level5_strategy,
+        FaultLevel.L6: level6_strategy,
     }
