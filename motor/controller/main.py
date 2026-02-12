@@ -71,7 +71,7 @@ def on_config_updated() -> None:
             # Fault tolerance was enabled
             logger.info("Fault tolerance feature enabled, starting FaultManager...")
             try:
-                from motor.controller.fault_tolerance.fault_manager import FaultManager
+                from motor.controller.fault_tolerance import FaultManager
                 fault_manager = FaultManager(config)
                 modules["FaultManager"] = fault_manager
 
@@ -145,11 +145,11 @@ def init_all_modules() -> None:
 
     modules["InstanceAssembler"] = InstanceAssembler(config)
     modules["EventPusher"] = EventPusher(config)
-    modules["ControllerAPI"] = ControllerAPI(config, modules)
     if config.fault_tolerance_config.enable_fault_tolerance:
-        from motor.controller.fault_tolerance.fault_manager import FaultManager
+        from motor.controller.fault_tolerance import FaultManager
         modules["FaultManager"] = FaultManager(config)
     modules["InstanceManager"] = InstanceManager(config)
+    modules["ControllerAPI"] = ControllerAPI(config, modules)
 
     # Attach observers before starting modules
     instance_manager = modules.get("InstanceManager")

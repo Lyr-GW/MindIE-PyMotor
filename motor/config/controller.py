@@ -56,7 +56,7 @@ class InstanceConfig:
     # instance manager configuration
     instance_manager_check_interval: int = 1  # 1 second
     instance_heartbeat_timeout: int = 5  # 5 seconds
-    instance_expired_timeout: int = 300  # 300 seconds
+    instance_expired_timeout: int = 1200  # 1200 seconds
 
     # other instance configuration
     send_cmd_retry_times: int = 3
@@ -78,14 +78,21 @@ class FaultToleranceConfig:
     """Fault tolerance configuration class"""
 
     # fault tolerance enable/disable
-    enable_fault_tolerance: bool = False
+    enable_fault_tolerance: bool = True
 
     # strategy center configuration
     strategy_center_check_interval: int = 1  # 1 second
 
-    # scale and recovery configuration
-    enable_scale_p2d: bool = False  # Enable/disable scale p2d strategy
-    enable_lingqu_network_recover: bool = False  # Enable/disable lingqu network recovery strategy
+    # configmap monitoring configuration - ConfigMap namespace and name prefix
+    configmap_namespace: str = "kube-system"
+    configmap_prefix: str = "mindx-dl-deviceinfo-"
+
+    # k8s certificate path (can be configured per ConfigMap if needed)
+    k8s_cert_path: str = ""  # Path to Kubernetes certificates (default: use in-cluster config)
+
+    # scale and recovery strategy configuration
+    enable_scale_p2d: bool = True  # Enable/disable scale p2d strategy
+    enable_lingqu_network_recover: bool = True  # Enable/disable lingqu network recovery strategy
 
 
 @dataclass

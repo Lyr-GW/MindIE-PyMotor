@@ -57,7 +57,7 @@ def test_default_config_initialization():
         assert config.instance_config.send_cmd_retry_times == 3
         assert config.instance_config.instance_manager_check_interval == 1
         assert config.instance_config.instance_heartbeat_timeout == 5
-        assert config.instance_config.instance_expired_timeout == 300
+        assert config.instance_config.instance_expired_timeout == 1200
         assert config.api_config.controller_api_host == '127.0.0.1'
         assert config.api_config.controller_api_port == 1026
         assert config.event_config.event_consumer_sleep_interval == 1.0
@@ -65,7 +65,7 @@ def test_default_config_initialization():
         assert config.mgmt_tls_config.enable_tls is False
         assert config.mgmt_tls_config.cert_file == 'security/mgmt/cert/server.crt'
         assert config.mgmt_tls_config.key_file == 'security/mgmt/keys/server.key'
-        assert config.fault_tolerance_config.enable_fault_tolerance is False
+        assert config.fault_tolerance_config.enable_fault_tolerance is True
     finally:
         # Restore original environment variable
         if original_pod_ip is not None:
