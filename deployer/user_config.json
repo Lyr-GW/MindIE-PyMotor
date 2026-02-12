@@ -14,11 +14,22 @@
     "weight_mount_path": "/mnt/weight/"
   },
   "motor_controller_config": {
+    "logging_config": {
+      "log_level": "INFO"
+    },
+    "fault_tolerance_config": {
+      "enable_fault_tolerance": true,
+      "enable_scale_p2d": true,
+      "enable_lingqu_network_recover": true
+    },
     "standby_config": {
       "enable_master_standby": false
     }
   },
   "motor_coordinator_config": {
+    "logging_config": {
+      "log_level": "INFO"
+    },
     "standby_config": {
       "enable_master_standby": false
     },
@@ -28,6 +39,9 @@
     }
   },
   "motor_nodemanger_config": {
+    "logging_config": {
+      "log_level": "INFO"
+    }
   },
   "motor_engine_prefill_config": {
     "engine_type": "vllm",

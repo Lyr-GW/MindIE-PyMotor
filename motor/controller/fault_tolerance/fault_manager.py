@@ -22,8 +22,9 @@ from motor.common.resources import Instance, ReadOnlyInstance
 from motor.common.etcd.etcd_client import EtcdClient
 from motor.controller.core import Observer, ObserverEvent, InstanceManager
 from motor.controller.fault_tolerance.strategy import generate_strategy_map
+from motor.controller.fault_tolerance.k8s.resource_monitor import ResourceMonitor
 from motor.controller.fault_tolerance.k8s.cluster_fault_codes import (
-    FaultInfo, NodeStatus, FaultLevel, FaultType, SpecialFaultCode
+    FaultInfo, FaultLevel, FaultType, SpecialFaultCode, NodeStatus
 )
 
 
@@ -97,6 +98,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
         if config is None:
             config = ControllerConfig()
         self.config = config
+        self.config_lock = threading.RLock()
 
         # Manage all nodes's status with host_ip, when it comes a faulty node,
         # we firstly find out which instance this node belongs to,
@@ -104,7 +106,14 @@ class FaultManager(ThreadSafeSingleton, Observer):
         self.nodes: dict[str, NodeMetadata] = {}
         self.instances: dict[int, InstanceMetadata] = {}
         self.lock = threading.Lock()
-        self.config_lock = threading.RLock()
+
+        # Version control for data persistence
+        self._data_version = 0
+        self._version_lock = threading.Lock()
+
+        # Dynamic Resource monitors for per-host monitoring, key is host_ip.
+        self.resource_monitors: dict[str, ResourceMonitor] = {}
+        self.resource_monitors_lock = threading.RLock()
 
         # Version control for data persistence
         self._data_version = 0
@@ -115,6 +124,9 @@ class FaultManager(ThreadSafeSingleton, Observer):
             self.etcd_config = config.etcd_config
             self.etcd_tls_config = config.etcd_tls_config
             self.strategy_center_check_interval = config.fault_tolerance_config.strategy_center_check_interval
+            # ConfigMap name prefix and namespace for dynamic monitoring
+            self.configmap_prefix = config.fault_tolerance_config.configmap_prefix
+            self.configmap_namespace = config.fault_tolerance_config.configmap_namespace
 
         with self.config_lock:
             self.etcd_client = EtcdClient(etcd_config=self.etcd_config, tls_config=self.etcd_tls_config)
@@ -127,6 +139,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
         self.strategies = generate_strategy_map()
 
         self.ft_strategy_center_thread = None
+
         self._initialized = True
         logger.info("FaultManager initialized.")
 
@@ -148,17 +161,27 @@ class FaultManager(ThreadSafeSingleton, Observer):
         if enable_persistence and not self.restore_data():
             logger.warning("Failed to restore fault manager's data from ETCD, start with empty state")
 
+        # Start Resource monitors for all restored nodes
+        with self.lock:
+            for host_ip in self.nodes.keys():
+                self._create_resource_monitor_for_host(host_ip)
+
         self.ft_strategy_center_thread.start()
 
         logger.info("FaultManager started.")
 
     def is_alive(self) -> bool:
         """ Check if the fault manager threads are alive """
-        return (self.ft_strategy_center_thread is not None
-                and self.ft_strategy_center_thread.is_alive())
+        return self.ft_strategy_center_thread is not None and self.ft_strategy_center_thread.is_alive()
 
     def stop(self) -> None:
         self.stop_event.set()
+
+        # Stop all host-specific Resource monitors
+        with self.resource_monitors_lock:
+            for monitor in self.resource_monitors.values():
+                monitor.stop_monitoring()
+            self.resource_monitors.clear()
 
         # Only join threads that have been started
         if self.ft_strategy_center_thread is not None and self.ft_strategy_center_thread.is_alive():
@@ -178,6 +201,39 @@ class FaultManager(ThreadSafeSingleton, Observer):
 
             # Update ETCD client with new configuration
             self.etcd_client = EtcdClient(etcd_config=self.etcd_config, tls_config=self.etcd_tls_config)
+
+            # Check if ConfigMap prefix or namespace configuration changed
+            new_configmap_prefix = config.fault_tolerance_config.configmap_prefix
+            new_configmap_namespace = config.fault_tolerance_config.configmap_namespace
+
+            config_changed = False
+            if self.configmap_prefix != new_configmap_prefix:
+                self.configmap_prefix = new_configmap_prefix
+                config_changed = True
+                logger.info("ConfigMap prefix configuration updated to: %s", new_configmap_prefix)
+
+            if self.configmap_namespace != new_configmap_namespace:
+                self.configmap_namespace = new_configmap_namespace
+                config_changed = True
+                logger.info("ConfigMap namespace configuration updated to: %s", new_configmap_namespace)
+
+            if config_changed:
+                # Stop all existing host-specific Resource monitors due to configuration change
+                with self.resource_monitors_lock:
+                    for host_ip, monitor in self.resource_monitors.items():
+                        monitor.stop_monitoring()
+                        logger.info("Stopped Resource monitor for host %s due to configuration change", host_ip)
+                    self.resource_monitors.clear()
+
+                # Restart Resource monitors for all existing hosts with new configuration
+                # Get all unique host_ips from nodes dictionary
+                with self.lock:
+                    host_ips = {node.host_ip for node in self.nodes.values()}
+                    for host_ip in host_ips:
+                        self._create_resource_monitor_for_host(host_ip)
+                        logger.info("Restarted Resource monitor for host %s with new configuration", host_ip)
+
+                logger.info("Resource configuration updated - all monitors restarted with new config")
 
             logger.info("FaultManager configuration updated")
 
@@ -221,7 +277,6 @@ class FaultManager(ThreadSafeSingleton, Observer):
                 if success:
                     logger.info("Successfully persisted fault manager data with version %d", next_version)
                 return success
-
         except Exception as e:
             logger.error("Error persisting fault manager data: %s", e)
             return False
@@ -306,6 +361,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
                     removed_host_ips = existing_host_ips - current_host_ips
                     for host_ip in removed_host_ips:
                         self.nodes.pop(host_ip, None)
+                        self._stop_resource_monitor_for_host(host_ip)
                         logger.debug("Removed node %s from instance %d", host_ip, instance.id)
 
                     # Add new nodes
@@ -317,6 +373,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
                                 host_ip=node_mgr.host_ip,
                                 instance_id=instance.id,
                             )
+                            self._create_resource_monitor_for_host(node_mgr.host_ip)
                             logger.debug("Added new node %s to instance %d", node_mgr.host_ip, instance.id)
                 else:
                     # Instance doesn't exist, add it
@@ -334,6 +391,10 @@ class FaultManager(ThreadSafeSingleton, Observer):
                     self.instances[instance.id] = ins_metadata
                     self.nodes.update(node_metadatas)
                     logger.debug("Added instance %d with %d nodes", instance.id, len(node_metadatas))
+
+                    # Create Resource monitors for all hosts in the new instance
+                    for node_mgr in current_node_managers:
+                        self._create_resource_monitor_for_host(node_mgr.host_ip)
 
     def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
         logger.info("FaultManager update instance %s with event: %s.", instance.job_name, event)
@@ -376,6 +437,10 @@ class FaultManager(ThreadSafeSingleton, Observer):
                     )
                     logger.info("Added new node %s to instance %d", node_mgr.host_ip, instance.id)
 
+        # Create Resource monitors for all hosts in the instance
+        for node_mgr in current_node_managers:
+            self._create_resource_monitor_for_host(node_mgr.host_ip)
+
     def _handle_instance_removed(self, instance: ReadOnlyInstance) -> None:
         # Find all nodes belonging to this instance
         instance_nodes = []
@@ -400,6 +465,58 @@ class FaultManager(ThreadSafeSingleton, Observer):
             # Remove the instance
             self.instances.pop(instance.id, None)
 
+    def _create_resource_monitor_for_host(self, host_ip: str) -> None:
+        """ Create a Resource monitor for a specific host IP """
+        with self.config_lock:
+            namespace = self.configmap_namespace
+            configmap_prefix = self.configmap_prefix
+
+        with self.resource_monitors_lock:
+            # Check if monitor already exists and is running with same configuration
+            if host_ip in self.resource_monitors:
+                existing_monitor = self.resource_monitors[host_ip]
+                
+                # Early return if monitor is alive and configuration matches
+                if existing_monitor.is_alive():
+                    config_matches = (existing_monitor.namespace == namespace
+                                     and existing_monitor.configmap_name_prefix == configmap_prefix)
+                    if config_matches:
+                        logger.debug("Resource monitor for host %s already exists and is running "
+                                   "with same configuration, skipping recreation", host_ip)
+                        return
+                    # Configuration changed, need to stop and recreate
+                    logger.info("Resource monitor configuration changed for host %s, "
+                              "stopping existing monitor", host_ip)
+                    existing_monitor.stop_monitoring()
+                else:
+                    # Monitor exists but not alive, will recreate
+                    logger.debug("Resource monitor for host %s exists but not alive, "
+                               "will recreate", host_ip)
+
+        logger.info("Creating Resource monitor for host %s", host_ip)
+
+        resource_monitor = ResourceMonitor(
+            host_ip=host_ip,
+            namespace=namespace,
+            configmap_name_prefix=configmap_prefix,
+            node_change_handler=self._handle_node_status_update,
+            configmap_change_handler=self._handle_fault_info_update,
+        )
+
+        with self.resource_monitors_lock:
+            self.resource_monitors[host_ip] = resource_monitor
+
+        resource_monitor.start_monitoring()
+
+    def _stop_resource_monitor_for_host(self, host_ip: str) -> None:
+        """ Stop Resource monitor for a specific host """
+        with self.resource_monitors_lock:
+            if host_ip in self.resource_monitors:
+                monitor = self.resource_monitors[host_ip]
+                monitor.stop_monitoring()
+                del self.resource_monitors[host_ip]
+                logger.info("Stopped Resource monitor for host %s", host_ip)
+
     def _handle_fault_info_update(self, fault_infos: list[FaultInfo], host_ip: str) -> None:
         """ Process the (host_ip)node's fault information update from ResourceMonitor """
         # Get node metadata
@@ -417,13 +534,13 @@ class FaultManager(ThreadSafeSingleton, Observer):
                         idx, len(fault_infos), info.fault_type.value, npu_segment,
                         info.fault_code, info.fault_level.name, info.origin_fault_level.value)
         # Update fault infos: preserve node_reboot faults (managed by node_change_handler)
+        node_reboot_fault = node_metadata.fault_infos.get(SpecialFaultCode.NODE_REBOOT)
         node_reboot_key = int(SpecialFaultCode.NODE_REBOOT)
         node_reboot_fault = node_metadata.fault_infos.get(node_reboot_key)
 
         # Clear all faults and add new faults from ConfigMap
         node_metadata.fault_infos.clear()
         for info in fault_infos:
-            # Ensure fault_code is stored as int (not enum)
             node_metadata.fault_infos[int(info.fault_code)] = info
 
         # Restore node_reboot fault if it existed
@@ -449,7 +566,7 @@ class FaultManager(ThreadSafeSingleton, Observer):
             node_metadata = self.nodes[host_ip]
             old_status = node_metadata.node_status
             node_metadata.node_status = status
-            logger.info("Updated node %s status to %s", host_ip, status)
+            logger.info("Updated node %s node status to %s", host_ip, status)
 
             # Handle node_reboot fault based on status change
             if old_status != status:

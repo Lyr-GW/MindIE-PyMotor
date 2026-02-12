@@ -11,7 +11,10 @@
 """
 Kubernetes utilities for the fault tolerance module.
 """
+
 __all__ = [
+    'K8sClient',
+    'ResourceMonitor',
     'FaultType',
     'FaultInfo',
     'FaultLevel',
@@ -19,4 +22,6 @@ __all__ = [
     'NodeStatus'
 ]
 
+from .k8s_client import K8sClient
+from .resource_monitor import ResourceMonitor
 from .cluster_fault_codes import FaultType, FaultInfo, FaultLevel, map_fault_level, NodeStatus
