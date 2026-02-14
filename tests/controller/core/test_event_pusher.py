@@ -217,10 +217,10 @@ def test_event_consumer_set_event_skip_missing_prefill(event_pusher, mock_http_c
             mock_http_client.assert_not_called()
             # check debug log is called with correct message
             mock_logger.debug.assert_called_once_with(
-                "SET event skipped: requires at least one prefill and one decode instance, "
-                "current instances: prefill=%s, decode=%s", False, True)
+                "SET event skipped: requires at least one prefill instance, "
+                "current instances: prefill=%s", False)
 
-def test_event_consumer_set_event_skip_missing_decode(event_pusher, mock_http_client):
+def test_event_consumer_set_event_missing_decode(event_pusher, mock_http_client):
     """test event consumer set event is skipped when missing decode instance"""
     # add only prefill instances
     for i in range(2):
@@ -250,12 +250,8 @@ def test_event_consumer_set_event_skip_missing_decode(event_pusher, mock_http_cl
             except StopIteration:
                 pass
 
-            # check send_instance_refresh is NOT called due to missing decode instance
-            mock_http_client.assert_not_called()
-            # check debug log is called with correct message
-            mock_logger.debug.assert_called_once_with(
-                "SET event skipped: requires at least one prefill and one decode instance, "
-                "current instances: prefill=%s, decode=%s", True, False)
+            # check send_instance_refresh is called even missing decode instance
+            mock_http_client.assert_called()
 
 def test_event_consumer_exception_handling(event_pusher, mock_http_client):
     """test event consumer exception handling"""

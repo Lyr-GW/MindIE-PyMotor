@@ -77,7 +77,7 @@ class InstanceManager(ThreadSafeSingleton):
             DeployMode.CPCD_SEPARATE,
             DeployMode.PD_SEPARATE,
         ):
-            return len(self._prefill_pool) > 0 and len(self._decode_pool) > 0
+            return len(self._prefill_pool) > 0
         elif deploy_mode == DeployMode.SINGLE_NODE:
             return len(self._hybrid_pool) > 0
         else:

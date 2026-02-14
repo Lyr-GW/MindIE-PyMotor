@@ -12,7 +12,7 @@
 
 from pytest import MonkeyPatch
 from fastapi import FastAPI, status, Request
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 import httpx
 import pytest
@@ -162,7 +162,7 @@ class TestRouterCDPSeparation:
         def mock_is_available(self):
             return True
         
-        def mock_get_available_instances(role):
+        def mock_get_available_instances(self, role):
             if role == PDRole.ROLE_U:  # PD hybrid role
                 return []  # No PD hybrid instances, will use separate P/D
             elif role == PDRole.ROLE_P:
@@ -209,6 +209,16 @@ class TestRouterCDPSeparation:
 
         monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
     
+    @pytest.fixture
+    def mock_raw_request(self):
+        # Mock Request
+        mock_req = MagicMock(spec=Request)
+        mock_req.body = AsyncMock(return_value=b'{"model": "test"}')
+        mock_req.json = AsyncMock(return_value={"model": "test"})
+        mock_req.headers = {}
+        mock_req.url.path = "/v1/chat/completions"
+        return mock_req
+
     @pytest.mark.asyncio
     async def test_successful_request_with_separate_cdp(self, client, monkeypatch: MonkeyPatch, setup_cdp_separation):
         """Test case: CDP separation mode request success
@@ -430,22 +440,22 @@ class TestRouterCDPSeparation:
         # mock AsyncClient in router
         mock_async_client = MockAsyncClient(post_exc=httpx.ConnectError(message=error_message, request=MagicMock()), 
                                             post_fail_times=retry_times)
-        
+
         state: ReqState = None
-        
+
         def mock_update_state(self, new_state: ReqState):
             nonlocal state
             state = new_state
         monkeypatch.setattr(RequestInfo, "update_state", mock_update_state)
-        
+
         
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            
+
             with client.stream(
                 "POST",
                 "/v1/chat/completions",
                 json={
-                    "model": "test-model", 
+                    "model": "test-model",
                     "messages": [{"role": "user", "content": "Hello"}]
                 },
             ) as response:
@@ -458,3 +468,64 @@ class TestRouterCDPSeparation:
         assert mock_async_client.post_count == retry_times
         assert mock_async_client.post_fail_count == retry_times
         assert state == ReqState.EXCEPTION
+
+    @pytest.mark.asyncio
+    async def test_degradation_to_single_node(self, monkeypatch: MonkeyPatch, setup_cdp_separation, mock_raw_request, client):
+        """
+        Test that when no ROLE_D instances are available, the router degrades to SINGLE_NODE mode
+        and uses PDHybridRouter.
+        """
+
+        # Mock InstanceManager.get_available_instances
+        host = "127.0.0.1"
+        mock_instance_p = self.create_mock_instance(0, PDRole.ROLE_P)
+        mock_endpoint_p = Endpoint(id=0, ip=host, business_port="8000", mgmt_port="8000")
+        mock_instance_p.endpoints = {host: {0: mock_endpoint_p}}
+
+        def mock_get_available_instances(self, role):
+            if role == PDRole.ROLE_U:  # PD hybrid role
+                return []  # No PD hybrid instances, will use separate P/D
+            elif role == PDRole.ROLE_P:
+                return [mock_instance_p]
+            elif role == PDRole.ROLE_D:
+                return []
+            return []
+        monkeypatch.setattr(InstanceManager, "get_available_instances", mock_get_available_instances)
+
+        def mock_select_instance_and_endpoint(self, role):
+            if role == PDRole.ROLE_P:
+                return mock_instance_p, mock_endpoint_p
+            elif role == PDRole.ROLE_D:
+                return None, None
+            return None, None
+        monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
+
+        # Mock PDHybridRouter response
+        mock_response = "mock_message"
+        with patch("motor.coordinator.router.router.PDHybridRouter.handle_request",
+                   return_value=mock_response) as mock_handle_request:
+            
+            response = await router.handle_request(mock_raw_request, CoordinatorConfig())
+          
+            # Verify PDHybridRouter.handle_request was called
+            mock_handle_request.assert_called_once()
+            # Verify response
+            assert response == mock_response
+            
+    @pytest.mark.asyncio
+    async def test_no_degradation_when_d_instances_exist(self, monkeypatch, setup_cdp_separation, mock_raw_request):
+        """
+        Test that when ROLE_D instances are available, the router uses the configured mode (PD_SEPARATE).
+        """
+
+        # Mock SeparateCDPRouter response
+        mock_response = "mock_message"
+        with patch("motor.coordinator.router.router.SeparateCDPRouter.handle_request",
+                   return_value=mock_response) as mock_handle_request:
+
+            response = await router.handle_request(mock_raw_request, CoordinatorConfig())
+
+            # Verify SeparateCDPRouter.handle_request was called
+            mock_handle_request.assert_called_once()
+            # Verify response
+            assert response == mock_response

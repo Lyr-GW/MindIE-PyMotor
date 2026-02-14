@@ -100,7 +100,7 @@ class TestInstanceManager:
 
         # Add prefill instance
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        assert self.instance_manager.is_available() == False  # Still need decode instance
+        assert self.instance_manager.is_available() == True  # No need decode instance
 
         # Add decode instance
         self.instance_manager._add_instance_to_available_pool(self.decode_instance)
@@ -115,7 +115,7 @@ class TestInstanceManager:
 
         # Add prefill instance
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        assert self.instance_manager.is_available() == False  # Still need decode instance
+        assert self.instance_manager.is_available() == True  # No need decode instance
 
         # Add decode instance
         self.instance_manager._add_instance_to_available_pool(self.decode_instance)
@@ -134,7 +134,7 @@ class TestInstanceManager:
 
         # Add prefill instance
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        assert self.instance_manager.is_available() == False  # Still need decode instance
+        assert self.instance_manager.is_available() == True  # No need decode instance
 
         # Add decode instance
         self.instance_manager._add_instance_to_available_pool(self.decode_instance)
