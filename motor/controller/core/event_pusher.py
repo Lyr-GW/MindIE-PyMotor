@@ -149,19 +149,18 @@ class EventPusher(Observer):
                 elif event_type == EventType.SET:
                     with self.lock:
                         instances = list(self.instances.values())
-                        # Check if we have at least one prefill and one decode instance
+                        # Check if we have at least one prefill
                         has_prefill = any(inst.role == "prefill" for inst in instances)
-                        has_decode = any(inst.role == "decode" for inst in instances)
 
-                        if has_prefill and has_decode:
+                        if has_prefill:
                             event_msg = InsEventMsg(
                                 event=event_type,
                                 instances=[instance.to_instance() for instance in instances]
                             )
                         else:
-                            logger.debug("SET event skipped: requires at least one prefill and one "
-                                         "decode instance, current instances: prefill=%s, decode=%s",
-                                         has_prefill, has_decode)
+                            logger.debug("SET event skipped: requires at least one prefill "
+                                         "instance, current instances: prefill=%s",
+                                         has_prefill)
                             event_msg = None
                 else:
                     logger.error("Unknown event type: %s", event_type)

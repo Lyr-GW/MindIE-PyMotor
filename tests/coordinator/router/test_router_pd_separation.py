@@ -103,7 +103,7 @@ class TestRouterPDSeparation:
         def mock_is_available(self):
             return True
         
-        def mock_get_available_instances(role):
+        def mock_get_available_instances(self, role):
             if role == PDRole.ROLE_U:  # PD hybrid role
                 return []  # No PD hybrid instances, will use separate P/D
             elif role == PDRole.ROLE_P:

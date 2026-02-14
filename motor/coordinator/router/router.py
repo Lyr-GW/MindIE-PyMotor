@@ -33,6 +33,7 @@ from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.core.request_manager import RequestManager
 from motor.config.coordinator import DeployMode, CoordinatorConfig
 from motor.coordinator.router.base_router import BaseRouter
+from motor.coordinator.core.instance_manager import InstanceManager, PDRole
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
@@ -131,7 +132,12 @@ async def handle_request(raw_request: Request,
     if TracerManager().contains_trace_headers(raw_request.headers):
         req_info.trace_obj.parent_context = TracerManager().extract_trace_context(raw_request.headers)
 
-    deploy_mode = config.scheduler_config.deploy_mode
+    # When there are no available D instances, use PD mixed method to call P instances
+    if len(InstanceManager().get_available_instances(PDRole.ROLE_D)) == 0:
+        deploy_mode = DeployMode.SINGLE_NODE
+    else:
+        deploy_mode = config.scheduler_config.deploy_mode
+
     router_impl_class = _ROUTER_MAP.get(deploy_mode)
     if not router_impl_class:
         raise HTTPException(

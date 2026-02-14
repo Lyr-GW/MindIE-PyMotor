@@ -92,7 +92,6 @@ class BaseRouter(ABC):
         """
         Manage schedule resource and http client
         :param resource: ScheduledResource
-        :param timeout: http client timeout
         """
         endpoint = resource.endpoint
         client = endpoint.get_client()

@@ -20,13 +20,15 @@ import pytest
 
 from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
 from motor.coordinator.core.instance_manager import InstanceManager
-from motor.coordinator.models.request import ScheduledResource
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from motor.coordinator.scheduler.scheduler import Scheduler
+from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.models.request import RequestInfo, ReqState
 import motor.coordinator.router.router as router
 from motor.common.utils.logger import get_logger
+
+TracerManager()
 
 logger = get_logger(__name__)
 
@@ -38,18 +40,15 @@ async def handle_completions(request: Request):
 @pytest.fixture
 def mock_forward_stream_request(monkeypatch):
     """Mock forward_stream_request 并自动设置和清理"""
-    async def mock_impl(self, req_data: dict, resource, timeout):
-        async def mock_stream():
-            responses = [
-                b'{"choices": [{"text": "chunk 1"}]}',
-                b'{"choices": [{"text": "chunk 2"}]}',
-                b'{"choices": [{"text": "chunk 3"}]}'
-            ]
-            for response in responses:
-                yield response
-        
-        async for chunk in mock_stream():
+    async def mock_impl(self, req_data: dict, client, timeout):
+        responses = [
+            b'{"choices": [{"text": "chunk 1"}]}',
+            b'{"choices": [{"text": "chunk 2"}]}',
+            b'{"choices": [{"text": "chunk 3"}]}'
+        ]
+        for chunk in responses:
             yield chunk
+        self.req_info.trace_obj.set_count_token(1)
     
     # Patch the forward_stream_request function to return an async generator directly
     monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_impl)
@@ -79,22 +78,22 @@ class TestRouterPDHybrid:
     @pytest.fixture
     def setup_pd_hybrid(self, monkeypatch: MonkeyPatch):
         # Create proper instance for PD hybrid flow
-        mock_instance_u = self.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint_u = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
-        mock_instance_u.endpoints = {"127.0.0.1": {0: mock_endpoint_u}}
+        mock_instance = self.create_mock_instance(0, PDRole.ROLE_P)
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
         
         # Mock functions
         def mock_is_available(self):
             return True
         
-        def mock_get_available_instances(role):
-            if role == PDRole.ROLE_U:  # PD hybrid role
-                return [mock_instance_u]  # Has PD hybrid instances
+        def mock_get_available_instances(self, role):
+            if role == PDRole.ROLE_P:  # PD hybrid role
+                return [mock_instance]  # Has PD hybrid instances
             return []
         
         def mock_select_instance_and_endpoint(self, role):
-            if role == PDRole.ROLE_U:
-                return mock_instance_u, mock_endpoint_u
+            if role == PDRole.ROLE_P:
+                return mock_instance, mock_endpoint
             return None, None, None
         
         def mock_update_workload(self, instance: Instance, endpoint: Endpoint, req_id: str,
@@ -205,36 +204,33 @@ class TestRouterPDHybrid:
             api="v1/chat/completions"
         )
         
+        error_message = "PD hybrid request failed"
         # Mock the stream request function to fail in PDHybridRouter
-        async def mock_forward_stream_request(self, req_data, resource,timeout):
+        async def mock_forward_stream_request(self, req_data, client, timeout):
             # This function should be an async generator that raises an exception
-            raise Exception("PD hybrid request failed")
+            raise Exception(error_message)
             yield
         monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward_stream_request)
         
         # Test the PD hybrid forwarding function with failure
         hybrid_router = PDHybridRouter(req_info, CoordinatorConfig())
-        with pytest.raises(Exception) as exc_info:
-            # Create an async generator and consume it
-            stream_resp = await hybrid_router.handle_request()
-            async for chunk in stream_resp.body_iterator:
-                pass
+        # Create an async generator and consume it
+        stream_resp = await hybrid_router.handle_request()
+        chunks = []
+        async for chunk in stream_resp.body_iterator:
+            chunks.append(chunk)
+        chunk_str = "".join(chunks)
         
-        assert "PD hybrid request failed" in str(exc_info.value)
+        assert error_message in chunk_str
 
     @pytest.mark.asyncio
-    async def test_successful_request_with_pd_hybrid(self, client, monkeypatch: MonkeyPatch, setup_pd_hybrid):
-        """测试场景:PD混合模式请求成功
-        预期现象:
-        1)检查请求状态为DecodeEnd
-        2)返回正常响应
+    async def test_successful_request_with_pd_hybrid(self, client, monkeypatch: MonkeyPatch, 
+                                                     setup_pd_hybrid, mock_forward_stream_request):
         """
-        # Mock the HTTP forwarding function to return a successful response
-        async def mock_forward_stream_request(self, req_data: dict, resource: ScheduledResource, timeout):
-            # Yield a simple response
-            yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
-        
-        monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward_stream_request)
+        Expected behavior:
+        1) Check request status is DecodeEnd
+        2) Return normal response
+        """
         
         response = client.post("/v1/chat/completions", json={
             "model": "test-model", 
@@ -245,4 +241,4 @@ class TestRouterPDHybrid:
         # Should get a 200 success status
         assert response.status_code == status.HTTP_200_OK
         # Should be a streaming response
-        assert response.headers.get("content-type") == "application/json"
+        assert "text/event-stream" in response.headers.get("content-type")
