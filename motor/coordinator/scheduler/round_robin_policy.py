@@ -9,7 +9,7 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
-
+from threading import Lock
 from motor.common.resources.instance import Instance, PDRole
 from motor.common.resources.endpoint import Endpoint
 from motor.common.utils.singleton import ThreadSafeSingleton
@@ -32,8 +32,10 @@ class RoundRobinPolicy(BaseSchedulingPolicy, ThreadSafeSingleton):
             return
         self._initialized = True
         super().__init__()
-        self._instance_rr_counter = 0
-        self._endpoint_rr_counters: dict[str, int] = {}
+        self._instance_rr_counters: dict[PDRole, int] = {}
+        self._endpoint_rr_counters: dict[int, int] = {}
+        self._instance_lock = Lock()  # Lock for instance counters
+        self._endpoint_lock = Lock()  # Lock for endpoint counters
         logger.info("RoundRobinPolicy started.")
 
     def _select_instance(self, role: PDRole = None) -> Instance | None:
@@ -51,9 +53,16 @@ class RoundRobinPolicy(BaseSchedulingPolicy, ThreadSafeSingleton):
             logger.warning("No active instances available for scheduling")
             return None
 
-        # Round-robin selection
-        selected_instance = active_instances[self._instance_rr_counter % len(active_instances)]
-        self._instance_rr_counter = (self._instance_rr_counter + 1) % len(active_instances)
+        # Initialize counter for this role if not exists
+        if role not in self._instance_rr_counters:
+            self._instance_rr_counters[role] = 0
+
+        # Thread-safe counter operations for read-modify-write
+        with self._instance_lock:
+            # Round-robin selection for this specific role
+            counter = self._instance_rr_counters[role]
+            selected_instance = active_instances[counter % len(active_instances)]
+            self._instance_rr_counters[role] = (counter + 1) % len(active_instances)
         return selected_instance
 
     def _select_endpoint(self, instance: Instance) -> Endpoint | None:
@@ -78,9 +87,11 @@ class RoundRobinPolicy(BaseSchedulingPolicy, ThreadSafeSingleton):
         # Counter for each instance
         if instance.id not in self._endpoint_rr_counters:
             self._endpoint_rr_counters[instance.id] = 0
-
-        # Round-robin selection among endpoints
-        endpoint_counter = self._endpoint_rr_counters[instance.id]
-        selected_endpoint = all_endpoints[endpoint_counter % len(all_endpoints)]
-        self._endpoint_rr_counters[instance.id] = (endpoint_counter + 1) % len(all_endpoints)
+        
+        # Thread-safe counter operations for read-modify-write
+        with self._endpoint_lock:
+            # Round-robin selection among endpoints
+            endpoint_counter = self._endpoint_rr_counters[instance.id]
+            selected_endpoint = all_endpoints[endpoint_counter % len(all_endpoints)]
+            self._endpoint_rr_counters[instance.id] = (endpoint_counter + 1) % len(all_endpoints)
         return selected_endpoint

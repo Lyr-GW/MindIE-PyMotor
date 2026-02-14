@@ -98,7 +98,6 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
         PYTHONUNBUFFERED=1 python3 "$CONFIGMAP_PATH/hccl_tools.py" --hccl_path "$HCCL_PATH"
         # ranktable output path, use by NodeManager
         export RANKTABLE_PATH="$CONFIG_PATH/ranktable.json"
-        echo "Ranktable generated successfully: $HCCL_PATH"
     else
         echo "hccl_tools.py does not exist, skip ranktable generation"
     fi
