@@ -1045,45 +1045,6 @@ class TestCoordinatorServerAdvanced:
         # Should return 400 or 422 for invalid JSON
         assert response.status_code in [400, 422, 500], f"Expected 400/422/500 for invalid JSON, got: {response.status_code}"
     
-    def test_refresh_instances_with_endpoints_conversion(self):
-        """Test refresh_instances with endpoint ID conversion"""
-        valid_body = {
-            "event": "add",
-            "instances": [
-                {
-                    "job_name": "test-job",
-                    "model_name": "test-model",
-                    "id": 2,
-                    "role": "prefill",
-                    "endpoints": {
-                        "192.168.1.2": {
-                            "0": {
-                                "id": 0,
-                                "ip": "192.168.1.2",
-                                "business_port": "8080",
-                                "mgmt_port": "18080"
-                            },
-                            "1": {
-                                "id": 1,
-                                "ip": "192.168.1.2",
-                                "business_port": "8081",
-                                "mgmt_port": "18081"
-                            }
-                        }
-                    }
-                }
-            ]
-        }
-        
-        response = self.mgmt_client.post(
-            "/instances/refresh",
-            json=valid_body
-        )
-        
-        assert response.status_code == 200, f"Refresh instances failed: {response.status_code}"
-        data = response.json()
-        assert data["status"] == "success", f"Refresh instances status abnormal: {data}"
-    
     def test_refresh_instances_invalid_event_msg(self):
         """Test refresh_instances with invalid event message format"""
         invalid_body = {

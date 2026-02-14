@@ -10,7 +10,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import os
 import pytest
 import threading
 import logging
@@ -47,33 +46,6 @@ def api_instance():
     return controller_api.ControllerAPI(config, module)
 
 
-def test_validate_cert_and_key_success(tmp_path) -> None:
-    cert_file = tmp_path / "server.crt"
-    key_file = tmp_path / "server.key"
-    cert_file.write_text("-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n")
-    key_file.write_text("-----BEGIN PRIVATE KEY-----\nxyz\n-----END PRIVATE KEY-----\n")
-    # No exception makes this case pass
-    controller_api.validate_cert_and_key(str(cert_file), str(key_file))
-
-def test_validate_cert_and_key_file_not_exist(tmp_path) -> None:
-    cert_file = tmp_path / "not_exist.crt"
-    key_file = tmp_path / "not_exist.key"
-    with pytest.raises(FileNotFoundError):
-        controller_api.validate_cert_and_key(str(cert_file), str(key_file))
-
-def test_validate_cert_and_key_format_error(tmp_path) -> None:
-    cert_file = tmp_path / "bad.crt"
-    key_file = tmp_path / "bad.key"
-    cert_file.write_text("INVALID CERT DATA\n")
-    key_file.write_text("-----BEGIN PRIVATE KEY-----\nxyz\n-----END PRIVATE KEY-----\n")
-    with pytest.raises(ValueError):
-        controller_api.validate_cert_and_key(str(cert_file), str(key_file))
-    # cert is pass but key is wrong
-    cert_file.write_text("-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n")
-    key_file.write_text("INVALID KEY DATA\n")
-    with pytest.raises(ValueError):
-        controller_api.validate_cert_and_key(str(cert_file), str(key_file))
-
 @patch('motor.controller.api_server.controller_api.HeartbeatMsg')
 @patch('motor.controller.api_server.controller_api.InstanceManager')
 def test_heartbeat_success(mock_instance_manager, mock_heartbeat_msg, client) -> None:
@@ -83,6 +55,7 @@ def test_heartbeat_success(mock_instance_manager, mock_heartbeat_msg, client) ->
     response = client.post('/controller/heartbeat', json=data)
     assert response.status_code == 200
     assert 'result' in response.json()
+
 
 @patch('motor.controller.api_server.controller_api.HeartbeatMsg', side_effect=Exception('parse error'))
 def test_heartbeat_invalid(mock_heartbeat_msg, client) -> None:

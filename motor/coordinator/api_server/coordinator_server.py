@@ -76,10 +76,6 @@ UVICORN_KEY_SSL_KEYFILE = "ssl_keyfile"
 UVICORN_KEY_SSL_CERTFILE = "ssl_certfile"
 UVICORN_KEY_SSL_CA_CERTS = "ssl_ca_certs"
 
-# JSON Field Constants
-JSON_FIELD_ENDPOINTS = "endpoints"
-JSON_FIELD_INSTANCES = "instances"
-
 # Encoding Constants
 ENCODING_UTF8 = "utf-8"
 FILE_MODE_READ_BINARY = "rb"
@@ -190,54 +186,6 @@ class CoordinatorServer:
                 logger.error(f"Failed to copy route: {e}", exc_info=True)
                 raise
 
-    @staticmethod
-    def _normalize_instance_endpoints(body: dict[str, Any]) -> None:
-        """normalize instance endpoints, convert endpoint_id from string to int"""
-        if not isinstance(body, dict) or JSON_FIELD_INSTANCES not in body:
-            return
-        
-        instances = body.get(JSON_FIELD_INSTANCES, [])
-        if not isinstance(instances, list):
-            return
-        
-        for instance in instances:
-            if isinstance(instance, dict) and JSON_FIELD_ENDPOINTS in instance:
-                endpoints = instance[JSON_FIELD_ENDPOINTS]
-                if isinstance(endpoints, dict):
-                    instance[JSON_FIELD_ENDPOINTS] = CoordinatorServer._convert_endpoints(endpoints)
-    
-    @staticmethod
-    def _convert_endpoints(endpoints: dict[str, Any]) -> dict[str, Any]:
-        """convert endpoints dictionary, convert endpoint_id from string to int"""
-        converted_endpoints = {}
-        for pod_ip, endpoint_dict in endpoints.items():
-            if isinstance(endpoint_dict, dict):
-                converted_endpoints[pod_ip] = CoordinatorServer._convert_endpoint_dict(endpoint_dict)
-            else:
-                converted_endpoints[pod_ip] = endpoint_dict
-        return converted_endpoints
-    
-    @staticmethod
-    def _convert_endpoint_dict(endpoint_dict: dict[str, Any]) -> dict[Any, Any]:
-        """convert single endpoint_dict, convert endpoint_id from string to int"""
-        converted = {}
-        for endpoint_id_str, endpoint_data in endpoint_dict.items():
-            endpoint_id = CoordinatorServer._convert_endpoint_id(endpoint_id_str)
-            converted[endpoint_id] = endpoint_data
-        return converted
-    
-    @staticmethod
-    def _convert_endpoint_id(endpoint_id_str: Any) -> Any:
-        """convert endpoint_id from string to int, keep original value if conversion fails"""
-        try:
-            return int(endpoint_id_str)
-        except (ValueError, TypeError) as e:
-            logger.warning(
-                f"Failed to convert endpoint_id '{endpoint_id_str}' to int: {e}, keeping as string",
-                exc_info=True
-            )
-            return endpoint_id_str
-    
     @staticmethod
     def _create_base_uvicorn_config(app: FastAPI, host: str, port: int) -> dict[str, Any]:
         # Create ApiAccessFilter for liveness endpoint
@@ -826,8 +774,6 @@ class CoordinatorServer:
             "Received instance refresh request, body keys: %s",
             list(body.keys()) if isinstance(body, dict) else NOT_A_DICT
         )
-        
-        CoordinatorServer._normalize_instance_endpoints(body)
         
         try:
             event_msg = InsEventMsg(**body)

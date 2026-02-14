@@ -24,6 +24,17 @@ from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.http_client import AsyncSafeHTTPSClient
 
 
+@pytest.fixture(autouse=True)
+def clear_instance_manager():
+    """Clear InstanceManager singleton before each test to ensure isolation."""
+    if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
+        instance = ThreadSafeSingleton._instances[InstanceManager]
+        for attr in list(instance.__dict__.keys()):
+            delattr(instance, attr)
+        del ThreadSafeSingleton._instances[InstanceManager]
+    yield
+
+
 @pytest.fixture
 def prefill_instances():
     """Create prefill instances for testing."""

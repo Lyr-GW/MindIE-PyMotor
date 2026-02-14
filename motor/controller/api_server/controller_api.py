@@ -33,16 +33,6 @@ from motor.controller.core.instance_manager import InstanceManager
 logger = get_logger(__name__)
 
 
-def validate_cert_and_key(cert_path: str, key_path: str):
-    for path, desc in [(cert_path, 'cert file'), (key_path, 'key file')]:
-        if not os.path.isfile(path):
-            raise FileNotFoundError(f"{desc} file is not exist: {path}")
-        with open(path, 'r') as f:
-            first_line = f.readline().strip()
-            if not first_line.startswith('-----BEGIN'):
-                raise ValueError(f"{desc} file format is nor correct: {path}")
-
-
 class ControllerAPI:
     def __init__(self, config: ControllerConfig | None = None, modules: dict[str, Any] | None = None,
                  host: str = None, port: int = None):
