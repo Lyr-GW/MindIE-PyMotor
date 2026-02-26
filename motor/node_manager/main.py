@@ -12,6 +12,7 @@
 
 import signal
 import time
+import argparse
 import os
 import sys
 from typing import Optional
@@ -25,8 +26,8 @@ from motor.node_manager.core.heartbeat_manager import HeartbeatManager
 from motor.common.utils.config_watcher import ConfigWatcher
 from motor.common.utils.env import Env
 
+logger = get_logger("motor.node_manager.main")
 
-logger = get_logger(__name__)
 
 modules = []
 _should_exit = False
@@ -172,7 +173,6 @@ def main() -> int:
 
     # -1: rescheduling; 0: restart
     return -1
-
 
 if __name__ == '__main__':
     exit_code = main()

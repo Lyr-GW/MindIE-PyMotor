@@ -202,6 +202,15 @@ class EngineManager(ThreadSafeSingleton):
         try:
             with open(hccl_path, 'r') as f:
                 data = json.load(f)
+            if self._config.single_container_config.single_container_flag:
+                device_offset = self._config.single_container_config.device_offset
+                device_num = self._config.single_container_config.device_num
+                server_list_key = 'server_list'
+                device_key = 'device'
+                if server_list_key in data and len(data[server_list_key]) > 0 and \
+                        device_key in data[server_list_key][0]:
+                    data[server_list_key][0][device_key] = \
+                            data[server_list_key][0][device_key][device_offset: device_offset + device_num]
             return Ranktable(**data)
         except Exception as e:
             logger.error("Failed to load ranktable from %s: %s", hccl_path, e)

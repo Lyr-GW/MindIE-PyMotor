@@ -47,7 +47,7 @@ class TestRankTable:
             json.dump(rank_table_content, f)
 
         # Mock environment variable
-        monkeypatch.setenv("RANK_TABLE_PATH", str(rank_table_file))
+        monkeypatch.setenv("RANKTABLE_PATH", str(rank_table_file))
 
         # Mock FileValidator
         mock_validator = mock.Mock()
@@ -64,17 +64,17 @@ class TestRankTable:
 
     def test_get_data_parallel_address_env_not_set(self, monkeypatch):
         # Remove environment variable if exists
-        if "RANK_TABLE_PATH" in os.environ:
-            monkeypatch.delenv("RANK_TABLE_PATH")
+        if "RANKTABLE_PATH" in os.environ:
+            monkeypatch.delenv("RANKTABLE_PATH")
 
         # Test missing environment variable
-        with pytest.raises(ValueError, match="Environment variable RANK_TABLE_PATH is not set"):
+        with pytest.raises(ValueError, match="Environment variable RANKTABLE_PATH is not set"):
             ranktable.get_data_parallel_address()
 
     def test_get_data_parallel_address_invalid_file(self, monkeypatch, tmpdir):
         # Mock environment variable
         rank_table_file = tmpdir.join("rank_table.json")
-        monkeypatch.setenv("RANK_TABLE_PATH", str(rank_table_file))
+        monkeypatch.setenv("RANKTABLE_PATH", str(rank_table_file))
 
         # Mock FileValidator to return invalid
         mock_validator = mock.Mock()
@@ -93,7 +93,7 @@ class TestRankTable:
     def test_get_data_parallel_address_file_not_found(self, monkeypatch):
         # Mock non-existent file
         non_existent_file = "non_existent_rank_table.json"
-        monkeypatch.setenv("RANK_TABLE_PATH", non_existent_file)
+        monkeypatch.setenv("RANKTABLE_PATH", non_existent_file)
 
         # Mock FileValidator
         mock_validator = mock.Mock()
@@ -113,7 +113,7 @@ class TestRankTable:
             f.write("{invalid json}")
 
         # Mock environment variable
-        monkeypatch.setenv("RANK_TABLE_PATH", str(rank_table_file))
+        monkeypatch.setenv("RANKTABLE_PATH", str(rank_table_file))
 
         # Mock FileValidator
         mock_validator = mock.Mock()
@@ -136,6 +136,13 @@ class TestRankTable:
                         {"rank_id": "1"},
                         {"rank_id": "2"}
                     ]
+                },
+                {
+                    "container_ip": "192.168.1.101",
+                    "device": [
+                        {"rank_id": "3"},
+                        {"rank_id": "4"}
+                    ]
                 }
             ]
         }
@@ -146,7 +153,7 @@ class TestRankTable:
             json.dump(rank_table_content, f)
 
         # Mock environment variable
-        monkeypatch.setenv("RANK_TABLE_PATH", str(rank_table_file))
+        monkeypatch.setenv("RANKTABLE_PATH", str(rank_table_file))
 
         # Mock FileValidator
         mock_validator = mock.Mock()
@@ -161,7 +168,7 @@ class TestRankTable:
 
     def test_get_data_parallel_address_unexpected_error(self, monkeypatch):
         # Mock environment variable
-        monkeypatch.setenv("RANK_TABLE_PATH", "test_rank_table.json")
+        monkeypatch.setenv("RANKTABLE_PATH", "test_rank_table.json")
 
         # Mock FileValidator
         mock_validator = mock.Mock()
@@ -203,7 +210,7 @@ class TestRankTable:
             json.dump(rank_table_content, f)
 
         # Mock environment variable
-        monkeypatch.setenv("RANK_TABLE_PATH", str(rank_table_file))
+        monkeypatch.setenv("RANKTABLE_PATH", str(rank_table_file))
 
         # Mock FileValidator
         mock_validator = mock.Mock()

@@ -46,6 +46,7 @@ UNION_ROLE = "union"
 # kv transfer config keys
 KV_TRANSFER_CONFIG = "kv_transfer_config"
 KV_ROLE = "kv_role"
+KV_PORT = "kv_port"
 KV_PRODUCER = "kv_producer"
 KV_CONSUMER = "kv_consumer"
 KV_CONNECTOR_EXTRA_CONFIG = "kv_connector_extra_config"

@@ -51,6 +51,7 @@ _ROUTER_MAP: dict[DeployMode, type['BaseRouter']] = {
     DeployMode.PD_SEPARATE: SeparateCDPRouter,
     DeployMode.CPCD_SEPARATE: SeparatePDRouter,
     DeployMode.SINGLE_NODE: PDHybridRouter,
+    DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER: SeparateCDPRouter,
 }
 
 
@@ -136,7 +137,8 @@ async def handle_request(
     config_mode = config.scheduler_config.deploy_mode
     readiness = await scheduler.has_required_instances()
     if (
-        config_mode in (DeployMode.PD_SEPARATE, DeployMode.CDP_SEPARATE)
+        config_mode in (DeployMode.PD_SEPARATE, DeployMode.CDP_SEPARATE, \
+                DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER)
         and readiness == InstanceReadiness.ONLY_PREFILL
     ):
         deploy_mode = DeployMode.SINGLE_NODE  # fallback only when has P but no D
@@ -192,7 +194,8 @@ async def handle_metaserver_request(
     req_info = await __create_request_info(raw_request, request_manager, metaserver_request=True)
     
     deploy_mode = config.scheduler_config.deploy_mode
-    if not deploy_mode or (deploy_mode != DeployMode.CDP_SEPARATE and deploy_mode != DeployMode.PD_SEPARATE):
+    if not deploy_mode or deploy_mode not in [DeployMode.CDP_SEPARATE, DeployMode.PD_SEPARATE, \
+            DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Unsupport deploy mode: {deploy_mode}"

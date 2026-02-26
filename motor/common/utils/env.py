@@ -43,6 +43,10 @@ class Env:
         return os.getenv("ROLE", None)
 
     @property
+    def index(self):
+        return os.getenv("INDEX", None)
+
+    @property
     def pod_ip(self):
         return os.getenv("POD_IP", None)
 
