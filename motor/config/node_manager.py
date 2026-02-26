@@ -33,6 +33,7 @@ FILE_ENCODING = "utf-8"
 
 PP = "pp_size"
 TP = "tp_size"
+DP = "dp_size"
 BASIC_CONFIG_KEY = "basic_config"
 MODEL_CONFIG_KEY = "model_config"
 PREFILL_PARALLEL_CONFIG_KEY = "prefill_parallel_config"
@@ -40,6 +41,16 @@ DECODE_PARALLEL_CONFIG_KEY = "decode_parallel_config"
 MOTOR_NODE_MANAGER_CONFIG_KEY = "motor_nodemanger_config"
 MOTOR_ENGINE_PREFILL_CONFIG_KEY = "motor_engine_prefill_config"
 MOTOR_ENGINE_DECODE_CONFIG_KEY = "motor_engine_decode_config"
+ENGINE_CONFIG_KEY = "engine_config"
+KV_TRANSFER_CONFIG_KEY = "kv_transfer_config"
+KV_CONNECTOR_KEY = "kv_connector"
+MULTICONNECTOR = "MultiConnector"
+KV_CONNECTOR_EXTRA_CONFIG_KEY = "kv_connector_extra_config"
+CONNECTORS_KEY = "connectors"
+KV_PORT_KEY = "kv_port"
+LOOPUP_RPC_PORT_KEY = "lookup_rpc_port"
+SERVER_LIST = "server_list"
+DEVICE = 'device'
 HARDWARE_TYPE_KEY = "hardware_type"
 MODEL_NAME_KEY = "model_name"
 
@@ -97,6 +108,72 @@ class EndpointConfig:
 
 
 @dataclass
+class SingleContainerNodemanagerConfig:
+    single_container_flag: bool = False
+    node_manager_port_offset: int | None = None
+    base_port_offset: int | None = None
+    device_offset: int | None = None
+    device_num: int | None = None
+    kv_port: int | None = None
+    lookup_rpc_port: int | None = None
+    dp_rpc_port: int | None = None
+
+    @classmethod
+    def from_json(cls, user_config_data: dict[str, Any]) -> 'SingleContainerNodemanagerConfig':
+        config = cls()
+        deploy_mode = user_config_data.get('motor_coordinator_config', {}).get(
+                "scheduler_config", {}).get('deploy_mode', '')
+        if not deploy_mode == 'pd_disaggregation_single_container' or not Env.role or Env.index is None:
+            return config
+
+        config.single_container_flag = True
+        p_instances_num = user_config_data['motor_deploy_config']['p_instances_num']
+        d_instances_num = user_config_data['motor_deploy_config']['d_instances_num']
+        prefill_parallel_config = \
+                user_config_data[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][PREFILL_PARALLEL_CONFIG_KEY]
+        decode_parallel_config = \
+                user_config_data[MOTOR_ENGINE_DECODE_CONFIG_KEY][MODEL_CONFIG_KEY][DECODE_PARALLEL_CONFIG_KEY]
+        p_dp_size = prefill_parallel_config[DP]
+        p_tp_size = prefill_parallel_config[TP]
+        p_pp_size = prefill_parallel_config[PP]
+        d_dp_size = decode_parallel_config[DP]
+        d_tp_size = decode_parallel_config[PP]
+        d_pp_size = decode_parallel_config[TP]
+
+        index = int(Env.index)
+        if Env.role == 'prefill':
+            config.node_manager_port_offset = index
+            config.base_port_offset = index * d_dp_size * 2
+            config.device_offset = index * p_dp_size * p_tp_size * p_pp_size
+            config.device_num = p_dp_size * p_tp_size * p_pp_size
+            kv_port_offset = config.device_offset
+            lookup_rpc_port_offset = index
+            dp_rpc_port_offset = index
+        else:
+            config.node_manager_port_offset = p_instances_num * p_dp_size + index
+            config.base_port_offset = (p_instances_num * p_dp_size + index * d_dp_size) * 2
+            config.device_offset = p_instances_num * p_dp_size * p_tp_size * p_pp_size + \
+                    index * d_dp_size * d_tp_size * d_pp_size
+            config.device_num = d_dp_size * d_tp_size * d_pp_size
+            kv_port_offset = config.device_offset
+            lookup_rpc_port_offset = p_instances_num + index
+            dp_rpc_port_offset = p_instances_num + index
+
+        kv_config = user_config_data[MOTOR_ENGINE_PREFILL_CONFIG_KEY][ENGINE_CONFIG_KEY].get(KV_TRANSFER_CONFIG_KEY, {})
+        if kv_config:
+            if kv_config[KV_CONNECTOR_KEY] == MULTICONNECTOR:
+                connectors = kv_config[KV_CONNECTOR_EXTRA_CONFIG_KEY][CONNECTORS_KEY]
+                config.kv_port = int(connectors[0][KV_PORT_KEY]) + kv_port_offset
+                config.lookup_rpc_port = int(connectors[1][LOOPUP_RPC_PORT_KEY]) + lookup_rpc_port_offset
+            else:
+                config.kv_port = int(kv_config[KV_PORT_KEY]) + kv_port_offset
+
+        config.dp_rpc_port = int(prefill_parallel_config["dp_rpc_port"]) + dp_rpc_port_offset
+
+        return config
+
+
+@dataclass
 class NodeManagerConfig:
     """
     Global configuration singleton for node manager.
@@ -109,6 +186,7 @@ class NodeManagerConfig:
     endpoint_config: EndpointConfig = field(default_factory=EndpointConfig)
     basic_config: BasicConfig = field(default_factory=BasicConfig)
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
+    single_container_config: SingleContainerNodemanagerConfig = field(default_factory=SingleContainerNodemanagerConfig)
 
     # Internal fields
     config_path: str = field(init=False)
@@ -144,6 +222,7 @@ class NodeManagerConfig:
     @classmethod
     def from_json(cls, config_path: str | None = None, hccl_path: str | None = None) -> 'NodeManagerConfig':
         """Load configuration from config and HCCL files"""
+
         if config_path is None:
             env_config_path = os.getenv("MOTOR_NODE_MANAGER_CONFIG_PATH") or Env.user_config_path
             if env_config_path:
@@ -187,6 +266,9 @@ class NodeManagerConfig:
                     with safe_open(str(config_path_obj), "r") as f:
                         raw = json.load(f)
                     logger.info("Successfully loaded config file: %s", config_path_obj)
+
+                    config.single_container_config = SingleContainerNodemanagerConfig.from_json(raw)
+
                     if isinstance(raw, dict) and MOTOR_NODE_MANAGER_CONFIG_KEY in raw:
                         user_cfg = raw
                         config_data = user_cfg.get(MOTOR_NODE_MANAGER_CONFIG_KEY, {})
@@ -206,6 +288,7 @@ class NodeManagerConfig:
                         _update_tls_config(tls_configs, config_data, user_cfg)
                     else:
                         config_data = raw
+
                     # Update configuration from loaded data
                     cls._update_from_config_data(config, config_data)
                 except Exception as e:
@@ -214,6 +297,7 @@ class NodeManagerConfig:
             else:
                 logger.warning("Config file does not exist, using default configuration: %s", config_path_obj)
 
+
             # Load HCCL JSON
             hccl_data = {}
             if os.path.exists(str(hccl_path_obj)):
@@ -221,6 +305,13 @@ class NodeManagerConfig:
                     with safe_open(str(hccl_path_obj), "r") as f:
                         hccl_data = json.load(f)
                     logger.info("Successfully loaded HCCL file: %s", hccl_path_obj)
+                    if config.single_container_config.single_container_flag:
+                        device_offset = config.single_container_config.device_offset
+                        device_num = config.single_container_config.device_num
+                        if SERVER_LIST in hccl_data and len(hccl_data[SERVER_LIST]) > 0 and \
+                                DEVICE in hccl_data[SERVER_LIST][0]:
+                            hccl_data[SERVER_LIST][0][DEVICE] = \
+                                hccl_data[SERVER_LIST][0][DEVICE][device_offset: device_offset + device_num]
                     # Update configuration from loaded data
                     cls._update_from_hccl_data(config, hccl_data)
                     # Generate endpoint ports only if we have HCCL data
@@ -279,6 +370,10 @@ class NodeManagerConfig:
                 pc = basic_cfg["parallel_config"]
                 if isinstance(pc, dict):
                     config.basic_config.parallel_config = ParallelConfig(**pc)
+
+        if config.single_container_config.single_container_flag:
+            config.api_config.node_manager_port += config.single_container_config.node_manager_port_offset
+            config.endpoint_config.base_port += config.single_container_config.base_port_offset
 
         # Set role from environment
         try:

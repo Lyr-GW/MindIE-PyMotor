@@ -68,6 +68,8 @@ SERVER_BASE_NAME_MAP = {
     "mindie-llm": "mindie-server",
     "sglang": "sglang"
 }
+SELECTOR = "selector"
+MATCHLABELS = "matchLabels"
 
 # Global variables
 g_controller_service = "mindie-motor-controller-service"
@@ -339,6 +341,30 @@ def normalize_kv_cache_pool_config(user_config):
     return kv_config
 
 
+def gen_kv_pool_env(kv_pool_config):
+    service_port = kv_pool_config.get(KV_POOL_PORT)
+    missing_keys = []
+    if KV_POOL_EVICTION_HIGH_WATERMARK_RATIO not in kv_pool_config:
+        missing_keys.append(KV_POOL_EVICTION_HIGH_WATERMARK_RATIO)
+    if KV_POOL_EVICTION_RATIO not in kv_pool_config:
+        missing_keys.append(KV_POOL_EVICTION_RATIO)
+    if missing_keys:
+        raise ValueError(
+            f"Missing required kv cache pool config: {missing_keys}. "
+            f"Please configure them in '{KV_CACHE_POOL_CONFIG}'."
+        )
+
+    kv_pool_env = [
+        {NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service},
+        {NAME: "KV_POOL_PORT", VALUE: str(service_port)},
+        {NAME: "KV_POOL_EVICTION_HIGH_WATERMARK_RATIO",
+            VALUE: str(kv_pool_config[KV_POOL_EVICTION_HIGH_WATERMARK_RATIO])},
+        {NAME: "KV_POOL_EVICTION_RATIO", VALUE: str(kv_pool_config[KV_POOL_EVICTION_RATIO])},
+    ]
+
+    return kv_pool_env
+
+
 def modify_server_yaml(deployment_data, deploy_config, index, node_type):
     container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
 
@@ -453,25 +479,8 @@ def generate_yaml_kv_pool(input_yaml, output_file, deploy_config, kv_pool_config
         container[ENV] = []
 
     service_port = kv_pool_config.get(KV_POOL_PORT)
-    missing_keys = []
-    if KV_POOL_EVICTION_HIGH_WATERMARK_RATIO not in kv_pool_config:
-        missing_keys.append(KV_POOL_EVICTION_HIGH_WATERMARK_RATIO)
-    if KV_POOL_EVICTION_RATIO not in kv_pool_config:
-        missing_keys.append(KV_POOL_EVICTION_RATIO)
-    if missing_keys:
-        raise ValueError(
-            f"Missing required kv cache pool config: {missing_keys}. "
-            f"Please configure them in '{KV_CACHE_POOL_CONFIG}'."
-        )
 
-    kv_pool_env = [
-        {NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service},
-        {NAME: "KV_POOL_PORT", VALUE: str(service_port)},
-        {NAME: "KV_POOL_EVICTION_HIGH_WATERMARK_RATIO",
-            VALUE: str(kv_pool_config[KV_POOL_EVICTION_HIGH_WATERMARK_RATIO])},
-        {NAME: "KV_POOL_EVICTION_RATIO", VALUE: str(kv_pool_config[KV_POOL_EVICTION_RATIO])},
-    ]
-
+    kv_pool_env = gen_kv_pool_env(kv_pool_config)
     container[ENV].extend(kv_pool_env)
     
     # Modify service data
@@ -565,6 +574,85 @@ def create_base_configmap(job_id, user_config_path):
     )
 
 
+def generate_yaml_single_container(input_yaml, output_file, user_config):
+    logger.info(f"Generating YAML from {input_yaml} to {output_file}")
+    data = load_yaml(input_yaml, False)
+
+    deploy_config = user_config["motor_deploy_config"]
+
+    # Modify deployment data
+    job_id = deploy_config[CONFIG_JOB_ID]
+
+    deployment_data = data[0] if isinstance(data, list) else data
+    app_name = f"{job_id}-single-container"
+    deployment_data[METADATA][NAME] = app_name
+    deployment_data[METADATA][LABELS][APP] = app_name
+    deployment_data[SPEC][SELECTOR][MATCHLABELS][APP] = app_name
+    deployment_data[SPEC][TEMPLATE][METADATA][LABELS][APP] = app_name
+    deployment_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
+
+    container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
+    container["image"] = deploy_config["image_name"]
+
+    # Modify service data
+    service_data = data[1]
+    service_data[METADATA][NAME] = f"{job_id}-coordinator-service"
+    service_data[METADATA][LABELS][APP] = app_name
+    service_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
+    service_data['spec']['selector']['app'] = app_name
+
+    external_service_data = data[2]
+    external_service_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
+    external_service_data[METADATA][LABELS][APP] = f"{job_id}-coordinator-infer"
+    external_service_data[METADATA][LABELS][APP] = app_name
+    external_service_data['spec']['selector']['app'] = app_name
+
+    if ENV not in container:
+        container[ENV] = []
+    role = "SINGLE_CONTAINER"
+    uuid_spec = generate_unique_id()
+    job_name = f"{deploy_config[CONFIG_JOB_ID]}-{role}-{uuid_spec}"
+    container[ENV].extend([
+        {NAME: "ROLE", VALUE: role},
+        {NAME: "JOB_NAME", VALUE: job_name},
+    ])
+    if g_kv_pool_enabled:
+        kv_pool_config = normalize_kv_cache_pool_config(user_config)
+        kv_pool_env = gen_kv_pool_env(kv_pool_config)
+        container[ENV].extend(kv_pool_env)
+
+    npu_num = int(deploy_config[P_POD_NPU_NUM]) * int(deploy_config[P_INSTANCES_NUM]) + \
+            int(deploy_config[D_POD_NPU_NUM]) * int(deploy_config[D_INSTANCES_NUM])
+    container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
+    container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
+
+    hardware_type = deploy_config[HARDWARE_TYPE]
+    if hardware_type == "800I_A2":
+        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-910b-8"
+        del deployment_data[METADATA][ANNOTATIONS]
+    elif hardware_type == "800I_A3":
+        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-a3-16"
+        deployment_data[METADATA][ANNOTATIONS][SP_BLOCK] = f"{npu_num}"
+
+    weight_mount_path = deploy_config.get("weight_mount_path", "/mnt/weight")
+    for volume in deployment_data[SPEC][TEMPLATE][SPEC]["volumes"]:
+        if volume["name"] == "weight-mount":
+            volume["hostPath"]["path"] = weight_mount_path
+    for volume_mount in container["volumeMounts"]:
+        if volume_mount["name"] == "weight-mount":
+            volume_mount["mountPath"] = weight_mount_path
+
+    write_yaml(data, output_file, False)
+
+
+def exec_all_kubectl_singer(deploy_config, out_path, user_config_path, yaml_file):
+    job_id = deploy_config[CONFIG_JOB_ID]
+    create_base_configmap(job_id, user_config_path)
+
+    # Apply yaml
+    safe_exec_cmd(f"kubectl apply -f {yaml_file} -n {job_id}")
+
+
 def parse_arguments():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -578,6 +666,12 @@ def parse_arguments():
         action="store_true",
         help="Only refresh configmap without applying deployments"
     )
+    parser.add_argument(
+        "--single_container_yaml_file",
+        type=str,
+        default="mindie_service_single_container.yaml",
+        help="Path of init yaml for single container deployment"
+    )
     return parser.parse_args()
 
 
@@ -587,6 +681,7 @@ def main():
     deploy_yaml_root_path = "./deployment"
     output_root_path = "./output"
     user_config_path = args.user_config_path
+    single_container_yaml_file = args.single_container_yaml_file
     
     # Ensure necessary directories exist
     os.makedirs(output_root_path, exist_ok=True)
@@ -616,16 +711,25 @@ def main():
     server_output_yaml = os.path.join(output_root_path, DEPLOYMENT, g_engine_base_name)
     kv_pool_input_yaml = os.path.join(deploy_yaml_root_path, 'kv_pool_init.yaml')
     kv_pool_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_ms_kv_pool.yaml')
+    singer_container_input_yaml = os.path.join(deploy_yaml_root_path, single_container_yaml_file)
+    singer_container_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_motor_single_container.yaml')
 
-    # Generate YAML files - pass user_config instead of user_config_path
-    init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, deploy_config)
-    generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, user_config)
-    generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, user_config)
-    generate_yaml_server(server_input_yaml, server_output_yaml, deploy_config)
-    if g_kv_pool_enabled:
-        kv_pool_config = normalize_kv_cache_pool_config(user_config)
-        generate_yaml_kv_pool(kv_pool_input_yaml, kv_pool_output_yaml, deploy_config, kv_pool_config)
-    exec_all_kubectl_multi(deploy_config, user_config_path)
+    deploy_mode = user_config["motor_coordinator_config"].get("scheduler_config", {}).get("deploy_mode", "")
+    if deploy_mode == "pd_disaggregation_single_container":
+        update_kv_pool_enabled_flag(user_config)
+
+        generate_yaml_single_container(singer_container_input_yaml, singer_container_output_yaml, user_config)
+        exec_all_kubectl_singer(deploy_config, output_root_path, user_config_path, singer_container_output_yaml)
+    else:
+        # Generate YAML files - pass user_config instead of user_config_path
+        init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, deploy_config)
+        generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, user_config)
+        generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, user_config)
+        generate_yaml_server(server_input_yaml, server_output_yaml, deploy_config)
+        if g_kv_pool_enabled:
+            kv_pool_config = normalize_kv_cache_pool_config(user_config)
+            generate_yaml_kv_pool(kv_pool_input_yaml, kv_pool_output_yaml, deploy_config, kv_pool_config)
+        exec_all_kubectl_multi(deploy_config, user_config_path)
 
     logger.info("all deploy end.")
 

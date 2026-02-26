@@ -66,7 +66,8 @@ def run_inference_worker_proc(
     deploy_mode = config.scheduler_config.deploy_mode
     if (
         base_port > 0
-        and deploy_mode in (DeployMode.CDP_SEPARATE, DeployMode.PD_SEPARATE)
+        and deploy_mode in (DeployMode.CDP_SEPARATE, DeployMode.PD_SEPARATE, \
+                DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER)
     ):
         config.worker_index = worker_index
         config.worker_metaserver_port = base_port + worker_index

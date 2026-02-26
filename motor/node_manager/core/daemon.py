@@ -42,6 +42,12 @@ class Daemon(ThreadSafeSingleton):
         # related config
         self.parallel_config = config.basic_config.parallel_config
         self.device_num = config.basic_config.device_num
+        self.single_container_flag = config.single_container_config.single_container_flag
+        if self.single_container_flag:
+            self.device_offset = config.single_container_config.device_offset
+            self.kv_port = config.single_container_config.kv_port
+            self.lookup_rpc_port = config.single_container_config.lookup_rpc_port
+            self.dp_rpc_port = config.single_container_config.dp_rpc_port
 
         self._initialized = True
         self._pids_lock = threading.Lock()
@@ -87,7 +93,7 @@ class Daemon(ThreadSafeSingleton):
             for i, endpoint in enumerate(endpoints_info):
                 if not self._check_params(endpoint):
                     raise ValueError("Invalid endpoint parameters")
-                start_device_id = i * local_world_size % device_size
+                start_device_id = (i * local_world_size % device_size)
                 end_device_id = start_device_id + local_world_size
                 if end_device_id > device_size:
                     device_ids = (
@@ -96,6 +102,8 @@ class Daemon(ThreadSafeSingleton):
                     )
                 else:
                     device_ids = list(range(start_device_id, end_device_id))
+                if self.single_container_flag:
+                    device_ids = [x + self.device_offset for x in device_ids]
                 device_ids_str = ",".join(map(str, device_ids))
                 logger.info(f"Device IDs: {device_ids_str}")
                 env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids_str
@@ -109,6 +117,11 @@ class Daemon(ThreadSafeSingleton):
                     "--mgmt-port", str(int(endpoint.mgmt_port)),
                     "--config-path", str(Env.motor_engine_path)
                 ]
+                if self.single_container_flag:
+                    cmd.extend(["--kv-port", str(self.kv_port)])
+                    cmd.extend(["--dp-rpc-port", str(self.dp_rpc_port)])
+                    if self.lookup_rpc_port is not None:
+                        cmd.extend(["--lookup-rpc-port", str(self.lookup_rpc_port)])
                 logger.info(" ".join(cmd))
                 process = subprocess.Popen(cmd,
                                            shell=False,

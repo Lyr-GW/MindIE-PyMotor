@@ -20,6 +20,7 @@ from motor.engine_server.config import config_loader
 from motor.engine_server.config.config_loader import DeployConfig
 from motor.engine_server.utils.ip import ip_valid_check, port_valid_check
 from motor.engine_server.utils.validators import FileValidator
+from motor.engine_server.constants import constants
 
 supported_engine = ["vllm"]
 supported_role = ["prefill", "decode", "union"]
@@ -30,6 +31,9 @@ class ServerConfig:
     engine_type: str = "vllm"
     server_host: str = "127.0.0.1"
     role: str = "union"
+    kv_port: int | None = None
+    lookup_rpc_port: int | None = None
+    dp_rpc_port: int | None = None
     server_port: int = 9001
     engine_port: int = 8000
     instance_id: int = 0
@@ -44,6 +48,12 @@ class ServerConfig:
                             help="EngineServer endpoint host")
         parser.add_argument("--role",
                             help="PD separate role, prefill/decode/union")
+        parser.add_argument("--kv-port", type=int,
+                            help="kv port")
+        parser.add_argument("--lookup-rpc-port", type=int,
+                            help="lookup rpc port")
+        parser.add_argument("--dp-rpc-port", type=int,
+                            help="dp rpc port")
         parser.add_argument("--port", type=int,
                             help="EngineServer business interface port")
         parser.add_argument("--mgmt-port", type=int, dest="server_port",
@@ -62,6 +72,9 @@ class ServerConfig:
         server_config = cls(
             server_host=cli_args.host,
             role=cli_args.role,
+            kv_port=cli_args.kv_port,
+            lookup_rpc_port=cli_args.lookup_rpc_port,
+            dp_rpc_port=cli_args.dp_rpc_port,
             server_port=cli_args.server_port,
             engine_port=cli_args.port,
             instance_id=cli_args.instance_id,
@@ -90,6 +103,21 @@ class ServerConfig:
 
     def load_deploy_config(self):
         self.deploy_config = config_loader.DeployConfig.load(self.config_path, role=self.role)
+        kv_config = self.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG, {})
+        if kv_config:
+            if kv_config[constants.KV_CONNECTOR] == constants.MULTI_CONNECTOR:
+                connectors = kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.CONNECTORS]
+                if self.kv_port is not None:
+                    connectors[0][constants.KV_PORT] = str(self.kv_port)
+                if self.lookup_rpc_port is not None:
+                    connectors[1][constants.LOOKUP_RPC_PORT] = str(self.lookup_rpc_port)
+            else:
+                if self.kv_port is not None:
+                    kv_config[constants.KV_PORT] = str(self.kv_port)
+        if self.role == "prefill" and self.dp_rpc_port is not None:
+            self.deploy_config.model_config.prefill_parallel_config.dp_rpc_port = self.dp_rpc_port
+        if self.role == "decode" and self.dp_rpc_port is not None:
+            self.deploy_config.model_config.decode_parallel_config.dp_rpc_port = self.dp_rpc_port
         self.engine_type = str(self.deploy_config.engine_type)
         if self.engine_type not in supported_engine:
             raise ValueError(f"engine type {self.engine_type} is not supported.")

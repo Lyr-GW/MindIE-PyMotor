@@ -77,19 +77,13 @@ else
     ulimit -c 0
 fi
 
-if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
-    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
-    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
+set_cann_env() {
+    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common"
+    source "$CANN_INSTALL_PATH/ascend-toolkit/set_env.sh"
+    source "$CANN_INSTALL_PATH/nnal/atb/set_env.sh"
+}
 
-    # KV cache pool scenario only: KVP_MASTER_SERVICE (kv cache pool master-service) is set
-    # only when KV pool is enabled; then generate kv_cache_pool_config.json.
-    if [ -n "$KVP_MASTER_SERVICE" ]; then
-        echo "Updating kv cache pool configuration file..."
-        export MOONCAKE_CONFIG_PATH=$CONFIG_PATH/kv_cache_pool_config.json
-        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-        python3 "$CONFIGMAP_PATH/update_kv_cache_pool_config.py" "$MOONCAKE_CONFIG_PATH" "$USER_CONFIG_PATH"
-    fi
-
+gen_ranktable_config() {
     # Use hccl_tools.py to generate ranktable.json
     if [ -f "$CONFIGMAP_PATH/hccl_tools.py" ]; then
         echo "Using hccl_tools.py to generate ranktable.json..."
@@ -101,13 +95,95 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
     else
         echo "hccl_tools.py does not exist, skip ranktable generation"
     fi
+}
 
-    export RANK_TABLE_PATH="$CONFIG_PATH/ranktable.json"
+gen_kv_pool_config() {
+    # KV cache pool scenario only: KVP_MASTER_SERVICE (kv cache pool master-service) is set
+    # only when KV pool is enabled; then generate kv_cache_pool_config.json.
+    if [ -n "$KVP_MASTER_SERVICE" ]; then
+        echo "Updating kv cache pool configuration file..."
+        export MOONCAKE_CONFIG_PATH=$CONFIG_PATH/kv_cache_pool_config.json
+        export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+        if [ "$ROLE" = "SINGLE_CONTAINER" ]; then
+            KVP_MASTER_SERVICE=$POD_IP
+        fi
+        python3 "$CONFIGMAP_PATH/update_kv_cache_pool_config.py" "$MOONCAKE_CONFIG_PATH" "$USER_CONFIG_PATH"
+    fi
+}
+
+if [ "$ROLE" = "SINGLE_CONTAINER" ]; then
+    export MOTOR_COORDINATOR_CONFIG_PATH="$USER_CONFIG_PATH"
+    export MOTOR_CONTROLLER_CONFIG_PATH="$USER_CONFIG_PATH"
+    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
+    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
+    export CONTROLLER_SERVICE="$POD_IP"
+    export COORDINATOR_SERVICE="$POD_IP"
+
+    # Use hccl_tools.py to generate ranktable.json
+    gen_ranktable_config
 
     # Set environment variables for CANN
-    export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common"
-    source "$CANN_INSTALL_PATH/ascend-toolkit/set_env.sh"
-    source "$CANN_INSTALL_PATH/nnal/atb/set_env.sh"
+    set_cann_env
+
+    # Init pid list
+    pids=()
+
+    # Start coordinator
+    set_coordinator_env
+    ROLE=coordinator python3 -m motor.coordinator.main &
+    pids+=($!)
+
+    # Start controller
+    set_controller_env
+    ROLE=controller python3 -m motor.controller.main --config $MOTOR_CONTROLLER_CONFIG_PATH &
+    pids+=($!)
+
+    # Set kv cache pool config
+    gen_kv_pool_config
+
+    # Start kv_pool
+    if [ -n "$KVP_MASTER_SERVICE" ]; then
+        set_kv_pool_env
+        ROLE=kv_pool mooncake_master --port "$KV_POOL_PORT" \
+        --eviction_high_watermark_ratio "$KV_POOL_EVICTION_HIGH_WATERMARK_RATIO" \
+        --eviction_ratio "$KV_POOL_EVICTION_RATIO" &
+	pids+=($!)
+    fi
+
+    # Start nodemanager
+    p_instances_num=$(grep '"p_instances_num"' $USER_CONFIG_PATH | sed 's/.*:[[:space:]]*\([0-9.]*\).*/\1/')
+    d_instances_num=$(grep '"d_instances_num"' $USER_CONFIG_PATH | sed 's/.*:[[:space:]]*\([0-9.]*\).*/\1/')
+    for i in $(seq 0 $((p_instances_num - 1))); do
+        ROLE=prefill INDEX=$i JOB_NAME=p$i RANKTABLE_PATH=$CONFIG_PATH/ranktable_p${i}.json python3 -m motor.node_manager.main &
+	pids+=($!)
+        echo "pull up instance: ROLE=prefill INDEX=$i JOB_NAME=p$i RANKTABLE_PATH=$CONFIG_PATH/ranktable_p${i}.json python3 -m motor.node_manager.main &"
+    done
+
+    for i in $(seq 0 $((d_instances_num - 1))); do
+        ROLE=decode INDEX=$i JOB_NAME=d$i RANKTABLE_PATH=$CONFIG_PATH/ranktable_d${i}.json python3 -m motor.node_manager.main &
+	pids+=($!)
+        echo "pull up instance: ROLE=decode INDEX=$i JOB_NAME=d$i RANKTABLE_PATH=$CONFIG_PATH/ranktable_d${i}.json python3 -m motor.node_manager.main &"
+    done
+
+    for pid in "${pids[@]}"; do
+        wait $pid
+    done
+    echo "All processes finished successfully."
+    exit 0
+fi
+
+if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
+    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
+    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
+
+    # Use hccl_tools.py to generate ranktable.json
+    gen_ranktable_config
+
+    # Set environment variables for CANN
+    set_cann_env
+
+    # Set kv cache pool config
+    gen_kv_pool_config
 
     # Set log and work paths
     if [ -n "$MINDIE_LOG_CONFIG_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$MODEL_ID" ]; then

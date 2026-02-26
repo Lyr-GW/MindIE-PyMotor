@@ -82,6 +82,7 @@ class InstanceManager:
             DeployMode.CDP_SEPARATE,
             DeployMode.CPCD_SEPARATE,
             DeployMode.PD_SEPARATE,
+            DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER,
         ):
             if has_p and has_d:
                 return InstanceReadiness.REQUIRED_MET

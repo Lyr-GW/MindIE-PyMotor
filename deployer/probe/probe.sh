@@ -16,7 +16,12 @@ if [ -z "$1" ]; then
 fi
 
 probe_type=$1
-role=$ROLE
+
+if [ -z "$2" ]; then
+    role=$ROLE
+else
+    role=$2
+fi
 
 # Execute probe
 python3 $CONFIGMAP_PATH/probe.py $role $probe_type

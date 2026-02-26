@@ -87,6 +87,7 @@ class DeployMode(Enum):
     PD_SEPARATE = "pd_separate"
     CDP_SEPARATE = "cdp_separate"
     CPCD_SEPARATE = "cpcd_separate"
+    PD_DISAGGREGATION_SINGLE_CONTAINER = "pd_disaggregation_single_container"
 
     @classmethod
     def from_string(cls, value: str) -> Optional['DeployMode']:
