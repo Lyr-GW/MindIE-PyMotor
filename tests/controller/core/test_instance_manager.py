@@ -650,7 +650,7 @@ def test_handle_deleted_state(instance_manager):
 
     # Test transition to DELETED
     instance_manager._handle_deleted(InsStatus.INACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
-    assert instance.status == InsStatus.DELTETED
+    assert instance.status == InsStatus.DELETED
 
     # Instance should be removed
     assert instance_manager.get_instance(103) is None

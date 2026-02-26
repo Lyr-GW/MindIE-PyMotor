@@ -85,7 +85,7 @@ class InstanceManager(ThreadSafeSingleton):
             InsStatus.INITIAL: self._handle_initial,
             InsStatus.ACTIVE: self._handle_active,
             InsStatus.INACTIVE: self._handle_inactive,
-            InsStatus.DELTETED: self._handle_deleted
+            InsStatus.DELETED: self._handle_deleted
         }
 
         """
@@ -95,14 +95,14 @@ class InstanceManager(ThreadSafeSingleton):
             (InsStatus.INITIAL, InsConditionEvent.INSTANCE_INIT): InsStatus.INITIAL,
             (InsStatus.INITIAL, InsConditionEvent.INSTANCE_NORMAL): InsStatus.ACTIVE,
             (InsStatus.INITIAL, InsConditionEvent.INSTANCE_ABNORMAL): InsStatus.INACTIVE,
-            (InsStatus.INITIAL, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.DELTETED,
+            (InsStatus.INITIAL, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.DELETED,
             (InsStatus.ACTIVE, InsConditionEvent.INSTANCE_NORMAL): InsStatus.ACTIVE,
             (InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.INACTIVE,
             (InsStatus.ACTIVE, InsConditionEvent.INSTANCE_ABNORMAL): InsStatus.INACTIVE,
             (InsStatus.INACTIVE, InsConditionEvent.INSTANCE_ABNORMAL): InsStatus.INACTIVE,
             (InsStatus.INACTIVE, InsConditionEvent.INSTANCE_NORMAL): InsStatus.ACTIVE,
             (InsStatus.INACTIVE, InsConditionEvent.INSTANCE_INIT): InsStatus.INITIAL,
-            (InsStatus.INACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.DELTETED
+            (InsStatus.INACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT): InsStatus.DELETED
         }
 
         self.instances_management_thread = None
@@ -490,7 +490,7 @@ class InstanceManager(ThreadSafeSingleton):
                 cur_instances = list(self.instances.values())
 
             for instance in cur_instances:
-                if instance.status == InsStatus.DELTETED:
+                if instance.status == InsStatus.DELETED:
                     continue
                 if instance.is_all_endpoints_alive():
                     continue
@@ -609,11 +609,11 @@ class InstanceManager(ThreadSafeSingleton):
         condition_event: InsConditionEvent,
         instance: Instance
     ) -> None:
-        if from_state == InsStatus.DELTETED:
+        if from_state == InsStatus.DELETED:
             return
         if condition_event == InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT or \
                 condition_event == InsConditionEvent.INSTANCE_ABNORMAL:
-            instance.update_instance_status(InsStatus.DELTETED)
+            instance.update_instance_status(InsStatus.DELETED)
             self.notify(instance, ObserverEvent.INSTANCE_REMOVED)
             self.del_instance(instance.id)
         return
@@ -673,7 +673,7 @@ class InstanceManager(ThreadSafeSingleton):
                                  instance.id, from_state, instance.status)
 
             # Remove from forced separated set if transitioning to DELETED
-            if to_state == InsStatus.DELTETED and instance.id in self.forced_separated_instances:
+            if to_state == InsStatus.DELETED and instance.id in self.forced_separated_instances:
                 with self.ins_lock:
                     self.forced_separated_instances.discard(instance.id)
                 logger.info("Instance %d (%s) transitioned to DELETED, removing from forced separated set",
@@ -706,10 +706,11 @@ class InstanceManager(ThreadSafeSingleton):
             logger.info("Restored ACTIVE instance %d (%s) with refreshed heartbeat (v%d)",
                         instance.id, instance.job_name, version)
         else:
+            status_str = instance.status.value if hasattr(instance.status, "value") else str(instance.status)
             logger.info("Restored instance %d (%s) with status %s (v%d)",
                         instance.id,
                         instance.job_name,
-                        instance.status.value,
+                        status_str,
                         version)
 
     def _get_next_version(self) -> int:

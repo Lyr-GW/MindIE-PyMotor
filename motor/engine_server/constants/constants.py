@@ -10,6 +10,8 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+from motor.common.constants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX
+
 # log dir permission
 MOTOR_CUSTOM_ZMQ_PRIVILEGE = 0o640
 MOTOR_CUSTOM_ZMQ_DIR_PRIVILEGE = 0o750
@@ -92,9 +94,7 @@ CHUNKED_ENCODING = "chunked"
 # json field names
 JSON_ID_FIELD = "id"
 
-# vllm related constants
-CHAT_COMPLETION_PREFIX = "chatcmpl-"
-COMPLETION_PREFIX = "cmpl-"
+# vllm related constants (shared with coordinator via motor.common.constants)
 
 # vllm api paths
 COMPLETIONS_PATH = "/v1/completions"

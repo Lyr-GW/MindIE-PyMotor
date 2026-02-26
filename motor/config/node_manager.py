@@ -332,7 +332,9 @@ class NodeManagerConfig:
 
         logger.info(
             "Generate endpoint ports successfully: endpoint_num: %d, mgmt_ports: %s, service_ports: %s.",
-            config.endpoint_config.endpoint_num, config.endpoint_config.mgmt_ports, config.endpoint_config.service_ports
+            config.endpoint_config.endpoint_num,
+            config.endpoint_config.mgmt_ports,
+            config.endpoint_config.service_ports,
         )
 
     def validate_config(self) -> None:

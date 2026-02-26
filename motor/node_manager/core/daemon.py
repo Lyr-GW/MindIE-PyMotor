@@ -90,7 +90,10 @@ class Daemon(ThreadSafeSingleton):
                 start_device_id = i * local_world_size % device_size
                 end_device_id = start_device_id + local_world_size
                 if end_device_id > device_size:
-                    device_ids = list(range(start_device_id, device_size)) + list(range(0, end_device_id - device_size))
+                    device_ids = (
+                        list(range(start_device_id, device_size))
+                        + list(range(0, end_device_id - device_size))
+                    )
                 else:
                     device_ids = list(range(start_device_id, end_device_id))
                 device_ids_str = ",".join(map(str, device_ids))

@@ -10,13 +10,9 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import asyncio
 import time
 from enum import Enum
-from typing import Optional
-
-from pydantic import BaseModel, Field, PrivateAttr
-from httpx import AsyncClient
+from pydantic import BaseModel, Field
 
 from motor.common.utils.logger import get_logger
 
@@ -40,17 +36,18 @@ class Workload(BaseModel):
         
         return self
     
-    def calculate_workload_score(self, role: None) -> float:
+    def calculate_workload_score(self, role: Enum | str | None) -> float:
         """
         Calculate workload score based on role.
         
         Args:
-            role: PDRole enum indicating the role (prefill/decode/both)
+            role: PDRole enum or str ("prefill"/"decode"/"mix") indicating the role.
             
         Returns:
             float: Calculated workload score
         """
-
+        if role is None:
+            raise ValueError("role is required for calculate_workload_score")
         role_value = role.value if isinstance(role, Enum) else role
         if role_value == "prefill":
             return self.active_tokens + self.active_kv_cache * 0.3
@@ -59,7 +56,7 @@ class Workload(BaseModel):
         elif role_value == "both":
             return self.active_tokens + self.active_kv_cache * 0.15
         else:
-            raise ValueError("Invalid role value: %s", role_value)
+            raise ValueError(f"Invalid role value: {role_value}")
 
 
 class WorkloadAction(Enum):
@@ -95,7 +92,6 @@ class Endpoint(BaseModel):
     device_infos: list[DeviceInfo] = Field(default_factory=list, description="List of DeviceInfo") 
     hb_timestamp: float = Field(default=0, description="Last heartbeat timestamp")
     workload: Workload = Field(default_factory=Workload, description="Current workload of the endpoint")
-    _client: Optional[AsyncClient] = PrivateAttr(default=None)
 
     def __init__(
         self,
@@ -119,23 +115,6 @@ class Endpoint(BaseModel):
             workload=workload if workload is not None else Workload()
         )
         logger.debug("Init endpoint with id:%s ip:%s business_port:%s mgmt_port:%s", id, ip, business_port, mgmt_port)
-
-    def get_client(self) -> AsyncClient:
-        return self._client
-    
-    def set_client(self, client: AsyncClient):
-        self._client = client
-    
-    def close_client(self):
-        if not self._client:
-            return
-        try:
-            _ = asyncio.get_running_loop()
-            logger.debug("Closing endpoint[id:%s ip:%s] client in EventLoop", self.id, self.ip)
-            asyncio.create_task(self._client.aclose())
-        except RuntimeError:
-            logger.debug("Closing endpoint[id:%s ip:%s] client without EventLoop", self.id, self.ip)
-            asyncio.run(self._client.aclose())
 
     def add_device(self, device_info: DeviceInfo) -> None:
         if device_info not in self.device_infos:

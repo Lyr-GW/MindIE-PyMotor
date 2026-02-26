@@ -38,3 +38,15 @@ class StandbyConfig:
     # Note: controller and coordinator will automatically 
     # add "/controller/" and "/coordinator/" prefixes respectively
     master_lock_key: str = "/master_lock"
+
+    # Shared memory name for role IPC (Daemon writes, Mgmt reads for /readiness).
+    # When non-empty, coordinator Daemon creates SharedMemory with this name; Mgmt opens by name to read.
+    # Default empty; coordinator config sets a name when needed. Controller does not use shm.
+    role_shm_name: str = ""
+
+    # Role shm heartbeat (Daemon liveness detection). See docs/design/standby-role-shm-heartbeat.md.
+    # Daemon: write heartbeat every this many seconds; 0 = do not write heartbeat (shm stays 1 byte).
+    role_heartbeat_interval_sec: float = 5.0
+    # Mgmt: treat Daemon as dead if heartbeat not updated for this many seconds; 0 = do not check.
+    # Should be >= 2*interval to avoid false 503.
+    role_heartbeat_stale_sec: float = 10.0

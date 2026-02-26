@@ -100,8 +100,8 @@ class SimpleRateLimiter:
         )
         
         logger.info(f"Initialized global rate limiter: max_requests={max_requests}, window_size={window_size}s")
-    
-    
+
+
     def is_allowed(self, request_data: Optional[Dict[str, Any]] = None) -> tuple[bool, Dict[str, Any]]:
         """
         

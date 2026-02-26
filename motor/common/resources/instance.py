@@ -15,6 +15,7 @@ import threading
 import copy
 from enum import Enum
 from types import MappingProxyType
+from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 from motor.common.utils.logger import get_logger
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
@@ -29,10 +30,10 @@ class InsStatus(str, Enum):
     INITIAL = "initial"
     INACTIVE = "inactive"
     ACTIVE = "active"
-    DELTETED = "deleted"
+    DELETED = "deleted"
 
     def __repr__(self) -> str:
-        return str.__repr__(self.value)  # 序列化时返回值的表示
+        return str.__repr__(self.value)  # Use value representation for serialization
 
 
 class PDRole(str, Enum):
@@ -132,6 +133,11 @@ class Instance(BaseModel):
     def __init__(self, **data) -> None:
         super().__init__(**data)
         self._lock = threading.Lock()
+        # Cache for get_all_endpoints() to avoid repeated tuple creation.
+        # Version counter tracks structural changes (add/del); O(1) check vs O(n) hashing.
+        self._endpoints_version: int = 0  # Incremented when endpoints structure changes
+        self._cached_endpoints_tuple: Optional[tuple[Endpoint, ...]] = None
+        self._cached_endpoints_version: Optional[int] = None  # Version at cache time
 
     def add_node_mgr(self, pod_ip: str, host_ip: str, port: str) -> None:
         if pod_ip is None or host_ip is None or port is None:
@@ -171,6 +177,8 @@ class Instance(BaseModel):
             old_endpoint_num = len(self.endpoints.get(pod_ip, {}))
             self.endpoints[pod_ip] = endpoints
             actual_added_num = new_endpoint_num - old_endpoint_num
+            # Bump version when endpoints structure changes
+            self._endpoints_version += 1
 
         expected_endpoints = self.parallel_config.dp_size if self.parallel_config else 0
         total_endpoints = current_endpoint_num + actual_added_num
@@ -183,6 +191,8 @@ class Instance(BaseModel):
             if pod_ip in self.endpoints:
                 del_endpoint_num = len(self.endpoints[pod_ip])
                 del self.endpoints[pod_ip]
+                # Bump version when endpoints structure changes
+                self._endpoints_version += 1
             else:
                 del_endpoint_num = 0
                 logger.warning(f"Pod_ip:{pod_ip} not found in instance:{self.job_name}")
@@ -194,11 +204,10 @@ class Instance(BaseModel):
 
     def is_endpoints_enough(self) -> bool:
         """
-            if endpoints number is equals to dp size,
-            then we think this instance is ready.
+        Return True if the number of endpoints equals dp_size (instance is ready).
 
         Returns:
-            bool: wheter this instance is ready
+            bool: Whether this instance has enough endpoints and is ready.
         """
         with self._lock:
             if self.parallel_config is not None:
@@ -292,12 +301,27 @@ class Instance(BaseModel):
             return MappingProxyType(self.endpoints.get(ip, {}))
 
     def get_all_endpoints(self) -> tuple[Endpoint, ...]:
+        """Return a tuple of all endpoints, with versioned caching.
+
+        Cache is invalidated only when the endpoints structure changes (add/del),
+        not when endpoint content (workload, status) changes. O(1) on cache hit,
+        O(n) tuple build on cache miss.
+        """
         with self._lock:
+            # O(1) version check
+            if (self._cached_endpoints_tuple is not None and
+                self._cached_endpoints_version == self._endpoints_version):
+                return self._cached_endpoints_tuple
+
+            # Rebuild tuple only when version changed
             eps = []
             for pod_endpoints in self.endpoints.values():
                 for endpoint in pod_endpoints.values():
                     eps.append(endpoint)
-            return tuple(eps)
+            
+            self._cached_endpoints_tuple = tuple(eps)
+            self._cached_endpoints_version = self._endpoints_version
+            return self._cached_endpoints_tuple
 
     def get_node_managers_num(self) -> int:
         with self._lock:

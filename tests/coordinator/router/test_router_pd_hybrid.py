@@ -19,11 +19,14 @@ from unittest.mock import MagicMock
 import pytest
 
 from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
-from motor.coordinator.core.instance_manager import InstanceManager
+from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
+from motor.common.resources.endpoint import Workload
+from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.tracer.tracing import TracerManager
+from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
 import motor.coordinator.router.router as router
 from motor.common.utils.logger import get_logger
@@ -33,9 +36,16 @@ TracerManager()
 logger = get_logger(__name__)
 
 app = FastAPI()
+_config = CoordinatorConfig()
+_scheduler = Scheduler(instance_provider=InstanceManager(_config), config=_config)
+_request_manager = RequestManager(_config)
+
+
 @app.post("/v1/chat/completions")
 async def handle_completions(request: Request):
-    return await router.handle_request(request, CoordinatorConfig())
+    return await router.handle_request(
+        request, _config, scheduler=_scheduler, request_manager=_request_manager
+    )
 
 @pytest.fixture
 def mock_forward_stream_request(monkeypatch):
@@ -48,7 +58,9 @@ def mock_forward_stream_request(monkeypatch):
         ]
         for chunk in responses:
             yield chunk
-        self.req_info.trace_obj.set_count_token(1)
+        trace_obj = getattr(self.req_info, "trace_obj", None)
+        if trace_obj is not None:
+            trace_obj.set_count_token(1)
     
     # Patch the forward_stream_request function to return an async generator directly
     monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_impl)
@@ -82,27 +94,30 @@ class TestRouterPDHybrid:
         mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
         
-        # Mock functions
-        def mock_is_available(self):
+        # Mock functions (Scheduler uses get_required_instances_status for readiness)
+        def mock_get_required_instances_status(self, deploy_mode=None):
+            return InstanceReadiness.REQUIRED_MET
+
+        def mock_has_required_instances(self, deploy_mode=None):
             return True
+
+        def mock_get_available_instances(self, role=None):
+            if role == PDRole.ROLE_P:  # PD hybrid uses ROLE_P
+                return {mock_instance.id: mock_instance}
+            return {}
         
-        def mock_get_available_instances(self, role):
-            if role == PDRole.ROLE_P:  # PD hybrid role
-                return [mock_instance]  # Has PD hybrid instances
-            return []
-        
-        def mock_select_instance_and_endpoint(self, role):
+        async def mock_select_and_allocate(self, role, req_id, req_len):
             if role == PDRole.ROLE_P:
-                return mock_instance, mock_endpoint
-            return None, None, None
-        
-        def mock_update_workload(self, instance: Instance, endpoint: Endpoint, req_id: str,
-                        workload_action, request_length: int) -> bool:
+                return mock_instance, mock_endpoint, Workload()
+            return None
+
+        async def mock_update_workload(self, params):
             return True
-        
-        monkeypatch.setattr(InstanceManager, "is_available", mock_is_available)
+
+        monkeypatch.setattr(InstanceManager, "get_required_instances_status", mock_get_required_instances_status)
+        monkeypatch.setattr(InstanceManager, "has_required_instances", mock_has_required_instances)
         monkeypatch.setattr(InstanceManager, "get_available_instances", mock_get_available_instances)
-        monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
         monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
 
         # Mock CoordinatorConfig to return SINGLE_NODE deploy mode
@@ -159,7 +174,11 @@ class TestRouterPDHybrid:
         )
         
         # Test the PD hybrid forwarding function
-        hybrid_router = PDHybridRouter(req_info, CoordinatorConfig())
+        hybrid_router = PDHybridRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=RequestManager(_config)
+        )
         chunks = []
         
         response = await hybrid_router.handle_request()
@@ -213,7 +232,11 @@ class TestRouterPDHybrid:
         monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward_stream_request)
         
         # Test the PD hybrid forwarding function with failure
-        hybrid_router = PDHybridRouter(req_info, CoordinatorConfig())
+        hybrid_router = PDHybridRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=RequestManager(_config)
+        )
         # Create an async generator and consume it
         stream_resp = await hybrid_router.handle_request()
         chunks = []
@@ -224,7 +247,7 @@ class TestRouterPDHybrid:
         assert error_message in chunk_str
 
     @pytest.mark.asyncio
-    async def test_successful_request_with_pd_hybrid(self, client, monkeypatch: MonkeyPatch, 
+    async def test_successful_request_with_pd_hybrid(self, client, monkeypatch: MonkeyPatch,
                                                      setup_pd_hybrid, mock_forward_stream_request):
         """
         Expected behavior:

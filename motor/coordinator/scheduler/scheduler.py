@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -10,55 +9,59 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import asyncio
+
 from motor.common.resources.instance import Instance, PDRole
-from motor.common.resources.endpoint import Endpoint, WorkloadAction
-from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.common.resources.endpoint import Endpoint, WorkloadAction, Workload
+from motor.coordinator.domain import InstanceReadiness, UpdateWorkloadParams
+from motor.common.resources.http_msg_spec import EventType
 from motor.common.utils.logger import get_logger
-from motor.coordinator.scheduler.base_scheduling_policy import BaseSchedulingPolicy
-from motor.coordinator.scheduler.round_robin_policy import RoundRobinPolicy
-from motor.coordinator.scheduler.load_balance_policy import LoadBalancePolicy
-from motor.config.coordinator import CoordinatorConfig, SchedulerType
+from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
+from motor.coordinator.scheduler.policy.factory import SchedulingPolicyFactory
+from motor.coordinator.router.workload_action_handler import calculate_demand_workload
+from motor.config.coordinator import CoordinatorConfig, DeployMode, SchedulerType
+from motor.coordinator.domain import InstanceProvider
 
 
 logger = get_logger(__name__)
 
 
-class Scheduler(ThreadSafeSingleton):
+class Scheduler:
     """
     Main scheduler class that acts as a facade for different scheduling algorithms.
+    Implements SchedulingFacade for BaseRouter DI (in-process mode).
+    Created once per Scheduler process by SchedulerServer (no singleton).
     """
 
-    def __init__(self, config: CoordinatorConfig | SchedulerType | None = None):
+    def __init__(
+        self,
+        instance_provider: InstanceProvider,
+        config: CoordinatorConfig | SchedulerType | None = None,
+    ):
         """
         Initialize the scheduler.
-        
+
         Args:
+            instance_provider: Required. Instance source (e.g. InstanceManager); injected by SchedulerServer or tests.
             config: Can be:
                    - CoordinatorConfig object
                    - SchedulerType enum value
                    - None (uses default config)
         """
-        # If the scheduler is already initialized, return.
-        if hasattr(self, '_initialized'):
-            return
-        
         if config is None:
             config = CoordinatorConfig()
         
         if isinstance(config, SchedulerType):
             self._policy_type = config
+            self._config: CoordinatorConfig | None = None
         else:
             self._policy_type = config.scheduler_config.scheduler_type
-        
-        if self._policy_type == SchedulerType.ROUND_ROBIN:
-            self._scheduling_policy = RoundRobinPolicy()
-        elif self._policy_type == SchedulerType.LOAD_BALANCE:
-            self._scheduling_policy = LoadBalancePolicy()
-        else:
-            logger.error(f"Unsupported scheduling policy: {self._policy_type}")
-            raise ValueError(f"Unsupported scheduling policy: {self._policy_type}")
+            self._config = config
 
-        self._initialized = True
+        self._instance_provider = instance_provider
+        self._scheduling_policy = SchedulingPolicyFactory.create(
+            self._policy_type, self._instance_provider
+        )
         logger.info("Scheduler started.")
     
     def get_scheduling_policy(self) -> BaseSchedulingPolicy:
@@ -70,34 +73,94 @@ class Scheduler(ThreadSafeSingleton):
         """
         return self._scheduling_policy
 
-    def select_instance_and_endpoint(self, role: PDRole = None) -> Instance | None:
+    async def select_instance_and_endpoint(self, role: PDRole = None):
         """
         Select an instance and endpoint based on the current scheduling algorithm.
+        If policy is async, awaits and returns.
         
         Args:
             role: Optional PDRole to filter instances by role (prefill/decode)
             
         Returns:
-            Selected Instance or None if no instance available
+            (Instance, Endpoint) tuple or None if no instance available
         """
-        return self._scheduling_policy.select_instance_and_endpoint(role)
+        r = self._scheduling_policy.select_instance_and_endpoint(role)
+        return (await r) if asyncio.iscoroutine(r) else r
 
-    def update_workload(self, instance: Instance, endpoint: Endpoint, req_id: str,
-                         workload_action: WorkloadAction, request_length: int) -> bool:
+    async def select_and_allocate(self, role: PDRole, req_id: str, req_len: int):
         """
-        Update workload information for load-aware scheduling strategies.
-        This method is only effective when using load-balancing strategies.
+        Atomic: select instance + one workload allocation (ALLOCATION).
+        Allocation workload is decided here: zero for policies without update_workload (e.g. RR), demand for LB.
         
-        Args:
-            instance: The instance being used
-            endpoint: The endpoint being used
-            req_id: Request identifier
-            workload_action: Workload action type
-            request_length: Length of the request
-            
         Returns:
-            True if workload was updated successfully, False otherwise
+            (Instance, Endpoint, Workload) tuple or None (no instance or update_workload failed).
+            The returned Workload is what was allocated; caller records it for release.
+        """
+        r = self._scheduling_policy.select_instance_and_endpoint(role)
+        result = (await r) if asyncio.iscoroutine(r) else r
+        if result is None:
+            return None
+        instance, endpoint = result
+        workload = (
+            Workload()
+            if not hasattr(self._scheduling_policy, "update_workload")
+            else calculate_demand_workload(role, req_len)
+        )
+        params = UpdateWorkloadParams(
+            instance_id=instance.id,
+            endpoint_id=endpoint.id,
+            role=role,
+            req_id=req_id,
+            workload_action=WorkloadAction.ALLOCATION,
+            workload_change=workload,
+        )
+        success = await self.update_workload(params)
+        if not success:
+            return None
+        return (instance, endpoint, workload)
+
+    async def update_workload(self, params: UpdateWorkloadParams) -> bool:
+        """
+        Update workload information for load-aware scheduling strategies (by id only).
+        Same interface as Router/AsyncSchedulerClient; role only for signature compat (in-process policy does not use).
         """
         if hasattr(self._scheduling_policy, 'update_workload'):
-            return self._scheduling_policy.update_workload(instance, endpoint, req_id, workload_action, request_length)
+            return await self._scheduling_policy.update_workload(
+                params.instance_id,
+                params.endpoint_id,
+                params.req_id,
+                params.workload_action,
+                params.workload_change,
+            )
         return True  # Ignore for strategies that don't support workload tracking
+
+    async def get_available_instances(
+        self, role: PDRole | None = None
+    ) -> dict[int, Instance]:
+        """
+        Get available instance list (for metrics/readiness etc.).
+        In-process provider is fast and lock-free; direct call avoids to_thread overhead.
+        """
+        return dict(self._instance_provider.get_available_instances(role))
+
+    async def has_required_instances(self) -> InstanceReadiness:
+        """
+        Check by deploy mode; returns InstanceReadiness (REQUIRED_MET, ONLY_PREFILL, ONLY_DECODE, NONE, UNKNOWN).
+        deploy_mode from init config; default DeployMode.PD_SEPARATE when no config.
+        """
+        deploy_mode = (
+            self._config.scheduler_config.deploy_mode
+            if self._config
+            else DeployMode.PD_SEPARATE
+        )
+        return await asyncio.to_thread(
+            self._instance_provider.get_required_instances_status, deploy_mode
+        )
+
+    async def get_all_instances(self) -> tuple[dict[int, Instance], dict[int, Instance]]:
+        """Return (available, unavailable) instance dicts from in-process InstanceManager."""
+        return await self._instance_provider.get_all_instances()
+
+    async def refresh_instances(self, event_type: EventType, instances: list[Instance]) -> bool:
+        """Refresh instance list (delegate to in-process InstanceManager). Returns True if pools changed."""
+        return await self._instance_provider.refresh_instances(event_type, instances)

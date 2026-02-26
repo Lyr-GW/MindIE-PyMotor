@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -10,11 +9,13 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import asyncio
 import re
 import time
 import threading
 from enum import Enum
 from collections import Counter
+from typing import Any, Callable
 
 from motor.common.resources.instance import Instance
 from motor.common.resources import PDRole
@@ -22,7 +23,6 @@ from motor.common.utils.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.api_client.engine_server_api_client import EngineServerApiClient
-from motor.coordinator.core.instance_manager import InstanceManager
 
 logger = get_logger(__name__)
 
@@ -69,6 +69,7 @@ class MetricsCollector(ThreadSafeSingleton):
         if config is None:
             config = CoordinatorConfig()
         self._prometheus_metrics_config = config.prometheus_metrics_config
+        self._deploy_config = config.deploy_config
 
         # Initial metrics state
         self._inactive_instance_metrics_aggregate: list[SingleMetric] = []
@@ -79,9 +80,33 @@ class MetricsCollector(ThreadSafeSingleton):
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._metrics_update_thread = None
+        # Event loop for async get_all_instances (set from lifespan)
+        self._loop = None
+        # When set, use this to get scheduler (same view as scheduling); must be set in lifespan
+        self._scheduler_provider: Callable[[], Any] | None = None
 
         self._initialized = True
         logger.info("MetricsCollector initialized.")
+
+    @staticmethod
+    def _get_value_str(value: float) -> str:
+        """ Transform float to str.  """
+
+        if value == float("nan"):
+            return "Nan"
+        elif value == float("inf"):
+            return "+Inf"
+        elif value == float("-inf"):
+            return "-Inf"
+        return str(value)
+
+    def set_event_loop(self, loop):
+        """Set the event loop for async calls from the metrics thread (call from lifespan)."""
+        self._loop = loop
+
+    def set_scheduler_provider(self, get_scheduler: Callable[[], Any]) -> None:
+        """Use same instance view as scheduling: get_scheduler().get_all_instances() (call from lifespan)."""
+        self._scheduler_provider = get_scheduler
 
     def start(self) -> None:
         """
@@ -115,6 +140,7 @@ class MetricsCollector(ThreadSafeSingleton):
         """Update configuration for the metrics collector"""
         with self._config_lock:
             self._prometheus_metrics_config = config.prometheus_metrics_config
+            self._deploy_config = config.deploy_config
         logger.info("MetricsCollector configuration updated")
 
     def prometheus_instance_metrics_handler(self):
@@ -542,7 +568,9 @@ class MetricsCollector(ThreadSafeSingleton):
                 self.METRICS_KEY: collects[instance_id][self.METRICS_KEY]
             }
 
-    def _aggregate_metrics_all_instance(self, collects: dict[int, dict[str, list[SingleMetric]]]) -> list[SingleMetric]:
+    def _aggregate_metrics_all_instance(
+        self, collects: dict[int, dict[str, list[SingleMetric]]]
+    ) -> list[SingleMetric]:
         """ Aggreagte metrics of all instances.  """
 
         if not self._instance_metrics_cached:
@@ -571,17 +599,6 @@ class MetricsCollector(ThreadSafeSingleton):
         aggregate = self._aggregate_metrics_common(aggr_input)
 
         return aggregate
-
-    def _get_value_str(self, value: float) -> str:
-        """ Transform float to str.  """
-
-        if value == float("nan"):
-            return "Nan"
-        elif value == float("inf"):
-            return "+Inf"
-        elif value == float("-inf"):
-            return "-Inf"
-        return str(value)
 
     def _get_serialize_metrics(self, aggregate: list[SingleMetric]) -> str:
         """ Metrics serialize.  """
@@ -660,8 +677,8 @@ class MetricsCollector(ThreadSafeSingleton):
         available_p = available_role_counts.get(PDRole.ROLE_P, 0)
         available_d = available_role_counts.get(PDRole.ROLE_D, 0)
 
-        p_num, d_num = InstanceManager().get_instances_num()
-
+        p_num = self._deploy_config.p_instances_num
+        d_num = self._deploy_config.d_instances_num
         unavailable_p = p_num - available_p
         unavailable_d = d_num - available_d
 
@@ -674,8 +691,25 @@ class MetricsCollector(ThreadSafeSingleton):
     def _get_and_aggregate_metrics(self) -> tuple[str, dict[str, list[SingleMetric]]]:
         """ Get and Aggregate metrics.  """
 
-        # Step 0: get instances/endpoints info
-        available_instances, unavailable_instances = InstanceManager().get_all_instances()
+        # Step 0: get instances (same view as scheduling when _scheduler_provider is set)
+        loop = getattr(self, '_loop', None)
+        if loop is None:
+            available_instances, unavailable_instances = {}, {}
+        else:
+            try:
+                get_scheduler = getattr(self, '_scheduler_provider', None)
+                if get_scheduler is None:
+                    logger.warning("[Metrics] scheduler_provider not set, skipping instance metrics")
+                    available_instances, unavailable_instances = {}, {}
+                else:
+                    scheduler = get_scheduler()
+                    future = asyncio.run_coroutine_threadsafe(
+                        scheduler.get_all_instances(), loop
+                    )
+                    available_instances, unavailable_instances = future.result(timeout=10)
+            except Exception as e:
+                logger.warning("[Metrics] get_all_instances failed: %s", e)
+                available_instances, unavailable_instances = {}, {}
         self._clear_inactive_metrics(unavailable_instances)
 
         # Step 1: get instances/endpoints info and get all endpoints metrics text.

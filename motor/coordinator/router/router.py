@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 #
@@ -28,16 +27,15 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
-from motor.config.coordinator import CoordinatorConfig
+from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.models.request import RequestInfo
-from motor.coordinator.core.request_manager import RequestManager
-from motor.config.coordinator import DeployMode, CoordinatorConfig
+from motor.coordinator.domain import InstanceReadiness
+from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.router.base_router import BaseRouter
-from motor.coordinator.core.instance_manager import InstanceManager, PDRole
+from motor.common.resources.instance import PDRole
 from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
 from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
-from motor.coordinator.tracer.tracing import TracerManager
 from motor.common.utils.security_utils import (
     sanitize_error_message,
     filter_sensitive_headers,
@@ -60,83 +58,90 @@ async def listen_for_disconnect(request: Request) -> None:
     """Returns if a disconnect message is received"""
     while True:
         message = await request.receive()
-        # detect http disconnect
-        if message["type"] == "http.disconnect":
+        if isinstance(message, dict) and message.get("type") == "http.disconnect":
             break
 
 
+async def _cancel_tasks_and_wait(*tasks: asyncio.Task) -> None:
+    """Cancel given tasks and await them to avoid pending-task warnings."""
+    for t in tasks:
+        if not t.done():
+            t.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def with_cancellation(handler_func):
-    """Decorator that allows router to be cancelled by client
-    disconnections.
+    """
+    Decorator: cancel the handler when the client disconnects.
 
-    Simultaneously awaits on two tasks
-        - one to wait for an http disconnect message
-        - the other to do the work that we want done
-    When the first task finishes, the other is cancelled.
-
-    In the case where a `StreamingResponse` is returned by the router, this
-    wrapper will stop listening for disconnects and instead the response object
-    will start listening for disconnects.
+    Runs the handler and listen_for_disconnect(request) concurrently; when one
+    finishes, the other is cancelled. If the handler finishes first, its return
+    value is returned; if the client disconnects first, returns None.
     """
 
     @wraps(handler_func)
     async def wrapper(*args, **kwargs):
-        
-        # Handles two parameter-passing scenarios:
-        # (1) func(request), where params in args.
-        # (2) func(raw_request=request), where params in kwargs.
-        request = args[0] if len(args) >= 1 else kwargs["raw_request"]
-
+        request = args[0] if args else kwargs["raw_request"]
         handler_task = asyncio.create_task(handler_func(*args, **kwargs))
-        cancellation_task = asyncio.create_task(listen_for_disconnect(request))
+        disconnect_task = asyncio.create_task(listen_for_disconnect(request))
 
         try:
             done, pending = await asyncio.wait(
-                [handler_task, cancellation_task], return_when=asyncio.FIRST_COMPLETED
+                [handler_task, disconnect_task],
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            for task in pending:
-                task.cancel()
+            await _cancel_tasks_and_wait(*pending)
 
             if handler_task in done:
                 return handler_task.result()
             return None
         except (Exception, asyncio.CancelledError):
-            if not handler_task.done():
-                handler_task.cancel()
-            if not cancellation_task.done():
-                cancellation_task.cancel()
+            await _cancel_tasks_and_wait(handler_task, disconnect_task)
             raise
 
     return wrapper
 
 
 @with_cancellation
-async def handle_request(raw_request: Request, 
-                         config: CoordinatorConfig
-                         ) -> StreamingResponse | JSONResponse:
+async def handle_request(
+    raw_request: Request,
+    config: CoordinatorConfig,
+    scheduler=None,
+    *,
+    request_manager: RequestManager,
+) -> StreamingResponse | JSONResponse:
     """Handle incoming requests and route them to appropriate router implementation
-    
+
     Args:
         raw_request: The incoming FastAPI request object
-        
+        request_manager: RequestManager instance (required, injected by InferenceServer)
+
     Returns:
         StreamingResponse: The stream response from the selected router implementation
         JSONResponse: The nonstream response from the selected router implementation
-        
+
     Raises:
         HTTPException: If request body is empty or request fail
     """
 
-    req_info = await __create_request_info(raw_request)
+    req_info = await __create_request_info(raw_request, request_manager)
 
-    if TracerManager().contains_trace_headers(raw_request.headers):
-        req_info.trace_obj.parent_context = TracerManager().extract_trace_context(raw_request.headers)
+    if scheduler is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Scheduler (SchedulingFacade) is required and must be injected by the server"
+        )
 
-    # When there are no available D instances, use PD mixed method to call P instances
-    if len(InstanceManager().get_available_instances(PDRole.ROLE_D)) == 0:
-        deploy_mode = DeployMode.SINGLE_NODE
+    config_mode = config.scheduler_config.deploy_mode
+    readiness = await scheduler.has_required_instances()
+    if (
+        config_mode in (DeployMode.PD_SEPARATE, DeployMode.CDP_SEPARATE)
+        and readiness == InstanceReadiness.ONLY_PREFILL
+    ):
+        deploy_mode = DeployMode.SINGLE_NODE  # fallback only when has P but no D
     else:
-        deploy_mode = config.scheduler_config.deploy_mode
+        deploy_mode = config_mode
 
     router_impl_class = _ROUTER_MAP.get(deploy_mode)
     if not router_impl_class:
@@ -144,8 +149,11 @@ async def handle_request(raw_request: Request,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=f"Unknown deploy mode: {deploy_mode}"
         )
-        
-    router_impl = router_impl_class(req_info, config)
+    
+    router_impl = router_impl_class(
+        req_info, config, scheduler=scheduler,
+        request_manager=request_manager
+    )
     
     try:
         return await router_impl.handle_request()
@@ -161,20 +169,27 @@ async def handle_request(raw_request: Request,
 
 
 @with_cancellation
-async def handle_metaserver_request(raw_request: Request, config: CoordinatorConfig) -> httpx.Response:
+async def handle_metaserver_request(
+    raw_request: Request,
+    config: CoordinatorConfig,
+    scheduler=None,
+    *,
+    request_manager: RequestManager,
+) -> httpx.Response:
     """Only for CDP mode
     Handle incoming requests from D Instance and route them to P instance
-    
+
     Args:
         raw_request: The incoming FastAPI request object from D Instance
-        
+        request_manager: RequestManager instance (required, injected by InferenceServer)
+
     Returns:
         httpx.Response: The non stream response from the selected P instance
-        
+
     Raises:
         HTTPException: If request body is empty or request fail
     """
-    req_info = await __create_request_info(raw_request, True)
+    req_info = await __create_request_info(raw_request, request_manager, metaserver_request=True)
     
     deploy_mode = config.scheduler_config.deploy_mode
     if not deploy_mode or (deploy_mode != DeployMode.CDP_SEPARATE and deploy_mode != DeployMode.PD_SEPARATE):
@@ -183,8 +198,16 @@ async def handle_metaserver_request(raw_request: Request, config: CoordinatorCon
             detail=f"Unsupport deploy mode: {deploy_mode}"
         )
     
+    if scheduler is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Scheduler (SchedulingFacade) is required and must be injected by the server"
+        )
     try:
-        return await SeparateCDPRouter(req_info=req_info, config=config).handle_metaserver_request()
+        return await SeparateCDPRouter(
+            req_info=req_info, config=config, scheduler=scheduler,
+            request_manager=request_manager
+        ).handle_metaserver_request()
     except Exception as e:
         logger.error(f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
         if isinstance(e, HTTPException):
@@ -196,22 +219,27 @@ async def handle_metaserver_request(raw_request: Request, config: CoordinatorCon
         ) from e
 
 
-async def __create_request_info(raw_request: Request, metaserver_request: bool = False) -> RequestInfo:
+async def __create_request_info(
+    raw_request: Request,
+    request_manager: RequestManager,
+    metaserver_request: bool = False,
+) -> RequestInfo:
     request_body = await raw_request.body()
     if not request_body:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Empty request body"
         )
-    
+
     try:
         request_json = await raw_request.json()
     except Exception as e:
+        logger.debug("JSON parse failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid JSON format: {str(e)}"
+            detail="Invalid JSON format"
         ) from e
-    
+
     if not request_json:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -223,7 +251,7 @@ async def __create_request_info(raw_request: Request, metaserver_request: bool =
     if metaserver_request:
         req_id = ""
     else:
-        req_id = RequestManager().generate_request_id()
+        req_id = await request_manager.generate_request_id()
     req_len = len(request_body)
     api = validate_and_sanitize_path(raw_request.url.path)
     

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -12,15 +11,12 @@
 
 import time
 from enum import Enum
-from typing import Optional, Dict, Any
+
 from pydantic import BaseModel, Field, PrivateAttr
 
 import anyio
-from httpx import AsyncClient
 
-from motor.common.resources.endpoint import Endpoint
-from motor.common.resources.instance import Instance, PDRole
-from motor.coordinator.tracer.tracing import TraceObj
+from motor.common.resources.instance import PDRole
 
 
 class RequestType(Enum):
@@ -53,9 +49,8 @@ class RequestInfo(BaseModel):
     api: str = Field(..., description="API need to be forwarded")
     state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
-    trace_obj: TraceObj = Field(default=TraceObj(), description="Tracing object")
-    _p_cancel_scope: Optional[anyio.CancelScope] = PrivateAttr(default=None)
-    _d_cancel_scope: Optional[anyio.CancelScope] = PrivateAttr(default=None)
+    _p_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
+    _d_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -76,27 +71,8 @@ class RequestInfo(BaseModel):
         elif role == PDRole.ROLE_D:
             self._d_cancel_scope = cancel_scope
     
-    def cancell_scope(self):
+    def cancel_scope(self):
         if self._p_cancel_scope and not self._p_cancel_scope.cancel_called:
             self._p_cancel_scope.cancel()
         if self._d_cancel_scope and not self._d_cancel_scope.cancel_called:
             self._d_cancel_scope.cancel()
-
-
-class ScheduledResource(BaseModel):
-    """Represents a scheduled resource with an instance and endpoint"""
-    instance: Instance = None
-    endpoint: Endpoint = None
-
-
-class RequestResponse(BaseModel):
-    request_id: str
-    status: str
-    message: Optional[str] = None
-    data: Optional[Dict[str, Any]] = None
-
-
-class ErrorResponse(BaseModel):
-    message: str
-    type: str
-    code: int

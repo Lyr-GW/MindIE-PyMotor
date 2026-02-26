@@ -10,11 +10,12 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import asyncio
 import pytest
 import time
 import threading
-from unittest.mock import patch
-from motor.coordinator.core.request_manager import RequestManager
+from unittest.mock import patch, AsyncMock
+from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
 from motor.config.coordinator import CoordinatorConfig
 
@@ -22,96 +23,61 @@ from motor.config.coordinator import CoordinatorConfig
 class TestRequestManager:
     """Test cases for RequestManager class"""
     
-    def test_singleton_behavior(self):
-        """Test that RequestManager is a singleton"""
-        config = CoordinatorConfig()
-        # Create two instances
-        manager1 = RequestManager(config)
-        manager2 = RequestManager(config)
-
-        # Both should be the same instance (singleton)
-        assert manager1 is manager2
-        assert id(manager1) == id(manager2)
-    
-    def test_generate_request_id_format(self):
+    @pytest.mark.asyncio
+    async def test_generate_request_id_format(self):
         """Test that generated ID has correct format"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        request_id = manager.generate_request_id()
-        
-        # Should be a string
+        request_id = await manager.generate_request_id()
+
         assert isinstance(request_id, str)
-        # Should be 28 characters (16 timestamp + 4 counter + 8 random)
         assert len(request_id) == 28
-        # Should contain only hex characters (0-9, a-f)
         assert all(c in '0123456789abcdef' for c in request_id)
-    
-    def test_generate_request_id_uniqueness(self):
+
+    @pytest.mark.asyncio
+    async def test_generate_request_id_uniqueness(self):
         """Test that generated IDs are unique"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        
-        # Generate multiple IDs
         ids = set()
         for _ in range(1000):
-            new_id = manager.generate_request_id()
-            # Each ID should be unique
+            new_id = await manager.generate_request_id()
             assert new_id not in ids
             ids.add(new_id)
-        
-        # Should have 1000 unique IDs
         assert len(ids) == 1000
-    
-    def test_generate_request_id_thread_safety(self):
-        """Test ID generation in multi-threaded environment"""
+
+    @pytest.mark.asyncio
+    async def test_generate_request_id_concurrent_async(self):
+        """Test ID generation with concurrent async calls"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        generated_ids = set()
-        lock = threading.Lock()
-        
-        def generate_ids():
-            """Worker function to generate IDs"""
-            for _ in range(100):
-                new_id = manager.generate_request_id()
-                with lock:
-                    generated_ids.add(new_id)
-        
-        # Create and start multiple threads
-        threads = []
-        for _ in range(10):
-            thread = threading.Thread(target=generate_ids)
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        # Should have 1000 unique IDs (10 threads × 100 IDs each)
+
+        async def generate_many():
+            return [await manager.generate_request_id() for _ in range(100)]
+
+        results = await asyncio.gather(*[generate_many() for _ in range(10)])
+        generated_ids = {id_ for lst in results for id_ in lst}
         assert len(generated_ids) == 1000
-    
-    @patch('motor.coordinator.core.request_manager.uuid.uuid4')
-    def test_fallback_uuid_generation(self, mock_uuid):
+
+    @pytest.mark.asyncio
+    @patch('motor.coordinator.domain.request_manager.uuid.uuid4')
+    async def test_fallback_uuid_generation(self, mock_uuid):
         """Test fallback to UUID when main algorithm fails"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        
-        # Mock uuid4 to return a predictable value
         mock_uuid.return_value.hex = 'fallback1234567890abcdef1234567890'
-        
-        # Force an exception in the main generation logic
-        with patch.object(manager, '_lock') as mock_lock:
-            mock_lock.__enter__.side_effect = Exception("Test exception")
-            
-            # Should use fallback UUID
-            request_id = manager.generate_request_id()
+
+        with patch.object(manager, '_lock', new_callable=AsyncMock) as mock_lock:
+            mock_lock.__aenter__.side_effect = Exception("Test exception")
+            request_id = await manager.generate_request_id()
             assert request_id == 'fallback1234567890abcdef1234567890'
-    
-    def test_id_structure(self):
+
+    @pytest.mark.asyncio
+    async def test_id_structure(self):
         """Test the structural components of generated ID"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        request_id = manager.generate_request_id()
+        request_id = await manager.generate_request_id()
         
         # Extract components
         timestamp_part = request_id[:16]  # First 16 chars: timestamp
@@ -133,161 +99,113 @@ class TestRequestManager:
         assert len(random_part) == 8
         assert all(c in '0123456789abcdef' for c in random_part)
     
-    def test_consecutive_ids_increment_counter(self):
+    @pytest.mark.asyncio
+    async def test_consecutive_ids_increment_counter(self):
         """Test that counter increments for same timestamp"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        
-        # Mock time to return same timestamp
         fixed_time = 1691234567890123
-        with patch('motor.coordinator.core.request_manager.time.time') as mock_time:
+        with patch('motor.coordinator.domain.request_manager.time.time') as mock_time:
             mock_time.return_value = fixed_time / 1000000
-            
-            # Generate multiple IDs with same timestamp
-            id1 = manager.generate_request_id()
-            id2 = manager.generate_request_id()
-            id3 = manager.generate_request_id()
-            
-            # Extract counters
-            counter1 = int(id1[16:20])
-            counter2 = int(id2[16:20])
-            counter3 = int(id3[16:20])
-            
-            # Counters should increment
-            assert counter2 == counter1 + 1
-            assert counter3 == counter2 + 1
-            
-            # Timestamps should be identical
-            assert id1[:16] == id2[:16] == id3[:16]
-    
-    def test_counter_reset_on_new_timestamp(self):
+            id1 = await manager.generate_request_id()
+            id2 = await manager.generate_request_id()
+            id3 = await manager.generate_request_id()
+        counter1, counter2, counter3 = int(id1[16:20]), int(id2[16:20]), int(id3[16:20])
+        assert counter2 == counter1 + 1
+        assert counter3 == counter2 + 1
+        assert id1[:16] == id2[:16] == id3[:16]
+
+    @pytest.mark.asyncio
+    async def test_counter_reset_on_new_timestamp(self):
         """Test that counter resets when timestamp changes"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        
-        # First call with timestamp T1
-        with patch('motor.coordinator.core.request_manager.time.time') as mock_time:
+        with patch('motor.coordinator.domain.request_manager.time.time') as mock_time:
             mock_time.return_value = 1691234567.890123
-            id1 = manager.generate_request_id()
-            counter1 = int(id1[16:20])
-        
-        # Second call with different timestamp T2
-        with patch('motor.coordinator.core.request_manager.time.time') as mock_time:
-            mock_time.return_value = 1691234567.890124  # Different microsecond
-            id2 = manager.generate_request_id()
+            id1 = await manager.generate_request_id()
+        with patch('motor.coordinator.domain.request_manager.time.time') as mock_time:
+            mock_time.return_value = 1691234567.890124
+            id2 = await manager.generate_request_id()
             counter2 = int(id2[16:20])
-        
-        # Counter should reset to 0 for new timestamp
         assert counter2 == 0
-        # Timestamps should be different
         assert id1[:16] != id2[:16]
 
-    def test_add_req_info_and_del_req_info(self):
+    @pytest.mark.asyncio
+    async def test_add_req_info_and_del_req_info(self):
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        
-        # Create a RequestInfo object
-        req_id = manager.generate_request_id()
+        req_id = await manager.generate_request_id()
         req_info = RequestInfo(
             req_id=req_id,
             req_data={"test": "data"},
             req_len=100,
             api="/test/api"
         )
-        
-        # Test add_req_info
-        result = manager.add_req_info(req_info)
-        assert result == True
-        assert req_id in manager._req_info_dict
-        assert manager._req_info_dict[req_id].req_id == req_id
-        
-        # Test del_req_info
-        result = manager.del_req_info(req_id)
-        assert result == True
-        assert req_id not in manager._req_info_dict
-        
-        # Test del_req_info with non-existent ID
-        result = manager.del_req_info("non_existent_id")
-        assert result == False
+        result = await manager.add_req_info(req_info)
+        assert result is True
+        async with manager._lock:
+            assert req_id in manager._req_info_dict
+            assert manager._req_info_dict[req_id].req_id == req_id
+        result = await manager.del_req_info(req_id)
+        assert result is True
+        async with manager._lock:
+            assert req_id not in manager._req_info_dict
+        result = await manager.del_req_info("non_existent_id")
+        assert result is False
 
-    def test_concurrent_access(self):
-        """Test concurrent access to add_req_info and del_req_info methods"""
+    @pytest.mark.asyncio
+    async def test_concurrent_async_access(self):
+        """Test concurrent async access to add_req_info and del_req_info"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        def worker(worker_id, results):
-            try:
-                # Generate request ID
-                req_id = manager.generate_request_id()
-                
-                # Create RequestInfo
-                req_info = RequestInfo(
-                    req_id=req_id,
-                    req_data={"worker_id": worker_id, "test": "data"},
-                    req_len=100,
-                    api=f"/test/api/{worker_id}"
-                )
-                
-                # Add request
-                add_result = manager.add_req_info(req_info)
-                
-                # Delete request
-                del_result = manager.del_req_info(req_id)
-                
-                results[worker_id] = (add_result, del_result)
-            except Exception as e:
-                results[worker_id] = (False, False, str(e))
-        
-        # Run multiple threads
-        num_threads = 10
-        threads = []
         results = {}
-        
-        for i in range(num_threads):
-            thread = threading.Thread(target=worker, args=(i, results))
-            threads.append(thread)
-            thread.start()
-        
-        # Wait for all threads to complete
-        for thread in threads:
-            thread.join()
-        
-        # Check results
-        for i in range(num_threads):
-            assert i in results
-            assert results[i][0] == True, f"Add failed for worker {i}"
-            assert results[i][1] == True, f"Delete failed for worker {i}"
-            
-    def test_request_persistence(self):
+
+        async def worker(worker_id: int):
+            req_id = await manager.generate_request_id()
+            req_info = RequestInfo(
+                req_id=req_id,
+                req_data={"worker_id": worker_id, "test": "data"},
+                req_len=100,
+                api=f"/test/api/{worker_id}"
+            )
+            add_result = await manager.add_req_info(req_info)
+            del_result = await manager.del_req_info(req_id)
+            return (add_result, del_result)
+
+        tasks = [worker(i) for i in range(10)]
+        out = await asyncio.gather(*tasks)
+        for i, (add_ok, del_ok) in enumerate(out):
+            assert add_ok is True, f"Add failed for worker {i}"
+            assert del_ok is True, f"Delete failed for worker {i}"
+
+    @pytest.mark.asyncio
+    async def test_request_persistence(self):
         """Test that requests persist in the dictionary until deleted"""
         config = CoordinatorConfig()
         manager = RequestManager(config)
-        # Add multiple requests
         req_ids = []
         for i in range(5):
-            req_id = manager.generate_request_id()
+            req_id = await manager.generate_request_id()
             req_info = RequestInfo(
                 req_id=req_id,
                 req_data={"index": i, "test": "data"},
                 req_len=100,
                 api=f"/test/api/{i}"
             )
-            manager.add_req_info(req_info)
+            await manager.add_req_info(req_info)
             req_ids.append(req_id)
-        
-        # Check all requests exist
-        for req_id in req_ids:
-            assert req_id in manager._req_info_dict
-        
-        # Delete some requests
-        manager.del_req_info(req_ids[1])
-        manager.del_req_info(req_ids[3])
-        
-        # Check remaining requests
-        assert req_ids[0] in manager._req_info_dict
-        assert req_ids[1] not in manager._req_info_dict
-        assert req_ids[2] in manager._req_info_dict
-        assert req_ids[3] not in manager._req_info_dict
-        assert req_ids[4] in manager._req_info_dict
+        async with manager._lock:
+            for req_id in req_ids:
+                assert req_id in manager._req_info_dict
+            await asyncio.sleep(0)  # allow lock to be released for next block
+        await manager.del_req_info(req_ids[1])
+        await manager.del_req_info(req_ids[3])
+        async with manager._lock:
+            assert req_ids[0] in manager._req_info_dict
+            assert req_ids[1] not in manager._req_info_dict
+            assert req_ids[2] in manager._req_info_dict
+            assert req_ids[3] not in manager._req_info_dict
+            assert req_ids[4] in manager._req_info_dict
 
 
 @pytest.fixture
@@ -297,11 +215,11 @@ def request_manager():
     return RequestManager(config)
 
 
-def test_with_fixture(request_manager):
+@pytest.mark.asyncio
+async def test_with_fixture(request_manager):
     """Test using pytest fixture"""
-    id1 = request_manager.generate_request_id()
-    id2 = request_manager.generate_request_id()
-
+    id1 = await request_manager.generate_request_id()
+    id2 = await request_manager.generate_request_id()
     assert isinstance(id1, str)
     assert isinstance(id2, str)
     assert id1 != id2
@@ -323,3 +241,64 @@ def test_update_config():
 
     # Verify config was updated
     assert request_manager._rate_limit_config.max_requests == 1000
+
+
+# -------- Workload (add/get/update/del_req_workload) tests --------
+from motor.common.resources.endpoint import Workload
+from motor.common.resources.instance import PDRole
+
+
+@pytest.mark.asyncio
+async def test_add_get_update_del_req_workload():
+    """Test add_req_workload, get_req_workload, update_req_workload, del_req_workload."""
+    config = CoordinatorConfig()
+    manager = RequestManager(config)
+    req_id = await manager.generate_request_id()
+    role = PDRole.ROLE_P
+    workload = Workload(active_kv_cache=10.0, active_tokens=5.0)
+
+    # add
+    ok = await manager.add_req_workload(req_id, role, workload)
+    assert ok is True
+
+    # get
+    got = await manager.get_req_workload(req_id, role)
+    assert got is not None
+    assert got.active_kv_cache == 10.0
+    assert got.active_tokens == 5.0
+
+    # update (in-place style: pass updated Workload)
+    updated = Workload(active_kv_cache=0, active_tokens=3.0)
+    ok = await manager.update_req_workload(req_id, role, updated)
+    assert ok is True
+    got2 = await manager.get_req_workload(req_id, role)
+    assert got2.active_kv_cache == 0
+    assert got2.active_tokens == 3.0
+
+    # del
+    ok = await manager.del_req_workload(req_id, role)
+    assert ok is True
+    got3 = await manager.get_req_workload(req_id, role)
+    assert got3 is None
+
+
+@pytest.mark.asyncio
+async def test_add_req_workload_duplicate_returns_false():
+    """Duplicate add_req_workload for same (req_id, role) returns False."""
+    config = CoordinatorConfig()
+    manager = RequestManager(config)
+    req_id = await manager.generate_request_id()
+    role = PDRole.ROLE_D
+    w = Workload(active_tokens=1.0)
+
+    assert await manager.add_req_workload(req_id, role, w) is True
+    assert await manager.add_req_workload(req_id, role, w) is False
+
+
+@pytest.mark.asyncio
+async def test_get_req_workload_missing_returns_none():
+    """get_req_workload for non-existent (req_id, role) returns None."""
+    config = CoordinatorConfig()
+    manager = RequestManager(config)
+    got = await manager.get_req_workload("nonexistent", PDRole.ROLE_P)
+    assert got is None
