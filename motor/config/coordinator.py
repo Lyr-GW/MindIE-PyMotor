@@ -16,7 +16,7 @@ import re
 import ipaddress
 from typing import Optional, Any
 from enum import Enum
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, is_dataclass
 from pathlib import Path
 
 from motor.common.utils.logger import LoggingConfig, reconfigure_logging, get_logger
@@ -108,7 +108,7 @@ class SchedulerType(Enum):
         try:
             return cls[value.upper()]
         except (KeyError, AttributeError):
-            logger.warning(f"Invalid deploy mode: {value}")
+            logger.warning(f"Invalid scheduler type: {value}")
             return None
 
 
@@ -169,8 +169,40 @@ class APIKeyConfig:
 
 
 @dataclass
+class InferenceWorkersConfig:
+    num_workers: int = 4  # Number of inference API worker processes; >1 = multiprocess
+    # Base port for worker metaserver; 0=disabled. When >0 and num_workers>1 and CDP/PD separation,
+    # worker i listens on (host, worker_metaserver_base_port + i).
+    worker_metaserver_base_port: int = 12000
+
+
+@dataclass
+class SchedulerProcessConfig:
+    """Scheduler process configuration (default only; not user-configurable in first version)."""
+    ipc_dir: str = ""  # Base dir for IPC sockets; empty => /tmp. Used to avoid hardcoded /tmp in containers.
+    timeout: float = 5.0  # Client request timeout (seconds)
+    reconnect_interval: float = 5.0  # Client reconnect interval (seconds)
+
+    @property
+    def frontend_address(self) -> str:
+        """IPC address for ROUTER (API Server ↔ Scheduler). Derived from ipc_dir."""
+        base = (self.ipc_dir or "/tmp").rstrip("/")
+        return f"ipc://{base}/scheduler_frontend"
+
+    @property
+    def instance_pub_address(self) -> str:
+        """IPC address for instance-change PUB. Derived from ipc_dir."""
+        base = (self.ipc_dir or "/tmp").rstrip("/")
+        return f"ipc://{base}/scheduler_instance_pub"
+
+
+# First version: single default instance used by all scheduler process / client code.
+DEFAULT_SCHEDULER_PROCESS_CONFIG = SchedulerProcessConfig()
+
+
+@dataclass
 class HttpConfig:
-    """HTTP configuration class"""
+    """HTTP configuration class (host/ports, combined mode)."""
 
     combined_mode: bool = False
     coordinator_api_host: str = field(default_factory=lambda: Env.pod_ip or "127.0.0.1")
@@ -228,6 +260,7 @@ class CoordinatorConfig:
     prometheus_metrics_config: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
     exception_config: ExceptionConfig = field(default_factory=ExceptionConfig)
     scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig)
+    inference_workers_config: InferenceWorkersConfig = field(default_factory=InferenceWorkersConfig)
     infer_tls_config: TLSConfig = field(default_factory=TLSConfig)
     mgmt_tls_config: TLSConfig = field(default_factory=TLSConfig)
     etcd_tls_config: TLSConfig = field(default_factory=TLSConfig)
@@ -245,12 +278,20 @@ class CoordinatorConfig:
     # internal fields
     config_path: str | None = field(default=None, init=False)
     last_modified: float | None = field(default=None, init=False)
+    _errors: list[str] = field(default_factory=list, init=False)
+    # Set by Worker process at runtime (D direct to Worker metaserver)
+    worker_index: Optional[int] = field(default=None, repr=False)
+    worker_metaserver_port: Optional[int] = field(default=None, repr=False)
 
     def __post_init__(self):
         """Validate configuration after initialization"""
         # Refresh master lock key with coordinator prefix
         if self.standby_config.master_lock_key == "/master_lock":
             self.standby_config.master_lock_key = LOCK_SLASH + "coordinator" + self.standby_config.master_lock_key
+        # When master/standby is enabled and role_shm_name is empty (e.g. JSON override),
+        # use default for Daemon->Mgmt IPC
+        if self.standby_config.enable_master_standby and not (self.standby_config.role_shm_name or "").strip():
+            self.standby_config.role_shm_name = "coordinator_standby_role"
         self.validate_config()
 
     @classmethod
@@ -289,12 +330,18 @@ class CoordinatorConfig:
             config = cls()
 
             def update_config_from_dict(config_obj, config_dict, special_handlers=None):
-                """Update configuration object fields from dictionary, only for existing keys"""
+                """Update configuration object fields from dictionary, only for existing keys.
+                Nested dicts are merged into existing dataclass attributes (e.g. inference_workers_config).
+                """
                 for key, value in config_dict.items():
                     if special_handlers and key in special_handlers:
                         special_handlers[key](config_obj, key, value)
                     elif hasattr(config_obj, key):
-                        setattr(config_obj, key, value)
+                        existing = getattr(config_obj, key)
+                        if is_dataclass(existing) and isinstance(value, dict):
+                            update_config_from_dict(existing, value, special_handlers)
+                        else:
+                            setattr(config_obj, key, value)
 
             def set_enum_field(obj, key, value, enum_class):
                 """Set enum field value from string"""
@@ -329,6 +376,7 @@ class CoordinatorConfig:
                 ('prometheus_metrics_config', config.prometheus_metrics_config, None),
                 ('exception_config', config.exception_config, None),
                 ('scheduler_config', config.scheduler_config, scheduler_handlers),
+                ('inference_workers_config', config.inference_workers_config, None),
                 ('timeout_config', config.timeout_config, None),
                 ('api_key_config', config.api_key_config, None),
                 ('rate_limit_config', config.rate_limit_config, None),
@@ -346,6 +394,12 @@ class CoordinatorConfig:
             for section_name, config_obj, special_handlers in config_mappings:
                 if section_name in cfg:
                     update_config_from_dict(config_obj, cfg[section_name], special_handlers)
+
+            # Set default role_shm_name for coordinator when standby is on and name is empty (e.g. after JSON load)
+            if config.standby_config.enable_master_standby and not (
+                config.standby_config.role_shm_name or ""
+            ).strip():
+                config.standby_config.role_shm_name = "coordinator_standby_role"
 
             if 'aigw' in cfg:
                 config.aigw_model = dict(cfg['aigw'])
@@ -414,6 +468,25 @@ class CoordinatorConfig:
         # Validate HTTP configuration
         self._validate_port_range(self.http_config.coordinator_api_infer_port, "coordinator_api_infer_port")
         self._validate_port_range(self.http_config.coordinator_api_mgmt_port, "coordinator_api_mgmt_port")
+        if self.inference_workers_config.worker_metaserver_base_port != 0:
+            self._validate_port_range(
+                self.inference_workers_config.worker_metaserver_base_port,
+                "worker_metaserver_base_port",
+            )
+        # Multiprocess: num_workers >= 1; when Worker metaserver enabled,
+        # base_port + (num_workers-1) must be valid port
+        self._validate_positive_number(
+            self.inference_workers_config.num_workers,
+            "num_workers",
+        )
+        iwc = self.inference_workers_config
+        if iwc.num_workers > 1 and iwc.worker_metaserver_base_port > 0:
+            last_port = iwc.worker_metaserver_base_port + iwc.num_workers - 1
+            if last_port > 65535:
+                self._errors.append(
+                    f"worker_metaserver_base_port({iwc.worker_metaserver_base_port}) + "
+                    f"num_workers({iwc.num_workers}) - 1 = {last_port} exceeds max port 65535"
+                )
 
         # Validate host address
         self._validate_ip_or_hostname(self.http_config.coordinator_api_host, "coordinator_api_host")
@@ -483,9 +556,10 @@ class CoordinatorConfig:
             logger.info("Configuration file change detected, reloading...")
             new_config = self.from_json(self.config_path)
 
-            # Update current configuration
+            # Update current configuration (skip runtime-only fields not from config file)
+            _reload_skip = frozenset({"worker_index", "worker_metaserver_port"})
             for field_name in self.__dataclass_fields__:
-                if not field_name.startswith('_'):
+                if not field_name.startswith('_') and field_name not in _reload_skip:
                     setattr(self, field_name, getattr(new_config, field_name))
 
             self.last_modified = current_mtime
@@ -516,7 +590,6 @@ class CoordinatorConfig:
                 scheduler_config['deploy_mode'] = scheduler_config['deploy_mode'].value
             if 'scheduler_type' in scheduler_config and isinstance(scheduler_config['scheduler_type'], SchedulerType):
                 scheduler_config['scheduler_type'] = scheduler_config['scheduler_type'].value
-
         # Convert sets to lists for JSON serialization
         if 'api_key_config' in config_dict:
             api_key_config = config_dict['api_key_config']
@@ -577,8 +650,13 @@ class CoordinatorConfig:
             f"    └─ Combined Mode:       {'Enabled' if self.http_config.combined_mode else 'Disabled'}\n"
             "\n"
             "  Scheduler Configuration:\n"
-            f"    ├─ Deploy Mode:         {self.scheduler_config.deploy_mode.value}\n"
-            f"    └─ Scheduler Type:      {self.scheduler_config.scheduler_type.value}\n"
+            f"    ├─ Deploy Mode:               {self.scheduler_config.deploy_mode.value}\n"
+            f"    └─ Scheduler Type:            {self.scheduler_config.scheduler_type.value}\n"
+            "\n"
+            "  Multiprocess (Inference Workers):\n"
+            f"    ├─ Num Workers:               {self.inference_workers_config.num_workers}\n"
+            f"    └─ Worker Metaserver Base:    "
+            f"{self.inference_workers_config.worker_metaserver_base_port or 'disabled'}\n"
             "\n"
             "  Security:\n"
             f"    ├─ Infer TLS:           {'Enabled' if self.infer_tls_config.enable_tls else 'Disabled'}\n"

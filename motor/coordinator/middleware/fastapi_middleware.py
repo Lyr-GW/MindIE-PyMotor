@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -14,7 +13,7 @@ import json
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
@@ -28,7 +27,7 @@ from .rate_limiter import SimpleRateLimiter
 
 logger = get_logger(__name__)
 
-# 环境变量名称常量
+# Environment variable name constants
 ENV_RATE_LIMIT_ENABLED = "RATE_LIMIT_ENABLED"
 ENV_RATE_LIMIT_MAX_REQUESTS = "RATE_LIMIT_MAX_REQUESTS"
 ENV_RATE_LIMIT_WINDOW_SIZE = "RATE_LIMIT_WINDOW_SIZE"
@@ -55,7 +54,7 @@ class SimpleRateLimitConfig:
             ]
 
 
-def load_rate_limit_config(config_file: Optional[str] = None) -> SimpleRateLimitConfig:
+def load_rate_limit_config(config_file: str | None = None) -> SimpleRateLimitConfig:
     """
     load rate limiting config
     
@@ -127,12 +126,14 @@ def load_rate_limit_config(config_file: Optional[str] = None) -> SimpleRateLimit
 
 
 class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
-    """FastAPI rate limiting middleware"""
-    
-    def __init__(self, 
+    """
+    FastAPI rate limiting middleware.
+    """
+
+    def __init__(self,
                  app: ASGIApp,
-                 rate_limiter: Optional[SimpleRateLimiter] = None,
-                 skip_paths: Optional[list] = None,
+                 rate_limiter: SimpleRateLimiter | None = None,
+                 skip_paths: list | None = None,
                  error_message: str = "Request too frequent, please try again later",
                  error_status_code: int = 429):
         """
@@ -153,21 +154,43 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
         ]
         self.error_message = error_message
         self.error_status_code = error_status_code
-        
+        self.enabled = True  # Hot-reload can disable rate limit via update_config(enabled=False)
+
         self.stats = {
             "total_requests": 0,
             "allowed_requests": 0,
             "blocked_requests": 0,
             "start_time": time.time()
         }
+
+    @staticmethod
+    def _extract_request_data(request: Request) -> Dict[str, Any]:
+        return {
+            "endpoint": request.url.path,
+            "method": request.method,
+            "timestamp": time.time()
+        }
+
+    @staticmethod
+    def _create_rate_limit_headers(limit_info: Dict[str, Any]) -> Dict[str, str]:
+        headers = {}
+        
+        if "available" in limit_info:
+            headers["X-RateLimit-Remaining"] = str(limit_info["available"])
+        if "limit" in limit_info:
+            headers["X-RateLimit-Limit"] = str(limit_info["limit"])
+        if "window_size" in limit_info:
+            headers["X-RateLimit-Window"] = str(limit_info["window_size"])
+        
+        return headers
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # Update statistics
         self.stats["total_requests"] += 1
-        
+        if not self.enabled:
+            return await call_next(request)
         if self._should_skip_path(request.url.path):
             return await call_next(request)
-        
+
         try:
             request_data = self._extract_request_data(request)
             
@@ -220,28 +243,26 @@ class SimpleRateLimitMiddleware(BaseHTTPMiddleware):
             # Allow request by default when error occurs
             self.stats["allowed_requests"] += 1
             return await call_next(request)
-    
+
+    def update_config(
+        self,
+        skip_paths: list | None = None,
+        error_message: str | None = None,
+        error_status_code: int | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        """Update middleware config at runtime (for config hot-reload)."""
+        if skip_paths is not None:
+            self.skip_paths = skip_paths
+        if error_message is not None:
+            self.error_message = error_message
+        if error_status_code is not None:
+            self.error_status_code = error_status_code
+        if enabled is not None:
+            self.enabled = enabled
+
     def _should_skip_path(self, path: str) -> bool:
         return any(path.startswith(skip_path) for skip_path in self.skip_paths)
-    
-    def _extract_request_data(self, request: Request) -> Dict[str, Any]:
-        return {
-            "endpoint": request.url.path,
-            "method": request.method,
-            "timestamp": time.time()
-        }
-    
-    def _create_rate_limit_headers(self, limit_info: Dict[str, Any]) -> Dict[str, str]:
-        headers = {}
-        
-        if "available" in limit_info:
-            headers["X-RateLimit-Remaining"] = str(limit_info["available"])
-        if "limit" in limit_info:
-            headers["X-RateLimit-Limit"] = str(limit_info["limit"])
-        if "window_size" in limit_info:
-            headers["X-RateLimit-Window"] = str(limit_info["window_size"])
-        
-        return headers
 
 
 def create_simple_rate_limit_middleware(app: ASGIApp, 

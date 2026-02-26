@@ -273,7 +273,7 @@ def test_to_dict():
     # Check that all config sections are present
     expected_keys = [
         'logging_config', 'prometheus_metrics_config', 'exception_config',
-        'scheduler_config', 'infer_tls_config', 'mgmt_tls_config', 'etcd_tls_config',
+        'scheduler_config', 'inference_workers_config', 'infer_tls_config', 'mgmt_tls_config', 'etcd_tls_config',
         'timeout_config', 'api_key_config', 'rate_limit_config', 'standby_config',
         'etcd_config', 'http_config', 'aigw_model', 'api_config'
     ]
@@ -316,23 +316,23 @@ def test_save_to_json_invalid_path():
 
 
 def test_config_summary():
-    """Test configuration summary generation"""
+    """Test configuration summary generation."""
     config = CoordinatorConfig()
     summary = config.get_config_summary()
 
     assert "Coordinator Configuration Summary" in summary
-    assert "├─ Log Level:" in summary
-    assert "└─ Log Max Line Length:" in summary
-    assert "├─ HTTP Pod IP:" in summary
-    assert "├─ Inference Port:" in summary
-    assert "├─ Management Port:" in summary
-    assert "└─ Combined Mode:" in summary
-    assert "├─ Deploy Mode:" in summary
-    assert "└─ Scheduler Type:" in summary
-    assert "├─ API Key Auth:" in summary
-    assert "└─ Rate Limiting:" in summary
-    assert "└─ Master/Standby:" in summary
-    assert "└─ Config Path:" in summary
+    assert "Log Level" in summary
+    assert "Log Max Line Length" in summary
+    assert "HTTP Pod IP" in summary
+    assert "Inference Port" in summary
+    assert "Management Port" in summary
+    assert "Combined Mode" in summary
+    assert "Deploy Mode" in summary
+    assert "Scheduler Type" in summary
+    assert "API Key Auth" in summary
+    assert "Rate Limiting" in summary
+    assert "Master/Standby" in summary
+    assert "Config Path" in summary
 
 
 def test_multiple_instances():

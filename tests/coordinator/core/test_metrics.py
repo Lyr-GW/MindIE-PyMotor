@@ -10,16 +10,17 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import asyncio
 import os
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 import requests
 import re
 import copy
 from urllib.parse import urlparse
 
 from motor.common.resources.instance import Instance, PDRole, Endpoint
-from motor.coordinator.core.instance_manager import InstanceManager
+from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.metrics.metrics_collector import MetricsCollector, MetricType, SingleMetric
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.utils.singleton import ThreadSafeSingleton
@@ -27,14 +28,21 @@ from motor.common.utils.singleton import ThreadSafeSingleton
 
 def _cleanup_singletons():
     """Clean up singleton instances to ensure test isolation"""
-    singletons_to_cleanup = [MetricsCollector, InstanceManager]
+    singletons_to_cleanup = [MetricsCollector]
 
     for singleton_cls in singletons_to_cleanup:
         if singleton_cls in ThreadSafeSingleton._instances:
             instance = ThreadSafeSingleton._instances[singleton_cls]
             try:
                 if hasattr(instance, 'stop'):
-                    instance.stop()
+                    stop_result = instance.stop()
+                    # If stop() returns a coroutine, run it to avoid "never awaited" warning
+                    if asyncio.iscoroutine(stop_result):
+                        try:
+                            asyncio.run(stop_result)
+                        except RuntimeError:
+                            pass  # e.g. cannot call run() from running loop; skip
+                pass
             except Exception:
                 pass  # Ignore errors during cleanup
             del ThreadSafeSingleton._instances[singleton_cls]
@@ -798,11 +806,13 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
     def mock_requests_get_normal(self, *args, **kwargs):
         return MockResponse(self.metrics_template, 200)
 
-    @patch('motor.coordinator.core.instance_manager.InstanceManager.get_all_instances')
-    def test_get_all_instances(self, mock_get_all_instances):
-        mock_get_all_instances.side_effect = self.mock_get_all_instances_normal
+    @pytest.mark.asyncio
+    @patch('motor.coordinator.domain.instance_manager.InstanceManager.get_all_instances', new_callable=AsyncMock)
+    async def test_get_all_instances(self, mock_get_all_instances):
+        mock_get_all_instances.return_value = self.mock_get_all_instances_normal()
 
-        assert InstanceManager().get_all_instances() == self.mock_get_all_instances_normal()
+        result = await InstanceManager().get_all_instances()
+        assert result == self.mock_get_all_instances_normal()
 
     @patch('requests.get')
     def test_requests_get(self, mock_requests_get):

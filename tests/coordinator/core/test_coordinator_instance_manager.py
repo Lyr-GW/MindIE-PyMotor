@@ -11,6 +11,7 @@
 # See the Mulan PSL v2 for more details.
 
 from unittest.mock import patch, AsyncMock
+import asyncio
 import threading
 
 import httpx
@@ -18,9 +19,8 @@ import pytest
 
 from motor.common.resources import Instance, PDRole, Workload, Endpoint, EventType
 from motor.common.utils.http_client import AsyncSafeHTTPSClient
-from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig, DeployMode
-from motor.coordinator.core.instance_manager import (
+from motor.coordinator.domain.instance_manager import (
     InstanceManager, UpdateInstanceMode
 )
 
@@ -30,20 +30,9 @@ class TestInstanceManager:
 
     def setup_method(self):
         """Setup for each test method"""
-        # Clear singleton instance completely
-        if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
-            instance = ThreadSafeSingleton._instances[InstanceManager]
-            # Clear all instance attributes
-            for attr in list(instance.__dict__.keys()):
-                delattr(instance, attr)
-            del ThreadSafeSingleton._instances[InstanceManager]
-
-        # Create config for testing
         self.config = CoordinatorConfig()
-
-        # Create a fresh instance manager for each test
         self.instance_manager = InstanceManager(self.config)
-        
+
         # Test data
         self.prefill_instance = Instance(
             job_name="test-prefill",
@@ -87,96 +76,108 @@ class TestInstanceManager:
         assert len(self.instance_manager._hybrid_pool) == 0
         assert len(self.instance_manager._unavailable_pool) == 0
 
-    def test_is_available_cdp_separate(self):
-        """Test is_available method in cdp_separate mode"""
+    def test_has_required_instances_cdp_separate(self):
+        """Test has_required_instances method in cdp_separate mode"""
         # Modify the config used by setup_method
         self.config.scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
+        deploy_mode = DeployMode.CDP_SEPARATE
 
         # Create a new instance manager with the modified config
         self.instance_manager = InstanceManager(self.config)
 
         # Initially should be False
-        assert self.instance_manager.is_available() == False
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add prefill instance
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        assert self.instance_manager.is_available() == True  # No need decode instance
+        # Still need decode instance
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add decode instance
         self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-        assert self.instance_manager.is_available() == True  # Now should be True
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == True  # Now should be True
 
-    def test_is_available_pd_separate(self):
-        """Test is_available method in pd_separate mode (default)"""
+    def test_has_required_instances_pd_separate(self):
+        """Test has_required_instances method in pd_separate mode (default)"""
         # Use the default config from setup_method (already PD_SEPARATE)
+        deploy_mode = self.config.scheduler_config.deploy_mode
 
         # Initially should be False
-        assert self.instance_manager.is_available() == False
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add prefill instance
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        assert self.instance_manager.is_available() == True  # No need decode instance
+        # Still need decode instance
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add decode instance
         self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-        assert self.instance_manager.is_available() == True  # Now should be True
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == True  # Now should be True
 
-    def test_is_available_cpcd_separate(self):
-        """Test is_available method in pd_disaggregation_single_container mode"""
+    def test_has_required_instances_cpcd_separate(self):
+        """Test has_required_instances method in pd_disaggregation_single_container mode"""
         # Modify the config used by setup_method
         self.config.scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
+        deploy_mode = DeployMode.CPCD_SEPARATE
 
         # Create a new instance manager with the modified config
         self.instance_manager = InstanceManager(self.config)
 
         # Initially should be False
-        assert self.instance_manager.is_available() == False
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add prefill instance
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        assert self.instance_manager.is_available() == True  # No need decode instance
+        # Still need decode instance
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add decode instance
         self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-        assert self.instance_manager.is_available() == True  # Now should be True
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == True  # Now should be True
 
-    def test_is_available_single_node(self):
-        """Test is_available method in single_node mode"""
+    def test_has_required_instances_single_node(self):
+        """Test has_required_instances method in single_node mode"""
         # Modify the config used by setup_method
         self.config.scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
+        deploy_mode = DeployMode.SINGLE_NODE
 
         # Create a new instance manager with the modified config
         self.instance_manager = InstanceManager(self.config)
 
         # Initially should be False
-        assert self.instance_manager.is_available() == False
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == False
 
         # Add hybrid instance
         result = self.instance_manager._add_instance_to_available_pool(self.hybrid_instance)
         assert result == True
-        assert self.instance_manager.is_available() == True
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) == True
 
-    def test_is_available_unknown_mode(self):
-        """Test is_available method with unknown deploy mode"""
+    def test_has_required_instances_unknown_mode(self):
+        """Test has_required_instances method with unknown deploy mode"""
         # Modify the config used by setup_method
         self.config.scheduler_config.deploy_mode = None  # Simulate unknown mode
 
         # Create a new instance manager with the modified config
         self.instance_manager = InstanceManager(self.config)
 
-        # Should return False for unknown mode
-        assert self.instance_manager.is_available() == False
+        # Should return False for unknown mode (passing None should trigger error handling)
+        # Note: Since deploy_mode is now required, we test with an invalid enum value
+        from enum import Enum
+        class InvalidDeployMode(Enum):
+            INVALID = "invalid"
+        assert self.instance_manager.has_required_instances(deploy_mode=InvalidDeployMode.INVALID) == False
 
-    def test_is_available_no_config(self):
-        """Test is_available method when scheduler_config is missing"""
+    def test_has_required_instances_no_config(self):
+        """Test has_required_instances method when scheduler_config is missing"""
         # Modify the config used by setup_method
         self.config.scheduler_config = None
 
         # Create a new instance manager with the modified config
         self.instance_manager = InstanceManager(self.config)
 
-        # Should return False when scheduler_config is missing
-        assert self.instance_manager.is_available() == False
+        # Should return False when deploy_mode is None (error case)
+        # Note: Since deploy_mode is now required, we test with None to trigger error handling
+        assert self.instance_manager.has_required_instances(deploy_mode=None) == False
 
     def test_get_available_instances(self):
         """Test get_available_instances method"""
@@ -207,7 +208,8 @@ class TestInstanceManager:
         unknown_instances = self.instance_manager.get_available_instances("unknown")
         assert unknown_instances == {}
 
-    def test_stop_instance(self):
+    @pytest.mark.asyncio
+    async def test_stop_instance(self):
         """Test stop  method"""
         # Add instances to pools
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
@@ -226,17 +228,19 @@ class TestInstanceManager:
         hybrid_instances = self.instance_manager.get_available_instances(PDRole.ROLE_U)
         assert hybrid_instances[3] == self.hybrid_instance
 
-        assert self.instance_manager.is_available() is True
+        deploy_mode = self.config.scheduler_config.deploy_mode
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) is True
 
         # Stop instance, delete all info
-        self.instance_manager.stop()
+        await self.instance_manager.stop()
 
-        assert self.instance_manager.is_available() is False
+        assert self.instance_manager.has_required_instances(deploy_mode=deploy_mode) is False
         assert self.instance_manager.get_available_instances(PDRole.ROLE_D) == {}
         assert self.instance_manager.get_available_instances(PDRole.ROLE_P) == {}
         assert self.instance_manager.get_available_instances(PDRole.ROLE_U) == {}
 
-    def test_get_all_instances(self):
+    @pytest.mark.asyncio
+    async def test_get_all_instances(self):
         """Test get_all_instances method"""
         # Add instances to pools
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
@@ -253,7 +257,7 @@ class TestInstanceManager:
         self.instance_manager._unavailable_pool[3] = unavailable_instance
         
         # Get all instances
-        available_pool, unavailable_pool = self.instance_manager.get_all_instances()
+        available_pool, unavailable_pool = await self.instance_manager.get_all_instances()
         
         # Verify available pool contents
         assert len(available_pool) == 2
@@ -303,35 +307,35 @@ class TestInstanceManager:
         none_pool = self.instance_manager._find_available_pool(999)
         assert none_pool is None
 
-    def test_update_instance_workload_success(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_workload_success(self, caplog):
         """Test update_instance_workload method with success case"""
-        # Add instance to pool properly using the public method
+        # Instance must have endpoints so _endpoint_id_cache can resolve endpoint_id
+        self.prefill_instance.add_endpoints("127.0.0.1", {self.endpoint.id: self.endpoint})
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        
-        # Create workload change
+
         workload_change = Workload(active_tokens=10, active_kv_cache=20)
-        
-        # Update workload
-        self.instance_manager.update_instance_workload(1, self.endpoint, workload_change)
-        
-        # Verify workload was updated
+        await self.instance_manager.update_instance_workload(1, self.endpoint.id, workload_change)
+
         assert self.prefill_instance.gathered_workload.active_tokens == 10
         assert self.prefill_instance.gathered_workload.active_kv_cache == 20
         assert self.endpoint.workload.active_tokens == 10
         assert self.endpoint.workload.active_kv_cache == 20
 
-    def test_update_instance_workload_instance_not_found(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_workload_instance_not_found(self, caplog):
         """Test update_instance_workload method when instance not found"""
         # Create workload change
         workload_change = Workload(active_tokens=10, active_kv_cache=20)
         
         # Try to update workload for non-existent instance
-        self.instance_manager.update_instance_workload(999, self.endpoint, workload_change)
+        await self.instance_manager.update_instance_workload(999, self.endpoint.id, workload_change)
         
-        # Verify warning was logged
-        assert "not found in available instance pool" in caplog.text
+        # Verify warning was logged (implementation: "not found in available pool while updating workload")
+        assert "not found in available pool" in caplog.text and "999" in caplog.text
 
-    def test_update_instance_workload_instance_none(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_workload_instance_none(self, caplog):
         """Test update_instance_workload method when instance is None"""
         # Add None instance to pool
         self.instance_manager._prefill_pool[1] = None
@@ -341,33 +345,36 @@ class TestInstanceManager:
         # Create workload change
         workload_change = Workload(active_tokens=10, active_kv_cache=20)
         
-        # Try to update workload for None instance
-        self.instance_manager.update_instance_workload(1, self.endpoint, workload_change)
-        
-        # Verify warning was logged
-        assert "Instance ID 1 not found in available instance pool" in caplog.text
+        # Try to update workload for None instance (instance_id 1 maps to None in pool)
+        await self.instance_manager.update_instance_workload(1, self.endpoint.id, workload_change)
 
-    def test_delete_unavailable_instance_success(self, caplog):
+        # Implementation logs "not found in available pool while updating workload"
+        assert "Instance ID 1" in caplog.text and "not found in available pool" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_delete_unavailable_instance_success(self, caplog):
         """Test delete_unavailable_instance method with success case"""
         # Add instance to unavailable pool
         self.instance_manager._unavailable_pool[1] = self.prefill_instance
         
         # Delete instance
-        self.instance_manager.delete_unavailable_instance(1)
+        await self.instance_manager.delete_unavailable_instance(1)
         
         # Verify instance was deleted
         assert 1 not in self.instance_manager._unavailable_pool
         assert "Deleted unavailable instance with ID 1 successfully" in caplog.text
 
-    def test_delete_unavailable_instance_not_found(self, caplog):
+    @pytest.mark.asyncio
+    async def test_delete_unavailable_instance_not_found(self, caplog):
         """Test delete_unavailable_instance method when instance not found"""
         # Try to delete non-existent instance
-        self.instance_manager.delete_unavailable_instance(999)
+        await self.instance_manager.delete_unavailable_instance(999)
         
         # Verify warning was logged
         assert "Instance ID 999 not found in unavailable instance pool yet" in caplog.text
 
-    def test_update_instance_state_to_available_success(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_state_to_available_success(self, caplog):
         """Test update_instance_state method to make instance available"""
         # Add instance to unavailable pool
         unavailable_instance = Instance(
@@ -380,7 +387,7 @@ class TestInstanceManager:
         self.instance_manager._unavailable_pool[1] = unavailable_instance
         
         # Update instance state to available
-        self.instance_manager.update_instance_state(1, UpdateInstanceMode.AVAILABLE)
+        await self.instance_manager.update_instance_state(1, UpdateInstanceMode.AVAILABLE)
         
         # Verify instance was moved to available pool
         assert 1 not in self.instance_manager._unavailable_pool
@@ -388,21 +395,23 @@ class TestInstanceManager:
         assert self.instance_manager._prefill_pool[1] == unavailable_instance
         assert "Instance ID 1 updated to available successfully" in caplog.text
 
-    def test_update_instance_state_to_available_not_found(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_state_to_available_not_found(self, caplog):
         """Test update_instance_state method when instance not found in unavailable pool"""
         # Try to update non-existent instance to available
-        self.instance_manager.update_instance_state(999, UpdateInstanceMode.AVAILABLE)
+        await self.instance_manager.update_instance_state(999, UpdateInstanceMode.AVAILABLE)
         
         # Verify warning was logged
         assert "Instance ID 999 not found in unavailable instance pool" in caplog.text
 
-    def test_update_instance_state_to_unavailable_success(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_state_to_unavailable_success(self, caplog):
         """Test update_instance_state method to make instance unavailable"""
         # Add instance to available pool properly
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
         
         # Update instance state to unavailable
-        self.instance_manager.update_instance_state(1, UpdateInstanceMode.UNAVAILABLE)
+        await self.instance_manager.update_instance_state(1, UpdateInstanceMode.UNAVAILABLE)
         
         # Verify instance was moved to unavailable pool
         assert 1 not in self.instance_manager._prefill_pool
@@ -410,57 +419,62 @@ class TestInstanceManager:
         assert self.instance_manager._unavailable_pool[1] == self.prefill_instance
         assert "Instance ID 1 updated to unavailable successfully" in caplog.text
 
-    def test_update_instance_state_to_unavailable_not_found(self, caplog):
+    @pytest.mark.asyncio
+    async def test_update_instance_state_to_unavailable_not_found(self, caplog):
         """Test update_instance_state method when instance not found in available pool"""
         # Try to update non-existent instance to unavailable
-        self.instance_manager.update_instance_state(999, UpdateInstanceMode.UNAVAILABLE)
+        await self.instance_manager.update_instance_state(999, UpdateInstanceMode.UNAVAILABLE)
         
         # Verify warning was logged
         assert "Instance ID 999 not found in available instance pool, cannot update to unavailable" in caplog.text
 
-    def test_refresh_instances_add_success(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_add_success(self, caplog):
         """Test refresh_instances method with ADD event"""
         # Create instances to add
         instances = [self.prefill_instance, self.decode_instance]
         
         # Refresh instances with ADD event
-        self.instance_manager.refresh_instances(EventType.ADD, instances)
+        await self.instance_manager.refresh_instances(EventType.ADD, instances)
         
         # Verify instances were added
         assert 1 in self.instance_manager._prefill_pool
         assert self.instance_manager._prefill_pool[1] == self.prefill_instance
         assert 2 in self.instance_manager._decode_pool
         assert self.instance_manager._decode_pool[2] == self.decode_instance
-        assert "Added instance ID 1 (role: prefill, job_name: test-prefill) to available pool successfully" in caplog.text
-        assert "Added instance ID 2 (role: decode, job_name: test-decode) to available pool successfully" in caplog.text
+        # Implementation logs "with N endpoints to available pool successfully"
+        assert "Added instance ID 1" in caplog.text and "to available pool successfully" in caplog.text
+        assert "Added instance ID 2" in caplog.text
 
-    def test_refresh_instances_add_duplicate_in_available_pool(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_add_duplicate_in_available_pool(self, caplog):
         """Test refresh_instances method with ADD event for duplicate instance in available pool"""
         # Add instance first properly
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
         
         # Try to add the same instance again
         instances = [self.prefill_instance]
-        self.instance_manager.refresh_instances(EventType.ADD, instances)
+        await self.instance_manager.refresh_instances(EventType.ADD, instances)
         
         # Verify warning was logged
         assert "Instance ID 1 (role: prefill, job_name: test-prefill) already exists in available pool" in caplog.text
 
-    def test_refresh_instances_add_duplicate_in_unavailable_pool(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_add_duplicate_in_unavailable_pool(self, caplog):
         """Test refresh_instances method with ADD event for duplicate instance in unavailable pool"""
         # Add instance to unavailable pool
         self.instance_manager._unavailable_pool[1] = self.prefill_instance
         
         # Try to add the same instance again
         instances = [self.prefill_instance]
-        self.instance_manager.refresh_instances(EventType.ADD, instances)
+        await self.instance_manager.refresh_instances(EventType.ADD, instances)
         
         # Verify warning was logged
         assert "Instance ID 1 (role: prefill, job_name: test-prefill) already exists in unavailable pool" in caplog.text
 
-    def test_refresh_instances_add_unknown_role(self, caplog):
-        """Test refresh_instances method with ADD event for instance with unknown role"""
-        # Create instance with unknown role
+    @pytest.mark.asyncio
+    async def test_refresh_instances_add_unknown_role(self):
+        """Test refresh_instances with ADD event for unknown role: PDRole('unknown_role') raises ValueError."""
         unknown_instance = Instance(
             job_name="test-unknown",
             model_name="test-model",
@@ -468,66 +482,50 @@ class TestInstanceManager:
             role="unknown_role",
             endpoints={}
         )
-        
-        # Try to add instance with unknown role
-        instances = [unknown_instance]
-        self.instance_manager.refresh_instances(EventType.ADD, instances)
-        
-        # Verify error was logged
-        assert "Unknown role for instance ID 1" in caplog.text
+        with pytest.raises(ValueError, match="unknown_role|valid PDRole"):
+            await self.instance_manager.refresh_instances(EventType.ADD, [unknown_instance])
 
     @pytest.mark.asyncio
     async def test_refresh_instances_del_success(self, caplog):
         """Test refresh_instances method with DEL event"""
-        
-        self.prefill_instance.add_endpoints(f"192.168.1.{self.prefill_instance.id}", {0: self.endpoint})
-        self.decode_instance.add_endpoints(f"192.168.1.{self.decode_instance.id}", {0: self.endpoint})
-        
-        def mock_create_client(address, tls_config=None, **kwargs):
-            client = AsyncMock()
-            client.base_url = f"http://{address}"
-            client.is_closed = False
-            client.post = AsyncMock(return_value=httpx.Response(200))
-            client.aclose = AsyncMock()
-            return client
-        
-        with patch.object(AsyncSafeHTTPSClient, 'create_client', mock_create_client):
-            # Add instances first properly
-            self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-            self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-            
-            # Refresh instances with DEL event
-            instances = [self.prefill_instance]
-            self.instance_manager.refresh_instances(EventType.DEL, instances)
+        # Add both instances to available pool first, then DEL removes only prefill
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+
+        instances = [self.prefill_instance]
+        await self.instance_manager.refresh_instances(EventType.DEL, instances)
         
         # Verify instance was deleted
         assert 1 not in self.instance_manager._prefill_pool
         assert 2 in self.instance_manager._decode_pool
         assert "Deleted instance ID 1 (role: prefill, job_name: test-prefill) from available pool successfully" in caplog.text
 
-    def test_refresh_instances_del_from_unavailable(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_del_from_unavailable(self, caplog):
         """Test refresh_instances method with DEL event for unavailable instance"""
         # Add instance to unavailable pool
         self.instance_manager._unavailable_pool[1] = self.prefill_instance
         
         # Refresh instances with DEL event
         instances = [self.prefill_instance]
-        self.instance_manager.refresh_instances(EventType.DEL, instances)
+        await self.instance_manager.refresh_instances(EventType.DEL, instances)
         
         # Verify instance was deleted from unavailable pool
         assert 1 not in self.instance_manager._unavailable_pool
         assert "Deleted instance ID 1 (role: prefill, job_name: test-prefill) from unavailable pool successfully" in caplog.text
 
-    def test_refresh_instances_del_not_found(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_del_not_found(self, caplog):
         """Test refresh_instances method with DEL event for non-existent instance"""
         # Try to delete non-existent instance
         instances = [self.prefill_instance]
-        self.instance_manager.refresh_instances(EventType.DEL, instances)
+        await self.instance_manager.refresh_instances(EventType.DEL, instances)
         
         # Verify warning was logged
         assert "Instance ID 1 (role: prefill, job_name: test-prefill) not found in instance pool" in caplog.text
 
-    def test_refresh_instances_set_success(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_set_success(self, caplog):
         """Test refresh_instances method with SET event"""
         # Create new instances for setting
         new_prefill_instance = Instance(
@@ -546,40 +544,40 @@ class TestInstanceManager:
         )
         
         instances = [new_prefill_instance, new_decode_instance]
-        self.instance_manager.refresh_instances(EventType.SET, instances)
-        
+        changed = await self.instance_manager.refresh_instances(EventType.SET, instances)
+        assert changed is True
         # Verify pools were set correctly
         assert len(self.instance_manager._prefill_pool) == 1
         assert len(self.instance_manager._decode_pool) == 1
         assert 10 in self.instance_manager._prefill_pool
         assert 20 in self.instance_manager._decode_pool
-        assert "Added instance ID 10 (role: prefill, job_name: new-prefill) to available pool successfully" in caplog.text
-        assert "Added instance ID 20 (role: decode, job_name: new-decode) to available pool successfully" in caplog.text
+        assert "Added instance ID 10" in caplog.text and "to available pool successfully" in caplog.text
+        assert "Added instance ID 20" in caplog.text
 
-    def test_refresh_instances_set_with_existing_instances(self, caplog):
-        """Test refresh_instances method with SET event when pools already have instances"""
-        # Add some instances first properly
+    @pytest.mark.asyncio
+    async def test_refresh_instances_set_with_existing_instances(self, caplog):
+        """Test refresh_instances with SET when pools have instances: SET applies diff (remove P, add D)."""
         self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-        
-        # Try to set new instances - should fail because pools are not empty
         instances = [self.decode_instance]
-        self.instance_manager.refresh_instances(EventType.SET, instances)
-        
-        # Verify error was logged and operation was cancelled
-        assert "Cannot set instance pools when there are existing instances in pools" in caplog.text
+        changed = await self.instance_manager.refresh_instances(EventType.SET, instances)
+        assert changed is True
+        assert "SET: removing" in caplog.text and "adding" in caplog.text
+        assert len(self.instance_manager._prefill_pool) == 0
+        assert len(self.instance_manager._decode_pool) == 1
+        assert self.decode_instance.id in self.instance_manager._decode_pool
 
-    def test_refresh_instances_unknown_event(self, caplog):
+    @pytest.mark.asyncio
+    async def test_refresh_instances_unknown_event(self, caplog):
         """Test refresh_instances method with unknown event type"""
         # Try to refresh with unknown event type
         instances = [self.prefill_instance]
-        self.instance_manager.refresh_instances("unknown", instances)
+        await self.instance_manager.refresh_instances("unknown", instances)
         
         # Verify error was logged
         assert "Unknown event type: unknown" in caplog.text
 
-    def test_add_instances_unknown_role(self, caplog):
-        """Test _add_instances method with unknown role"""
-        # Create instance with unknown role
+    def test_add_instances_unknown_role(self):
+        """Test _add_instances with unknown role: PDRole('unknown_role') raises ValueError."""
         unknown_instance = Instance(
             job_name="test-unknown",
             model_name="test-model",
@@ -587,24 +585,20 @@ class TestInstanceManager:
             role="unknown_role",
             endpoints={}
         )
-        
-        # Try to add instance with unknown role
-        self.instance_manager._add_instances([unknown_instance])
-        
-        # Verify error was logged
-        assert "Unknown role for instance ID 1" in caplog.text
 
-    def test_delete_instances_empty_pools(self):
-        """Test _delete_instances method when pools are empty"""
-        # Try to delete instance from empty pools
-        self.instance_manager._delete_instances([self.prefill_instance])
-        
-        # Should not raise any exception
+        # _add_instance_to_available_pool uses _role_to_pdrole(instance.role); invalid role raises
+        with pytest.raises(ValueError, match="unknown_role|valid PDRole"):
+            self.instance_manager._add_instances([unknown_instance])
+
+    @pytest.mark.asyncio
+    async def test_delete_instances_empty_pools(self):
+        """Test _delete_instances path when pools are empty (via refresh_instances DEL)"""
+        await self.instance_manager.refresh_instances(EventType.DEL, [self.prefill_instance])
         assert True
 
-    def test_set_instances_empty_pools(self):
-        """Test _set_instances method with empty pools"""
-        # Create new instances for setting
+    @pytest.mark.asyncio
+    async def test_set_instances_empty_pools(self):
+        """Test _apply_set_diff when pools are empty: SET adds new instance."""
         new_prefill_instance = Instance(
             job_name="new-prefill",
             model_name="test-model",
@@ -612,13 +606,62 @@ class TestInstanceManager:
             role=PDRole.ROLE_P,
             endpoints={}
         )
-        
-        # Set instances when pools are empty
-        self.instance_manager._set_instances([new_prefill_instance])
-        
-        # Verify instance was added
+        changed = await self.instance_manager.refresh_instances(EventType.SET, [new_prefill_instance])
+        assert changed is True
         assert len(self.instance_manager._prefill_pool) == 1
         assert 10 in self.instance_manager._prefill_pool
+
+    @pytest.mark.asyncio
+    async def test_set_instances_no_diff_returns_false(self, caplog):
+        """SET with same instance set as current: no change, returns False."""
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        instances = [self.prefill_instance, self.decode_instance]
+        changed = await self.instance_manager.refresh_instances(EventType.SET, instances)
+        assert changed is False
+        assert len(self.instance_manager._prefill_pool) == 1 and len(self.instance_manager._decode_pool) == 1
+
+    @pytest.mark.asyncio
+    async def test_set_instances_only_add(self, caplog):
+        """SET adds one new instance, keeps existing."""
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        new_decode = Instance(
+            job_name="new-decode",
+            model_name="test-model",
+            id=20,
+            role=PDRole.ROLE_D,
+            endpoints={}
+        )
+        changed = await self.instance_manager.refresh_instances(
+            EventType.SET, [self.prefill_instance, new_decode]
+        )
+        assert changed is True
+        assert len(self.instance_manager._prefill_pool) == 1
+        assert len(self.instance_manager._decode_pool) == 1
+        assert 20 in self.instance_manager._decode_pool
+
+    @pytest.mark.asyncio
+    async def test_set_instances_only_remove(self, caplog):
+        """SET removes one instance, keeps the other."""
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        changed = await self.instance_manager.refresh_instances(
+            EventType.SET, [self.prefill_instance]
+        )
+        assert changed is True
+        assert len(self.instance_manager._prefill_pool) == 1
+        assert len(self.instance_manager._decode_pool) == 0
+
+    @pytest.mark.asyncio
+    async def test_set_instances_empty_list_clears_all(self):
+        """SET with empty list removes all instances."""
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+        changed = await self.instance_manager.refresh_instances(EventType.SET, [])
+        assert changed is True
+        assert len(self.instance_manager._prefill_pool) == 0
+        assert len(self.instance_manager._decode_pool) == 0
+        assert len(self.instance_manager._available_pool) == 0
 
 
 class TestInstanceManagerThreadSafety:
@@ -626,18 +669,7 @@ class TestInstanceManagerThreadSafety:
 
     def setup_method(self):
         """Setup for each test method"""
-        # Clear singleton instance completely
-        if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
-            instance = ThreadSafeSingleton._instances[InstanceManager]
-            # Clear all instance attributes
-            for attr in list(instance.__dict__.keys()):
-                delattr(instance, attr)
-            del ThreadSafeSingleton._instances[InstanceManager]
-
-        # Create config for testing
         self.config = CoordinatorConfig()
-
-        # Create a fresh instance manager for each test
         self.instance_manager = InstanceManager(self.config)
 
         # Test data
@@ -682,10 +714,16 @@ class TestInstanceManagerThreadSafety:
         add_results = []
         delete_results = []
         lock = threading.Lock()
-        
+        loop = asyncio.new_event_loop()
+
+        def run_loop():
+            loop.run_forever()
+
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+
         def add_instance_task(iteration):
             try:
-                # Create unique instance for each iteration
                 instance = Instance(
                     job_name=f"test-add-{iteration}",
                     model_name="test-model",
@@ -693,17 +731,17 @@ class TestInstanceManagerThreadSafety:
                     role=PDRole.ROLE_U,
                     endpoints={}
                 )
-                self.instance_manager.refresh_instances(EventType.ADD, [instance])
-                
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.refresh_instances(EventType.ADD, [instance]), loop
+                ).result(timeout=10)
                 with lock:
                     add_results.append(f"add_success_{iteration}")
             except Exception as e:
                 with lock:
                     add_results.append(f"add_error_{iteration}: {str(e)}")
-        
+
         def delete_instance_task(iteration):
             try:
-                # Create instance to delete
                 instance = Instance(
                     job_name=f"test-del-{iteration}",
                     model_name="test-model",
@@ -711,43 +749,45 @@ class TestInstanceManagerThreadSafety:
                     role=PDRole.ROLE_P,
                     endpoints={}
                 )
-                # First add the instance to make sure it exists
-                self.instance_manager.refresh_instances(EventType.ADD, [instance])
-                # Then delete it
-                self.instance_manager.refresh_instances(EventType.DEL, [instance])
-                
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.refresh_instances(EventType.ADD, [instance]), loop
+                ).result(timeout=10)
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.refresh_instances(EventType.DEL, [instance]), loop
+                ).result(timeout=10)
                 with lock:
                     delete_results.append(f"delete_success_{iteration}")
             except Exception as e:
                 with lock:
                     delete_results.append(f"delete_error_{iteration}: {str(e)}")
-        
+
         # Run multiple concurrent operations
         threads = []
-        
-        # Start 5 add threads, each performing 50 iterations
+
         for i in range(5):
-            thread = threading.Thread(target=lambda: [add_instance_task(j) for j in range(i*50, (i+1)*50)])
+            thread = threading.Thread(target=lambda i=i: [add_instance_task(j) for j in range(i*50, (i+1)*50)])
             threads.append(thread)
             thread.start()
-        
-        # Start 3 delete threads, each performing 50 iterations
+
         for i in range(3):
-            thread = threading.Thread(target=lambda: [delete_instance_task(j) for j in range(i*50, (i+1)*50)])
+            thread = threading.Thread(target=lambda i=i: [delete_instance_task(j) for j in range(i*50, (i+1)*50)])
             threads.append(thread)
             thread.start()
         
         # Wait for all threads to complete
         for thread in threads:
             thread.join()
-        
+
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2)
+
         # Verify that operations succeeded
         add_success_count = sum(1 for r in add_results if "add_success" in r)
         delete_success_count = sum(1 for r in delete_results if "delete_success" in r)
-        
+
         assert add_success_count > 0, f"Expected some add operations to succeed, got results: {add_results}"
         assert delete_success_count > 0, f"Expected some delete operations to succeed, got results: {delete_results}"
-        
+
         # Verify final state consistency
         available_count = (len(self.instance_manager._prefill_pool) + 
                           len(self.instance_manager._decode_pool) + 
@@ -777,53 +817,65 @@ class TestInstanceManagerThreadSafety:
         unavailable_results = []
         available_results = []
         lock = threading.Lock()
-        
+        loop = asyncio.new_event_loop()
+
+        def run_loop():
+            loop.run_forever()
+
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+
         def make_unavailable_task(instance_id, iteration):
             try:
-                self.instance_manager.update_instance_state(instance_id, UpdateInstanceMode.UNAVAILABLE)
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.update_instance_state(instance_id, UpdateInstanceMode.UNAVAILABLE), loop
+                ).result(timeout=10)
                 with lock:
                     unavailable_results.append(f"to_unavailable_success_{iteration}")
             except Exception as e:
                 with lock:
                     unavailable_results.append(f"to_unavailable_error_{iteration}: {str(e)}")
-        
+
         def make_available_task(instance_id, iteration):
             try:
-                self.instance_manager.update_instance_state(instance_id, UpdateInstanceMode.AVAILABLE)
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.update_instance_state(instance_id, UpdateInstanceMode.AVAILABLE), loop
+                ).result(timeout=10)
                 with lock:
                     available_results.append(f"to_available_success_{iteration}")
             except Exception as e:
                 with lock:
                     available_results.append(f"to_available_error_{iteration}: {str(e)}")
-        
+
         # Run concurrent operations
         threads = []
-        
-        # Start 4 threads to make instances unavailable, each performing 30 iterations
+
         for i in range(4):
             thread = threading.Thread(
-                target=lambda: [
-                    make_unavailable_task(100 + (j % 10), j) 
+                target=lambda i=i: [
+                    make_unavailable_task(100 + (j % 10), j)
                     for j in range(i*30, (i+1)*30)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
-        # Start 4 threads to make instances available, each performing 30 iterations
+
         for i in range(4):
             thread = threading.Thread(
-                target=lambda: [
-                    make_available_task(100 + (j % 10), j) 
+                target=lambda i=i: [
+                    make_available_task(100 + (j % 10), j)
                     for j in range(i*30, (i+1)*30)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
+
         # Wait for all threads to complete
         for thread in threads:
             thread.join()
+
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2)
         
         # Verify that operations succeeded
         unavailable_success_count = sum(1 for r in unavailable_results if "to_unavailable_success" in r)
@@ -853,45 +905,55 @@ class TestInstanceManagerThreadSafety:
         # Thread-safe counter for tracking results
         results = []
         lock = threading.Lock()
-        
+        loop = asyncio.new_event_loop()
+
+        def run_loop():
+            loop.run_forever()
+
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+
         def update_workload_task(iteration, tokens, kv_cache):
             try:
                 workload_change = Workload(active_tokens=tokens, active_kv_cache=kv_cache)
-                self.instance_manager.update_instance_workload(1, self.endpoint, workload_change)
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.update_instance_workload(1, self.endpoint.id, workload_change), loop
+                ).result(timeout=10)
                 with lock:
                     results.append(f"update_success_{iteration}")
             except Exception as e:
                 with lock:
                     results.append(f"update_error_{iteration}: {str(e)}")
-        
+
         # Run concurrent update operations
         threads = []
-        
-        # Start 5 threads for positive workload updates, each performing 40 iterations
+
         for i in range(5):
             thread = threading.Thread(
-                target=lambda: [
-                    update_workload_task(j, 10, 20) 
+                target=lambda i=i: [
+                    update_workload_task(j, 10, 20)
                     for j in range(i*40, (i+1)*40)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
-        # Start 5 threads for negative workload updates, each performing 40 iterations
+
         for i in range(5):
             thread = threading.Thread(
-                target=lambda: [
-                    update_workload_task(j, -5, -10) 
+                target=lambda i=i: [
+                    update_workload_task(j, -5, -10)
                     for j in range(i*40, (i+1)*40)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
+
         # Wait for all threads to complete
         for thread in threads:
             thread.join()
+
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2)
         
         # Verify that operations succeeded
         success_count = sum(1 for r in results if "update_success" in r)
@@ -903,8 +965,8 @@ class TestInstanceManagerThreadSafety:
         assert self.endpoint.workload.active_tokens >= 0, "Negative endpoint token count"
         assert self.endpoint.workload.active_kv_cache >= 0, "Negative endpoint KV cache count"
 
-    def test_concurrent_is_available_calls(self):
-        """Test concurrent is_available calls under different conditions with enhanced concurrency"""
+    def test_concurrent_has_required_instances_calls(self):
+        """Test concurrent has_required_instances calls under different conditions with enhanced concurrency"""
         # Use config with cdp_separate deploy mode
         self.config.scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
         self.instance_manager = InstanceManager(self.config)
@@ -913,9 +975,11 @@ class TestInstanceManagerThreadSafety:
         results = []
         lock = threading.Lock()
 
+        deploy_mode = self.config.scheduler_config.deploy_mode
+        
         def check_availability_task(iteration):
             try:
-                result = self.instance_manager.is_available()
+                result = self.instance_manager.has_required_instances(deploy_mode=deploy_mode)
                 with lock:
                     results.append((iteration, result))
             except Exception as e:
@@ -923,49 +987,47 @@ class TestInstanceManagerThreadSafety:
                     results.append((iteration, f"error: {str(e)}"))
 
         # Run multiple concurrent availability checks when not available
-            threads = []
-            # Start 8 threads, each performing 20 iterations
-            for i in range(8):
-                thread = threading.Thread(
-                    target=lambda: [
-                        check_availability_task(j) 
-                        for j in range(i*20, (i+1)*20)
-                    ]
-                )
-                threads.append(thread)
-                thread.start()
-            
-            for thread in threads:
-                thread.join()
-            
-            # All checks should return False (no instances added yet)
-            false_count = sum(1 for _, r in results if r is False)
-            assert false_count == 160, f"Expected all checks to return False, got {false_count} False out of {len(results)}"
-            
-            # Add instances to make it available
-            self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
-            self.instance_manager._add_instance_to_available_pool(self.decode_instance)
-            
-            # Run multiple concurrent availability checks when available
-            results = []
-            threads = []
-            # Start 8 threads, each performing 20 iterations
-            for i in range(8):
-                thread = threading.Thread(
-                    target=lambda: [
-                        check_availability_task(j) 
-                        for j in range(i*20, (i+1)*20)
-                    ]
-                )
-                threads.append(thread)
-                thread.start()
-            
-            for thread in threads:
-                thread.join()
-            
-            # All checks should return True
-            true_count = sum(1 for _, r in results if r is True)
-            assert true_count == 160, f"Expected all checks to return True, got {true_count} True out of {len(results)}"
+        threads = []
+        for i in range(8):
+            thread = threading.Thread(
+                target=lambda i=i: [
+                    check_availability_task(j)
+                    for j in range(i*20, (i+1)*20)
+                ]
+            )
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        # All checks should return False (no instances added yet)
+        false_count = sum(1 for _, r in results if r is False)
+        assert false_count == 160, f"Expected all checks to return False, got {false_count} False out of {len(results)}"
+
+        # Add instances to make it available
+        self.instance_manager._add_instance_to_available_pool(self.prefill_instance)
+        self.instance_manager._add_instance_to_available_pool(self.decode_instance)
+
+        # Run multiple concurrent availability checks when available
+        results = []
+        threads = []
+        for i in range(8):
+            thread = threading.Thread(
+                target=lambda i=i: [
+                    check_availability_task(j)
+                    for j in range(i*20, (i+1)*20)
+                ]
+            )
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        # All checks should return True
+        true_count = sum(1 for _, r in results if r is True)
+        assert true_count == 160, f"Expected all checks to return True, got {true_count} True out of {len(results)}"
 
     def test_concurrent_get_available_instances(self):
         """Test concurrent get_available_instances calls with enhanced concurrency"""
@@ -1009,19 +1071,19 @@ class TestInstanceManagerThreadSafety:
         # Start 6 threads for prefill instances, each performing 30 iterations
         for i in range(6):
             thread = threading.Thread(
-                target=lambda: [
-                    get_prefill_instances_task(j) 
+                target=lambda i=i: [
+                    get_prefill_instances_task(j)
                     for j in range(i*30, (i+1)*30)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
+
         # Start 6 threads for decode instances, each performing 30 iterations
         for i in range(6):
             thread = threading.Thread(
-                target=lambda: [
-                    get_decode_instances_task(j) 
+                target=lambda i=i: [
+                    get_decode_instances_task(j)
                     for j in range(i*30, (i+1)*30)
                 ]
             )
@@ -1073,19 +1135,27 @@ class TestInstanceManagerThreadSafety:
         results = []
         errors = []
         lock = threading.Lock()
-        
+        loop = asyncio.new_event_loop()
+
+        def run_loop():
+            loop.run_forever()
+
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+
         def get_all_instances_task(iteration):
             try:
-                available_pool, unavailable_pool = self.instance_manager.get_all_instances()
+                available_pool, unavailable_pool = asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.get_all_instances(), loop
+                ).result(timeout=10)
                 with lock:
                     results.append((iteration, len(available_pool), len(unavailable_pool)))
             except Exception as e:
                 with lock:
                     errors.append((iteration, str(e)))
-        
+
         def modify_instances_task(iteration):
             try:
-                # Add a new instance to available pool
                 if iteration % 2 == 0:
                     instance = Instance(
                         job_name=f"test-modify-available-{iteration}",
@@ -1094,8 +1164,9 @@ class TestInstanceManagerThreadSafety:
                         role=PDRole.ROLE_P,
                         endpoints={}
                     )
-                    self.instance_manager.refresh_instances(EventType.ADD, [instance])
-                # Add a new instance to unavailable pool
+                    asyncio.run_coroutine_threadsafe(
+                        self.instance_manager.refresh_instances(EventType.ADD, [instance]), loop
+                    ).result(timeout=10)
                 else:
                     instance = Instance(
                         job_name=f"test-modify-unavailable-{iteration}",
@@ -1108,35 +1179,36 @@ class TestInstanceManagerThreadSafety:
             except Exception as e:
                 with lock:
                     errors.append((iteration, str(e)))
-        
+
         # Run concurrent get and modify operations
         threads = []
-        
-        # Start 3 threads for getting all instances, each performing 40 iterations
+
         for i in range(3):
             thread = threading.Thread(
-                target=lambda: [
-                    get_all_instances_task(j) 
+                target=lambda i=i: [
+                    get_all_instances_task(j)
                     for j in range(i*40, (i+1)*40)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
-        # Start 3 threads for modifying instances, each performing 40 iterations
+
         for i in range(3):
             thread = threading.Thread(
-                target=lambda: [
-                    modify_instances_task(j) 
+                target=lambda i=i: [
+                    modify_instances_task(j)
                     for j in range(i*40, (i+1)*40)
                 ]
             )
             threads.append(thread)
             thread.start()
-        
+
         # Wait for all threads to complete
         for thread in threads:
             thread.join()
+
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2)
         
         # Verify that operations succeeded
         assert len(errors) == 0, f"Expected no errors, got {len(errors)} errors: {errors}"
@@ -1152,6 +1224,14 @@ class TestInstanceManagerThreadSafety:
 
     def test_large_scale_concurrent_operations(self):
         """Test large scale concurrent operations to stress test thread safety"""
+        loop = asyncio.new_event_loop()
+
+        def run_loop():
+            loop.run_forever()
+
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+
         def add_instance_task(instance_id, iteration):
             instance = Instance(
                 job_name=f"test-add-{instance_id}-{iteration}",
@@ -1161,11 +1241,13 @@ class TestInstanceManagerThreadSafety:
                 endpoints={}
             )
             try:
-                self.instance_manager.refresh_instances(EventType.ADD, [instance])
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.refresh_instances(EventType.ADD, [instance]), loop
+                ).result(timeout=10)
                 return f"add_{instance_id}_{iteration}_success"
             except Exception as e:
                 return f"add_{instance_id}_{iteration}_error: {str(e)}"
-        
+
         def delete_instance_task(instance_id, iteration):
             instance = Instance(
                 job_name=f"test-del-{instance_id}-{iteration}",
@@ -1175,16 +1257,18 @@ class TestInstanceManagerThreadSafety:
                 endpoints={}
             )
             try:
-                self.instance_manager.refresh_instances(EventType.DEL, [instance])
+                asyncio.run_coroutine_threadsafe(
+                    self.instance_manager.refresh_instances(EventType.DEL, [instance]), loop
+                ).result(timeout=10)
                 return f"del_{instance_id}_{iteration}_success"
             except Exception as e:
                 return f"del_{instance_id}_{iteration}_error: {str(e)}"
-        
+
         # Thread-safe counter for tracking results
         results = []
         lock = threading.Lock()
-        
-        # First add some instances
+
+        # First add some instances (run in loop from main thread)
         for i in range(50):
             instance = Instance(
                 job_name=f"initial-{i}",
@@ -1193,8 +1277,10 @@ class TestInstanceManagerThreadSafety:
                 role=PDRole.ROLE_P if i % 2 == 0 else PDRole.ROLE_D,
                 endpoints={}
             )
-            self.instance_manager.refresh_instances(EventType.ADD, [instance])
-        
+            asyncio.run_coroutine_threadsafe(
+                self.instance_manager.refresh_instances(EventType.ADD, [instance]), loop
+            ).result(timeout=10)
+
         def add_worker(start_id):
             local_results = []
             for i in range(start_id, start_id + 20):
@@ -1202,7 +1288,7 @@ class TestInstanceManagerThreadSafety:
                 local_results.append(result)
             with lock:
                 results.extend(local_results)
-        
+
         def delete_worker(start_id):
             local_results = []
             for i in range(start_id, start_id + 10):
@@ -1210,25 +1296,26 @@ class TestInstanceManagerThreadSafety:
                 local_results.append(result)
             with lock:
                 results.extend(local_results)
-        
+
         # Run concurrent add/delete operations
         threads = []
-        
-        # Start 10 add threads, each adding 20 instances
+
         for i in range(10):
             thread = threading.Thread(target=add_worker, args=(i*20,))
             threads.append(thread)
             thread.start()
-        
-        # Start 10 delete threads, each deleting 10 instances
+
         for i in range(10):
             thread = threading.Thread(target=delete_worker, args=(i*10,))
             threads.append(thread)
             thread.start()
-        
+
         # Wait for all threads to complete
         for thread in threads:
             thread.join()
+
+        loop.call_soon_threadsafe(loop.stop)
+        loop_thread.join(timeout=2)
         
         # Verify that operations completed
         success_count = sum(1 for r in results if "success" in r)
@@ -1244,22 +1331,3 @@ class TestInstanceManagerThreadSafety:
         total_instances = available_count + unavailable_count
         assert total_instances >= 0, f"Invalid instance count: {total_instances}"
         assert total_instances <= 300, f"Unexpectedly high instance count: {total_instances}"
-
-    def test_update_config(self):
-        """Test InstanceManager update_config method"""
-        # Create initial config
-        initial_config = CoordinatorConfig()
-        initial_config.scheduler_config.deploy_mode = "single_node"
-
-        # Create instance manager with initial config
-        instance_manager = InstanceManager(initial_config)
-
-        # Create new config with different values
-        new_config = CoordinatorConfig()
-        new_config.scheduler_config.deploy_mode = "pd_separate"
-
-        # Update config
-        instance_manager.update_config(new_config)
-
-        # Verify config was updated (check internal state)
-        assert instance_manager._scheduler_config.deploy_mode == "pd_separate"

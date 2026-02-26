@@ -11,7 +11,7 @@
 # See the Mulan PSL v2 for more details.
 
 """
-Test cert_util functionality in coordinator_server.py
+Test cert_util functionality used by ManagementServer/InferenceServer for TLS.
 """
 import os
 import tempfile
@@ -291,25 +291,21 @@ def test_cert_util_validation(test_certificates):
 
 
 def test_coordinator_server_ssl_config(test_certificates):
-    """Test Coordinator server SSL configuration"""
+    """Test Coordinator (ManagementServer/InferenceServer) SSL configuration via cert_util"""
     logger.info("=== Testing Coordinator server SSL configuration ===")
-    
+
     test_certs = test_certificates
-    
-    # Create SSL configuration
     tls_config = TLSConfig(
         enable_tls=True,
         ca_file=test_certs["ca_cert"],
         cert_file=test_certs["server_cert"],
         key_file=test_certs["server_key"]
     )
-    
     logger.info("Coordinator server SSL configuration created successfully")
-    
+
     ssl_context = CertUtil.create_ssl_context(tls_config=tls_config)
-    
     assert ssl_context is not None, "SSL context should be created successfully"
-    logger.info("SSL context created successfully, cert_util works properly in coordinator_server")
+    logger.info("SSL context created successfully, cert_util works properly for coordinator TLS")
 
 
 def test_ssl_disabled_mode():

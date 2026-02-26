@@ -15,23 +15,19 @@ import pytest
 import httpx
 
 from motor.coordinator.scheduler.scheduler import Scheduler, SchedulerType
-from motor.coordinator.core.instance_manager import InstanceManager
+from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
+from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
+from motor.coordinator.domain.instance_manager import InstanceManager
+from motor.coordinator.router.workload_action_handler import calculate_demand_workload
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction
 from motor.common.resources.http_msg_spec import EventType
-from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.common.utils.http_client import AsyncSafeHTTPSClient
 
 
 @pytest.fixture(autouse=True)
 def clear_instance_manager():
-    """Clear InstanceManager singleton before each test to ensure isolation."""
-    if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
-        instance = ThreadSafeSingleton._instances[InstanceManager]
-        for attr in list(instance.__dict__.keys()):
-            delattr(instance, attr)
-        del ThreadSafeSingleton._instances[InstanceManager]
+    """No-op: InstanceManager is no longer a singleton; each test creates its own."""
     yield
 
 
@@ -96,20 +92,18 @@ def mock_create_client(address, tls_config=None, **kwargs):
 
 
 @pytest.fixture
-def scheduler_setup(prefill_instances, decode_instances, mix_instances):
+async def scheduler_setup(prefill_instances, decode_instances, mix_instances):
     """Setup scheduler with instances and endpoints."""
     config = CoordinatorConfig()
     instance_manager = InstanceManager(config)
 
-    # Clear all existing instances first
-    available_pool, unavailable_pool = instance_manager.get_all_instances()
+    available_pool, unavailable_pool = await instance_manager.get_all_instances()
     all_existing_instances = list(available_pool.values()) + list(unavailable_pool.values())
     if all_existing_instances:
-        instance_manager.refresh_instances(EventType.DEL, all_existing_instances)
+        await instance_manager.refresh_instances(EventType.DEL, all_existing_instances)
 
-    # Add endpoints to all instances
     all_instances = prefill_instances + decode_instances + mix_instances
-    instance_manager.refresh_instances(EventType.DEL, all_instances)
+    await instance_manager.refresh_instances(EventType.DEL, all_instances)
     for instance in all_instances:
         endpoints = {}
         for j in range(2):  # 2 endpoints per instance
@@ -124,141 +118,168 @@ def scheduler_setup(prefill_instances, decode_instances, mix_instances):
             endpoints[j] = endpoint
         instance.add_endpoints(f"192.168.1.{instance.id}", endpoints)
 
-    with patch.object(AsyncSafeHTTPSClient, 'create_client', mock_create_client):
-        instance_manager.refresh_instances(EventType.ADD, all_instances)
+    # refresh_instances is now async, and add no longer creates HTTP client; no patch needed
+    await instance_manager.refresh_instances(EventType.ADD, all_instances)
 
-    # Clear singleton instance to ensure fresh state for each test
-    if Scheduler in ThreadSafeSingleton._instances:
-        del ThreadSafeSingleton._instances[Scheduler]
+    # Fail fast if pool was not populated (e.g. CI missing asyncio_mode or different impl)
+    for role in (PDRole.ROLE_P, PDRole.ROLE_D):
+        pool = instance_manager.get_available_instances(role)
+        assert len(pool) > 0, (
+            f"scheduler_setup: get_available_instances({role}) is empty after ADD. "
+            "Check pytest asyncio_mode=auto and InstanceManager implementation."
+        )
 
-    return all_instances
+    # Return instance_manager so tests can pass it to Scheduler(..., instance_provider=...).
+    return all_instances, instance_manager
 
 
-def test_request_processing_pd_separation_scenario(scheduler_setup):
+@pytest.mark.asyncio
+async def test_request_processing_pd_separation_scenario(scheduler_setup):
     """Test PD separation scenario with load balance policy."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.LOAD_BALANCE)
     load_balance_scheduler = scheduler.get_scheduling_policy()
     request_length = 4
     req_id = "test_request_1"
-    
+
     # 1. select prefill instance and endpoint
-    selected_prefill_instance, selected_prefill_endpoint = load_balance_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
-    
+    result = load_balance_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert result is not None, (
+        "select_instance_and_endpoint(ROLE_P) returned None; InstanceManager pool may be empty or fixture did not run."
+    )
+    selected_prefill_instance, selected_prefill_endpoint = result
+
     assert selected_prefill_instance.role == PDRole.ROLE_P
-    
+
     # 2. allocate prefill workload
-    result = load_balance_scheduler.update_workload(
-        selected_prefill_instance, selected_prefill_endpoint, req_id, 
-        WorkloadAction.ALLOCATION, request_length
+    workload_p = calculate_demand_workload(PDRole.ROLE_P, request_length)
+    result = await load_balance_scheduler.update_workload(
+        selected_prefill_instance.id, selected_prefill_endpoint.id, req_id,
+        WorkloadAction.ALLOCATION, workload_p
     )
     assert result
-    
+
     assert selected_prefill_endpoint.workload.active_tokens > 0
     assert selected_prefill_endpoint.workload.active_kv_cache > 0
-    
+
     # 3. release active_tokens
-    result = load_balance_scheduler.update_workload(
-        selected_prefill_instance, selected_prefill_endpoint, req_id,
-        WorkloadAction.RELEASE_TOKENS, request_length
+    release_tokens = Workload(active_tokens=-selected_prefill_endpoint.workload.active_tokens)
+    result = await load_balance_scheduler.update_workload(
+        selected_prefill_instance.id, selected_prefill_endpoint.id, req_id,
+        WorkloadAction.RELEASE_TOKENS, release_tokens
     )
     assert result
-    
+
     assert selected_prefill_endpoint.workload.active_tokens == 0
     assert selected_prefill_endpoint.workload.active_kv_cache > 0
-    
+
     # 4. select decode instance and endpoint
-    selected_decode_instance, selected_decode_endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
-    
+    res_d = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+    assert res_d is not None, "select_instance_and_endpoint(ROLE_D) returned None."
+    selected_decode_instance, selected_decode_endpoint = res_d
+
     assert selected_decode_instance.role == PDRole.ROLE_D
-    
+
     # 5. allocate decode workload
-    result = load_balance_scheduler.update_workload(
-        selected_decode_instance, selected_decode_endpoint, req_id,
-        WorkloadAction.ALLOCATION, request_length
+    workload_d = calculate_demand_workload(PDRole.ROLE_D, request_length)
+    result = await load_balance_scheduler.update_workload(
+        selected_decode_instance.id, selected_decode_endpoint.id, req_id,
+        WorkloadAction.ALLOCATION, workload_d
     )
     assert result
-    
+
     assert selected_decode_endpoint.workload.active_tokens > 0
-    
+
     # 6. release decode workload
-    result = load_balance_scheduler.update_workload(
-        selected_decode_instance, selected_decode_endpoint, req_id,
-        WorkloadAction.RELEASE_TOKENS, request_length
+    release_d = Workload(active_tokens=-selected_decode_endpoint.workload.active_tokens)
+    result = await load_balance_scheduler.update_workload(
+        selected_decode_instance.id, selected_decode_endpoint.id, req_id,
+        WorkloadAction.RELEASE_TOKENS, release_d
     )
     assert result
-    
+
     assert selected_decode_endpoint.workload.active_tokens == 0
-    
+
     # 7. release prefill kv_cache
-    result = load_balance_scheduler.update_workload(
-        selected_prefill_instance, selected_prefill_endpoint, req_id,
-        WorkloadAction.RELEASE_KV, request_length
+    release_kv = Workload(active_kv_cache=-selected_prefill_endpoint.workload.active_kv_cache)
+    result = await load_balance_scheduler.update_workload(
+        selected_prefill_instance.id, selected_prefill_endpoint.id, req_id,
+        WorkloadAction.RELEASE_KV, release_kv
     )
     assert result
-    
+
     assert selected_prefill_endpoint.workload.active_kv_cache == 0
 
 
-def test_request_processing_mix_scenario(scheduler_setup):
+@pytest.mark.asyncio
+async def test_request_processing_mix_scenario(scheduler_setup):
     """Test mixed role scenario with load balance policy."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.LOAD_BALANCE)
     request_length = 4
     req_id = "test_request_mix_1"
-    
+
     # 1. select mix instance and endpoint
-    selected_instance, selected_endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
-    
+    result = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
+    assert result is not None, "select_instance_and_endpoint(ROLE_U) returned None."
+    selected_instance, selected_endpoint = result
+
     assert selected_instance.role == PDRole.ROLE_U
-    
+
     # 2. allocate mix workload
     load_balance_scheduler = scheduler.get_scheduling_policy()
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.ALLOCATION, request_length
+    workload_u = calculate_demand_workload(PDRole.ROLE_U, request_length)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.ALLOCATION, workload_u
     )
     assert result
-    
+
     assert selected_endpoint.workload.active_tokens > 0
     assert selected_endpoint.workload.active_kv_cache > 0
-    
+
     # 3. release tokens
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.RELEASE_TOKENS, request_length
+    release_tokens = Workload(active_tokens=-selected_endpoint.workload.active_tokens)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.RELEASE_TOKENS, release_tokens
     )
     assert result
-    
+
     assert selected_endpoint.workload.active_tokens == 0
     assert selected_endpoint.workload.active_kv_cache > 0
-    
+
     # 4. release kv_cache
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.RELEASE_KV, request_length
+    release_kv = Workload(active_kv_cache=-selected_endpoint.workload.active_kv_cache)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.RELEASE_KV, release_kv
     )
     assert result
-    
+
     assert selected_endpoint.workload.active_tokens == 0
     assert selected_endpoint.workload.active_kv_cache == 0
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("request_length", [4, 6, 3, 8, 5])
-def test_multiple_requests_load_balancing(scheduler_setup, request_length):
+async def test_multiple_requests_load_balancing(scheduler_setup, request_length):
     """Test multiple requests with different lengths."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.LOAD_BALANCE)
     
     req_id = f"test_request_{request_length}"
     
-    selected_instance, selected_endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
-    
+    result = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert result is not None, "select_instance_and_endpoint returned None (pool empty)."
+    selected_instance, selected_endpoint = result
+
     # allocate workload
     load_balance_scheduler = scheduler.get_scheduling_policy()
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.ALLOCATION, request_length
+    workload = calculate_demand_workload(PDRole.ROLE_P, request_length)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.ALLOCATION, workload
     )
     assert result
     
@@ -266,9 +287,10 @@ def test_multiple_requests_load_balancing(scheduler_setup, request_length):
     assert selected_endpoint.workload.active_kv_cache > 0
     
     # release tokens
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.RELEASE_TOKENS, request_length
+    release_tokens = Workload(active_tokens=-selected_endpoint.workload.active_tokens)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.RELEASE_TOKENS, release_tokens
     )
     assert result
     
@@ -276,165 +298,186 @@ def test_multiple_requests_load_balancing(scheduler_setup, request_length):
     assert selected_endpoint.workload.active_kv_cache > 0
 
 
-def test_workload_calculation_accuracy(scheduler_setup):
+@pytest.mark.asyncio
+async def test_workload_calculation_accuracy(scheduler_setup):
     """Test workload calculation accuracy."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.LOAD_BALANCE)
     request_length = 4
     req_id = "test_workload_calc"
     load_balance_scheduler = scheduler.get_scheduling_policy()
-    
+
     # select prefill instance and endpoint
-    selected_instance, selected_endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
-    
+    result = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert result is not None, (
+        "select_instance_and_endpoint returned None (pool empty). "
+        "Ensure scheduler_setup fixture ran and instance_manager has instances."
+    )
+    selected_instance, selected_endpoint = result
+
     # allocate prefill workload
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.ALLOCATION, request_length
+    workload = calculate_demand_workload(PDRole.ROLE_P, request_length)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.ALLOCATION, workload
     )
     assert result
-    
+
     # calculate expected workload score
     expected_score = selected_endpoint.workload.active_tokens + selected_endpoint.workload.active_kv_cache * 0.3
-    
+
     # get actual computed score
     actual_score = selected_endpoint.workload.calculate_workload_score(role=selected_instance.role)
-    
+
     # verify that the computed score matches the expected score
     assert actual_score == expected_score
-    
+
     # release tokens
-    result = load_balance_scheduler.update_workload(
-        selected_instance, selected_endpoint, req_id,
-        WorkloadAction.RELEASE_TOKENS, request_length
+    release_tokens = Workload(active_tokens=-selected_endpoint.workload.active_tokens)
+    result = await load_balance_scheduler.update_workload(
+        selected_instance.id, selected_endpoint.id, req_id,
+        WorkloadAction.RELEASE_TOKENS, release_tokens
     )
     assert result
-    
+
     # verify that the score after release matches the expected score
     expected_score_after_release = selected_endpoint.workload.active_tokens + selected_endpoint.workload.active_kv_cache * 0.3
     actual_score_after_release = selected_endpoint.workload.calculate_workload_score(role=selected_instance.role)
     assert actual_score_after_release == expected_score_after_release
 
 
-def test_load_balance_policy_selection_logic(scheduler_setup):
+@pytest.mark.asyncio
+async def test_load_balance_policy_selection_logic(scheduler_setup):
     """Test load balance policy selection logic."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.LOAD_BALANCE)
-    
-    prefill_instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.LOAD_BALANCE)
+
+    result = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert result is not None, "select_instance_and_endpoint(ROLE_P) returned None (pool empty)."
+    prefill_instance, _ = result
     assert prefill_instance is not None
     assert prefill_instance.role == PDRole.ROLE_P
-    
-    decode_instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+
+    res_d = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+    assert res_d is not None, "select_instance_and_endpoint(ROLE_D) returned None."
+    decode_instance, _ = res_d
     assert decode_instance is not None
     assert decode_instance.role == PDRole.ROLE_D
-    
-    mix_instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
+
+    res_u = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
+    assert res_u is not None, "select_instance_and_endpoint(ROLE_U) returned None."
+    mix_instance, _ = res_u
     assert mix_instance is not None
     assert mix_instance.role == PDRole.ROLE_U
-    
-    _, endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+
+    res_p2 = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert res_p2 is not None, "select_instance_and_endpoint(ROLE_P) returned None."
+    _, endpoint = res_p2
     assert endpoint is not None
     assert endpoint in prefill_instance.get_all_endpoints()
 
 
-def test_round_robin_instance_selection(scheduler_setup):
+@pytest.mark.asyncio
+async def test_round_robin_instance_selection(scheduler_setup):
     """Test round robin instance selection."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
-    
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.ROUND_ROBIN)
+
     selected_instances = []
     # select 6 times, should round robin all 3 prefill instances each 2 times
     for _ in range(6):
-        instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+        instance, _ = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
         assert instance is not None
         assert instance.role == PDRole.ROLE_P
         selected_instances.append(instance.id)
-    
+
     # verify that the round robin order is correct: 1, 2, 3, 1, 2, 3
     expected_order = [1, 2, 3, 1, 2, 3]
     assert selected_instances == expected_order
-    
+
     # select 4 times, should round robin all 2 decode instances each 2 times
     selected_decode_instances = []
     for _ in range(4):
-        instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+        instance, _ = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
         assert instance is not None
         assert instance.role == PDRole.ROLE_D
         selected_decode_instances.append(instance.id)
-    
+
     # verify that the round robin order is correct: 4, 5, 4, 5
     expected_decode_order = [4, 5, 4, 5]
     assert selected_decode_instances == expected_decode_order
 
 
-def test_round_robin_endpoint_selection(scheduler_setup):
+@pytest.mark.asyncio
+async def test_round_robin_endpoint_selection(scheduler_setup):
     """Test round robin endpoint selection."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.ROUND_ROBIN)
     # select a prefill instance
-    instance, endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    instance, endpoint = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
     assert instance is not None
-    
+
     # test that the endpoint selection round robin for the selected prefill instance
     selected_endpoints = []
     for _ in range(4):
-        instance, endpoint = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+        instance, endpoint = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
         assert endpoint is not None
         selected_endpoints.append(endpoint.id)
-    
+
     # verify that the round robin order is correct
     expected_order = [20, 30, 11, 21]
     assert selected_endpoints == expected_order
 
 
-def test_round_robin_mixed_role_selection(scheduler_setup):
+@pytest.mark.asyncio
+async def test_round_robin_mixed_role_selection(scheduler_setup):
     """Test round robin mixed role selection."""
-    all_instances = scheduler_setup
-    scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
-    
+    all_instances, instance_manager = scheduler_setup
+    scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.ROUND_ROBIN)
+
     # test that the mixed role selection round robin works as expected
     selected_instances = []
     for _ in range(9):  # select 9 times, should round robin all 3 prefill instances, 2 decode instances, 4 mix instances each 2 times
         if len(selected_instances) % 3 == 0:
-            instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+            instance, _ = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
             expected_role = PDRole.ROLE_P
         elif len(selected_instances) % 3 == 1:
-            instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+            instance, _ = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
             expected_role = PDRole.ROLE_D
         else:
-            instance, _ = scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
+            instance, _ = await scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
             expected_role = PDRole.ROLE_U
-        
+
         assert instance is not None
         assert instance.role == expected_role
         selected_instances.append(instance.id)
 
 
-def test_round_robin_edge_cases():
-    """Test round robin edge cases."""
+@pytest.mark.asyncio
+async def test_round_robin_edge_cases():
+    """Test round robin edge cases (empty pool). Use explicit instance_provider; Policy is no longer singleton."""
     config = CoordinatorConfig()
     instance_manager = InstanceManager(config)
-    available_pool, unavailable_pool = instance_manager.get_all_instances()
+    available_pool, unavailable_pool = await instance_manager.get_all_instances()
     all_instances = list(available_pool.values()) + list(unavailable_pool.values())
-    instance_manager.refresh_instances(EventType.DEL, all_instances)
+    if all_instances:
+        await instance_manager.refresh_instances(EventType.DEL, all_instances)
 
-    empty_scheduler = Scheduler(SchedulerType.ROUND_ROBIN)
+    empty_scheduler = Scheduler(instance_provider=instance_manager, config=SchedulerType.ROUND_ROBIN)
 
-    # test that the round robin edge cases work as expected: no instances, no endpoints
-    instance, _ = empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
-    assert instance is None
-    
-    instance, _ = empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
-    assert instance is None
-    
-    instance, _ = empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
-    assert instance is None
-    
-    # test that the round robin edge cases work as expected: no endpoints for selected instance
-    _, endpoint = empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
-    assert endpoint is None
-    
-    # test that the round robin edge cases work as expected: no endpoints for selected instance
-    _, endpoint = empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
-    assert endpoint is None
+    # No instances: select_instance_and_endpoint returns None (not (None, None))
+    result = await empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert result is None
+
+    result = await empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+    assert result is None
+
+    result = await empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_U)
+    assert result is None
+
+    # Empty scheduler: no instance => no endpoint (same as above)
+    result = await empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_P)
+    assert result is None
+
+    result = await empty_scheduler.select_instance_and_endpoint(role=PDRole.ROLE_D)
+    assert result is None

@@ -11,6 +11,7 @@
 # See the Mulan PSL v2 for more details.
 
 import logging
+import multiprocessing
 import os
 import json
 import sys
@@ -28,8 +29,18 @@ class LoggingConfig:
     log_level: str = 'INFO'  # Logging level: DEBUG, INFO, WARNING, ERROR
     log_max_line_length: int = 8192
     log_file: str | None = None  # Optional log file path
-    log_format: str = '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d]  %(message)s'
+    log_format: str = (
+        '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(process_name)s]  %(message)s'
+    )
     log_date_format: str = '%Y-%m-%d %H:%M:%S'
+
+
+class ProcessNameFilter(logging.Filter):
+    """Inject process_name into LogRecord so format can use %(process_name)s."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.process_name = multiprocessing.current_process().name
+        return True
 
 
 class MaxLengthFormatter(logging.Formatter):
@@ -118,13 +129,20 @@ def get_logger(
         if len(parts) >= 2:
             log_name = parts[1]
 
+    root_logger = logging.getLogger()
     logger = logging.getLogger(log_name)
 
-    # Always ensure root logger has proper handlers configured
-    _ensure_root_logger_configured(config, log_file)
-
-    # Set logger level - logs will propagate to root logger
-    logger.setLevel(level)
+    # Only configure root when it has no handlers (e.g. first use in process).
+    # If root already has handlers, it was likely set by reconfigure_logging() (e.g. DEBUG);
+    # calling _ensure_root_logger_configured with default LoggingConfig() would overwrite
+    # level back to INFO and hide DEBUG logs in API server workers.
+    if not root_logger.handlers:
+        _ensure_root_logger_configured(config, log_file)
+        logger.setLevel(level)
+    else:
+        # Leave root and its handlers unchanged; set this logger to DEBUG so it does not
+        # filter messages—root/handlers will apply the actual level from reconfigure_logging.
+        logger.setLevel(logging.DEBUG)
 
     return logger
 
@@ -132,18 +150,23 @@ def get_logger(
 def _ensure_root_logger_configured(config: LoggingConfig, log_file: str | None) -> None:
     """Ensure root logger has the proper handlers configured."""
     root_logger = logging.getLogger()
+    level = getattr(logging, config.log_level.upper(), logging.INFO)
 
-    # If root logger already has handlers, assume it's properly configured
+    # If root logger already has handlers, update their level and return
+    # Fix: update level of existing handlers as well
     if root_logger.handlers:
+        root_logger.setLevel(level)
+        for handler in root_logger.handlers:
+            handler.setLevel(level)
         return
 
     # Configure root logger with handlers
-    level = getattr(logging, config.log_level.upper(), logging.INFO)
     root_logger.setLevel(level)
 
     # Console handler
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
+    console_handler.addFilter(ProcessNameFilter())
     formatter = MaxLengthFormatter(
         config.log_format,
         max_length=config.log_max_line_length,
@@ -166,6 +189,7 @@ def _ensure_root_logger_configured(config: LoggingConfig, log_file: str | None) 
             try:
                 file_handler = logging.FileHandler(log_file, encoding='utf-8')
                 file_handler.setLevel(level)
+                file_handler.addFilter(ProcessNameFilter())
                 file_handler.setFormatter(formatter)
                 root_logger.addHandler(file_handler)
             except Exception:
@@ -201,6 +225,10 @@ def reconfigure_logging(log_config: LoggingConfig) -> None:
 
     # Reconfigure root logger with new settings
     _ensure_root_logger_configured(log_config, log_config.log_file)
+
+    # Update level of all handlers (ensure handler level matches config)
+    for handler in root_logger.handlers:
+        handler.setLevel(new_level)
 
     # Update all existing logger levels (they propagate to root logger for formatting)
     for name in logging.root.manager.loggerDict:

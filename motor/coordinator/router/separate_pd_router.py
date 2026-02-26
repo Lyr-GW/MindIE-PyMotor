@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -14,28 +13,59 @@ import json
 from fastapi.responses import StreamingResponse
 from fastapi import HTTPException, status
 
-from motor.coordinator.models.request import ReqState, ScheduledResource
+from motor.coordinator.domain import ScheduledResource
+from motor.coordinator.models.request import ReqState
+from motor.coordinator.models.response import ErrorResponse
 from motor.coordinator.router.base_router import BaseRouter
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import PDRole
-from motor.coordinator.models.request import ErrorResponse
 
 
 class SeparatePDRouter(BaseRouter):
-    """Handle request with separate P and D instances (original behavior)"""
+    """
+    Handle request with separate P and D instances (original behavior).
+    """
 
-    def __init__(self, req_info, config: CoordinatorConfig):
-        super().__init__(req_info, config)
+    def __init__(
+        self,
+        req_info,
+        config: CoordinatorConfig,
+        scheduler: "SchedulingFacade",
+        request_manager=None,
+    ):
+        super().__init__(
+            req_info, config, scheduler=scheduler,
+            request_manager=request_manager
+        )
         self.retry = True  # Need to re-request when recomputing
         self.retry_count = 0  # Recomputation count
         self.total_generated_token = ""  # Record all generated tokens during recomputation
         self.is_finished = False
 
-    async def handle_request(self) -> StreamingResponse:
-        """Handle request with separate P and D instances"""
-        return StreamingResponse(self.generate_stream(),
-                                 media_type="application/json")
-    
+    @staticmethod
+    def _extract_content_from_choice(choice: dict) -> str:
+        """Extract content from choice delta/message/text"""
+        delta = choice.get("delta") or {}
+        message = choice.get("message") or {}
+
+        return (
+            delta.get("content")
+            or message.get("content")
+            or choice.get("text")
+            or ""
+        )
+
+    @staticmethod
+    def _update_completion_tokens(request_info: dict, chunk_json: dict):
+        """Update completion tokens count"""
+        completion_tokens_key = "completion_tokens"
+        usage = chunk_json.get("usage", {})
+
+        if request_info["stream_flag"]:
+            request_info[completion_tokens_key] += 1
+        else:
+            request_info[completion_tokens_key] += usage.get("completion_tokens", 0)
+
     async def generate_stream(self):
         for attempt in range(self.config.exception_config.max_retry):
             # set True to start forward request
@@ -45,12 +75,17 @@ class SeparatePDRouter(BaseRouter):
                 # set False to avoid recompute
                 self.retry = False
 
-                async for chunk in self.procss_single_attempt(attempt):
+                async for chunk in self.process_single_attempt(attempt):
                     yield chunk
                 if self.is_finished:
                     return
 
-    async def procss_single_attempt(self, attempt):
+    async def handle_request(self) -> StreamingResponse:
+        """Handle request with separate P and D instances"""
+        return StreamingResponse(self.generate_stream(),
+                                 media_type="application/json")
+
+    async def process_single_attempt(self, attempt):
         prefill_resource: ScheduledResource = None
         try:
             # Schedule P instance
@@ -68,10 +103,9 @@ class SeparatePDRouter(BaseRouter):
             return
         finally:
             if prefill_resource and self.req_info.state != ReqState.PREFILL_END:
-                # When forwarding fails, releases p tokens and kvcache
-                if not self.release_all(prefill_resource):
-                    self.logger.warning(
-                        "Fail to release prefill resource, instance id: %s, endpoint id: %s, req state: %s",
+                if not await self.release_all(prefill_resource):
+                    self.logger.debug(
+                        "release_all(prefill) returned False instance_id=%s endpoint_id=%s state=%s",
                         prefill_resource.instance.id, prefill_resource.endpoint.id, self.req_info.state)
 
         decode_resource: ScheduledResource = None
@@ -89,11 +123,12 @@ class SeparatePDRouter(BaseRouter):
             if self.first_chunk_sent or attempt == self.config.exception_config.max_retry - 1:
                 yield self._generate_streaming_error_chunk(e)
         finally:
-            # After streaming done or error occurred, release tokens
-            if decode_resource and not self.release_tokens(decode_resource):
-                self.logger.warning(
-                    "Fail to release decode resource, instance id: %s, endpoint id: %s, req state: %s",
-                    decode_resource.instance.id, decode_resource.endpoint.id, self.req_info.state)
+            if decode_resource:
+                released = await self.release_tokens(decode_resource)
+                if not released:
+                    self.logger.debug(
+                        "release_tokens(decode) returned False instance_id=%s endpoint_id=%s state=%s",
+                        decode_resource.instance.id, decode_resource.endpoint.id, self.req_info.state)
 
     def _gen_p_request(self) -> dict:
         """Generate P request parameters"""
@@ -122,13 +157,13 @@ class SeparatePDRouter(BaseRouter):
                 resource
             ) as prefill_client:
             # P non-streaming request
-            response = await self.forward_post_request(
+            response = await self.forward_request(
                 req_data=req_data, 
                 client=prefill_client,
                 timeout=self.config.exception_config.infer_timeout)
             resp_json = response.json()
             self.req_info.update_state(ReqState.PREFILL_END)
-            self.release_tokens(resource)
+            await self.release_tokens(resource)
             return resp_json
 
     def _gen_d_request(self, resp_json: dict) -> dict:
@@ -159,10 +194,9 @@ class SeparatePDRouter(BaseRouter):
                 yield chunk
 
             self.req_info.update_state(ReqState.DECODE_END)
-            self.release_tokens(decode_resource)
-            self.logger.info("Completed streaming for request %s", self.req_info)
+            self.logger.debug("Completed streaming for request %s", self.req_info)
         except Exception as e:
-            self._handle_stream_error(prefill_resource, e)
+            await self._handle_stream_error(prefill_resource, e)
             raise e
 
     def _extract_request_info(self, req_data: dict) -> dict:
@@ -208,11 +242,11 @@ class SeparatePDRouter(BaseRouter):
                 timeout=self.config.exception_config.infer_timeout):
                 if not release_kv and chunk:
                     release_kv = True
-                    self.release_kv(prefill_resource)
+                    await self.release_kv(prefill_resource)
 
                 processed_chunk = self._process_single_chunk(chunk, request_info, req_data)
                 if processed_chunk is None:  # Recomputation triggered
-                    self._handle_recomputation(req_data, request_info, prefill_resource, decode_resource)
+                    await self._handle_recomputation(req_data, request_info, prefill_resource, decode_resource)
                     return
 
                 if processed_chunk:
@@ -265,28 +299,6 @@ class SeparatePDRouter(BaseRouter):
             self.logger.debug("Skipping chunk str: %s", chunk_str)
             return None
 
-    def _extract_content_from_choice(self, choice: dict) -> str:
-        """Extract content from choice delta/message/text"""
-        delta = choice.get("delta") or {}
-        message = choice.get("message") or {}
-
-        return (
-            delta.get("content")
-            or message.get("content")
-            or choice.get("text")
-            or ""
-        )
-
-    def _update_completion_tokens(self, request_info: dict, chunk_json: dict):
-        """Update completion tokens count"""
-        completion_tokens_key = "completion_tokens"
-        usage = chunk_json.get("usage", {})
-
-        if request_info["stream_flag"]:
-            request_info[completion_tokens_key] += 1
-        else:
-            request_info[completion_tokens_key] += usage.get("completion_tokens", 0)
-
     def _update_retry_response(self, choice: dict, request_info: dict):
         """Update response for retry case in non-streaming mode"""
         self.total_generated_token += request_info["generated_token"]
@@ -296,7 +308,7 @@ class SeparatePDRouter(BaseRouter):
         else:
             choice["text"] = self.total_generated_token
 
-    def _handle_recomputation(
+    async def _handle_recomputation(
         self,
         req_data: dict,
         request_info: dict,
@@ -310,8 +322,8 @@ class SeparatePDRouter(BaseRouter):
         self.retry = True
         self.req_info.update_state(ReqState.RECOMPUTE)
         self.total_generated_token += request_info["generated_token"]
-        self.release_all(prefill_resource)
-        self.release_tokens(decode_resource)
+        await self.release_all(prefill_resource)
+        await self.release_tokens(decode_resource)
 
         self._prepare_retry_request(req_data, request_info)
 
@@ -337,10 +349,10 @@ class SeparatePDRouter(BaseRouter):
         self.logger.info("Recomputing request %s, retry count: %d, new req_info: %s",
                          self.req_info.req_id, self.retry_count, self.req_info)
 
-    def _handle_stream_error(self, prefill_resource: ScheduledResource, error: Exception):
+    async def _handle_stream_error(self, prefill_resource: ScheduledResource, error: Exception):
         """Handle streaming errors"""
         if not self.first_chunk_sent:
-            self.release_kv(prefill_resource)
+            await self.release_kv(prefill_resource)
 
         self.logger.error("Error during streaming from decoder %s, aborted request %s, error: %s",
                           self.req_info.api, self.req_info.req_id, str(error))
