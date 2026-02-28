@@ -324,7 +324,8 @@ class InstanceManager(ThreadSafeSingleton):
                     logger.warning("Failed to refresh heartbeat for pod_ip %s in instance %s(id:%d)",
                                    pod_ip, ins.job_name, ins.id)
 
-            logger.info("Instance %s(id:%d) role:%s added.", ins.job_name, ins.id, ins.role)
+            logger.info("Instance %s(id:%d) role:%s added, total %d instances", ins.job_name, ins.id, ins.role,
+                        len(self.instances))
             self.notify(ins, ObserverEvent.INSTANCE_INITIAL)
 
     def del_instance(self, ins_id: int):
@@ -335,7 +336,8 @@ class InstanceManager(ThreadSafeSingleton):
                 self.instances.pop(ins_id)
                 # Also remove from forced separated set if present
                 self.forced_separated_instances.discard(ins_id)
-                logger.info("Instance %s(id:%d) role:%s removed.", job_name, ins_id, role)
+                logger.info("Instance %s(id:%d) role:%s removed, total %d instances", job_name, ins_id, role,
+                            len(self.instances))
             else:
                 logger.error("Instance %d not found.", ins_id)
 
