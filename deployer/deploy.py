@@ -12,6 +12,7 @@ import argparse
 import os
 import json
 import logging
+import subprocess
 import uuid
 import time
 import yaml as ym
@@ -52,6 +53,7 @@ CLUSTER_ROLE_BINDING = "ClusterRoleBinding"
 HARDWARE_TYPE = 'hardware_type'
 ANNOTATIONS = "annotations"
 SP_BLOCK = "sp-block"
+DATA = "data"
 NAME_FLAG = " -n "
 BOOT_SHELL_PATH = "./boot_helper/boot.sh"
 KV_CACHE_POOL_CONFIG = "kv_cache_pool_config"
@@ -63,11 +65,16 @@ STANDBY_CONFIG = "standby_config"
 MOTOR_CONTROLLER_CONFIG = "motor_controller_config"
 MOTOR_COORDINATOR_CONFIG = "motor_coordinator_config"
 ENABLE_MASTER_STANDBY = "enable_master_standby"
+INSTANCE_NUM_ZERO = 0
+INSTANCE_NUM_MAX = 16
+MOTOR_CONFIG_CONFIGMAP_NAME = "motor-config"
 SERVER_BASE_NAME_MAP = {
     "vllm": "vllm",
     "mindie-llm": "mindie-server",
     "sglang": "sglang"
 }
+DEPLOY_YAML_ROOT_PATH = "./deployment"
+OUTPUT_ROOT_PATH = "./output"
 SELECTOR = "selector"
 MATCHLABELS = "matchLabels"
 
@@ -84,6 +91,12 @@ def read_json(file_path):
     """Read JSON file"""
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def write_json(file_path, data):
+    """Write data to JSON file"""
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def write_yaml(data, output_file, single_doc=True):
@@ -122,6 +135,28 @@ def safe_exec_cmd(command):
     except Exception as e:
         logger.warning(f"Command execution failed: {e}")
         raise
+
+
+def run_cmd_get_output(args):
+    """Run command and return stdout. args: list of command and arguments. Raises on non-zero return code."""
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed (exit {result.returncode}): {result.stderr or result.stdout}")
+    return result.stdout.strip()
+
+
+def get_baseline_config_from_configmap(job_id):
+    """Get current deployed user_config from cluster ConfigMap. Returns None if CM missing or no user_config."""
+    try:
+        out = run_cmd_get_output(
+            ["kubectl", "get", "configmap", MOTOR_CONFIG_CONFIGMAP_NAME, "-n", job_id, "-o", "json"]
+        )
+        data = json.loads(out)
+        if DATA not in data or "user_config.json" not in data[DATA]:
+            return None
+        return json.loads(data[DATA]["user_config.json"])
+    except (RuntimeError, json.JSONDecodeError, KeyError):
+        return None
 
 
 def apply_configmap(create_cmd: str):
@@ -195,7 +230,7 @@ def update_kv_pool_enabled_flag(user_config):
         g_kv_pool_enabled = True
 
 
-def _extract_resources(data):
+def extract_resources(data):
     """Extract deployment, services, and RBAC resources from YAML data"""
     deployment_data = None
     service_list = []
@@ -216,7 +251,7 @@ def _extract_resources(data):
     return deployment_data, service_list, rbac_resources
 
 
-def _set_rbac_namespace(rbac_resources, namespace):
+def set_rbac_namespace(rbac_resources, namespace):
     """Set namespace for RBAC resources"""
     for rbac_resource in rbac_resources:
         if rbac_resource.get(KIND) == SERVICE_ACCOUNT:
@@ -230,7 +265,7 @@ def _set_rbac_namespace(rbac_resources, namespace):
                         subject[NAMESPACE] = namespace
 
 
-def _modify_deployment(deployment_data, deploy_config, user_config):
+def modify_deployment(deployment_data, deploy_config, user_config):
     """Modify deployment namespace and environment variables"""
     if not deployment_data:
         return
@@ -267,28 +302,27 @@ def _modify_deployment(deployment_data, deploy_config, user_config):
     modify_coordinator_or_controller_replicas(deployment_data, user_config, role)
 
 
-def _set_services_namespace(service_list, namespace):
+def set_services_namespace(service_list, namespace):
     """Set namespace for all services"""
     for service_data in service_list:
         service_data[METADATA][NAMESPACE] = namespace
 
 
-def modify_controller_or_coordinator_yaml(data, user_config):
+def modify_controller_or_coordinator_yaml(data, deploy_config, user_config):
     """Modify controller or coordinator YAML configuration"""
-    deploy_config = user_config["motor_deploy_config"]
     namespace = deploy_config[CONFIG_JOB_ID]
 
     # Extract resources
-    deployment_data, service_list, rbac_resources = _extract_resources(data)
+    deployment_data, service_list, rbac_resources = extract_resources(data)
 
     # Set namespace for RBAC resources
-    _set_rbac_namespace(rbac_resources, namespace)
+    set_rbac_namespace(rbac_resources, namespace)
 
     # Modify deployment data
-    _modify_deployment(deployment_data, deploy_config, user_config)
+    modify_deployment(deployment_data, deploy_config, user_config)
 
     # Set namespace for all services
-    _set_services_namespace(service_list, namespace)
+    set_services_namespace(service_list, namespace)
 
 
 def modify_coordinator_or_controller_replicas(data, user_config, role):
@@ -365,64 +399,55 @@ def gen_kv_pool_env(kv_pool_config):
     return kv_pool_env
 
 
-def modify_server_yaml(deployment_data, deploy_config, index, node_type):
-    container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
-
-    deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]["image"] = deploy_config["image_name"]
-    
-    # Update metadata
+def set_engine_metadata(deployment_data, deploy_config, index, node_type, job_name):
     deployment_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
-    
-    # Modify deployment name to make it unique for each instance
     unique_name = f"{g_engine_base_name}-{node_type}{index}"
     deployment_data[METADATA][NAME] = unique_name
     deployment_data[METADATA][LABELS][APP] = unique_name
-    deployment_data['spec']['selector']['matchLabels']['app'] = unique_name
+    deployment_data[SPEC]["selector"]["matchLabels"]["app"] = unique_name
     deployment_data[SPEC][TEMPLATE][METADATA][LABELS][APP] = unique_name
-    container[NAME] = g_engine_base_name
-
-    uuid_spec = generate_unique_id()
-    job_name = f"{deploy_config[CONFIG_JOB_ID]}-{node_type}{index}-{uuid_spec}"
     deployment_data[METADATA][LABELS]["job-name"] = job_name
-    
-    # Add ROLE environment variable
-    role = "prefill" if node_type == "p" else "decode"
-    if ENV not in container:
-        container[ENV] = []
 
+
+def set_engine_env(container, node_type, job_name):
+    role = "prefill" if node_type == "p" else "decode"
     container[ENV].extend([
         {NAME: "ROLE", VALUE: role},
         {NAME: "JOB_NAME", VALUE: job_name},
         {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
         {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service}
     ])
-
     if g_kv_pool_enabled:
-        container[ENV].append(
-            {NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service}
-        )
+        container[ENV].append({NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service})
 
+
+def set_engine_replicas(deployment_data, deploy_config, node_type):
     instance_pod_num_key = SINGER_P_INSTANCES_NUM if node_type == "p" else SINGER_D_INSTANCES_NUM
     if instance_pod_num_key in deploy_config:
         deployment_data[SPEC]["replicas"] = int(deploy_config[instance_pod_num_key])
-    
-    # Modify NPU num for server yaml
+
+
+def set_engine_npu(container, deploy_config, node_type):
     if node_type == "p" and P_POD_NPU_NUM in deploy_config:
         npu_num = int(deploy_config[P_POD_NPU_NUM])
-        container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
-        container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
     elif node_type == "d" and D_POD_NPU_NUM in deploy_config:
         npu_num = int(deploy_config[D_POD_NPU_NUM])
-        container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
-        container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
+    else:
+        return
+    container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
+    container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
 
-    hardware_type = deploy_config[HARDWARE_TYPE]
+
+def set_engine_node_selector(deployment_data, deploy_config, node_type):
     modify_sp_block_num(deployment_data, node_type, deploy_config)
+    hardware_type = deploy_config[HARDWARE_TYPE]
     if hardware_type == "800I_A2":
         deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-910b-8"
     elif hardware_type == "800I_A3":
         deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-a3-16"
 
+
+def set_engine_weight_mount(deployment_data, container, deploy_config):
     weight_mount_path = deploy_config.get("weight_mount_path", "/mnt/weight")
     for volume in deployment_data[SPEC][TEMPLATE][SPEC]["volumes"]:
         if volume["name"] == "weight-mount":
@@ -432,34 +457,81 @@ def modify_server_yaml(deployment_data, deploy_config, index, node_type):
             volume_mount["mountPath"] = weight_mount_path
 
 
-def obtain_server_instance_total(deploy_config):
-    p_instances = int(deploy_config.get(P_INSTANCES_NUM, 1))
-    d_instances = int(deploy_config.get(D_INSTANCES_NUM, 1))
+def modify_engine_yaml(deployment_data, deploy_config, index, node_type):
+    container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
+    container["image"] = deploy_config["image_name"]
+    job_name = f"{deploy_config[CONFIG_JOB_ID]}-{node_type}{index}-{generate_unique_id()}"
+    set_engine_metadata(deployment_data, deploy_config, index, node_type, job_name)
+    container[NAME] = g_engine_base_name
+    if ENV not in container:
+        container[ENV] = []
+    set_engine_env(container, node_type, job_name)
+    set_engine_replicas(deployment_data, deploy_config, node_type)
+    set_engine_npu(container, deploy_config, node_type)
+    set_engine_node_selector(deployment_data, deploy_config, node_type)
+    set_engine_weight_mount(deployment_data, container, deploy_config)
+
+
+def obtain_engine_instance_total(deploy_config):
+    if P_INSTANCES_NUM not in deploy_config:
+        raise KeyError(f"{P_INSTANCES_NUM} is required in motor_deploy_config")
+    if D_INSTANCES_NUM not in deploy_config:
+        raise KeyError(f"{D_INSTANCES_NUM} is required in motor_deploy_config")
+    try:
+        p_instances = int(deploy_config[P_INSTANCES_NUM])
+        d_instances = int(deploy_config[D_INSTANCES_NUM])
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{P_INSTANCES_NUM} and {D_INSTANCES_NUM} must be integers") from e
     return p_instances, d_instances
 
 
-def generate_yaml_controller_or_coordinator(input_yaml, output_file, deploy_config):
+def validate_instance_nums(deploy_config):
+    p_total, d_total = obtain_engine_instance_total(deploy_config)
+    if p_total <= INSTANCE_NUM_ZERO:
+        raise ValueError(f"{P_INSTANCES_NUM} must be greater than {INSTANCE_NUM_ZERO}")
+    if p_total > INSTANCE_NUM_MAX:
+        raise ValueError(f"{P_INSTANCES_NUM} must not exceed {INSTANCE_NUM_MAX}")
+    if d_total <= INSTANCE_NUM_ZERO:
+        raise ValueError(f"{D_INSTANCES_NUM} must be greater than {INSTANCE_NUM_ZERO}")
+    if d_total > INSTANCE_NUM_MAX:
+        raise ValueError(f"{D_INSTANCES_NUM} must not exceed {INSTANCE_NUM_MAX}")
+
+
+def strip_instance_nums(config_dict):
+    cleaned = json.loads(json.dumps(config_dict))
+    cleaned["motor_deploy_config"].pop(P_INSTANCES_NUM, None)
+    cleaned["motor_deploy_config"].pop(D_INSTANCES_NUM, None)
+    return cleaned
+
+
+def validate_only_instance_changed(current_config, baseline_config):
+    if strip_instance_nums(current_config) != strip_instance_nums(baseline_config):
+        raise ValueError("user_config changes detected beyond instance numbers. "
+                         "Only p_instances_num/d_instances_num can be modified for scaling.")
+
+
+def generate_yaml_controller_or_coordinator(input_yaml, output_file, user_config, deploy_config):
     logger.info(f"Generating YAML from {input_yaml} to {output_file}")
     data = load_yaml(input_yaml, False)
-    modify_controller_or_coordinator_yaml(data, deploy_config)
+    modify_controller_or_coordinator_yaml(data, deploy_config, user_config)
     write_yaml(data, output_file, False)
     global g_generate_yaml_list
     g_generate_yaml_list.append(output_file)
 
 
-def generate_yaml_server(input_yaml, output_file, deploy_config):
+def generate_yaml_engine(input_yaml, output_file, deploy_config):
     logger.info(f"Generating YAML from {input_yaml} to {output_file}")
     global g_generate_yaml_list
-    p_total, d_total = obtain_server_instance_total(deploy_config)
+    p_total, d_total = obtain_engine_instance_total(deploy_config)
     for p_index in range(p_total):
         data = load_yaml(input_yaml, True)
-        modify_server_yaml(data, deploy_config, p_index, "p")
+        modify_engine_yaml(data, deploy_config, p_index, "p")
         output_file_p = output_file + "_p" + str(p_index) + ".yaml"
         write_yaml(data, output_file_p, True)
         g_generate_yaml_list.append(output_file_p)
     for d_index in range(d_total):
         data = load_yaml(input_yaml, True)
-        modify_server_yaml(data, deploy_config, d_index, "d")
+        modify_engine_yaml(data, deploy_config, d_index, "d")
         output_file_d = output_file + "_d" + str(d_index) + ".yaml"
         write_yaml(data, output_file_d, True)
         g_generate_yaml_list.append(output_file_d)
@@ -538,14 +610,45 @@ def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_p
     g_kv_pool_service = f"{kv_pool_name}.{deploy_config[CONFIG_JOB_ID]}.svc.cluster.local"
 
 
-def exec_all_kubectl_multi(deploy_config, user_config_path):
+def elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path):
+    scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, "p")
+    scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, "d")
+    logger.info("Engine scale done.")
+
+
+def scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, node_type):
     job_id = deploy_config[CONFIG_JOB_ID]
-    
-    create_base_configmap(job_id, user_config_path)
-    
-    # Apply YAML files
-    for yaml_file in g_generate_yaml_list:
-        safe_exec_cmd(f"kubectl apply -f {yaml_file} -n {job_id}")
+    totals = obtain_engine_instance_total(deploy_config)
+    bases = obtain_engine_instance_total(baseline_deploy_config)
+    total = totals[0] if node_type == "p" else totals[1]
+    base = bases[0] if node_type == "p" else bases[1]
+    if total < base:
+        logger.info(f"Scale-in {node_type} instance, {base} -> {total}")
+        for index in reversed(range(total, base)):
+            yaml_path = os.path.join(out_deploy_yaml_path, f"{g_engine_base_name}_{node_type}{index}.yaml")
+            safe_exec_cmd(f"kubectl delete -f {yaml_path} -n {job_id}")
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
+    if total > base:
+        logger.info(f"Scale-out {node_type} instance, {base} -> {total}")
+        for index in range(base, total):
+            yaml_path = os.path.join(out_deploy_yaml_path, f"{g_engine_base_name}_{node_type}{index}.yaml")
+            safe_exec_cmd(f"kubectl apply -f {yaml_path} -n {job_id}")
+
+
+def exec_all_kubectl_multi(deploy_config, baseline_config, user_config_path):
+    job_id = deploy_config[CONFIG_JOB_ID]
+    out_deploy_yaml_path = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT)
+    create_motor_config_configmap(job_id, user_config_path)
+
+    if baseline_config is None:
+        # Apply all YAML files on first run
+        for yaml_file in g_generate_yaml_list:
+            safe_exec_cmd(f"kubectl apply -f {yaml_file} -n {job_id}")
+    else:
+        # Only scale engine deployments on elastic run
+        baseline_deploy_config = baseline_config.get("motor_deploy_config", {})
+        elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path)
 
 
 def set_env_to_shell(deploy_config):
@@ -560,10 +663,12 @@ def set_env_to_shell(deploy_config):
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
 
 
-def create_base_configmap(job_id, user_config_path):
-    # Create base configmap with all mounted files
+def create_motor_config_configmap(job_id, user_config_path):
+    """Create or update ConfigMap motor-config with all mounted files (scripts + user_config.json)."""
+    if not os.path.exists(user_config_path):
+        raise FileNotFoundError(f"user_config file not found: {user_config_path}")
     apply_configmap(
-        "kubectl create configmap motor-config "
+        f"kubectl create configmap {MOTOR_CONFIG_CONFIGMAP_NAME} "
         "--from-file=./boot_helper/boot.sh "
         "--from-file=./boot_helper/hccl_tools.py "
         "--from-file=./boot_helper/update_kv_cache_pool_config.py "
@@ -645,9 +750,9 @@ def generate_yaml_single_container(input_yaml, output_file, user_config):
     write_yaml(data, output_file, False)
 
 
-def exec_all_kubectl_singer(deploy_config, out_path, user_config_path, yaml_file):
+def exec_all_kubectl_singer(deploy_config, user_config_path, yaml_file):
     job_id = deploy_config[CONFIG_JOB_ID]
-    create_base_configmap(job_id, user_config_path)
+    create_motor_config_configmap(job_id, user_config_path)
 
     # Apply yaml
     safe_exec_cmd(f"kubectl apply -f {yaml_file} -n {job_id}")
@@ -667,6 +772,11 @@ def parse_arguments():
         help="Only refresh configmap without applying deployments"
     )
     parser.add_argument(
+        "--update_instance_num",
+        action="store_true",
+        help="Scale instances by comparing ConfigMap baseline with current user_config"
+    )
+    parser.add_argument(
         "--single_container_yaml_file",
         type=str,
         default="mindie_service_single_container.yaml",
@@ -675,63 +785,109 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def main():
-    args = parse_arguments()
+def handle_update_config(deploy_config, user_config_path):
+    baseline_config = get_baseline_config_from_configmap(deploy_config[CONFIG_JOB_ID])
+    if baseline_config is None:
+        raise FileNotFoundError("ConfigMap motor-config not found or has no user_config in cluster. "
+                                "Please deploy once before updating configmap.")
+    baseline_deploy = baseline_config["motor_deploy_config"]
+    if (deploy_config.get(P_INSTANCES_NUM) != baseline_deploy.get(P_INSTANCES_NUM)
+            or deploy_config.get(D_INSTANCES_NUM) != baseline_deploy.get(D_INSTANCES_NUM)):
+        raise ValueError(
+            "P/D instance count in user_config differs from the deployed baseline. "
+            "Use --update_instance_num to scale instances instead of --update_config."
+        )
+    create_motor_config_configmap(deploy_config[CONFIG_JOB_ID], user_config_path)
+    logger.info("Configmap refreshed.")
 
-    deploy_yaml_root_path = "./deployment"
-    output_root_path = "./output"
-    user_config_path = args.user_config_path
-    single_container_yaml_file = args.single_container_yaml_file
-    
-    # Ensure necessary directories exist
-    os.makedirs(output_root_path, exist_ok=True)
-    os.makedirs(os.path.join(output_root_path, DEPLOYMENT), exist_ok=True)
-    
-    logger.info(f"Starting service deployment using config file path: {user_config_path}.")
 
-    user_config = read_json(user_config_path)
-    deploy_config = user_config["motor_deploy_config"]
-
-    if args.update_config:
-        create_base_configmap(deploy_config[CONFIG_JOB_ID], user_config_path)
-        logger.info("configmap refresh end.")
-        return
+def handle_update_instance_num(user_config, deploy_config, user_config_path):
+    baseline_config = get_baseline_config_from_configmap(deploy_config[CONFIG_JOB_ID])
+    if baseline_config is None:
+        raise FileNotFoundError("ConfigMap motor-config not found. "
+                                "Please deploy once before scaling.")
+    validate_only_instance_changed(user_config, baseline_config)
 
     update_kv_pool_enabled_flag(user_config)
     update_engine_base_name(user_config)
-    
+
+    engine_input_yaml = os.path.join(DEPLOY_YAML_ROOT_PATH, 'engine_init.yaml')
+    engine_output_yaml = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, g_engine_base_name)
+    generate_yaml_engine(engine_input_yaml, engine_output_yaml, deploy_config)
+    exec_all_kubectl_multi(deploy_config, baseline_config, user_config_path)
+    logger.info("instance num update end.")
+
+
+def get_deploy_paths(single_container_yaml_file):
+    return {
+        "controller_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, 'controller_init.yaml'),
+        "controller_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, 'mindie_motor_controller.yaml'),
+        "coordinator_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, 'coordinator_init.yaml'),
+        "coordinator_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, 'mindie_motor_coordinator.yaml'),
+        "engine_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, 'engine_init.yaml'),
+        "engine_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, g_engine_base_name),
+        "kv_pool_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, 'kv_pool_init.yaml'),
+        "kv_pool_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, 'mindie_ms_kv_pool.yaml'),
+        "singer_container_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, single_container_yaml_file),
+        "singer_container_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT,
+                                                     'mindie_motor_single_container.yaml')
+    }
+
+
+def deploy_services(user_config, deploy_config, user_config_path, single_container_yaml_file):
+    update_kv_pool_enabled_flag(user_config)
+    update_engine_base_name(user_config)
     set_env_to_shell(deploy_config)
 
-    # Use new YAML template files
-    controller_input_yaml = os.path.join(deploy_yaml_root_path, 'controller_init.yaml')
-    controller_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_motor_controller.yaml')
-    coordinator_input_yaml = os.path.join(deploy_yaml_root_path, 'coordinator_init.yaml')
-    coordinator_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_motor_coordinator.yaml')
-    server_input_yaml = os.path.join(deploy_yaml_root_path, 'engine_init.yaml')
-    server_output_yaml = os.path.join(output_root_path, DEPLOYMENT, g_engine_base_name)
-    kv_pool_input_yaml = os.path.join(deploy_yaml_root_path, 'kv_pool_init.yaml')
-    kv_pool_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_ms_kv_pool.yaml')
-    singer_container_input_yaml = os.path.join(deploy_yaml_root_path, single_container_yaml_file)
-    singer_container_output_yaml = os.path.join(output_root_path, DEPLOYMENT, 'mindie_motor_single_container.yaml')
+    paths = get_deploy_paths(single_container_yaml_file)
 
     deploy_mode = user_config["motor_coordinator_config"].get("scheduler_config", {}).get("deploy_mode", "")
     if deploy_mode == "pd_disaggregation_single_container":
         update_kv_pool_enabled_flag(user_config)
 
-        generate_yaml_single_container(singer_container_input_yaml, singer_container_output_yaml, user_config)
-        exec_all_kubectl_singer(deploy_config, output_root_path, user_config_path, singer_container_output_yaml)
+        generate_yaml_single_container(paths["singer_container_input_yaml"],
+                                       paths["singer_container_output_yaml"], user_config)
+        exec_all_kubectl_singer(deploy_config, user_config_path, paths["singer_container_output_yaml"])
     else:
-        # Generate YAML files - pass user_config instead of user_config_path
-        init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, deploy_config)
-        generate_yaml_controller_or_coordinator(controller_input_yaml, controller_output_yaml, user_config)
-        generate_yaml_controller_or_coordinator(coordinator_input_yaml, coordinator_output_yaml, user_config)
-        generate_yaml_server(server_input_yaml, server_output_yaml, deploy_config)
+        init_service_domain_name(paths["controller_input_yaml"], paths["coordinator_input_yaml"],
+                                paths["kv_pool_input_yaml"], deploy_config)
+        generate_yaml_controller_or_coordinator(paths["controller_input_yaml"], paths["controller_output_yaml"],
+                                                user_config, deploy_config)
+        generate_yaml_controller_or_coordinator(paths["coordinator_input_yaml"], paths["coordinator_output_yaml"],
+                                                user_config, deploy_config)
+        generate_yaml_engine(paths["engine_input_yaml"], paths["engine_output_yaml"], deploy_config)
         if g_kv_pool_enabled:
             kv_pool_config = normalize_kv_cache_pool_config(user_config)
-            generate_yaml_kv_pool(kv_pool_input_yaml, kv_pool_output_yaml, deploy_config, kv_pool_config)
-        exec_all_kubectl_multi(deploy_config, user_config_path)
+            generate_yaml_kv_pool(paths["kv_pool_input_yaml"], paths["kv_pool_output_yaml"],
+                                  deploy_config, kv_pool_config)
+        exec_all_kubectl_multi(deploy_config, None, user_config_path)
 
     logger.info("all deploy end.")
+
+
+def main():
+    args = parse_arguments()
+
+    user_config_path = args.user_config_path
+    single_container_yaml_file = args.single_container_yaml_file
+    
+    os.makedirs(OUTPUT_ROOT_PATH, exist_ok=True)
+    os.makedirs(os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT), exist_ok=True)
+    
+    logger.info(f"Starting service deployment using config file path: {user_config_path}.")
+
+    user_config = read_json(user_config_path)
+    deploy_config = user_config["motor_deploy_config"]
+    validate_instance_nums(deploy_config)
+
+    if args.update_config:
+        handle_update_config(deploy_config, user_config_path)
+        return
+    if args.update_instance_num:
+        handle_update_instance_num(user_config, deploy_config, user_config_path)
+        return
+
+    deploy_services(user_config, deploy_config, user_config_path, single_container_yaml_file)
 
 
 if __name__ == '__main__':
