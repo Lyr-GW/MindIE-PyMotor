@@ -106,6 +106,7 @@ cat > "$cert_config_file" <<EOF
 [req]
 distinguished_name = req_distinguished_name
 req_extensions = v3_req
+prompt = no
 
 [req_distinguished_name]
 C = CN

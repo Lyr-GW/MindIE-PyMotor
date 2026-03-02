@@ -24,6 +24,7 @@ if [ ! -d "$ca_dir" ]; then
     chmod 700 "$ca_dir"
 fi
 
+ca_config_file="${ca_path}/ca.conf"
 ca_key_file="${ca_path}/ca.key.pem"
 ca_cert_file="${ca_path}/ca.pem"
 
@@ -43,15 +44,11 @@ echo "Generating CA private key..."
 openssl genrsa -aes256 -out "$ca_key_file" -passout pass:"$ca_pwd" 3072
 
 echo "Generating CA certificate..."
-# Generate CA certificate (self-signed, valid for 365 days, SHA256 signature algorithm)
-openssl req -new -x509 -days 365 -key "$ca_key_file" -out "$ca_cert_file" \
-    -passin pass:"$ca_pwd" \
-    -sha256 \
-    -extensions v3_ca \
-    -config <(
-        cat <<EOF
+
+cat > "$ca_config_file" <<EOF
 [req]
 distinguished_name = req_distinguished_name
+prompt = no
 
 [req_distinguished_name]
 C = CN
@@ -66,7 +63,13 @@ keyUsage = critical,digitalSignature,keyCertSign,cRLSign
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always,issuer:always
 EOF
-    )
+
+# Generate CA certificate (self-signed, valid for 365 days, SHA256 signature algorithm)
+openssl req -new -x509 -days 365 -key "$ca_key_file" -out "$ca_cert_file" \
+    -passin pass:"$ca_pwd" \
+    -sha256 \
+    -extensions v3_ca \
+    -config "$ca_config_file"
 
 # Set file permissions
 chmod 600 "$ca_key_file"
