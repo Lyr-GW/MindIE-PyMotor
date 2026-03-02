@@ -21,13 +21,14 @@ from motor.common.resources.instance import ParallelConfig, PDRole
 from motor.config.tls_config import TLSConfig
 from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
-from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
+from motor.common.utils.logger import get_logger, reconfigure_logging
 from motor.config.config_utils import (
     ConfigKey,
     save_config_to_json,
     _update_tls_config,
     MGMT_TLS_CONFIG,
 )
+from motor.config.log_config import LoggingConfig
 
 FILE_ENCODING = "utf-8"
 
@@ -548,6 +549,7 @@ class NodeManagerConfig:
             f"{separator}\n"
             "  Logging Configuration:\n"
             f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    ├─ Log File:            {self.logging_config.host_log_dir}\n"
             f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
             "\n"
             "  Network Configuration:\n"

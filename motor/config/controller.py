@@ -14,9 +14,10 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 from pathlib import Path
 
-from motor.common.utils.logger import get_logger, LoggingConfig, reconfigure_logging
+from motor.common.utils.logger import get_logger, reconfigure_logging
 from motor.common.utils.env import Env
 from motor.config.etcd import EtcdConfig
+from motor.config.log_config import LoggingConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
 from motor.config.tls_config import TLSConfig
 from motor.config.config_utils import (
@@ -393,7 +394,7 @@ class ControllerConfig:
             f"{separator}\n"
             "  Logging Configuration:\n"
             f"    ├─ Log Level:            {self.logging_config.log_level}\n"
-            f"    ├─ Log File:             {self.logging_config.log_file}\n"
+            f"    ├─ Log File:             {self.logging_config.host_log_dir}\n"
             f"    └─ Log Max Line Length:  {self.logging_config.log_max_line_length}\n"
             "\n"
             "  Network Configuration:\n"

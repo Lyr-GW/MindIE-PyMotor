@@ -19,10 +19,11 @@ from enum import Enum
 from dataclasses import dataclass, field, asdict, is_dataclass
 from pathlib import Path
 
-from motor.common.utils.logger import LoggingConfig, reconfigure_logging, get_logger
+from motor.common.utils.logger import reconfigure_logging, get_logger
 from motor.common.utils.env import Env
 from motor.common.utils.key_encryption import set_default_key_encryption_by_name
 from motor.config.etcd import EtcdConfig
+from motor.config.log_config import LoggingConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH
 from motor.config.tls_config import TLSConfig
 from motor.config.config_utils import (
@@ -642,6 +643,7 @@ class CoordinatorConfig:
             f"    └─ d_instances_num:     {self.deploy_config.d_instances_num}\n"
             "  Logging Configuration:\n"
             f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    ├─ Log File:            {self.logging_config.host_log_dir}\n"
             f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
             "\n"
             "  Network Configuration:\n"
