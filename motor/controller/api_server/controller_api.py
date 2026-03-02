@@ -15,7 +15,8 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Callable
+from functools import wraps
 
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException
@@ -24,13 +25,27 @@ from motor.common.resources import RegisterMsg, ReregisterMsg, HeartbeatMsg, Ter
 from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.utils.cert_util import CertUtil
 from motor.common.utils.logger import get_logger, ApiAccessFilter
+from motor.common.utils.http_response import format_success_response, raise_internal_error
+from motor.common.alarm.record import Record
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client import NodeManagerApiClient
-from motor.controller.api_server import om_api
+from motor.controller.observability.observability import Observability
 from motor.controller.core.instance_assembler import InstanceAssembler
 from motor.controller.core.instance_manager import InstanceManager
+from motor.controller.observability.inventory.inventory_collector import InventoryCollector
 
 logger = get_logger(__name__)
+
+
+def observability_enabled_required(func: Callable):
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        if not self.enable_observability_api:
+            return raise_internal_error(
+                message="Observability is not enabled."
+            )
+        return await func(self, *args, **kwargs)
+    return wrapper
 
 
 class ControllerAPI:
@@ -39,6 +54,7 @@ class ControllerAPI:
         if config is None:
             config = ControllerConfig()
 
+        self.observability = Observability()
         # Extract required config fields for TLS and standby mode
         self.enable_master_standby = config.standby_config.enable_master_standby
         self.mgmt_tls_config = config.mgmt_tls_config
@@ -51,6 +67,17 @@ class ControllerAPI:
         self.loop = None
         self.app = self._create_app()
         self.api_server_thread = None
+
+        # Observability API configuration
+        self.enable_observability_api = config.observability_config.observability_enable
+        self.observability_api_host = host if host is not None else config.api_config.controller_api_host
+        self.observability_api_port = config.api_config.observability_api_port
+        self.observability_tls_config = config.observability_tls_config
+        self.observability_server = None
+        self.observability_loop = None
+        self.observability_app = self._create_observability_app()
+        self.observability_api_server_thread = None
+
         logger.info("ControllerAPI initialized.")
 
     def start(self) -> None:
@@ -61,11 +88,28 @@ class ControllerAPI:
             name="APIServer"
         )
         self.api_server_thread.start()
+
+        # Observability API startup logic merging
+        self.observability_api_server_thread = threading.Thread(
+            target=self._run_observability_api_server,
+            daemon=True,
+            name="ObservabilityAPIServer"
+        )
+        self.observability_api_server_thread.start()
+        logger.info("Observability API started successfully. Host: %s, Port: %d", 
+                self.observability_api_host, self.observability_api_port)
+
         logger.info("ControllerAPI started.")
 
     def is_alive(self) -> bool:
         """Check if the API server thread is alive"""
-        return self.api_server_thread is not None and self.api_server_thread.is_alive()
+        # Controller API server status
+        controller_alive = self.api_server_thread is not None and self.api_server_thread.is_alive()
+        
+        # check observability API server status
+        observability_alive = (self.observability_api_server_thread is not None 
+                            and self.observability_api_server_thread.is_alive())        
+        return controller_alive and observability_alive
 
     def stop(self) -> None:
         if self.server and self.loop:
@@ -78,6 +122,17 @@ class ControllerAPI:
                 if self.loop and not self.loop.is_closed():
                     self.loop.call_soon_threadsafe(self.loop.stop)
 
+        # stop observability API server
+        if self.observability_server and self.observability_loop:
+            try:
+                future = asyncio.run_coroutine_threadsafe(self.observability_server.shutdown(), self.observability_loop)
+                future.result(timeout=3)
+                logger.info("Observability API server stopped gracefully")
+            except Exception as e:
+                logger.error("Error stopping Observability API server: %s", e)
+                if self.observability_loop and not self.observability_loop.is_closed():
+                    self.observability_loop.call_soon_threadsafe(self.observability_loop.stop)
+
     def update_config(self, config: ControllerConfig) -> None:
         """Update configuration for the controller API"""
         # Note: API server configuration cannot be updated while running
@@ -85,6 +140,11 @@ class ControllerAPI:
         with self.config_lock:
             self.enable_master_standby = config.standby_config.enable_master_standby
             self.mgmt_tls_config = config.mgmt_tls_config
+
+            # Observability API configuration update
+            self.enable_observability_api = config.observability_config.observability_enable
+            self.observability_tls_config = config.observability_tls_config
+
             logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
 
     @asynccontextmanager
@@ -92,6 +152,46 @@ class ControllerAPI:
         logger.info("API server startup started")
         yield
         logger.info("API server shutdown completed")
+
+    # Observability API lifecycle management
+    @asynccontextmanager
+    async def _observability_api_lifespan(self, app: FastAPI):
+        logger.info("Observability API server startup started")
+        yield
+        logger.info("Observability API server shutdown completed")
+
+    @observability_enabled_required
+    async def _get_inventory(self) -> dict[str, Any]:
+        try:
+            return format_success_response(InventoryCollector().collect_inventory())
+
+        except Exception as e:
+            logger.error("Failed to get inventory: %s", e)
+            raise_internal_error(f"Internal server error: {str(e)}")
+
+    @observability_enabled_required
+    async def _get_metrics(self) -> dict[str, Any]:
+        try:
+            metrics_data = self.observability.get_metrics()	 
+            return format_success_response(metrics_data)
+
+        except Exception as e:
+            logger.error("Failed to get metrics: %s", e)
+            raise_internal_error(f"Internal server error: {str(e)}")
+
+    @observability_enabled_required
+    async def _get_alarms(self, request: Request) -> dict[str, Any]:
+        try:
+            source_id = request.query_params.get("source_id", None)	 
+            alarms = self.observability.get_alarms(source_id=source_id)	 
+
+            return format_success_response({ 
+                "total": len(alarms), 
+                "alarms": alarms, 
+            })
+        except Exception as e:
+            logger.error("Failed to get alarms: %s", e)
+            raise_internal_error(f"Internal server error: {str(e)}")
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(lifespan=self._lifespan)
@@ -102,7 +202,7 @@ class ControllerAPI:
             "/controller/register": logging.INFO,
             "/controller/reregister": logging.INFO,
             "/controller/terminate_instance": logging.INFO,
-            "/v1/alarm/coordinator": logging.ERROR,
+            "/observability/add_alarm": logging.INFO,
             "/startup": logging.ERROR,
             "/readiness": logging.ERROR,
             "/liveness": logging.ERROR
@@ -120,7 +220,8 @@ class ControllerAPI:
         app.add_api_route("/startup", self._startup, methods=get_methods)
         app.add_api_route("/readiness", self._readiness, methods=get_methods)
         app.add_api_route("/liveness", self._liveness, methods=get_methods)
-        app.include_router(om_api.router)
+
+        app.add_api_route("/observability/add_alarm", self._add_alarm, methods=post_methods)
 
         return app
 
@@ -296,3 +397,80 @@ class ControllerAPI:
             )
         else:
             return {"message": "Controller is alive"}
+
+    async def _add_alarm(self, request: Request) -> dict:	 
+        body = await request.json()	 
+        try:	 
+            if not self.enable_observability_api: 
+                return format_success_response( 
+                    message="OM is not enabled." 
+                ) 
+            record = Record(**body) 
+            self.observability.add_alarm(record)
+            return format_success_response()
+        except Exception as e:
+            logger.error("Failed to add alarms: %s", e)
+            raise_internal_error(f"Internal server error: {str(e)}")
+
+    def _create_observability_app(self) -> FastAPI:
+        app = FastAPI(lifespan=self._observability_api_lifespan)
+
+        # Apply filter to suppress access logs for specified APIs unless level >= configured level
+        api_filters = {
+            "/observability/inventory": logging.ERROR,
+            "/observability/metrics": logging.ERROR,
+            "/observability/alarms": logging.ERROR,
+        }
+        logging.getLogger("uvicorn.access").addFilter(ApiAccessFilter(api_filters))
+        
+        # Register middleware check role 
+        app.middleware("http")(self._master_standby_middleware)
+
+        # Register observability routes
+        get_methods = ["GET"]
+        app.add_api_route("/observability/inventory", self._get_inventory, methods=get_methods)
+        app.add_api_route("/observability/metrics", self._get_metrics, methods=get_methods)
+        app.add_api_route("/observability/alarms", self._get_alarms, methods=get_methods)
+
+        return app
+
+    async def _master_standby_middleware(self, request: Request, call_next):	 
+        # if enable master/standby and is standby role then raise exception 
+        if self.enable_master_standby and not StandbyManager().is_master(): 
+            # raise exception at the middleware layer is an incorrect way. It is better to construct the response. 
+            raise_internal_error("This controller is not master") 
+        # master continue 
+        response: Response = await call_next(request) 
+        return response
+
+    def _run_observability_api_server(self) -> None:
+        try:
+            server_config = uvicorn.Config(
+                self.observability_app, 
+                host=self.observability_api_host, 
+                port=self.observability_api_port, 
+                log_level="info"
+            )
+            if self.observability_tls_config.enable_tls:
+                server_config.load()
+                context = CertUtil.create_ssl_context(self.observability_tls_config)
+                if not context:
+                    raise RuntimeError("Failed to create SSL context")
+
+                server_config.ssl = context
+                logger.info(f"Starting observability API server on https://"
+                            f"{self.observability_api_host}:{self.observability_api_port}")
+            else:
+                logger.info(f"Starting observability API server on http://"
+                            f"{self.observability_api_host}:{self.observability_api_port}")
+  
+            self.observability_server = uvicorn.Server(server_config)
+            self.observability_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.observability_loop)
+            self.observability_loop.run_until_complete(self.observability_server.serve())
+
+        except Exception as e:
+            logger.error("Observability API server error: %s", e)
+        finally:
+            if self.observability_loop and not self.observability_loop.is_closed():
+                self.observability_loop.close()

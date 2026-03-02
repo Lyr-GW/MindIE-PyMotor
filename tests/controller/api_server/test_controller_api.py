@@ -423,8 +423,8 @@ def test_controller_api_thread_start() -> None:
     config = ControllerConfig()
     with patch.object(threading.Thread, 'start') as mock_start:
         api = controller_api.ControllerAPI(config, '127.0.0.1', 12345)
-        api.start()  # Now we need to explicitly call start()
-        mock_start.assert_called_once()
+        api.start()  # Starts API server thread and Observability API server thread
+        assert mock_start.call_count == 2
 
 def test_api_access_filter_non_uvicorn_access() -> None:
     """Test non uvicorn.access log should return True"""

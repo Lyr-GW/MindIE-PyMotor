@@ -102,6 +102,7 @@ def test_init_all_modules_success(mock_logger):
     # Create mock config
     mock_config = MagicMock()
     mock_config.fault_tolerance_config.enable_fault_tolerance = False
+    mock_config.om_config.om_enable = False
 
     # Create mock instance manager
     mock_instance_manager = MagicMock()
@@ -225,6 +226,7 @@ def test_on_config_updated_enable_fault_tolerance(mock_logger):
     # Create mock config
     mock_config = MagicMock()
     mock_config.fault_tolerance_config.enable_fault_tolerance = True
+    mock_config.om_config.om_enable = False
 
     # Create mock modules
     mock_instance_manager = MagicMock()
@@ -377,7 +379,7 @@ def test_on_become_master_initialize_modules(mock_logger):
          patch('motor.controller.main.init_all_modules') as mock_init, \
          patch('motor.controller.main.start_all_modules') as mock_start:
 
-        on_become_master()
+        on_become_master(should_report_event=False)
 
         mock_init.assert_called_once()
         mock_start.assert_called_once_with(exclude_modules={"ControllerAPI"})
@@ -392,7 +394,7 @@ def test_on_become_master_modules_already_initialized(mock_logger):
     with patch('motor.controller.main.init_all_modules') as mock_init, \
          patch('motor.controller.main.start_all_modules') as mock_start:
 
-        on_become_master()
+        on_become_master(should_report_event=False)
 
         mock_init.assert_not_called()
         mock_start.assert_called_once_with(exclude_modules={"ControllerAPI"})

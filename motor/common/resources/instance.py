@@ -19,6 +19,8 @@ from typing import Optional
 from pydantic import BaseModel, Field, ConfigDict
 from motor.common.utils.logger import get_logger
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
+from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
+from motor.common.alarm.server_exception_event import ServerExceptionEvent, ServerExceptionReason
 
 logger = get_logger(__name__)
 
@@ -238,6 +240,15 @@ class Instance(BaseModel):
                         dead_endpoints[endpoint.ip].append(endpoint.id)
 
             if dead_endpoints and len(dead_endpoints) > 0:
+                for endpoint_ip, endpoint_ids in dead_endpoints.items():
+                    from motor.controller.observability.observability import Observability
+
+                    event = ServerExceptionEvent(
+                        endpoint_ip=endpoint_ip,
+                        endpoint_ids=endpoint_ids,
+                        reason_id=ServerExceptionReason.HEARTBEAT_TIMEOUT
+                    )
+                    Observability().add_alarm(event)
                 logger.warning("Instance %s(id:%d)'s endpoints %s have heartbeat timeout",
                                self.job_name, self.id, dead_endpoints)
                 return False
@@ -262,6 +273,15 @@ class Instance(BaseModel):
                         abnormal_endpoints[endpoint.ip].append(endpoint.id)
 
             if abnormal_endpoints and len(abnormal_endpoints) > 0:
+                for endpoint_ip, endpoint_ids in abnormal_endpoints.items():
+                    from motor.controller.observability.observability import Observability
+
+                    event = ServerExceptionEvent(
+                        endpoint_ip=endpoint_ip,
+                        endpoint_ids=endpoint_ids,
+                        reason_id=ServerExceptionReason.ENDPOINT_ABNORMAL
+                    )
+                    Observability().add_alarm(event)
                 logger.warning("Instance %s(id:%d)'s endpoints %s have ABNORMAL status",
                                self.job_name, self.id, abnormal_endpoints)
                 return True

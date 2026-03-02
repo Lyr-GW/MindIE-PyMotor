@@ -23,6 +23,10 @@ from motor.config.controller import ControllerConfig
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import Observer, ObserverEvent
 from motor.common.utils.logger import get_logger
+from motor.common.alarm.instance_exception_alarm import InstanceExceptionAlarm, InstanceExceptionReason
+from motor.common.alarm.coordinator_exception_alarm import CoordinatorExceptionAlarm, CoordinatorExceptionReason
+from motor.common.alarm.enums import Cleared
+
 
 logger = get_logger(__name__)
 
@@ -528,6 +532,8 @@ class InstanceManager(ThreadSafeSingleton):
         if condition_event == InsConditionEvent.INSTANCE_NORMAL:
             instance.update_instance_status(InsStatus.ACTIVE)
             self.notify(instance, ObserverEvent.INSTANCE_READY)
+            self._report_inst_alarm(instance, True)
+            self._report_coordinator_alarm(instance, True)
         return
 
     def _handle_inactive(
@@ -559,6 +565,8 @@ class InstanceManager(ThreadSafeSingleton):
             if self._check_node_managers_status(instance):
                 instance.update_instance_status(InsStatus.INACTIVE)
                 self.notify(instance, ObserverEvent.INSTANCE_SEPERATED)
+                self._report_inst_alarm(instance)
+                self._report_coordinator_alarm(instance)
             else:
                 # If node managers are all normal, do not set to INACTIVE
                 # and we need to refresh the heartbeat to avoid immediate timeout
@@ -566,6 +574,37 @@ class InstanceManager(ThreadSafeSingleton):
                     for endpoint in endpoints.values():
                         endpoint.hb_timestamp = time.time()
         return
+
+    def _report_inst_alarm(self, instance: Instance, is_cleared: bool = False) -> None:
+        from motor.controller.observability.observability import Observability
+
+        alarm = InstanceExceptionAlarm(
+            instance_id=instance.job_name,
+            reason_id=InstanceExceptionReason.INSTANCE_EXCEPTION,
+            is_cleared=Cleared.YES if is_cleared else Cleared.NO
+        )
+        Observability().add_alarm(alarm)
+
+    def _report_coordinator_alarm(self, instance: Instance, is_cleared: bool = False) -> None:
+        from motor.controller.observability.observability import Observability
+        
+        active_instances = self.get_active_instances()
+
+        role_to_partner = {"prefill": "decode", "decode": "prefill"}
+        role = role_to_partner.get(instance.role) if is_cleared else instance.role
+        if role is None:
+            return
+
+        has_role = any(inst.role == role for inst in active_instances)
+
+        if has_role != is_cleared:
+            return
+
+        alarm_msg = CoordinatorExceptionAlarm(
+            reason_id=CoordinatorExceptionReason.INSTANCE_MISSING,
+            is_cleared=is_cleared
+        )
+        Observability().add_alarm(alarm_msg)
 
     def _check_node_managers_status(self, instance: Instance) -> bool:
         """

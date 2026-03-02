@@ -17,6 +17,7 @@ MGMT_TLS_CONFIG = "mgmt_tls_config"
 INFER_TLS_CONFIG = "infer_tls_config"
 ETCD_TLS_CONFIG = "etcd_tls_config"
 GRPC_TLS_CONFIG = "grpc_tls_config"
+OBSERVABILITY_TLS_CONFIG = "observability_tls_config"
 ENABLE_TLS = "enable_tls"
 CA_FILE = "ca_file"
 CERT_FILE = "cert_file"
@@ -167,7 +168,7 @@ def _extract_tls_configs(config_dict: dict) -> dict:
     tls_configs = {}
     
     # Extract TLS configs
-    tls_keys = ["mgmt_tls_config", "infer_tls_config", "etcd_tls_config", "grpc_tls_config"]
+    tls_keys = ["mgmt_tls_config", "infer_tls_config", "etcd_tls_config", "grpc_tls_config", "observability_tls_config"]
     for key in tls_keys:
         if key in config_dict:
             tls_configs[key] = config_dict[key]
@@ -200,7 +201,7 @@ def generate_user_config_sample(output_path: str):
     # Extract TLS configs from all configs
     all_tls_configs = {}
     
-    # From controller: mgmt_tls_config, etcd_tls_config, grpc_tls_config
+    # From controller: mgmt_tls_config, etcd_tls_config, grpc_tls_config, observability_tls_config
     controller_tls = _extract_tls_configs(controller_dict)
     all_tls_configs.update(controller_tls)
     
@@ -256,6 +257,14 @@ def generate_user_config_sample(output_path: str):
                 CRL_FILE: ""
             }),
             "grpc_tls_config": all_tls_configs.get("grpc_tls_config", {
+                ENABLE_TLS: False,
+                CA_FILE: "",
+                CERT_FILE: "",
+                KEY_FILE: "",
+                PASSWD_FILE: "",
+                CRL_FILE: ""
+            }),
+            "observability_tls_config": all_tls_configs.get("observability_tls_config", {
                 ENABLE_TLS: False,
                 CA_FILE: "",
                 CERT_FILE: "",

@@ -23,6 +23,7 @@ from motor.config.controller import ControllerConfig
 from motor.controller.api_server import ControllerAPI
 from motor.controller.core import InstanceAssembler, InstanceManager, EventPusher
 
+
 logger = get_logger(__name__)
 
 # Global stop event for main loop
@@ -148,6 +149,9 @@ def init_all_modules() -> None:
         from motor.controller.fault_tolerance import FaultManager
         modules["FaultManager"] = FaultManager(config)
     modules["InstanceManager"] = InstanceManager(config)
+    if config.observability_config.observability_enable:
+        from motor.controller.observability.observability import Observability
+        modules["Observability"] = Observability(config)
     modules["ControllerAPI"] = ControllerAPI(config, modules)
 
     # Attach observers before starting modules
@@ -200,14 +204,23 @@ def stop_all_modules(exclude_modules: set[str] | None = None) -> None:
     logger.info("All modules stopped.")
 
 
-def on_become_master() -> None:
-    """Callback when becoming master - start all modules except ControllerAPI (which runs always)"""
+def on_become_master(should_report_event: bool) -> None:
+    """Callback when becoming master - start all modules except ControllerAPI (which runs always)""" 
     logger.info("Becoming master, starting all modules except ControllerAPI...")
     global config
     if not modules:  # Only initialize if not already initialized
         init_all_modules()
     # Start all modules except ControllerAPI, which should always be running
     start_all_modules(exclude_modules={"ControllerAPI"})
+
+    if should_report_event:
+        from motor.common.alarm.controller_to_slave_event import ControllerToSlaveEvent, ControllerToSlaveReason
+        from motor.controller.observability.observability import Observability
+        event = ControllerToSlaveEvent(
+            reason_id=ControllerToSlaveReason.MASTER_CONTROLLER_EXCEPTION,
+        )
+        Observability().add_alarm(event)
+        logger.info("Reported ControllerToSlave event")
 
 
 def on_become_standby() -> None:
@@ -285,6 +298,8 @@ def main() -> None:
         exclude_modules = {"InstanceManager", "InstanceAssembler", "EventPusher"}
         if config.fault_tolerance_config.enable_fault_tolerance:
             exclude_modules.add("FaultManager")
+        if config.observability_config.observability_enable:
+            exclude_modules.add("Observability")
         start_all_modules(exclude_modules=exclude_modules)
 
         # Get singleton instance and initialize/start it

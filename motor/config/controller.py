@@ -26,6 +26,7 @@ from motor.config.config_utils import (
     MGMT_TLS_CONFIG,
     ETCD_TLS_CONFIG,
     GRPC_TLS_CONFIG,
+    OBSERVABILITY_TLS_CONFIG,
 )
 
 
@@ -42,6 +43,17 @@ class ApiConfig:
     controller_api_host: str = field(default_factory=lambda: Env.pod_ip or '127.0.0.1')
     controller_api_dns: str | None = field(default_factory=lambda: Env.controller_service or "127.0.0.1")
     controller_api_port: int = 1026
+    observability_api_port: int = 1027
+
+
+@dataclass
+class ObservabilityConfig:
+    """observability configuration class"""
+
+    # observability enable/disable
+    observability_enable: bool = True
+
+    metrics_ttl: int = 15
 
 
 @dataclass
@@ -105,9 +117,11 @@ class ControllerConfig:
     mgmt_tls_config: TLSConfig = field(default_factory=TLSConfig)
     etcd_tls_config: TLSConfig = field(default_factory=TLSConfig)
     grpc_tls_config: TLSConfig = field(default_factory=TLSConfig)
+    observability_tls_config: TLSConfig = field(default_factory=TLSConfig)
     instance_config: InstanceConfig = field(default_factory=InstanceConfig)
     event_config: EventPusherConfig = field(default_factory=EventPusherConfig)
     fault_tolerance_config: FaultToleranceConfig = field(default_factory=FaultToleranceConfig)
+    observability_config: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     standby_config: StandbyConfig = field(default_factory=StandbyConfig)
     etcd_config: EtcdConfig = field(default_factory=EtcdConfig)
 
@@ -142,7 +156,7 @@ class ControllerConfig:
                             cfg = raw.get("motor_controller_config", {})
                         else:
                             cfg = raw
-                        tls_configs = [MGMT_TLS_CONFIG, ETCD_TLS_CONFIG, GRPC_TLS_CONFIG]
+                        tls_configs = [MGMT_TLS_CONFIG, ETCD_TLS_CONFIG, GRPC_TLS_CONFIG, OBSERVABILITY_TLS_CONFIG]
                         _update_tls_config(tls_configs, cfg, raw)
         except json.JSONDecodeError as e:
             # If JSON parsing fails, use default configuration
@@ -177,6 +191,9 @@ class ControllerConfig:
             if 'grpc_tls_config' in cfg:
                 update_config_from_dict(config.grpc_tls_config, cfg['grpc_tls_config'])
 
+            if 'observability_tls_config' in cfg:
+                update_config_from_dict(config.observability_tls_config, cfg['observability_tls_config'])
+
             if 'instance_config' in cfg:
                 update_config_from_dict(config.instance_config, cfg['instance_config'])
 
@@ -191,6 +208,9 @@ class ControllerConfig:
 
             if 'etcd_config' in cfg:
                 update_config_from_dict(config.etcd_config, cfg['etcd_config'])
+
+            if 'observability_config' in cfg:
+                update_config_from_dict(config.observability_config, cfg['observability_config'])
 
             # Set internal fields
             if config_path:
@@ -277,6 +297,9 @@ class ControllerConfig:
         if self.etcd_config.etcd_timeout <= 0:
             errors.append("etcd_timeout must be greater than 0")
 
+        if not (1 <= self.api_config.observability_api_port <= 65535):
+            errors.append("observability_api_port must be in range 1-65535")
+
         if errors:
             error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in errors)
             logger.error(error_msg)
@@ -357,7 +380,9 @@ class ControllerConfig:
                             and enable_fault_tolerance)
         enable_lingqu_network_recover = (self.fault_tolerance_config.enable_lingqu_network_recover
                                          and enable_fault_tolerance)
+        enable_observability = self.observability_config.observability_enable
         master_standby_check_interval = self.standby_config.master_standby_check_interval
+        metrics_ttl = self.observability_config.metrics_ttl
         master_lock_ttl = self.standby_config.master_lock_ttl
         master_lock_key = self.standby_config.master_lock_key
         controller_api = f"{self.api_config.controller_api_host}:{self.api_config.controller_api_port}"
@@ -377,7 +402,8 @@ class ControllerConfig:
             f"    ├─ Controller API DNS:  {controller_api_dns}\n"
             f"    ├─ Etcd TLS:            {'Enabled' if self.etcd_tls_config.enable_tls else 'Disabled'}\n"
             f"    ├─ GRPC TLS:            {'Enabled' if self.grpc_tls_config.enable_tls else 'Disabled'}\n"
-            f"    └─ Management TLS:      {'Enabled' if self.mgmt_tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ Management TLS:      {'Enabled' if self.mgmt_tls_config.enable_tls else 'Disabled'}\n"
+            f"    └─ Observability TLS:   {'Enabled' if self.observability_tls_config.enable_tls else 'Disabled'}\n"
             "\n"
             "  Instance Management:\n"
             f"    ├─ Assemble Timeout:     {self.instance_config.instance_assemble_timeout} seconds\n"
@@ -393,6 +419,8 @@ class ControllerConfig:
             f"    │   ├─ Host:             {self.etcd_config.etcd_host}\n"
             f"    │   ├─ Port:             {self.etcd_config.etcd_port}\n"
             f"    │   └─ Timeout:          {self.etcd_config.etcd_timeout} seconds\n"
+            f"    ├─ Observability:        {'Enabled' if enable_observability else 'Disabled'}\n"
+            f"    │   └─ Metrics TTL:      {metrics_ttl} seconds\n"
             f"    └─ Master/Standby:       {'Enabled' if self.standby_config.enable_master_standby else 'Disabled'}\n"
             f"        ├─ Check Interval:   {master_standby_check_interval} seconds\n"
             f"        ├─ Lock TTL:         {master_lock_ttl} seconds\n"

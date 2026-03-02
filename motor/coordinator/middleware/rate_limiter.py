@@ -28,6 +28,9 @@ from motor.common.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+DEFAULT_REQ_CONGESTION_TRIGGER_RATIO = 0.85
+DEFAULT_REQ_CONGESTION_CLEAR_RATIO = 0.75
+
 
 class TokenBucket:    
     def __init__(self, capacity: int, refill_rate: float):
@@ -92,6 +95,7 @@ class SimpleRateLimiter:
         # Calculate token bucket parameters
         self.capacity = max_requests  # Bucket capacity equals maximum requests
         self.refill_rate = max_requests / window_size  # Tokens added per second
+        self._congestion_alarm_sent = False
         
         # Use single global token bucket
         self._bucket = TokenBucket(
@@ -115,7 +119,37 @@ class SimpleRateLimiter:
             # Try to consume one token
             allowed = self._bucket.try_consume()
             available = self._bucket.get_available_tokens()
-            
+
+            req_congestion_trigger_threshold = int(self.max_requests * DEFAULT_REQ_CONGESTION_TRIGGER_RATIO)
+            req_congestion_clear_threshold = int(self.max_requests * DEFAULT_REQ_CONGESTION_CLEAR_RATIO)
+
+            from motor.common.alarm.req_congestion_event import ReqCongestionEvent, RequestCongestionReason
+            from motor.coordinator.api_client.controller_api_client import ControllerApiClient
+
+            additional_information = ""
+            if not self._congestion_alarm_sent and available >= req_congestion_trigger_threshold:
+                self._congestion_alarm_sent = True
+                additional_information = (
+                    f"The current number of inference requests in the system is{available},"
+                    f"which is greater than the configured maximum number of requests {self.max_requests}*85%."
+                )
+                event = ReqCongestionEvent(
+                    reason_id=RequestCongestionReason.DEALING_WITH_CONGESTION,
+                    additional_information=additional_information
+                )
+                ControllerApiClient.report_alarms(event.model_dump())
+            elif self._congestion_alarm_sent and available < req_congestion_clear_threshold:
+                self._congestion_alarm_sent = False
+                additional_information = (
+                    f"The current number of inference requests in the system is {available},"
+                    f"which is less than the configured maximum number of requests {self.max_requests}*75%."
+                )           
+                event = ReqCongestionEvent(
+                    reason_id=RequestCongestionReason.DEALING_WITH_CONGESTION,
+                    additional_information=additional_information
+                )
+                ControllerApiClient.report_alarms(event.model_dump())
+
             # Build rate limiting info
             limit_info = {
                 "allowed": allowed,

@@ -60,6 +60,28 @@ class CoordinatorApiClient:
         except Exception as e:
             raise e
 
+    @staticmethod
+    def get_full_metrics() -> str | None:
+        """
+        Get full aggregated metrics from coordinator (GET /metrics, plain text).
+        Returns None on failure.
+        """
+        client = None
+        try:
+            client_ars = CoordinatorApiClient._generate_client_args()
+            client = SafeHTTPSClient(**client_ars, timeout=5.0)
+            response = client.do_get("/metrics")
+            if response and response.ok:
+                return response.text
+            return None
+        except Exception as e:
+            address = CoordinatorApiClient._generate_client_args().get("address", "unknown")
+            logger.error("Failed to get full metrics from coordinator %s: %s", address, e)
+            return None
+        finally:
+            if client is not None:
+                client.close()
+
     @classmethod
     def _generate_client_args(cls) -> dict[str, str]:
         tls_config = cls.controller_config.mgmt_tls_config

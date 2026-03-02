@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -10,17 +9,17 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from fastapi import APIRouter, Request
+from pydantic import Field
 
-from motor.common.utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-router = APIRouter()
+from motor.common.alarm.record import Record
+from motor.common.alarm.enums import Category, Cleared
 
 
-@router.post("/v1/alarm/coordinator")
-async def alarms(request: Request):
-    body = await request.json()
-    logger.info(f"received alarm request: {body}")
-    return {"message": "ok"}
+class Event(Record):
+    """Event class for motor alarms."""
+
+    category: Category = Field(default=Category.EVENT)
+    cleared: Cleared = Field(default=Cleared.YES)
+
+    def __init__(self):
+        super().__init__()

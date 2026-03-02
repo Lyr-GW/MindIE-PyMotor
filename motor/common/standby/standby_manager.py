@@ -61,6 +61,7 @@ class StandbyManager(ThreadSafeSingleton):
         self.stanyby_loop_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
         self.is_running = False
+        self.has_set_role = False
 
         # Enhanced lock configuration for better reliability (loaded from config)
         self.lock_ttl = standby_config.master_lock_ttl
@@ -318,7 +319,9 @@ class StandbyManager(ThreadSafeSingleton):
                     if self._try_become_master():
                         logger.info("Became master, starting modules")
                         if self.on_become_master:
-                            self.on_become_master()
+                            self.on_become_master(self.etcd_client.get_bool(key="should_report_event"))
+                            self.etcd_client.set_bool(key="should_report_event", value=True)
+                    self.has_set_role = True
 
             except Exception as e:
                 logger.error("Error in master/standby manager: %s", e)

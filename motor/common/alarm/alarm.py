@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -10,26 +9,20 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from setuptools import setup, find_packages
+from pydantic import Field
+
+from motor.common.alarm.enums import Category, Cleared, ClearCategory
+from .record import Record
 
 
-setup(
-    name="motor",
-    version="0.1.0",
-    description="A Python package named motor.",
-    packages=find_packages(),
-    python_requires=">=3.11",
-    install_requires=[
+class Alarm(Record):
+    """Alarm class for motor alarms."""
 
-    ],
-    package_data={
-        "motor": ["version.info"],
-    },
-    include_package_data=True,
-    zip_safe=False,
-    entry_points={
-        "console_scripts": [
-            "engine_server = motor.engine_server.cli.main:main",
-        ]
-    }
-)
+    category: Category = Field(default=Category.ALARM)
+
+    def __init__(self):
+        super().__init__()
+
+    def clear(self) -> None:
+        self.cleared = Cleared.YES
+        self.category = Category.CLEAR

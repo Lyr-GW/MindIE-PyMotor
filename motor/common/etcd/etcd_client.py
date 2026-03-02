@@ -125,12 +125,10 @@ class EtcdClient:
         """Renew lease for a lock"""
         try:
             with self._lock:
-                lock_key = self.get_key_with_namespace_and_job_name(lock_key)
-                if lock_key not in self._leases:
+                lock_key, lease_id = self._get_lock_key_and_id(lock_key)
+                if lease_id is None:
                     logger.error("Lock %s does not exist", lock_key)
                     return False
-
-                lease_id = self._leases[lock_key]
 
                 keep_alive_req = rpc_pb2.LeaseKeepAliveRequest(ID=lease_id)
 
@@ -157,12 +155,11 @@ class EtcdClient:
         """Release a lease lock"""
         try:
             with self._lock:
-                lock_key = self.get_key_with_namespace_and_job_name(lock_key)
-                if lock_key not in self._leases:
+                lock_key, lease_id = self._get_lock_key_and_id(lock_key)
+                if lease_id is None:
                     logger.warning("Lock %s does not exist", lock_key)
                     return False
 
-                lease_id = self._leases[lock_key]
                 self.lease_stub.LeaseRevoke(rpc_pb2.LeaseRevokeRequest(ID=lease_id), timeout=self.timeout)
                 del self._leases[lock_key]
                 logger.debug("Released lock for lock %s", lock_key)
@@ -185,26 +182,8 @@ class EtcdClient:
             else:
                 json_data = json.dumps(data, ensure_ascii=False)
 
-            value = json_data
-
             key = self.get_key_with_namespace_and_job_name(key)
-            if lease:
-                self.kv_stub.Put(
-                    rpc_pb2.PutRequest(
-                        key=key.encode(UTF8_ENCODING),
-                        value=value.encode(UTF8_ENCODING),
-                        lease=lease
-                    ),
-                    timeout=self.timeout
-                )
-            else:
-                self.kv_stub.Put(
-                    rpc_pb2.PutRequest(
-                        key=key.encode(UTF8_ENCODING),
-                        value=value.encode(UTF8_ENCODING)
-                    ),
-                    timeout=self.timeout
-                )
+            self._put_key_value(key, json_data, lease)
 
             logger.info("Stored JSON data for key %s", key)
             return True
@@ -229,6 +208,40 @@ class EtcdClient:
         except Exception as e:
             logger.error("Failed to delete prefix %s: %s", prefix, e)
             return False
+
+    def set_bool(self, key: str, value: bool, lease: int = None) -> bool:
+        try:
+            key = self.get_key_with_namespace_and_job_name(key)
+            str_value = "true" if value else "false"
+            self._put_key_value(key, str_value, lease)
+            logger.debug("Stored bool %s for key %s", value, key)
+            return True
+        except Exception as e:
+            logger.error("Error storing bool at key %s: %s", key, e)
+            return False
+
+    def get_bool(self, key: str, default: bool | None = False) -> bool | None:
+        try:
+            key = self.get_key_with_namespace_and_job_name(key)
+            resp = self.kv_stub.Range(
+                rpc_pb2.RangeRequest(
+                    key=key.encode(UTF8_ENCODING),
+                    limit=1
+                ),
+                timeout=self.timeout
+            )
+            if not resp.kvs:
+                return default
+            str_value = resp.kvs[0].value.decode(UTF8_ENCODING).strip().lower()
+            if str_value in ("true", "1"):
+                return True
+            if str_value in ("false", "0"):
+                return False
+            logger.warning("Invalid bool value for key %s: %s", key, str_value)
+            return default
+        except Exception as e:
+            logger.error("Error getting bool at key %s: %s", key, e)
+            return default
 
     def delete_key(self, key: str) -> bool:
         """Delete a specific key"""
@@ -351,3 +364,32 @@ class EtcdClient:
         except Exception as e:
             logger.error("Failed to get prefix data with prefix %s: %s", key_prefix, e)
             return {}
+    
+    def _put_key_value(self, key: str, value: str, lease: int = None) -> None:
+        """Helper method to put key-value pair with optional lease"""
+        key_bytes = key.encode(UTF8_ENCODING)
+        value_bytes = value.encode(UTF8_ENCODING)
+        
+        if lease:
+            self.kv_stub.Put(
+                rpc_pb2.PutRequest(
+                    key=key_bytes,
+                    value=value_bytes,
+                    lease=lease
+                ),
+                timeout=self.timeout
+            )
+        else:
+            self.kv_stub.Put(
+                rpc_pb2.PutRequest(
+                    key=key_bytes,
+                    value=value_bytes
+                ),
+                timeout=self.timeout
+            )
+
+    def _get_lock_key_and_id(self, lock_key: str) -> tuple[str, int | None]:
+        """Helper method to get processed lock key and its lease ID"""
+        lock_key = self.get_key_with_namespace_and_job_name(lock_key)
+        lease_id = self._leases.get(lock_key)
+        return lock_key, lease_id

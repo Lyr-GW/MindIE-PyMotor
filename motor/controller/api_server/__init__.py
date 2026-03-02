@@ -16,8 +16,6 @@ Controller API server module - contains the REST API endpoints and server implem
 
 __all__ = [
     "ControllerAPI",
-    "om_api",
 ]
 
 from .controller_api import ControllerAPI
-from . import om_api
