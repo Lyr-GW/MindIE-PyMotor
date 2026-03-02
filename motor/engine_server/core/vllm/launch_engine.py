@@ -65,6 +65,7 @@ def engine_server_launch_vllm_core_engines(
     master_ip = parallel_cfg.data_parallel_master_ip
     dp_rank_idx = parallel_cfg.data_parallel_rank
     data_parallel_size = parallel_cfg.data_parallel_size
+    enable_expert_parallel = parallel_cfg.enable_expert_parallel
     
     is_local_only = (
             parallel_cfg.data_parallel_hybrid_lb
@@ -172,6 +173,7 @@ def engine_server_launch_vllm_core_engines(
             zmq_addresses,
             engines_for_handshake,
             parallel_cfg,
+            True if data_parallel_size > 1 and enable_expert_parallel else False,
             vllm_config.cache_config,
             local_engine_mgr,
             dp_coordinator.proc if dp_coordinator else None,

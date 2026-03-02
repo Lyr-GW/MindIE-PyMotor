@@ -85,7 +85,8 @@ class VLLMServerCore(BaseServerCore):
         bind_address, listening_socket = setup_server(self.args)
 
         engine_config = vllm.AsyncEngineArgs.from_cli_args(self.args)
-        setattr(engine_config, "_api_process_count", server_instance_count)
+        safe_count = server_instance_count or 1
+        setattr(engine_config, "_api_process_count", safe_count)
         setattr(engine_config, "_api_process_rank", -1)
 
         server_usage_context = UsageContext.OPENAI_API_SERVER

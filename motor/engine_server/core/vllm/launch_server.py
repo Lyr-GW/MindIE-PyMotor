@@ -25,7 +25,6 @@ import uvloop
 import vllm.envs as envs
 
 from vllm.reasoning import ReasoningParserManager
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.openai.api_server import load_log_config
 from vllm.entrypoints.openai.api_server import build_async_engine_client
@@ -58,6 +57,17 @@ async def engine_server_run_server_worker(address, listen_sock, args, ipc_config
     if (hasattr(args, 'tool_parser_plugin')
             and args.tool_parser_plugin 
             and len(args.tool_parser_plugin) > 3):
+        # Check vllm version and import ToolParserManager from appropriate module
+        try:
+            import pkg_resources
+            vllm_version = pkg_resources.get_distribution('vllm').version
+            if pkg_resources.parse_version(vllm_version) >= pkg_resources.parse_version("0.15.0"):
+                from vllm.tool_parsers import ToolParserManager
+            else:
+                from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+        except (ImportError, pkg_resources.DistributionNotFound):
+            # Fallback import if version check fails
+            from vllm.entrypoints.openai.tool_parsers import ToolParserManager
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     if (hasattr(args, 'reasoning_parser_plugin')

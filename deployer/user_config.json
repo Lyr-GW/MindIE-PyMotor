@@ -60,6 +60,7 @@
     "engine_config": {
       "enforce-eager": true,
       "max_model_len": 2048,
+      "api-server-count": 1,
       "kv_transfer_config": {
         "kv_connector": "MooncakeLayerwiseConnector",
         "kv_buffer_device": "npu",
@@ -98,6 +99,7 @@
     },
     "engine_config": {
       "max_model_len": 2048,
+      "api-server-count": 1,
       "kv_transfer_config": {
         "kv_connector": "MooncakeLayerwiseConnector",
         "kv_buffer_device": "npu",

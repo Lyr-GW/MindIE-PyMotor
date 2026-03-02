@@ -19,6 +19,14 @@ import asyncio
 # Use pytest fixture to mock dependencies within the test scope
 @pytest.fixture
 def mock_all_dependencies():
+    # Mock pkg_resources for version checking
+    mock_pkg_resources = mock.MagicMock()
+    mock_distribution = mock.MagicMock()
+    mock_distribution.version = '0.15.0'  # Default to v0.15.0 for testing
+    mock_pkg_resources.get_distribution.return_value = mock_distribution
+    # Mock DistributionNotFound exception
+    mock_pkg_resources.DistributionNotFound = Exception
+    sys.modules['pkg_resources'] = mock_pkg_resources
     """Mock all external dependencies within test scope only"""
     # Clear any existing modules from cache first - this is crucial for fresh imports
     # Be more aggressive in clearing modules to prevent any cross-test pollution
@@ -81,6 +89,10 @@ def mock_all_dependencies():
     mock_vllm.reasoning = mock.MagicMock()
     mock_vllm.reasoning.ReasoningParserManager = mock_reasoning_parser_manager
 
+    # Mock both import paths for ToolParserManager to handle version checking
+    mock_vllm.tool_parsers = mock.MagicMock()
+    mock_vllm.tool_parsers.ToolParserManager = mock_tool_parser_manager
+    
     mock_vllm.entrypoints = mock.MagicMock()
     mock_vllm.entrypoints.openai = mock.MagicMock()
     mock_vllm.entrypoints.openai.tool_parsers = mock.MagicMock()
