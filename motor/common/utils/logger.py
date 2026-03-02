@@ -13,26 +13,19 @@
 import logging
 import multiprocessing
 import os
-import json
 import sys
-from dataclasses import dataclass
 from pathlib import Path
+
+from motor.common.logger.logger_handler import CompressedRotatingFileHandler
+from motor.config.log_config import LoggingConfig
 
 
 # Set to track modules that have requested loggers
 _logged_modules = set()
 
-
-@dataclass
-class LoggingConfig:
-    """Logging configuration class used by various components"""
-    log_level: str = 'INFO'  # Logging level: DEBUG, INFO, WARNING, ERROR
-    log_max_line_length: int = 8192
-    log_file: str | None = None  # Optional log file path
-    log_format: str = (
-        '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(process_name)s]  %(message)s'
-    )
-    log_date_format: str = '%Y-%m-%d %H:%M:%S'
+# Get hostname from en
+hostname = os.getenv('HOSTNAME', 'unknown')
+env_log_dir = os.getenv('MOTOR_LOG_PATH')
 
 
 class ProcessNameFilter(logging.Filter):
@@ -97,7 +90,6 @@ class ApiAccessFilter(logging.Filter):
 
 def get_logger(
     name: str = __name__,
-    log_file: str | None = None,
     level: int | None = None
 ):
     """
@@ -105,7 +97,6 @@ def get_logger(
 
     Args:
         name: Logger name (usually __name__)
-        log_file: Optional file path for file logging (overrides config)
         level: Optional logging level (overrides config)
 
     Returns:
@@ -120,8 +111,6 @@ def get_logger(
     # Use provided parameters or fall back to config
     if level is None:
         level = getattr(logging, config.log_level.upper(), logging.INFO)
-    if log_file is None:
-        log_file = config.log_file
 
     log_name = name
     if name.startswith("motor."):
@@ -137,7 +126,7 @@ def get_logger(
     # calling _ensure_root_logger_configured with default LoggingConfig() would overwrite
     # level back to INFO and hide DEBUG logs in API server workers.
     if not root_logger.handlers:
-        _ensure_root_logger_configured(config, log_file)
+        _ensure_root_logger_configured(config, env_log_dir)
         logger.setLevel(level)
     else:
         # Leave root and its handlers unchanged; set this logger to DEBUG so it does not
@@ -147,7 +136,7 @@ def get_logger(
     return logger
 
 
-def _ensure_root_logger_configured(config: LoggingConfig, log_file: str | None) -> None:
+def _ensure_root_logger_configured(config: LoggingConfig, log_dir: str | None) -> None:
     """Ensure root logger has the proper handlers configured."""
     root_logger = logging.getLogger()
     level = getattr(logging, config.log_level.upper(), logging.INFO)
@@ -176,24 +165,42 @@ def _ensure_root_logger_configured(config: LoggingConfig, log_file: str | None) 
     root_logger.addHandler(console_handler)
 
     # File handler (optional)
-    if log_file:
+    if log_dir:
         # Ensure log directory exists
-        log_dir = os.path.dirname(log_file)
-        if log_dir and not os.path.exists(log_dir):
+        logging.info("Internal logs of pod will be saved to %s, will mounted to host %s", log_dir, config.host_log_dir)
+
+        # Get log_dir from pod name prefix, remove random suffix
+        parts = hostname.split('-')
+        if len(parts) <= 2:
+            module_log_dir = os.path.join(log_dir, hostname)
+        else:
+            module_log_dir = os.path.join(log_dir, '-'.join(parts[:-2]))
+
+        if not os.path.exists(module_log_dir):
             try:
-                Path(log_dir).mkdir(parents=True, exist_ok=True)
+                Path(module_log_dir).mkdir(parents=True, exist_ok=True)
             except Exception:
                 # If directory creation fails, skip file logging
+                logging.error(f"Failed to create log directory: {module_log_dir}")
                 pass
-        else:
+        if os.path.exists(module_log_dir):
             try:
-                file_handler = logging.FileHandler(log_file, encoding='utf-8')
-                file_handler.setLevel(level)
-                file_handler.addFilter(ProcessNameFilter())
-                file_handler.setFormatter(formatter)
-                root_logger.addHandler(file_handler)
+                log_file = os.path.join(module_log_dir, f"{hostname}_{os.getpid()}.log")
+
+                rotate_handler = CompressedRotatingFileHandler(
+                    filename=log_file,
+                    maxBytes=config.log_rotation_size * 1024 * 1024,  # Convert mb to bytes
+                    backupCount=config.log_rotation_count,
+                    compress=config.log_compress,
+                    compress_level=config.log_compress_level,
+                    max_total_size=config.log_max_total_size * 1024 * 1024,
+                    cleanup_interval=config.log_cleanup_interval
+                )
+                rotate_handler.setFormatter(formatter)
+                root_logger.addHandler(rotate_handler)
             except Exception:
                 # If file logging fails, continue with console only
+                logging.error(f"Failed to configure log handler")
                 pass
 
 
@@ -224,7 +231,7 @@ def reconfigure_logging(log_config: LoggingConfig) -> None:
         root_logger.removeHandler(handler)
 
     # Reconfigure root logger with new settings
-    _ensure_root_logger_configured(log_config, log_config.log_file)
+    _ensure_root_logger_configured(log_config, env_log_dir)
 
     # Update level of all handlers (ensure handler level matches config)
     for handler in root_logger.handlers:

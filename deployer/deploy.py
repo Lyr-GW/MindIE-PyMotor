@@ -74,10 +74,12 @@ SERVER_BASE_NAME_MAP = {
     "mindie-llm": "mindie-server",
     "sglang": "sglang"
 }
+LOG_PATH = "plog-path"
 DEPLOY_YAML_ROOT_PATH = "./deployment"
 OUTPUT_ROOT_PATH = "./output"
 SELECTOR = "selector"
 MATCHLABELS = "matchLabels"
+LOGGING_CONFIG = "logging_config"
 
 # Global variables
 g_controller_service = "mindie-motor-controller-service"
@@ -301,6 +303,7 @@ def modify_deployment(deployment_data, deploy_config, user_config):
     ])
 
     modify_coordinator_or_controller_replicas(deployment_data, user_config, role)
+    _modify_log_mount(deployment_data, user_config)
 
 
 def set_services_namespace(service_list, namespace):
@@ -458,7 +461,7 @@ def set_engine_weight_mount(deployment_data, container, deploy_config):
             volume_mount["mountPath"] = weight_mount_path
 
 
-def modify_engine_yaml(deployment_data, deploy_config, index, node_type):
+def modify_engine_yaml(deployment_data, deploy_config, user_config, index, node_type):
     container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
     container["image"] = deploy_config["image_name"]
     job_name = f"{deploy_config[CONFIG_JOB_ID]}-{node_type}{index}-{generate_unique_id()}"
@@ -471,6 +474,28 @@ def modify_engine_yaml(deployment_data, deploy_config, index, node_type):
     set_engine_npu(container, deploy_config, node_type)
     set_engine_node_selector(deployment_data, deploy_config, node_type)
     set_engine_weight_mount(deployment_data, container, deploy_config)
+    _modify_log_mount(deployment_data, user_config)
+
+
+def _modify_log_mount(deployment_data, user_config):
+    app_type = deployment_data[METADATA][NAME]
+    host_log_dir = "/root/ascend/log"
+    temp_app_config = None
+    if app_type == "mindie-motor-controller":
+        if MOTOR_CONTROLLER_CONFIG in user_config:
+            temp_app_config = user_config[MOTOR_CONTROLLER_CONFIG]
+    elif app_type == "mindie-motor-coordinator":
+        if MOTOR_COORDINATOR_CONFIG in user_config:
+            temp_app_config = user_config[MOTOR_COORDINATOR_CONFIG]
+    else:
+        if "motor_nodemanger_config" in user_config:
+            temp_app_config = user_config["motor_nodemanger_config"]
+    if temp_app_config and LOGGING_CONFIG in temp_app_config and \
+            temp_app_config[LOGGING_CONFIG]["host_log_dir"]:
+        host_log_dir = temp_app_config[LOGGING_CONFIG]["host_log_dir"]
+    for volume in deployment_data[SPEC][TEMPLATE][SPEC]["volumes"]:
+        if volume["name"] == LOG_PATH:
+            volume["hostPath"]["path"] = host_log_dir
 
 
 def obtain_engine_instance_total(deploy_config):
@@ -520,19 +545,19 @@ def generate_yaml_controller_or_coordinator(input_yaml, output_file, user_config
     g_generate_yaml_list.append(output_file)
 
 
-def generate_yaml_engine(input_yaml, output_file, deploy_config):
+def generate_yaml_engine(input_yaml, output_file, deploy_config, user_config):
     logger.info(f"Generating YAML from {input_yaml} to {output_file}")
     global g_generate_yaml_list
     p_total, d_total = obtain_engine_instance_total(deploy_config)
     for p_index in range(p_total):
         data = load_yaml(input_yaml, True)
-        modify_engine_yaml(data, deploy_config, p_index, "p")
+        modify_engine_yaml(data, deploy_config, user_config, p_index, "p")
         output_file_p = output_file + "_p" + str(p_index) + ".yaml"
         write_yaml(data, output_file_p, True)
         g_generate_yaml_list.append(output_file_p)
     for d_index in range(d_total):
         data = load_yaml(input_yaml, True)
-        modify_engine_yaml(data, deploy_config, d_index, "d")
+        modify_engine_yaml(data, deploy_config, user_config, d_index, "d")
         output_file_d = output_file + "_d" + str(d_index) + ".yaml"
         write_yaml(data, output_file_d, True)
         g_generate_yaml_list.append(output_file_d)
@@ -846,7 +871,7 @@ def handle_update_instance_num(user_config, deploy_config, user_config_path):
 
     engine_input_yaml = os.path.join(DEPLOY_YAML_ROOT_PATH, 'engine_init.yaml')
     engine_output_yaml = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, g_engine_base_name)
-    generate_yaml_engine(engine_input_yaml, engine_output_yaml, deploy_config)
+    generate_yaml_engine(engine_input_yaml, engine_output_yaml, deploy_config, user_config)
     exec_all_kubectl_multi(deploy_config, baseline_config, user_config_path)
     logger.info("instance num update end.")
 
@@ -888,7 +913,7 @@ def deploy_services(user_config, deploy_config, user_config_path, single_contain
                                                 user_config, deploy_config)
         generate_yaml_controller_or_coordinator(paths["coordinator_input_yaml"], paths["coordinator_output_yaml"],
                                                 user_config, deploy_config)
-        generate_yaml_engine(paths["engine_input_yaml"], paths["engine_output_yaml"], deploy_config)
+        generate_yaml_engine(paths["engine_input_yaml"], paths["engine_output_yaml"], deploy_config, user_config)
         if g_kv_pool_enabled:
             kv_pool_config = normalize_kv_cache_pool_config(user_config)
             generate_yaml_kv_pool(paths["kv_pool_input_yaml"], paths["kv_pool_output_yaml"],

@@ -39,7 +39,7 @@ def config_data():
         "logging_config": {
             "log_level": "DEBUG",
             "log_max_line_length": 4096,
-            "log_file": "/tmp/test.log",
+            "host_log_dir": "/tmp/",
             "log_format": "%(levelname)s [%(filename)s:%(lineno)d] %(message)s",
             "log_date_format": "%Y-%m-%d %H:%M:%S"
         }
@@ -147,7 +147,7 @@ def test_init_success(mock_safe_open, config_data, hccl_data):
     # Verify logging config
     assert config.logging_config.log_level == "DEBUG"
     assert config.logging_config.log_max_line_length == 4096
-    assert config.logging_config.log_file == "/tmp/test.log"
+    assert config.logging_config.host_log_dir == "/tmp/"
     assert config.logging_config.log_format == "%(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     assert config.logging_config.log_date_format == "%Y-%m-%d %H:%M:%S"
     
@@ -194,7 +194,7 @@ def test_logging_config_defaults(config_data, hccl_data):
     # Test default values
     assert config.logging_config.log_level == "INFO"
     assert config.logging_config.log_max_line_length == 8192
-    assert config.logging_config.log_file is None
+    assert config.logging_config.host_log_dir is not None
     # Default format includes [proc:%(process_name)s] for multi-process logging
     assert config.logging_config.log_format == (
         '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(process_name)s]  %(message)s'
