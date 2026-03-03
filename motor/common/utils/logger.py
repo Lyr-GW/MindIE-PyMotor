@@ -32,7 +32,7 @@ class ProcessNameFilter(logging.Filter):
     """Inject process_name into LogRecord so format can use %(process_name)s."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.process_name = multiprocessing.current_process().name
+        record.processName = multiprocessing.current_process().name
         return True
 
 

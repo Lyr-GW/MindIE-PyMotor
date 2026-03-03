@@ -197,7 +197,7 @@ def test_logging_config_defaults(config_data, hccl_data):
     assert config.logging_config.host_log_dir is not None
     # Default format includes [proc:%(process_name)s] for multi-process logging
     assert config.logging_config.log_format == (
-        '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(process_name)s]  %(message)s'
+        '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(processName)s]  %(message)s'
     )
     assert config.logging_config.log_date_format == '%Y-%m-%d %H:%M:%S'
 

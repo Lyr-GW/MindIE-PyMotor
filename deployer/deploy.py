@@ -80,6 +80,7 @@ OUTPUT_ROOT_PATH = "./output"
 SELECTOR = "selector"
 MATCHLABELS = "matchLabels"
 LOGGING_CONFIG = "logging_config"
+HOST_LOG_DIR = "host_log_dir"
 
 # Global variables
 g_controller_service = "mindie-motor-controller-service"
@@ -480,19 +481,14 @@ def modify_engine_yaml(deployment_data, deploy_config, user_config, index, node_
 def _modify_log_mount(deployment_data, user_config):
     app_type = deployment_data[METADATA][NAME]
     host_log_dir = "/root/ascend/log"
-    temp_app_config = None
     if app_type == "mindie-motor-controller":
-        if MOTOR_CONTROLLER_CONFIG in user_config:
-            temp_app_config = user_config[MOTOR_CONTROLLER_CONFIG]
+        temp_app_config = get_json_by_path(user_config, MOTOR_CONTROLLER_CONFIG)
     elif app_type == "mindie-motor-coordinator":
-        if MOTOR_COORDINATOR_CONFIG in user_config:
-            temp_app_config = user_config[MOTOR_COORDINATOR_CONFIG]
+        temp_app_config = get_json_by_path(user_config, MOTOR_COORDINATOR_CONFIG)
     else:
-        if "motor_nodemanger_config" in user_config:
-            temp_app_config = user_config["motor_nodemanger_config"]
-    if temp_app_config and LOGGING_CONFIG in temp_app_config and \
-            temp_app_config[LOGGING_CONFIG]["host_log_dir"]:
-        host_log_dir = temp_app_config[LOGGING_CONFIG]["host_log_dir"]
+        temp_app_config = get_json_by_path(user_config, "motor_nodemanger_config")
+    if temp_app_config:
+        host_log_dir = get_json_by_path(temp_app_config, "logging_config.host_log_dir", "/root/ascend/log")
     for volume in deployment_data[SPEC][TEMPLATE][SPEC]["volumes"]:
         if volume["name"] == LOG_PATH:
             volume["hostPath"]["path"] = host_log_dir

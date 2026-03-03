@@ -19,7 +19,7 @@ class LoggingConfig:
     log_level: str = 'INFO'  # Logging level: DEBUG, INFO, WARNING, ERROR
     log_max_line_length: int = 8192
     log_format: str = (
-        '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(process_name)s]  %(message)s'
+        '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(processName)s]  %(message)s'
     )
     log_date_format: str = '%Y-%m-%d %H:%M:%S'
     # Persistent log configuration

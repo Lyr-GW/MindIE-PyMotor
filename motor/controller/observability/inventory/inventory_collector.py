@@ -73,8 +73,6 @@ def _get_server_of_controller_master():
 def _get_instance_info_from_instance(instance: Instance, instance_status: InstanceStatus):
     server_ip_list = []
     pod_ip_list = []
-    for node_manager in instance.node_managers:
-        server_ip_list.append(node_manager.host_ip)
 
     pod_info_list = []
     for pod_ip, pod_info in instance.endpoints.items():
@@ -152,8 +150,6 @@ class InventoryCollector(ThreadSafeSingleton):
             instance_name_list.append(temp_instance_name)
             # every temp_instance equals to one instance(P or D)
             host_ip = ""
-            for node_manager in temp_instance.node_managers:
-                host_ip = node_manager.host_ip
             for pod_ip, pod_info in temp_instance.endpoints.items():
                 # every pod_info equals to one pod
                 pod_npu_info_list = []
