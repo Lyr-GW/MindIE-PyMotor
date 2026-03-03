@@ -11,7 +11,7 @@
 import os
 import base64
 
-from ccae.common.logging import Log
+from ccae_reporter.common.logging import Log
 from motor.common.utils.http_client import SafeHTTPSClient
 from .base_backend import BaseBackend
 
@@ -30,7 +30,7 @@ class MotorBackend(BaseBackend):
             return []
         url = "/observability/alarms"
         try:
-            response = self.om_client.do_get(f"{url}?source_id={os.getenv('NORTH_PLATFORM', 'ccae')}")
+            response = self.om_client.do_get(f"{url}?source_id={os.getenv('NORTH_PLATFORM', 'ccae_reporter')}")
             if response.status_code != 200:
                 self.logger.error(f"Failed to fetch alarms info from {url}")
                 return []

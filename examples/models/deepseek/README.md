@@ -64,8 +64,7 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
     "TASK_QUEUE_ENABLE": 1,
     "HCCL_OP_EXPANSION_MODE": "AIV",
     "VLLM_USE_V1": 1,
-    "ASCEND_BUFFER_POOL": "4:8",
-    "VLLM_LOGGING_LEVEL": "DEBUG"
+    "ASCEND_BUFFER_POOL": "4:8"
   },
   "motor_engine_decode_env": {
     "HCCL_INTRA_PCIE_ENABLE_": 1,
@@ -83,8 +82,7 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
     "OMP_PROC_BIND": "false",
     "OMP_NUM_THREADS": 10,
     "ASCEND_BUFFER_POOL": "4:8",
-    "VLLM_USE_V1": 1,
-    "VLLM_LOGGING_LEVEL": "DEBUG"
+    "VLLM_USE_V1": 1
   }
 }
 ```
@@ -108,38 +106,6 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
     "env_path": "./conf/env.json",
     "weight_mount_path": "/mnt/weight/",
     "tls_config": {
-      "infer_tls_config": {
-        "tls_enable": false,
-        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/infer/ca.pem",
-        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/infer/cert.pem",
-        "key_file": "/usr/local/Ascend/pyMotor/conf/security/infer/nopass.cert.key.pem",
-        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/infer/key_pwd.txt",
-        "tls_crl": ""
-      },
-      "mgmt_tls_config": {
-        "tls_enable": false,
-        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/ca.pem",
-        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/cert.pem",
-        "key_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/nopass.cert.key.pem",
-        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/mgmt/key_pwd.txt",
-        "tls_crl": ""
-      },
-      "etcd_tls_config": {
-        "tls_enable": false,
-        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/ca.pem",
-        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/cert.pem",
-        "key_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/nopass.cert.key.pem",
-        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/etcd/key_pwd.txt",
-        "tls_crl": ""
-      },
-      "grpc_tls_config": {
-        "tls_enable": false,
-        "ca_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/ca.pem",
-        "cert_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/cert.pem",
-        "key_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/nopass.cert.key.pem",
-        "passwd_file": "/usr/local/Ascend/pyMotor/conf/security/clusterd/key_pwd.txt",
-        "tls_crl": ""
-      }
     }
   },
   "motor_controller_config": {
@@ -161,7 +127,7 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
   "motor_engine_prefill_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "dsr1",
+      "model_name": "dsv3",
       "model_path": "/mnt/share/weights/DeepSeek-V3.1-Terminus-w8a8-QuaRot-lfs",
       "npu_mem_utils": 0.9,
       "prefill_parallel_config": {
@@ -173,6 +139,7 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
       }
     },
     "engine_config": {
+      "api-server-count": 1,
       "enforce-eager": true,
       "trust-remote-code": true,
       "max_model_len": 73000,
@@ -199,6 +166,7 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
         "kv_rank": 0,
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
         "kv_connector_extra_config": {
+          "use_ascend_direct": true,
           "prefill": {
             "dp_size": 2,
             "tp_size": 8
@@ -226,6 +194,7 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
       }
     },
     "engine_config": {
+      "api-server-count": 1,
       "trust-remote-code": true,
       "max_model_len": 73000,
       "max-num-batched-tokens": 256,

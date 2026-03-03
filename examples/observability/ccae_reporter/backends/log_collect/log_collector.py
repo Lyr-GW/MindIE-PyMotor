@@ -14,10 +14,10 @@ import re
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from ccae.common.logging import Log
-from ccae.common.util import PathCheck
-from ccae.backends.log_collect.log_processor import LogDataProcessor
-from ccae.backends.log_collect.data_class import LogFile
+from ccae_reporter.common.logging import Log
+from ccae_reporter.common.util import PathCheck
+from ccae_reporter.backends.log_collect.log_processor import LogDataProcessor
+from ccae_reporter.backends.log_collect.data_class import LogFile
 
 
 DEFAULT_COLLECT_PATH = os.getenv("MOTOR_LOG_PATH")
@@ -35,26 +35,26 @@ class CollectHandler(FileSystemEventHandler):
 
     def on_created(self, event):
         if self._check_valid_file(event):
-            self.logger.info(f"[CCAE] File %s is created" % event.src_path)
+            self.logger.info(f"[CCAE Reporter] File %s is created" % event.src_path)
             self.log_processor.watch_files[event.src_path] = LogFile(file_path=event.src_path)
             self.log_processor.modified_log_files.add(event.src_path)
 
     def on_modified(self, event):
         if self._check_valid_file(event):
-            self.logger.debug(f"[CCAE] File %s is modified", event.src_path)  # 文件内容更新频率高
+            self.logger.debug(f"[CCAE Reporter] File %s is modified", event.src_path)  # 文件内容更新频率高
             if event.src_path not in self.log_processor.watch_files:
                 self.log_processor.watch_files[event.src_path] = LogFile(file_path=event.src_path)
             self.log_processor.modified_log_files.add(event.src_path)
 
     def on_deleted(self, event):
         if self._check_valid_file(event):
-            self.logger.info("[CCAE] File %s is deleted" % event.src_path)
+            self.logger.info("[CCAE Reporter] File %s is deleted" % event.src_path)
             self.log_processor.watch_files.pop(event.src_path)
             self.log_processor.modified_log_files.pop(event.src_path)
 
     def on_moved(self, event):
         if self._check_valid_file(event):
-            self.logger.info(f"[CCAE] File %s is changed to %s" % (event.src_path, event.dest_path))
+            self.logger.info(f"[CCAE Reporter] File %s is changed to %s" % (event.src_path, event.dest_path))
             src_log_file = self.log_processor.watch_files.pop(event.src_path, LogFile(file_path=event.dest_path))
             src_log_file.file_path = event.dest_path
             src_log_file.last_read_position = 0  # 文件轮转后，更新读取位置
@@ -81,12 +81,19 @@ class Collector:
     def __init__(self, collect_path=DEFAULT_COLLECT_PATH, identity=None):
         self.logger = Log(__name__).getlog()
 
-        self.log_path = os.path.join(collect_path, identity.lower() if identity else "")
-        if not self.log_path:
-            err_msg = f"[CCAE] Init log monitor failed, the log_path is empty"
-            self.logger.error(err_msg)
-            raise Exception(err_msg)
-        self.logger.info(f"[CCAE] Log monitor path is %s" % self.log_path)
+        if not os.path.exists(collect_path):
+            raise RuntimeError(f"[CCAE Reporter] The log monitor path %s is not exists" % collect_path)
+
+        host_name = os.getenv("HOST_NAME", "")
+        parts = host_name.split("-")
+        if len(parts) > 2:
+            self.log_path = os.path.join(collect_path, "-".join(parts[:-2]))
+        else:
+            self.log_path = os.path.join(collect_path, host_name)
+        if not os.path.exists(self.log_path):
+            os.makedirs(self.log_path, exist_ok=True)
+            self.logger.info(f"[CCAE Reporter] Create log monitor path %s" % self.log_path)
+        self.logger.info(f"[CCAE Reporter] Log monitor path is %s" % self.log_path)
 
         self.collect_handler = CollectHandler(identity)
         self.collect_observer = Observer()
@@ -94,9 +101,9 @@ class Collector:
         try:
             self.collect_observer.start()
         except Exception as e:
-            self.logger.error(f"[CCAE] Failed to start collect_observer: {e}")
+            self.logger.error(f"[CCAE Reporter] Failed to start collect_observer: {e}")
             self.running = False
-            raise RuntimeError(f"Observer startup failed: {e}") from e
+            raise RuntimeError(f"[CCAE Reporter] Observer startup failed: {e}") from e
 
     def stop(self):
         self.collect_observer.stop()

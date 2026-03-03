@@ -2,11 +2,11 @@
 
 CCAE(Cluster Computing Autonomous Engine)是华为开发的一套集群自智引擎系统
 
-Motor 推理服务可纳管至 CCAE。本组件（Observability CCAE）负责采集 Motor 的运行信息（告警、日志、inventory、metrics 等）并上报至 CCAE，便于在 CCAE 侧进行统一监控与运维管理。
+Motor 推理服务可纳管至 CCAE。本组件（CCAE Reporter）负责采集 Motor 的运行信息（告警、日志、实例信息和metrics 等）并上报至 CCAE，便于在 CCAE 侧进行统一监控与运维管理。
 
 ## 安装步骤
 
-### 1. 构建 Observability CCAE whl包
+### 1. 构建 CCAE Reporter whl包
 
 ```bash
 # 将代码下载到共享路径下
@@ -15,32 +15,32 @@ cd ${share-path}
 git clone https://gitcode.com/Ascend/MindIE-pyMotor-private.git
 
 # 进入 observability 目录
-cd Motor/examples/observability
+cd MindIE-pyMotor-private/examples/observability
 
 # 安装依赖
-pip install -r requirement.txt
+pip install -r requirements.txt
 
 # 构建 wheel 包
 ./build.sh
 ```
 
-### 2. 安装 Observability CCAE 包
+### 2. 安装 CCAE Reporter 包
 
-在 `boot.sh` 中、`set_common_env` 之后添加以下命令：
+在 `boot.sh` 中、`set_common_env` 之后添加安装命令：
 
 ```bash
-pip install ${share-path}/Motor/examples/observability/dist/ccae-*.whl
+pip install ${share-path}/MindIE-pyMotor-private/examples/observability/dist/ccae_reporter-*.whl
 ```
 
 ### 3. 在 boot.sh 中添加启动命令
 
 - **Controller**：在 `python3 -m motor.controller.main` 之前添加
   ```bash
-  python3 -m ccae.run Controller &
+  python3 -m ccae_reporter.run Controller &
   ```
 - **Coordinator**：在 `python3 -m motor.coordinator.main` 之前添加
   ```bash
-  python3 -m rcae.run Coordinator &
+  python3 -m ccae_reporter.run Coordinator &
   ```
 
 ## 配置说明
@@ -63,8 +63,8 @@ pip install ${share-path}/Motor/examples/observability/dist/ccae-*.whl
     }
   },
   "north_config": {
-    "name": "ccae",
-    "ip": "ccae-server-ip",
+    "name": "ccae_reporter",
+    "ip": "xxx",
     "port": 31948
   }
 }

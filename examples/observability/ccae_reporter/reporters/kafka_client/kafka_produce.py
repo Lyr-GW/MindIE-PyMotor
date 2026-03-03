@@ -10,8 +10,8 @@
 
 from confluent_kafka import Producer
 
-from ccae.common.logging import Log
-from ccae.common.util import PathCheck
+from ccae_reporter.common.logging import Log
+from ccae_reporter.common.util import PathCheck
 
 
 class KafkaProducer:
@@ -44,7 +44,7 @@ class KafkaProducer:
         for param, value in self.kafka_config.items():
             if param in params_whitelist:
                 if not params_whitelist[param](value):
-                    err_msg = f"[CCAE] Invalid value in kafka producer config for parameter {param}"
+                    err_msg = f"[CCAE Reporter] Invalid value in kafka producer config for parameter {param}"
                     raise ValueError(err_msg)
 
     def send(self, topic, message):
@@ -57,7 +57,7 @@ class KafkaProducer:
 
     def _delivery_report(self, err, msg):
         if err is not None:
-            self.logger.error("[CCAE] message send failed, the reason is: %s" % err)
+            self.logger.error("[CCAE Reporter] message send failed, the reason is: %s" % err)
         else:
             self.logger.debug(
-                f"[CCAE] message send successfully topic=%s, partition=%s", msg.topic(), msg.partition())
+                f"[CCAE Reporter] message send successfully topic=%s, partition=%s", msg.topic(), msg.partition())

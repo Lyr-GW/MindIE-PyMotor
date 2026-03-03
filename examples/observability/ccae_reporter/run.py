@@ -15,9 +15,9 @@ import threading
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
-from ccae.common.logging import Log
-from ccae.config import ConfigUtil
-from ccae.monitors import select_monitor
+from ccae_reporter.common.logging import Log
+from ccae_reporter.config import ConfigUtil
+from ccae_reporter.reporters import select_reporter
 
 
 logger = Log(__name__).getlog()
@@ -58,11 +58,11 @@ class UserConfigWatcher(FileSystemEventHandler):
 
 class Runner:
     def __init__(self, identity: str):
-        self.monitor = select_monitor("ccae")("motor", identity)
-        logger.info("CCAE monitor initialized successfully, identity: %s", identity)
+        self.reporter = select_reporter("ccae_reporter")("motor", identity)
+        logger.info("CCAE reporter initialized successfully, identity: %s", identity)
 
     def run(self):
-        self.monitor.run()
+        self.reporter.run()
 
 
 def _wait_for_north_config():

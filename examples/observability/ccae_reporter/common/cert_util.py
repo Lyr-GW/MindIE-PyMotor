@@ -9,10 +9,9 @@
 # See the Mulan PSL v2 for more details.
 
 import os
-import stat
 
-from ccae.common.util import PathCheck, safe_open
-from ccae.common.logging import Log
+from ccae_reporter.common.util import PathCheck, safe_open
+from ccae_reporter.common.logging import Log
 
 CA_FILE = "ca_file"
 CERT_FILE = "cert_file"

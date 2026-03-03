@@ -11,10 +11,9 @@
 import os
 import time
 
-from ccae.common.util import safe_open
-from ccae.config import ConfigUtil
-from ccae.thread_safe_util import ThreadSafeFactory
-from ccae.monitors.base_monitor import BaseMonitor, check_element
+from ccae_reporter.common.util import safe_open
+from ccae_reporter.thread_safe_util import ThreadSafeFactory
+from ccae_reporter.reporters.base_reporter import BaseReporter
 
 import motor
 
@@ -31,7 +30,12 @@ def response_raise_for_status(response, interface_name: str):
                            f"content is {response.text}")
 
 
-class CCAEMonitor(BaseMonitor):
+def check_element(item: dict, key: str):
+    if key not in item.keys():
+        raise ValueError(f"Failed to read http response, lack key `{key}`")
+
+
+class CCAEReporter(BaseReporter):
     def __init__(self, backend_name: str, identity: str):
         super().__init__(backend_name, identity)
         # model_id_period 值为一个三元list

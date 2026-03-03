@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -9,5 +8,15 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from .log_collector import Collector
-from .data_class import LogRequestMessage
+from .ccae_reporter import CCAEReporter
+
+
+reporter_dict = {
+    "ccae_reporter": CCAEReporter,
+}
+
+
+def select_reporter(reporter_name: str):
+    if reporter_name not in reporter_dict.keys():
+        raise ValueError(f"No such backend: {reporter_name}, supported backends are: {reporter_dict.keys()}")
+    return reporter_dict.get(reporter_name)

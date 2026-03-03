@@ -15,14 +15,14 @@ os.environ['SOURCE_DATE_EPOCH'] = '0'
 
 
 setup(
-    name='ccae',
+    name='ccae_reporter',
     version='1.0.0',
-    description='observability for ccae',
+    description='ccae_reporter',
     packages=find_packages(),
     python_requires=">=3.10",
     entry_points={
         'console_scripts': [
-            'ccae=ccae.run:main'
+            'ccae_reporter=ccae_reporter.run:main'
         ],
     },
 )

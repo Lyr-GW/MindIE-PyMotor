@@ -9,8 +9,8 @@
 # See the Mulan PSL v2 for more details.
 
 
-from ccae.backends.log_collect.data_class import LogData, LogFile
-from ccae.thread_safe_util import ThreadSafeFactory
+from ccae_reporter.backends.log_collect.data_class import LogData, LogFile
+from ccae_reporter.thread_safe_util import ThreadSafeFactory
 
 CLIENT_COMPONENT_TYPE = ["Controller", "Coordinator"]
 

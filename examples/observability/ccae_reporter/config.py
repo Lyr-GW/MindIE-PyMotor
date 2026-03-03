@@ -11,9 +11,9 @@
 import json
 import os
 
-from ccae.common.logging import Log
-from ccae.common.util import safe_open
-from ccae.common.util import PathCheck
+from ccae_reporter.common.logging import Log
+from ccae_reporter.common.util import safe_open
+from ccae_reporter.common.util import PathCheck
 
 
 class ConfigUtil:

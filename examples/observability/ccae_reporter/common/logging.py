@@ -11,38 +11,19 @@
 import os
 import stat
 import time
-import re
-import sys
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass, field
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
-from ccae.common.util import PathCheckBase
 
 
-MODULE_NAME = 'observability-ccae'
-MINDIE_PREFIX = "MINDIE_"
+MODULE_NAME = 'ccae-reporter'
 UNSET_LOGGER = 'NULL'
 FILE_SIZE = 'fs'
 FILE_COUNT = 'fc'
 FILE_PER_PROCESS = 'r'
-BOOL_ENV_CHOICES = ["True", "False", "true", "false", "0", "1"]
-LOG_ENV_LEVEL = ['critical', 'error', 'warn', 'info', 'debug', 'null']
 TRUE_STR = "true"
-
-logger_screen = logging.getLogger("ccae_screen")
-logger_screen.setLevel(logging.INFO)
-ch = logging.StreamHandler(sys.stdout)
-logger_screen.addHandler(ch)
-
-
-def print_value_warn(value_type, env_value, default_value, support_choices=None):
-    msg = f"[WARNING] Invalid value of ccae in {value_type}: {env_value}. "
-    if support_choices:
-        msg += f"Only {support_choices} support. "
-    msg += f"{value_type} will be set default to {default_value} "
-    logger_screen.warning(msg)
 
 
 def is_true_value(value):
@@ -238,11 +219,7 @@ class CustomRotatingFileHandler(RotatingFileHandler):
 
 
 class Log(metaclass=Singleton):
-    MODULE_KEY_NAME = 'observability-ccae'
-    MIN_FILE_SIZE = 1 * 1024 * 1024
-    MAX_FILE_SIZE = 500 * 1024 * 1024
-    MIN_FILE_PER_PROCESS = 1
-    MAX_FILE_PER_PROCESS = 64
+    MODULE_KEY_NAME = 'ccae-reporter'
 
     def __init__(self, logger=None):
         self._logger = logging.getLogger(self.MODULE_KEY_NAME)

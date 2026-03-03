@@ -15,22 +15,17 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
-from ccae.backends import select_backend
-from ccae.common.cert_util import AdapterCertUtil
-from ccae.common.logging import Log
-from ccae.config import ConfigUtil
+from ccae_reporter.backends import select_backend
+from ccae_reporter.common.cert_util import AdapterCertUtil
+from ccae_reporter.common.logging import Log
+from ccae_reporter.config import ConfigUtil
+from ccae_reporter.reporters.kafka_client.kafka_produce import KafkaProducer
 
 from motor.common.utils.http_client import SafeHTTPSClient
 from motor.config.tls_config import TLSConfig
-from .kafka_client.kafka_produce import KafkaProducer
 
 
-def check_element(item: dict, key: str):
-    if key not in item.keys():
-        raise ValueError(f"Failed to read http response, lack key `{key}`")
-
-
-class BaseMonitor(ABC):
+class BaseReporter(ABC):
     def __init__(self, backend_name: str, identity: str, *args, **kwargs):
         self.logger = Log(__name__).getlog()
         self.backend = select_backend(backend_name)(identity, *args, **kwargs)

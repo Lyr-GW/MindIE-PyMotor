@@ -8,13 +8,12 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import json
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List
 
-from ccae.common.util import safe_open
+from ccae_reporter.common.util import safe_open
 
 ENV_MODEL_NAME = "MODEL_NAME"
 DEFAULT_MODEL_NAME = "UNKNOWN_MODEL_NAME"

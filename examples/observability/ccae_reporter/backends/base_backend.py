@@ -11,9 +11,10 @@
 import json
 from abc import ABC, abstractmethod
 
-from ccae.backends.log_collect import Collector, LogRequestMessage
-from ccae.common.logging import Log
-from ccae.common.util import get_local_ip
+from ccae_reporter.backends.log_collect.log_collector import Collector
+from ccae_reporter.backends.log_collect.data_class import LogRequestMessage
+from ccae_reporter.common.logging import Log
+from ccae_reporter.common.util import get_local_ip
 
 
 class BaseBackend(ABC):

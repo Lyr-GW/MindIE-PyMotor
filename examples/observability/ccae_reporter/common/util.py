@@ -62,7 +62,7 @@ class PathCheckBase(object):
     @classmethod
     def check_exists(cls, path: str):
         if not os.path.exists(path):
-            error_message = f"[CCAE] The path {path} is not exists"
+            error_message = f"[CCAE Reporter] The path {path} is not exists"
             cls.log_error(error_message)
             return False
         return True
@@ -70,7 +70,7 @@ class PathCheckBase(object):
     @classmethod
     def check_soft_link(cls, path: str):
         if os.path.islink(os.path.normpath(path)):
-            error_msg = f"[CCAE] The path {path} is a soft link"
+            error_msg = f"[CCAE Reporter] The path {path} is a soft link"
             cls.log_error(error_msg)
             return False
         return True
@@ -89,7 +89,7 @@ class PathCheckBase(object):
             flag = flag or (file_user_id == 0 and file_group_id == 0)
         if flag:
             return True
-        error_msg = f"[CCAE] Check the path {path} owner and group failed"
+        error_msg = f"[CCAE Reporter] Check the path {path} owner and group failed"
         cls.log_error(error_msg)
         return False
 
@@ -98,7 +98,7 @@ class PathCheckBase(object):
         cur_stat = os.stat(path)
         cur_mode = stat.S_IMODE(cur_stat.st_mode)
         if cur_mode != mode:
-            error_message = f"[CCAE] Check the {path} %s mode failed"
+            error_message = f"[CCAE Reporter] Check the {path} %s mode failed"
             cls.log_error(error_message)
             return False
         return True
@@ -106,20 +106,20 @@ class PathCheckBase(object):
     @classmethod
     def check_name_valid(cls, path: str):
         if not path:
-            error_msg = f"[CCAE] The path is empty: {path}"
+            error_msg = f"[CCAE Reporter] The path is empty: {path}"
             cls.log_error(error_msg)
             return False
         if len(path) > 2048:
-            error_msg = f"[CCAE] The length of path exceeds 2048 characters: {path}"
+            error_msg = f"[CCAE Reporter] The length of path exceeds 2048 characters: {path}"
             cls.log_error(error_msg)
             return False
         traversal_patterns = ["../", "..\\", ".."]
         if any(pattern in path for pattern in traversal_patterns):
-            error_msg = f"[CCAE] Path contains traversal sequences: {path}"
+            error_msg = f"[CCAE Reporter] Path contains traversal sequences: {path}"
             cls.log_error(error_msg)
             return False
         if re.search(r'[^0-9a-zA-Z_./-]', path):
-            error_msg = f"[CCAE] The path contains special characters: {path}"
+            error_msg = f"[CCAE Reporter] The path contains special characters: {path}"
             cls.log_error(error_msg)
             return False
         return True
@@ -129,10 +129,11 @@ class PathCheckBase(object):
         try:
             file_size = os.path.getsize(path)
         except FileNotFoundError:
-            cls.log_error("[CCAE] The path %s is not exists" % path)
+            cls.log_error("[CCAE Reporter] The path %s is not exists" % path)
             return False
         if file_size > max_file_size:
-            cls.log_error(f"[CCAE] Invalid file size, should be no more than {max_file_size} but got {file_size}")
+            cls.log_error(f"[CCAE Reporter] Invalid file size, "
+                          f"should be no more than {max_file_size} but got {file_size}")
             return False
         return True
 
@@ -143,7 +144,7 @@ class PathCheck(PathCheckBase):
 
     @classmethod
     def log_error(cls, msg: str):
-        from ccae.common.logging import Log
+        from ccae_reporter.common.logging import Log
         if not cls.logger:
             cls.logger = Log(__name__).getlog()
         cls.logger.error(msg)

@@ -28,7 +28,7 @@ MindIE PyMotor核心组件定义如下：
 作为集群的**状态管控器和决策大脑**，负责全局业务状态管控及 RAS 能力决策。 
 - **FaultManager**：故障管理模块，负责接收故障上报并执行隔离、重启、自愈恢复等操作。
 - **InsManager**：实例管理器，负责 PD 实例身份（Prefill 或 Decode）的分配与动态调整。
-- **OMAdaptor**：运维管理信息上报，将实例状态及 Metrics 信息同步至[CCAE](https://www.hiascend.com/software/ccae)等运维管理平台。
+- **CCAEReporter**：运维管理信息上报，将实例状态及 Metrics 信息同步至[CCAE](https://www.hiascend.com/software/ccae)等运维管理平台。
 - **EventPusher**：事件推送器，同步实例状态信息给Coordinator。
 
 ### 3. Deployer
