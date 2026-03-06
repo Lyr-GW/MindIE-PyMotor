@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -10,7 +8,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from typing import Dict
 import importlib
 
 from motor.engine_server.config.base import IConfig
@@ -18,7 +15,7 @@ from motor.engine_server.core.base_core import IServerCore
 
 
 class ServerCoreFactory:
-    _ENGINE_CORE_MAP: Dict[str, str] = {
+    _ENGINE_CORE_MAP: dict[str, str] = {
         "vllm": "motor.engine_server.core.vllm.vllm_core.VLLMServerCore"
     }
 
@@ -37,7 +34,7 @@ class ServerCoreFactory:
             module_path, class_name = core_class_path.rsplit('.', 1)
             module = importlib.import_module(module_path)
             core_class = getattr(module, class_name)
-            
+
             return core_class(config)
         except (ImportError, AttributeError) as e:
             raise ValueError(f"Failed to load core class for {config_type}") from e
