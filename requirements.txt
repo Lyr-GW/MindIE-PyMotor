@@ -20,3 +20,4 @@ anyio>=4.0.0
 # Process title (scheduler/worker process naming, optional at runtime)
 setproctitle>=1.3.0
 confluent_kafka>=2.13.2
+transformers>=4.57.6
