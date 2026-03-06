@@ -21,7 +21,7 @@ from motor.coordinator.scheduler.policy.factory import SchedulingPolicyFactory
 from motor.coordinator.router.workload_action_handler import calculate_demand_workload
 from motor.config.coordinator import CoordinatorConfig, DeployMode, SchedulerType
 from motor.coordinator.domain import InstanceProvider
-
+from motor.coordinator.models.request import RequestInfo
 
 logger = get_logger(__name__)
 
@@ -87,7 +87,7 @@ class Scheduler:
         r = self._scheduling_policy.select_instance_and_endpoint(role)
         return (await r) if asyncio.iscoroutine(r) else r
 
-    async def select_and_allocate(self, role: PDRole, req_id: str, req_len: int):
+    async def select_and_allocate(self, role: PDRole, req_info: RequestInfo):
         """
         Atomic: select instance + one workload allocation (ALLOCATION).
         Allocation workload is decided here: zero for policies without update_workload (e.g. RR), demand for LB.
@@ -104,13 +104,13 @@ class Scheduler:
         workload = (
             Workload()
             if not hasattr(self._scheduling_policy, "update_workload")
-            else calculate_demand_workload(role, req_len)
+            else calculate_demand_workload(role, req_info.req_len)
         )
         params = UpdateWorkloadParams(
             instance_id=instance.id,
             endpoint_id=endpoint.id,
             role=role,
-            req_id=req_id,
+            req_id=req_info.req_id,
             workload_action=WorkloadAction.ALLOCATION,
             workload_change=workload,
         )

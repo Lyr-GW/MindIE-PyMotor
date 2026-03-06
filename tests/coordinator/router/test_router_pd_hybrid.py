@@ -106,7 +106,7 @@ class TestRouterPDHybrid:
                 return {mock_instance.id: mock_instance}
             return {}
         
-        async def mock_select_and_allocate(self, role, req_id, req_len):
+        async def mock_select_and_allocate(self, role, req_info):
             if role == PDRole.ROLE_P:
                 return mock_instance, mock_endpoint, Workload()
             return None

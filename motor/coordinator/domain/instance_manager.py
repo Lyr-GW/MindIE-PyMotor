@@ -17,7 +17,11 @@ from motor.common.resources.instance import Instance, PDRole, Workload, Endpoint
 from motor.common.resources.http_msg_spec import EventType
 from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.domain.scheduling import InstanceReadiness
+from motor.coordinator.api_client.conductor_api_client import ConductorApiClient
 
+
+TYPE_SCHEDULER = "schedule"
+TYPE_MGMT = "mgmt"
 
 logger = get_logger(__name__)
 
@@ -41,10 +45,11 @@ class InstanceManager:
     InstanceProvider. Created explicitly and injected; no singleton.
     """
 
-    def __init__(self, config: CoordinatorConfig | None = None):
+    def __init__(self, config: CoordinatorConfig | None = None, typename: str = TYPE_SCHEDULER):
         if config is None:
             config = CoordinatorConfig()
         self._lock = asyncio.Lock()
+        self.typename = typename
         self._workload_locks: dict[int, asyncio.Lock] = {}
         self._available_pool: dict[int, Instance] = {}
         self._unavailable_pool: dict[int, Instance] = {}
@@ -277,10 +282,13 @@ class InstanceManager:
             )
             if event_type == EventType.ADD:
                 result = self._add_instances(instances)
+                # The _register_kv_instance function is called in _add_instances.
             elif event_type == EventType.DEL:
                 result = self._delete_instances(instances)
+                self._register_kv_instance(instances, False)
             elif event_type == EventType.SET:
                 result = self._apply_set_diff(instances)
+                # The _register_kv_instance function is called in _add_instances.
             else:
                 logger.error("Unknown event type: %s, cannot refresh instances", event_type)
                 result = False
@@ -297,10 +305,21 @@ class InstanceManager:
             return None
         return self._available_role_pools.get(_role_to_pdrole(instance.role))
 
+    def _register_kv_instance(self, instances: list[Instance], is_register: bool = True) -> None:
+        """Apply kv instance refresh, to avoid duplication, only mgmt needs to do this."""
+        if self.typename != TYPE_MGMT:
+            return
+
+        if is_register:
+            ConductorApiClient().register_kv_instance(instances)
+        else:
+            ConductorApiClient().unregister_kv_instance(instances)
+
     def _add_instances(self, instances: list[Instance]) -> bool:
         """Add instances to pool. Return True if at least one instance was actually added (pool modified)."""
         # This is a private method that should only be called within locked contexts
         modified = False
+        instances_tmp = []
         for instance in instances:
             if instance.id in self._unavailable_pool:
                 logger.warning("Instance ID %d (role: %s, job_name: %s) already exists in unavailable pool, "
@@ -325,7 +344,12 @@ class InstanceManager:
                 "Added instance ID %d (role: %s, job_name: %s) with %d endpoints to available pool successfully",
                 instance.id, instance.role, instance.job_name, num_endpoints,
             )
+
+            instances_tmp.append(instance)
+
+        self._register_kv_instance(instances_tmp)
         return modified
+
 
     def _delete_instances(self, instances: list[Instance]) -> bool:
         """Delete instances from pool. Return True if at least one instance was actually deleted (pool modified)."""

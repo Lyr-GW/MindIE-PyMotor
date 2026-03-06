@@ -241,7 +241,7 @@ async def __create_request_info(
     try:
         request_json = await raw_request.json()
     except Exception as e:
-        logger.debug("JSON parse failed: %s", e)
+        logger.warning("JSON parse failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid JSON format"

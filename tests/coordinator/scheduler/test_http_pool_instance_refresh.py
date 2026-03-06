@@ -17,6 +17,7 @@ import pytest
 
 from motor.common.resources.instance import Instance, PDRole
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
+from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.runtime.scheduler_client import (
     _collect_active_endpoints_from_cache,
     _SchedulerInstanceCache,
@@ -130,8 +131,14 @@ async def test_on_instance_refreshed_callback_invoked_on_version_change():
         with patch.object(client, "_transport") as mock_transport:
             mock_transport.connected = True
             mock_transport.send_request = AsyncMock(return_value=alloc_response)
+            req_info = RequestInfo(
+                req_id="",
+                req_data={"test": "data"},
+                req_len=100,
+                api="/test/api"
+            )
             result = await client.select_and_allocate(
-                PDRole.ROLE_P, "req-1", 128
+                PDRole.ROLE_P, req_info
             )
 
     assert result is not None
@@ -159,8 +166,14 @@ async def test_on_instance_refreshed_not_called_when_no_callback():
         with patch.object(client, "_transport") as mock_transport:
             mock_transport.connected = True
             mock_transport.send_request = AsyncMock(return_value=None)
+            req_info = RequestInfo(
+                req_id="",
+                req_data={"test": "data"},
+                req_len=100,
+                api="/test/api"
+            )
             await client.select_and_allocate(
-                PDRole.ROLE_P, "req-1", 128
+                PDRole.ROLE_P, req_info
             )
 
     assert client._on_instance_refreshed is None

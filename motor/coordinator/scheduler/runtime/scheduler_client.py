@@ -32,7 +32,9 @@ from motor.common.utils.logger import get_logger
 from motor.config.coordinator import DeployMode
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
+from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
 from motor.coordinator.router.workload_action_handler import calculate_demand_workload
+from motor.coordinator.models.request import RequestInfo
 
 logger = get_logger(__name__)
 
@@ -521,13 +523,13 @@ class AsyncSchedulerClient:
             self._workload_reader = None
         await self._transport.disconnect()
 
-    async def select_instance_and_endpoint(self, role: PDRole | None = None):
+    async def select_instance_and_endpoint(self, req_info: RequestInfo, role: PDRole | None = None):
         """Select instance and endpoint from cache or GET_AVAILABLE_INSTANCES. Returns (Instance, Endpoint) or None."""
         cache_role = role if role is not None else PDRole.ROLE_U
         cached_instances = self._cache.get_instances(cache_role)
         if cached_instances:
             # Cache stores instances sorted by id (see replace_all call sites); use as-is for RR
-            selected = self._select_instance_and_endpoint_from_list(cached_instances, cache_role)
+            selected = self._select_instance_and_endpoint_from_list(cached_instances, cache_role, req_info)
             if selected:
                 logger.debug("Selected instance from cache (role=%s, policy=%s)", role, self._scheduler_type)
                 return selected
@@ -537,7 +539,7 @@ class AsyncSchedulerClient:
 
         # get_available_instances already wrote sorted list to cache; build sorted list once for this path
         instance_list = sorted(instances.values(), key=lambda i: i.id)
-        selected = self._select_instance_and_endpoint_from_list(instance_list, cache_role)
+        selected = self._select_instance_and_endpoint_from_list(instance_list, cache_role, req_info)
         if selected:
             logger.debug("Selected instance from fresh fetch (role=%s, policy=%s)", role, self._scheduler_type)
         return selected
@@ -545,8 +547,7 @@ class AsyncSchedulerClient:
     async def select_and_allocate(
         self,
         role: "PDRole",
-        req_id: str,
-        req_len: int,
+        req_info: RequestInfo
     ) -> tuple[Instance, Endpoint, Workload] | None:
         """Select instance locally + ALLOCATE_ONLY RPC. Allocation workload is decided here (RR=zero, LB=demand)."""
         role_str = role.value if role is not None else (getattr(PDRole.ROLE_U, "value", "both"))
@@ -601,7 +602,7 @@ class AsyncSchedulerClient:
                 else:
                     self._last_instance_version = current_version
 
-        selected = await self.select_instance_and_endpoint(role)
+        selected = await self.select_instance_and_endpoint(req_info, role)
         if not selected:
             return None
         instance, endpoint = selected
@@ -610,7 +611,7 @@ class AsyncSchedulerClient:
         workload = (
             Workload()
             if (self._scheduler_type or "round_robin") == "round_robin"
-            else calculate_demand_workload(role, req_len)
+            else calculate_demand_workload(role, req_info.req_len)
         )
 
         request_id = str(uuid.uuid4())
@@ -621,7 +622,7 @@ class AsyncSchedulerClient:
                 "instance_id": instance.id,
                 "endpoint_id": endpoint.id,
                 "role": role_str,
-                "req_id": req_id,
+                "req_id": req_info.req_id,
                 "workload": workload.model_dump(mode="json"),
             },
         )
@@ -630,7 +631,7 @@ class AsyncSchedulerClient:
             if response:
                 logger.error(
                     "ALLOCATE_ONLY failed: role=%s req_id=%s error=%s",
-                    role_str, req_id, response.error
+                    role_str, req_info.req_id, response.error
                 )
             return None
         data = response.data or {}
@@ -843,21 +844,32 @@ class AsyncSchedulerClient:
             logger.warning("Instance change notify refresh failed: %s", e)
 
     def _select_instance_and_endpoint_from_list(
-        self, instances: list[Instance], role: PDRole
+        self, instances: list[Instance], role: PDRole, req_info: RequestInfo
     ) -> tuple[Instance, Endpoint] | None:
         if not instances:
             return None
         st = self._scheduler_type or "round_robin"
         selected_instance = None
         if st == "load_balance":
-            n = len(instances)
-            start_index = (n * self._client_index) // self._client_count if n else 0
-            selected_instance = LoadBalancePolicy.select_instance_from_list(
-                instances, role, start_index=start_index
-            )
+            selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
             if selected_instance is not None:
                 return self._select_endpoint_for_instance(selected_instance)
-            logger.warning("All instances failed workload calculation, falling back to round-robin")
+            logger.warning("load_balance failed, falling back to round-robin")
+        elif st == "kv_cache_affinity":
+            if role is PDRole.ROLE_P:
+                selected = KvCacheAffinityPolicy.select_endpoint_from_list(instances, req_info)
+                if selected is not None:
+                    return selected
+                logger.warning("kv_cache_affinity failed, falling back to load_balance")
+                selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+                if selected_instance is not None:
+                    return self._select_endpoint_for_instance(selected_instance)
+                logger.warning("load_balance also failed, falling back to round-robin")
+            else:
+                selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+            if selected_instance is not None:
+                return self._select_endpoint_for_instance(selected_instance)
+            logger.warning("kv_cache_affinity failed, falling back to round-robin")
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
@@ -898,3 +910,13 @@ class AsyncSchedulerClient:
             await self.get_available_instances(None)
         except Exception as e:
             logger.warning("Failed to initialize instance cache: %s", e, exc_info=True)
+
+    def _select_instance_and_endpoint_by_load_balance(
+        self, instances: list[Instance], role: PDRole
+    ) -> Instance | None:
+        n = len(instances)
+        start_index = (n * self._client_index) // self._client_count if n else 0
+        selected_instance = LoadBalancePolicy.select_instance_from_list(
+            instances, role, start_index=start_index
+        )
+        return selected_instance

@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 from motor.common.resources.endpoint import Endpoint, Workload, WorkloadAction
 from motor.common.resources.instance import Instance, PDRole
+from motor.coordinator.models.request import RequestInfo
 
 
 class InstanceReadiness(str, Enum):
@@ -72,8 +73,7 @@ class SchedulingFacade(Protocol):
     async def select_and_allocate(
         self,
         role: PDRole,
-        req_id: str,
-        req_len: int,
+        req_info: RequestInfo
     ) -> Tuple[Instance, Endpoint, Workload] | None:
         """
         Atomic: select instance + one workload allocation (ALLOCATION).
