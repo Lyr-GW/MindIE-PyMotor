@@ -12,6 +12,7 @@ logger = get_logger(__name__)
 
 MINDIE_MOTOR_CONFIG_FILENAME = "config_sample.json"
 MOTOR_DEPLOY_CONFIG = "motor_deploy_config"
+MOTOR_ENGINE_PREFILL_CONFIG = "motor_engine_prefill_config"
 TLS_CONFIG = "tls_config"
 MGMT_TLS_CONFIG = "mgmt_tls_config"
 INFER_TLS_CONFIG = "infer_tls_config"
@@ -25,6 +26,16 @@ KEY_FILE = "key_file"
 PASSWD_FILE = "passwd_file"
 CRL_FILE = "crl_file"
 ENGINE_CONFIG = "engine_config"
+ENGINE_TYPE = "engine_type"
+BLOCK_SIZE = "block_size"
+KV_EVENTS_CONFIG = "kv-events-config"
+PREFILL_KV_EVENT_CONFIG = "prefill_kv_event_config"
+ENDPOINT = "endpoint"
+REPLAY_ENDPOINT = "replay_endpoint"
+KV_CONDUCTOR_CONFIG = "kv_conductor_config"
+HTTP_SERVER_PORT = "http_server_port"
+MODEL_CONFIG = "model_config"
+MODEL_PATH = "model_path"
 SSL_ENABLE = "ssl_enable"
 SSL_CA_CERTS = "ssl_ca_certs"
 SSL_CERTFILE = "ssl_certfile"
@@ -161,6 +172,32 @@ def _update_instances_num(
         P_INSTANCES_NUM: deploy_config.get(P_INSTANCES_NUM, 1),
         D_INSTANCES_NUM: deploy_config.get(D_INSTANCES_NUM, 1)
     }
+
+
+def _update_prefill_kv_event_config(
+    updated_config: dict[str, Any],
+    user_config_data: dict[str, Any]
+) -> None:
+    try:
+        prefill_engine_config = user_config_data[MOTOR_ENGINE_PREFILL_CONFIG][ENGINE_CONFIG]
+        if not isinstance(prefill_engine_config, dict):
+            logger.warning("prefill_engine_config is not dict")
+            return
+
+        kv_events_config = prefill_engine_config.get(KV_EVENTS_CONFIG, None)
+        if not isinstance(kv_events_config, dict):
+            logger.warning("kv_events_config is None")
+            return
+
+        updated_config[PREFILL_KV_EVENT_CONFIG] = {
+            ENDPOINT: kv_events_config.get(ENDPOINT, ""),
+            REPLAY_ENDPOINT: kv_events_config.get(REPLAY_ENDPOINT, ""),
+            BLOCK_SIZE: prefill_engine_config.get("block-size", 128),
+            HTTP_SERVER_PORT: user_config_data[KV_CONDUCTOR_CONFIG][HTTP_SERVER_PORT],
+            MODEL_PATH: user_config_data[MOTOR_ENGINE_PREFILL_CONFIG][MODEL_CONFIG][MODEL_PATH]
+        }
+    except Exception as e:
+        logger.warning("Failed to get prefill config: %s", e)
 
 
 def _extract_tls_configs(config_dict: dict) -> dict:

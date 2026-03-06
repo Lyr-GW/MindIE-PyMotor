@@ -58,5 +58,8 @@ class Env:
     def controller_service(self):
         return os.getenv("CONTROLLER_SERVICE", "mindie-motor-controller-service.mindie-motor.svc.cluster.local")
 
+    @property
+    def conductor_service(self):
+        return os.getenv("KV_CONDUCTOR_SERVICE", "kv-conductor.mindie-motor.svc.cluster.local")
 
 Env = Env()

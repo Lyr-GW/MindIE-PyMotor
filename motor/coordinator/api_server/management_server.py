@@ -42,7 +42,7 @@ from motor.coordinator.api_server.base_server import BaseCoordinatorServer
 from motor.coordinator.scheduler.runtime import SchedulerConnectionManager
 from motor.coordinator.api_server.app_builder import AppBuilder
 from motor.coordinator.domain import InstanceReadiness
-from motor.coordinator.domain.instance_manager import InstanceManager
+from motor.coordinator.domain.instance_manager import InstanceManager, TYPE_MGMT
 
 logger = get_logger(__name__)
 
@@ -83,7 +83,7 @@ class ManagementServer(BaseCoordinatorServer):
         self._scheduler_connection = SchedulerConnectionManager.from_config(self.coordinator_config)
         self._main_instance_manager = (
             instance_manager if instance_manager is not None
-            else InstanceManager(self.coordinator_config)
+            else InstanceManager(self.coordinator_config, TYPE_MGMT)
         )
         self._app_builder = AppBuilder(self.coordinator_config)
         self.management_app = self._app_builder.create_management_app(lifespan=self._lifespan)

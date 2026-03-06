@@ -31,6 +31,7 @@ from motor.config.config_utils import (
     save_config_to_json,
     _update_tls_config,
     _update_instances_num,
+    _update_prefill_kv_event_config,
     MGMT_TLS_CONFIG,
     INFER_TLS_CONFIG,
     ETCD_TLS_CONFIG,
@@ -103,6 +104,7 @@ class DeployMode(Enum):
 class SchedulerType(Enum):
     LOAD_BALANCE = "load_balance"
     ROUND_ROBIN = "round_robin"
+    KV_CACHE_AFFINITY = "kv_cache_affinity"
 
     @classmethod
     def from_string(cls, value: str) -> Optional['SchedulerType']:
@@ -255,6 +257,19 @@ class TracerConfig:
 
 
 @dataclass
+class PrefillKvEventConfig:
+    """Prefill kv event configuration class"""
+
+    conductor_service: str = field(default_factory=lambda: Env.conductor_service or '127.0.0.1')
+    http_server_port: int = 13333
+    block_size: int = 128
+    endpoint: str = ""
+    replay_endpoint: str = ""
+    engine_type: str = "vLLM"
+    model_path: str = ""
+
+
+@dataclass
 class CoordinatorConfig:
     """Coordinator configuration class with validation, reload and error handling support"""
 
@@ -276,6 +291,7 @@ class CoordinatorConfig:
     api_config: ApiConfig = field(default_factory=ApiConfig)
     deploy_config: DeployConfig = field(default_factory=DeployConfig)
     tracer_config: TracerConfig = field(default_factory=TracerConfig)
+    prefill_kv_event_config: PrefillKvEventConfig = field(default_factory=PrefillKvEventConfig)
 
     # internal fields
     config_path: str | None = field(default=None, init=False)
@@ -321,6 +337,7 @@ class CoordinatorConfig:
                         tls_configs = [MGMT_TLS_CONFIG, INFER_TLS_CONFIG, ETCD_TLS_CONFIG]
                         _update_tls_config(tls_configs, cfg, raw)   
                         _update_instances_num(cfg, raw)
+                        _update_prefill_kv_event_config(cfg, raw)
         except json.JSONDecodeError as e:
             # If JSON parsing fails, use default configuration
             logger.warning(f"Configuration file {json_path} format error: {e}, using default configuration")
@@ -391,6 +408,7 @@ class CoordinatorConfig:
                 ('api_config', config.api_config, None),
                 ('deploy_config', config.deploy_config, None),
                 ('tracer_config', config.tracer_config, None),
+                ('prefill_kv_event_config', config.prefill_kv_event_config, None),
             ]
 
             for section_name, config_obj, special_handlers in config_mappings:

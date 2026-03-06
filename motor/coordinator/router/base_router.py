@@ -170,7 +170,7 @@ class BaseRouter(ABC):
             try:
                 t0_select = time.perf_counter()
                 result = await self._scheduler.select_and_allocate(
-                    role, self.req_info.req_id, self.req_info.req_len
+                    role, self.req_info
                 )
                 elapsed_select_ms = (time.perf_counter() - t0_select) * 1000
                 if _should_log_scheduling_sample(self.req_info.req_id):

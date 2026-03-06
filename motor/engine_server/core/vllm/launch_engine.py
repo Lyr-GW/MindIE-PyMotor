@@ -168,16 +168,29 @@ def engine_server_launch_vllm_core_engines(
 
         yield local_engine_mgr, dp_coordinator, zmq_addresses
 
-        wait_for_engine_startup(
-            handshake_sock,
-            zmq_addresses,
-            engines_for_handshake,
-            parallel_cfg,
-            True if data_parallel_size > 1 and enable_expert_parallel else False,
-            vllm_config.cache_config,
-            local_engine_mgr,
-            dp_coordinator.proc if dp_coordinator else None,
-        )
+        import pkg_resources
+        vllm_version = pkg_resources.get_distribution('vllm').version
+        if pkg_resources.parse_version(vllm_version) >= pkg_resources.parse_version("0.15.0"):
+            wait_for_engine_startup(
+                handshake_sock,
+                zmq_addresses,
+                engines_for_handshake,
+                parallel_cfg,
+                True if data_parallel_size > 1 and enable_expert_parallel else False,
+                vllm_config.cache_config,
+                local_engine_mgr,
+                dp_coordinator.proc if dp_coordinator else None,
+            )
+        else:
+            wait_for_engine_startup(
+                handshake_sock,
+                zmq_addresses,
+                engines_for_handshake,
+                parallel_cfg,
+                vllm_config.cache_config,
+                local_engine_mgr,
+                dp_coordinator.proc if dp_coordinator else None,
+            )
 
 
 class EngineServerEngineCoreProc(EngineCoreProc):
