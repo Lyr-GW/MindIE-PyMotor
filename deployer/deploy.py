@@ -62,6 +62,8 @@ KV_POOL_PORT = "port"
 KV_POOL_EVICTION_HIGH_WATERMARK_RATIO = "eviction_high_watermark_ratio"
 KV_POOL_EVICTION_RATIO = "eviction_ratio"
 DEFAULT_KV_POOL_PORT = 50088
+KV_CONDUCTOR_CONFIG = "kv_conductor_config"
+KV_CONDUCTOR_PORT = "http_server_port"
 STANDBY_CONFIG = "standby_config"
 MOTOR_CONTROLLER_CONFIG = "motor_controller_config"
 MOTOR_COORDINATOR_CONFIG = "motor_coordinator_config"
@@ -93,7 +95,9 @@ NODE_SELECTOR = "nodeSelector"
 g_controller_service = "mindie-motor-controller-service"
 g_coordinator_service = "mindie-motor-coordinator-service"
 g_kv_pool_service = "kvp-master"
+g_kv_conductor_service = "kv-conductor"
 g_kv_pool_enabled = False
+g_kv_conductor_enabled = False
 g_engine_base_name = "mindie-server"
 g_generate_yaml_list = []
 
@@ -235,6 +239,18 @@ def update_kv_pool_enabled_flag(user_config):
         g_kv_pool_enabled = True
 
 
+def update_kv_conductor_enabled_flag(user_config):
+    global g_kv_conductor_enabled
+    g_kv_conductor_enabled = False
+
+    kv_conductor_config = user_config.get("kv_conductor_config", None)
+    if kv_conductor_config is None:
+        return
+    http_server_port = kv_conductor_config.get("http_server_port", 0)
+    if http_server_port != 0:
+        g_kv_conductor_enabled = True
+
+
 def extract_resources(data):
     """Extract deployment, services, and RBAC resources from YAML data"""
     deployment_data = None
@@ -304,6 +320,11 @@ def modify_deployment(deployment_data, deploy_config, user_config):
         {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service}
     ])
 
+    if g_kv_conductor_enabled:
+        container[ENV].append(
+            {NAME: "KV_CONDUCTOR_SERVICE", VALUE: g_kv_conductor_service}
+        )
+
     modify_coordinator_or_controller_replicas(deployment_data, user_config, role)
     modify_log_mount(deployment_data, user_config)
 
@@ -329,6 +350,21 @@ def modify_controller_or_coordinator_yaml(data, deploy_config, user_config):
 
     # Set namespace for all services
     set_services_namespace(service_list, namespace)
+
+    container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
+    weight_mount_path = deploy_config.get("weight_mount_path", "/mnt/weight")
+    volume = [{
+        "name": "weight-mount",
+        "hostPath": {
+            "path": weight_mount_path
+        }
+    }]
+    deployment_data[SPEC][TEMPLATE][SPEC]["volumes"].extend(volume)
+    volume_mount = [{
+        "name": "weight-mount",
+        "mountPath": weight_mount_path
+    }]
+    container["volumeMounts"].extend(volume_mount)
 
 
 def modify_coordinator_or_controller_replicas(data, user_config, role):
@@ -379,6 +415,17 @@ def normalize_kv_cache_pool_config(user_config):
         kv_config[KV_POOL_PORT] = DEFAULT_KV_POOL_PORT
 
     return kv_config
+
+
+def normalize_kv_conductor_pool_config(user_config):
+    mc_config = user_config.get(KV_CONDUCTOR_CONFIG)
+    if not isinstance(mc_config, dict):
+        raise ValueError(f"Missing or invalid '{KV_CONDUCTOR_CONFIG}' in user config")
+
+    if KV_POOL_PORT not in mc_config:
+        mc_config[KV_POOL_PORT] = DEFAULT_KV_POOL_PORT
+
+    return mc_config
 
 
 def gen_kv_pool_env(kv_pool_config):
@@ -876,7 +923,7 @@ def generate_yaml_kv_pool(input_yaml, output_file, deploy_config, kv_pool_config
 
     kv_pool_env = gen_kv_pool_env(kv_pool_config)
     container[ENV].extend(kv_pool_env)
-    
+
     # Modify service data
     service_data = data[1]
     service_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
@@ -894,11 +941,54 @@ def generate_yaml_kv_pool(input_yaml, output_file, deploy_config, kv_pool_config
     g_generate_yaml_list.append(output_file)
 
 
-def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, deploy_config):
+
+def generate_yaml_kv_conductor(input_yaml, output_file, deploy_config, kv_conductor_config):
+    logger.info(f"Generating YAML from {input_yaml} to {output_file}")
+    data = load_yaml(input_yaml, False)
+
+    # Extract resources
+    deployment_data, service_list, rbac_resources = extract_resources(data)
+
+    # Modify deployment data
+    deployment_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
+
+    container = deployment_data[SPEC][TEMPLATE][SPEC]["containers"][0]
+    container["image"] = deploy_config["image_name"]
+
+    if ENV not in container:
+        container[ENV] = []
+
+    # Set namespace for all services
+    set_services_namespace(service_list, deploy_config[CONFIG_JOB_ID])
+
+    service_port = kv_conductor_config.get(KV_CONDUCTOR_PORT)
+
+    ports = service_list[0].get(SPEC, {}).get("ports", [])
+    if not ports:
+        raise ValueError(
+            "Missing required service ports in 'kv_pool_init.yaml'. "
+            "Please configure spec.ports for KV pool service."
+        )
+    ports[0]["port"] = service_port
+    ports[0]["targetPort"] = service_port
+
+    kv_pool_env = [
+        {NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service}
+    ]
+    container[ENV].extend(kv_pool_env)
+
+    write_yaml(data, output_file, False)
+    global g_generate_yaml_list
+    g_generate_yaml_list.append(output_file)
+
+
+def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_pool_input_yaml, kv_conductor_input_yaml,
+                             deploy_config):
 
     controller_data = load_yaml(controller_input_yaml, False)
     coordinator_data = load_yaml(coordinator_input_yaml, False)
     kv_pull_data = load_yaml(kv_pool_input_yaml, False)
+    kv_conductor_data = load_yaml(kv_conductor_input_yaml, False)
 
     # Find Service resource from controller data
     controller_service_data = None
@@ -921,6 +1011,13 @@ def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_p
             kv_pull_service_data = doc
             break
 
+    # Find Service resource from kv_pool data
+    kv_conductor_service_data = None
+    for doc in kv_conductor_data:
+        if doc.get(KIND) == SERVICE:
+            kv_conductor_service_data = doc
+            break
+
     global g_controller_service
     controller_name = controller_service_data[METADATA][NAME]
     g_controller_service = f"{controller_name}.{deploy_config[CONFIG_JOB_ID]}.svc.cluster.local"
@@ -930,6 +1027,10 @@ def init_service_domain_name(controller_input_yaml, coordinator_input_yaml, kv_p
     global g_kv_pool_service
     kv_pool_name = kv_pull_service_data[METADATA][NAME]
     g_kv_pool_service = f"{kv_pool_name}.{deploy_config[CONFIG_JOB_ID]}.svc.cluster.local"
+    global g_kv_conductor_service
+    kv_pool_name = kv_conductor_service_data[METADATA][NAME]
+    g_kv_conductor_service = f"{kv_pool_name}.{deploy_config[CONFIG_JOB_ID]}.svc.cluster.local"
+
 
 
 def elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path):
@@ -1015,6 +1116,7 @@ def set_env_to_shell(deploy_config, user_config):
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_engine_prefill_env", "set_prefill_env")
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_engine_decode_env", "set_decode_env")
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
+        update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_kv_conductor_env", "set_kv_conductor_env")
 
 
 def create_motor_config_configmap(job_id, user_config_path):
@@ -1026,6 +1128,7 @@ def create_motor_config_configmap(job_id, user_config_path):
         "--from-file=./boot_helper/boot.sh "
         "--from-file=./boot_helper/hccl_tools.py "
         "--from-file=./boot_helper/update_kv_cache_pool_config.py "
+        "--from-file=./boot_helper/update_kv_conductor_config.py "
         "--from-file=./probe/probe.sh "
         "--from-file=./probe/probe.py "
         f"--from-file=user_config.json={user_config_path}"
@@ -1214,14 +1317,16 @@ def get_deploy_paths(single_container_yaml_file):
         "infer_service_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, INFER_SERVICE_OUTPUT_YAML),
         "singer_container_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, single_container_yaml_file),
         "singer_container_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT,
-                                                     'mindie_motor_single_container.yaml')
+                                                     'mindie_motor_single_container.yaml'),
+        "kv_conductor_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, 'kv_conductor.yaml'),
+        "kv_conductor_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, 'mindie_ms_kv_conductor.yaml')
     }
 
 
 def deploy_services_multi_yaml(paths, user_config, deploy_config, user_config_path):
     init_service_domain_name(
         paths["controller_input_yaml"], paths["coordinator_input_yaml"],
-        paths["kv_pool_input_yaml"], deploy_config
+        paths["kv_pool_input_yaml"], paths["kv_conductor_input_yaml"], deploy_config
     )
     generate_yaml_controller_or_coordinator(
         paths["controller_input_yaml"], paths["controller_output_yaml"], user_config, deploy_config
@@ -1235,13 +1340,20 @@ def deploy_services_multi_yaml(paths, user_config, deploy_config, user_config_pa
         generate_yaml_kv_pool(
             paths["kv_pool_input_yaml"], paths["kv_pool_output_yaml"], deploy_config, kv_pool_config
         )
+    if g_kv_conductor_enabled:
+        kv_conductor_config = normalize_kv_conductor_pool_config(user_config)
+        generate_yaml_kv_conductor(
+            paths["kv_conductor_input_yaml"], paths["kv_conductor_output_yaml"],
+            deploy_config, kv_conductor_config
+        )
     exec_all_kubectl_multi(deploy_config, None, user_config_path, DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
+
 
 
 def deploy_services_infer_service_set(paths, user_config, deploy_config, user_config_path):
     init_service_domain_name(
         paths["controller_input_yaml"], paths["coordinator_input_yaml"],
-        paths["kv_pool_input_yaml"], deploy_config
+        paths["kv_pool_input_yaml"], paths["kv_conductor_input_yaml"], deploy_config
     )
     infer_input = paths["infer_service_input_yaml"]
     if not os.path.exists(infer_input):
@@ -1258,6 +1370,7 @@ def deploy_services_infer_service_set(paths, user_config, deploy_config, user_co
 
 def deploy_services(user_config, deploy_config, user_config_path, single_container_yaml_file):
     update_kv_pool_enabled_flag(user_config)
+    update_kv_conductor_enabled_flag(user_config)
     update_engine_base_name(user_config)
     set_env_to_shell(deploy_config, user_config)
 
