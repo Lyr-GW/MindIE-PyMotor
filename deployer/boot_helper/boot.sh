@@ -231,6 +231,17 @@ if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
         set_prefill_env
     fi
 
+    # CRD scenario: refresh JOB_NAME with INFER_SERVICE_INDEX and INSTANCE_INDEX injected by CRD
+    # Final format: {namespace}-{InferServiceSet_name}-{INFER_SERVICE_INDEX}-p/d{INSTANCE_INDEX}
+    if [ -n "$INFER_SERVICE_INDEX" ] && [ -n "$INSTANCE_INDEX" ]; then
+        if [ "$ROLE" = "prefill" ]; then
+            export JOB_NAME="${JOB_NAME}-${INFER_SERVICE_INDEX}-p${INSTANCE_INDEX}"
+        elif [ "$ROLE" = "decode" ]; then
+            export JOB_NAME="${JOB_NAME}-${INFER_SERVICE_INDEX}-d${INSTANCE_INDEX}"
+        fi
+        echo "CRD mode: JOB_NAME refreshed to $JOB_NAME"
+    fi
+
     # Nodemanager start command
     python3 -m motor.node_manager.main &
     pid=$!

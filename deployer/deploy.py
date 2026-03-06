@@ -77,10 +77,17 @@ SERVER_BASE_NAME_MAP = {
 LOG_PATH = "plog-path"
 DEPLOY_YAML_ROOT_PATH = "./deployment"
 OUTPUT_ROOT_PATH = "./output"
+INFER_SERVICE_INIT_YAML = "infer_service_init.yaml"
+INFER_SERVICE_OUTPUT_YAML = "infer_service.yaml"
 SELECTOR = "selector"
+DEPLOY_MODE_INFER_SERVICE_SET = "infer_service_set"
+DEPLOY_MODE_MULTI_DEPLOYMENT_YAML = "multi_deployment"
+DEPLOYMENT_BACKEND_KEY = "deployment_backend"
+VALID_DEPLOYMENT_BACKENDS = (DEPLOY_MODE_INFER_SERVICE_SET, DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
 MATCHLABELS = "matchLabels"
 LOGGING_CONFIG = "logging_config"
 HOST_LOG_DIR = "host_log_dir"
+NODE_SELECTOR = "nodeSelector"
 
 # Global variables
 g_controller_service = "mindie-motor-controller-service"
@@ -95,12 +102,6 @@ def read_json(file_path):
     """Read JSON file"""
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f)
-
-
-def write_json(file_path, data):
-    """Write data to JSON file"""
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def write_yaml(data, output_file, single_doc=True):
@@ -185,7 +186,7 @@ def shell_escape(value):
 
 def update_shell_script_safely(script_path, env_config, component_key="", function_name="set_common_env"):
     all_env_vars = {}
-    all_env_vars.update(env_config[MOTOR_COMMON_ENV])
+    all_env_vars.update(env_config.get(MOTOR_COMMON_ENV, {}))
     if component_key and component_key in env_config:
         all_env_vars.update(env_config[component_key])
 
@@ -304,7 +305,7 @@ def modify_deployment(deployment_data, deploy_config, user_config):
     ])
 
     modify_coordinator_or_controller_replicas(deployment_data, user_config, role)
-    _modify_log_mount(deployment_data, user_config)
+    modify_log_mount(deployment_data, user_config)
 
 
 def set_services_namespace(service_list, namespace):
@@ -404,6 +405,294 @@ def gen_kv_pool_env(kv_pool_config):
     return kv_pool_env
 
 
+def get_infer_role(infer_service_set, role_name):
+    """Get role by name from InferServiceSet spec.template.roles."""
+    roles = infer_service_set.get(SPEC, {}).get(TEMPLATE, {}).get("roles", [])
+    for role in roles:
+        if role.get("name") == role_name:
+            return role
+    return None
+
+
+def set_container_env(container, env_list):
+    """Append or update env vars in container."""
+    if ENV not in container:
+        container[ENV] = []
+    existing_names = {e[NAME] for e in container[ENV] if isinstance(e, dict) and NAME in e}
+    for env_item in env_list:
+        name = env_item.get(NAME)
+        if name not in existing_names:
+            container[ENV].append(env_item)
+            existing_names.add(name)
+
+
+def find_infer_service_set_doc(all_docs):
+    for doc in all_docs:
+        if doc and doc.get(KIND) == "InferServiceSet":
+            return doc
+    raise ValueError("InferServiceSet document not found in infer_service_init.yaml")
+
+
+def update_infer_rbac_namespace(all_docs, namespace):
+    for doc in all_docs:
+        if not doc:
+            continue
+        kind = doc.get(KIND)
+        metadata = doc.setdefault(METADATA, {})
+        name = metadata.get(NAME)
+        if kind == SERVICE_ACCOUNT and name == "mindie-motor-controller":
+            metadata[NAMESPACE] = namespace
+        elif kind == CLUSTER_ROLE_BINDING and name == "mindie-controller-binding":
+            metadata[NAMESPACE] = namespace
+            for subj in doc.get(SUBJECTS, []):
+                if isinstance(subj, dict) and subj.get("kind") == SERVICE_ACCOUNT:
+                    subj[NAMESPACE] = namespace
+
+
+def configure_controller_role(infer_doc, user_config, deploy_config):
+    controller_role = get_infer_role(infer_doc, CONTROLLER)
+    if not controller_role:
+        return
+    controller_role[REPLICAS] = 1
+    controller_cfg = user_config.get(MOTOR_CONTROLLER_CONFIG, {})
+    standby_cfg = controller_cfg.get(STANDBY_CONFIG, {})
+    replicas = 2 if standby_cfg.get(ENABLE_MASTER_STANDBY) else 1
+    workload_spec = controller_role.setdefault(SPEC, {})
+    workload_spec[REPLICAS] = replicas
+    template = workload_spec.setdefault(TEMPLATE, {})
+    pod_spec = template.setdefault(SPEC, {})
+    containers = pod_spec.get("containers", [])
+    if not containers:
+        return
+    container = containers[0]
+    container["image"] = deploy_config["image_name"]
+    job_id = deploy_config[CONFIG_JOB_ID]
+    uuid_spec = generate_unique_id()
+    job_name = f"{job_id}-{CONTROLLER}-{uuid_spec}"
+    set_container_env(container, [
+        {NAME: "ROLE", VALUE: CONTROLLER},
+        {NAME: "JOB_NAME", VALUE: job_name},
+        {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
+        {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service},
+    ])
+
+
+def configure_coordinator_role(infer_doc, user_config, deploy_config):
+    coordinator_role = get_infer_role(infer_doc, COORDINATOR)
+    if not coordinator_role:
+        return
+    coordinator_role[REPLICAS] = 1
+    coord_cfg = user_config.get(MOTOR_COORDINATOR_CONFIG, {})
+    standby_cfg = coord_cfg.get(STANDBY_CONFIG, {})
+    replicas = 2 if standby_cfg.get(ENABLE_MASTER_STANDBY) else 1
+    workload_spec = coordinator_role.setdefault(SPEC, {})
+    workload_spec[REPLICAS] = replicas
+    template = workload_spec.setdefault(TEMPLATE, {})
+    pod_spec = template.setdefault(SPEC, {})
+    containers = pod_spec.get("containers", [])
+    if not containers:
+        return
+    container = containers[0]
+    container["image"] = deploy_config["image_name"]
+    job_id = deploy_config[CONFIG_JOB_ID]
+    uuid_spec = generate_unique_id()
+    job_name = f"{job_id}-{COORDINATOR}-{uuid_spec}"
+    set_container_env(container, [
+        {NAME: "ROLE", VALUE: COORDINATOR},
+        {NAME: "JOB_NAME", VALUE: job_name},
+        {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
+        {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service},
+    ])
+
+
+def apply_infer_node_selector_and_sp_block(
+    deploy_config, pod_spec, template, instance_key, npu_key
+):
+    hardware_type = deploy_config.get(HARDWARE_TYPE, "800I_A2")
+    pod_spec[NODE_SELECTOR] = pod_spec.get(NODE_SELECTOR, {})
+    if hardware_type == "800I_A2":
+        pod_spec[NODE_SELECTOR]["accelerator-type"] = "module-910b-8"
+    elif hardware_type == "800I_A3":
+        pod_spec[NODE_SELECTOR]["accelerator-type"] = "module-a3-16"
+
+    if deploy_config.get(HARDWARE_TYPE) == "800I_A3":
+        single_instance = int(deploy_config.get(instance_key, 1))
+        pod_npu = int(deploy_config.get(npu_key, 1))
+        sp_block = single_instance * pod_npu
+        metadata = template.setdefault(METADATA, {})
+        annotations = metadata.setdefault(ANNOTATIONS, {})
+        annotations[SP_BLOCK] = str(sp_block)
+
+
+def configure_prefill_role(infer_doc, deploy_config, infer_name):
+    role = get_infer_role(infer_doc, "prefill")
+    if not role:
+        return
+    p_total, _ = obtain_engine_instance_total(deploy_config)
+    single_p = int(deploy_config.get(SINGER_P_INSTANCES_NUM, 1))
+    role[REPLICAS] = p_total
+    workload_spec = role.setdefault(SPEC, {})
+    workload_spec[REPLICAS] = single_p
+    selector = workload_spec.setdefault(SELECTOR, {}).setdefault(MATCHLABELS, {})
+    selector[APP] = infer_name
+    template = workload_spec.setdefault(TEMPLATE, {})
+    template.setdefault(METADATA, {}).setdefault(LABELS, {})[APP] = infer_name
+    pod_spec = template.setdefault(SPEC, {})
+    containers = pod_spec.get("containers", [])
+    if not containers:
+        return
+    container = containers[0]
+    container["image"] = deploy_config["image_name"]
+    container[NAME] = infer_name
+    job_id = deploy_config[CONFIG_JOB_ID]
+    job_name_base = f"{job_id}-{infer_name}"
+    env_items = [
+        {NAME: "ROLE", VALUE: "prefill"},
+        {NAME: "JOB_NAME", VALUE: job_name_base},
+        {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
+        {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service},
+    ]
+    if g_kv_pool_enabled:
+        env_items.append({NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service})
+    set_container_env(container, env_items)
+    npu_num = int(deploy_config.get(P_POD_NPU_NUM, 1))
+    if RESOURCES in container:
+        container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
+        container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
+    weight_path = deploy_config.get("weight_mount_path", "/mnt/weight")
+    for vm in container.get("volumeMounts", []):
+        if vm.get("name") == "weight-mount":
+            vm["mountPath"] = weight_path
+    for vol in pod_spec.get("volumes", []):
+        if vol.get("name") == "weight-mount" and "hostPath" in vol:
+            vol["hostPath"]["path"] = weight_path
+    apply_infer_node_selector_and_sp_block(
+        deploy_config, pod_spec, template, SINGER_P_INSTANCES_NUM, P_POD_NPU_NUM
+    )
+
+
+def configure_decode_role(infer_doc, deploy_config, infer_name):
+    role = get_infer_role(infer_doc, "decode")
+    if not role:
+        return
+    _, d_total = obtain_engine_instance_total(deploy_config)
+    single_d = int(deploy_config.get(SINGER_D_INSTANCES_NUM, 1))
+    role[REPLICAS] = d_total
+    workload_spec = role.setdefault(SPEC, {})
+    workload_spec[REPLICAS] = single_d
+    selector = workload_spec.setdefault(SELECTOR, {}).setdefault(MATCHLABELS, {})
+    selector[APP] = infer_name
+    template = workload_spec.setdefault(TEMPLATE, {})
+    template.setdefault(METADATA, {}).setdefault(LABELS, {})[APP] = infer_name
+    pod_spec = template.setdefault(SPEC, {})
+    containers = pod_spec.get("containers", [])
+    if not containers:
+        return
+    container = containers[0]
+    container["image"] = deploy_config["image_name"]
+    container[NAME] = infer_name
+    job_id = deploy_config[CONFIG_JOB_ID]
+    job_name_base = f"{job_id}-{infer_name}"
+    env_items = [
+        {NAME: "ROLE", VALUE: "decode"},
+        {NAME: "JOB_NAME", VALUE: job_name_base},
+        {NAME: "CONTROLLER_SERVICE", VALUE: g_controller_service},
+        {NAME: "COORDINATOR_SERVICE", VALUE: g_coordinator_service},
+    ]
+    if g_kv_pool_enabled:
+        env_items.append({NAME: "KVP_MASTER_SERVICE", VALUE: g_kv_pool_service})
+    set_container_env(container, env_items)
+    npu_num = int(deploy_config.get(D_POD_NPU_NUM, 1))
+    if RESOURCES in container:
+        container[RESOURCES]["requests"][ASCEND_910_NPU_NUM] = npu_num
+        container[RESOURCES]["limits"][ASCEND_910_NPU_NUM] = npu_num
+    weight_path = deploy_config.get("weight_mount_path", "/mnt/weight")
+    for vm in container.get("volumeMounts", []):
+        if vm.get("name") == "weight-mount":
+            vm["mountPath"] = weight_path
+    for vol in pod_spec.get("volumes", []):
+        if vol.get("name") == "weight-mount" and "hostPath" in vol:
+            vol["hostPath"]["path"] = weight_path
+    apply_infer_node_selector_and_sp_block(
+        deploy_config, pod_spec, template, SINGER_D_INSTANCES_NUM, D_POD_NPU_NUM
+    )
+
+
+def update_infer_service_replicas_only(infer_service_yaml_path, deploy_config):
+    """Update only prefill/decode instance count (role.replicas) in infer_service.yaml for scaling."""
+    logger.info(f"Updating InferServiceSet instance replicas in {infer_service_yaml_path}")
+    all_docs = load_yaml(infer_service_yaml_path, False)
+    if not isinstance(all_docs, list):
+        all_docs = [all_docs]
+    infer_doc = find_infer_service_set_doc(all_docs)
+    p_total, d_total = obtain_engine_instance_total(deploy_config)
+
+    prefill_role = get_infer_role(infer_doc, "prefill")
+    if prefill_role:
+        prefill_role[REPLICAS] = p_total
+
+    decode_role = get_infer_role(infer_doc, "decode")
+    if decode_role:
+        decode_role[REPLICAS] = d_total
+
+    os.makedirs(os.path.dirname(infer_service_yaml_path), exist_ok=True)
+    write_yaml(all_docs, infer_service_yaml_path, False)
+    global g_generate_yaml_list
+    g_generate_yaml_list.append(infer_service_yaml_path)
+
+
+def generate_yaml_infer_service_set(input_yaml, output_file, user_config, deploy_config):
+    """Generate InferServiceSet yaml from init template and user_config."""
+    logger.info(f"Generating InferServiceSet YAML from {input_yaml} to {output_file}")
+    all_docs = load_yaml(input_yaml, False)
+    if not isinstance(all_docs, list):
+        all_docs = [all_docs]
+    namespace = deploy_config[CONFIG_JOB_ID]
+    infer_doc = find_infer_service_set_doc(all_docs)
+    infer_name = infer_doc.get(METADATA, {}).get(NAME, "mindie-server")
+    update_infer_rbac_namespace(all_docs, namespace)
+    infer_doc[METADATA][NAMESPACE] = namespace
+    configure_controller_role(infer_doc, user_config, deploy_config)
+    configure_coordinator_role(infer_doc, user_config, deploy_config)
+    configure_prefill_role(infer_doc, deploy_config, infer_name)
+    configure_decode_role(infer_doc, deploy_config, infer_name)
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    write_yaml(all_docs, output_file, False)
+    global g_generate_yaml_list
+    g_generate_yaml_list.append(output_file)
+
+
+def init_infer_service_domain_name(infer_service_init_yaml, deploy_config):
+    """
+    Set g_controller_service and g_coordinator_service for CRD InferServiceSet mode.
+    CRD creates services with naming: {service_name}-{infer_service_set_name}-0-{role_name}
+    """
+    all_docs = load_yaml(infer_service_init_yaml, False)
+    if not isinstance(all_docs, list):
+        all_docs = [all_docs]
+    infer_doc = find_infer_service_set_doc(all_docs)
+    infer_name = infer_doc.get(METADATA, {}).get(NAME, "mindie-server")
+    namespace = deploy_config[CONFIG_JOB_ID]
+
+    def get_service_fqdn_for_role(role_name):
+        role = get_infer_role(infer_doc, role_name)
+        if not role:
+            return None
+        services = role.get("services", [])
+        if not services:
+            return None
+        service_name = services[0].get("name", "")
+        role_name_val = role.get("name", role_name)
+        full_service_name = f"{service_name}-{infer_name}-0-{role_name_val}"
+        return f"{full_service_name}.{namespace}.svc.cluster.local"
+
+    global g_controller_service, g_coordinator_service
+    g_controller_service = get_service_fqdn_for_role(CONTROLLER)
+    g_coordinator_service = get_service_fqdn_for_role(COORDINATOR)
+    if not g_controller_service or not g_coordinator_service:
+        raise ValueError("Controller or coordinator role not found in infer_service_init.yaml")
+
+
 def set_engine_metadata(deployment_data, deploy_config, index, node_type, job_name):
     deployment_data[METADATA][NAMESPACE] = deploy_config[CONFIG_JOB_ID]
     unique_name = f"{g_engine_base_name}-{node_type}{index}"
@@ -447,9 +736,9 @@ def set_engine_node_selector(deployment_data, deploy_config, node_type):
     modify_sp_block_num(deployment_data, node_type, deploy_config)
     hardware_type = deploy_config[HARDWARE_TYPE]
     if hardware_type == "800I_A2":
-        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-910b-8"
+        deployment_data[SPEC][TEMPLATE][SPEC][NODE_SELECTOR]["accelerator-type"] = "module-910b-8"
     elif hardware_type == "800I_A3":
-        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-a3-16"
+        deployment_data[SPEC][TEMPLATE][SPEC][NODE_SELECTOR]["accelerator-type"] = "module-a3-16"
 
 
 def set_engine_weight_mount(deployment_data, container, deploy_config):
@@ -475,10 +764,10 @@ def modify_engine_yaml(deployment_data, deploy_config, user_config, index, node_
     set_engine_npu(container, deploy_config, node_type)
     set_engine_node_selector(deployment_data, deploy_config, node_type)
     set_engine_weight_mount(deployment_data, container, deploy_config)
-    _modify_log_mount(deployment_data, user_config)
+    modify_log_mount(deployment_data, user_config)
 
 
-def _modify_log_mount(deployment_data, user_config):
+def modify_log_mount(deployment_data, user_config):
     app_type = deployment_data[METADATA][NAME]
     host_log_dir = "/root/ascend/log"
     if app_type == "mindie-motor-controller":
@@ -530,6 +819,17 @@ def validate_only_instance_changed(current_config, baseline_config):
     if strip_instance_nums(current_config) != strip_instance_nums(baseline_config):
         raise ValueError("user_config changes detected beyond instance numbers. "
                          "Only p_instances_num/d_instances_num can be modified for scaling.")
+
+
+def get_deployment_backend_from_config(deploy_config):
+    """Read deployment_backend from motor_deploy_config; default infer_service_set; validate value."""
+    backend = deploy_config.get(DEPLOYMENT_BACKEND_KEY, DEPLOY_MODE_INFER_SERVICE_SET)
+    if backend not in VALID_DEPLOYMENT_BACKENDS:
+        raise ValueError(
+            f"motor_deploy_config.{DEPLOYMENT_BACKEND_KEY} must be one of {list(VALID_DEPLOYMENT_BACKENDS)}, "
+            f"got: {backend}"
+        )
+    return backend
 
 
 def generate_yaml_controller_or_coordinator(input_yaml, output_file, user_config, deploy_config):
@@ -658,17 +958,17 @@ def scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_
             safe_exec_cmd(f"kubectl apply -f {yaml_path} -n {job_id}")
 
 
-def exec_all_kubectl_multi(deploy_config, baseline_config, user_config_path):
+def exec_all_kubectl_multi(
+    deploy_config, baseline_config, user_config_path, deployment_backend=DEPLOY_MODE_INFER_SERVICE_SET
+):
     job_id = deploy_config[CONFIG_JOB_ID]
     out_deploy_yaml_path = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT)
     create_motor_config_configmap(job_id, user_config_path)
 
-    if baseline_config is None:
-        # Apply all YAML files on first run
+    if baseline_config is None or deployment_backend == DEPLOY_MODE_INFER_SERVICE_SET:
         for yaml_file in g_generate_yaml_list:
             safe_exec_cmd(f"kubectl apply -f {yaml_file} -n {job_id}")
     else:
-        # Only scale engine deployments on elastic run
         baseline_deploy_config = baseline_config.get("motor_deploy_config", {})
         elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path)
 
@@ -787,10 +1087,10 @@ def generate_yaml_single_container(input_yaml, output_file, user_config):
 
     hardware_type = deploy_config[HARDWARE_TYPE]
     if hardware_type == "800I_A2":
-        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-910b-8"
+        deployment_data[SPEC][TEMPLATE][SPEC][NODE_SELECTOR]["accelerator-type"] = "module-910b-8"
         del deployment_data[METADATA][ANNOTATIONS]
     elif hardware_type == "800I_A3":
-        deployment_data[SPEC][TEMPLATE][SPEC]["nodeSelector"]["accelerator-type"] = "module-a3-16"
+        deployment_data[SPEC][TEMPLATE][SPEC][NODE_SELECTOR]["accelerator-type"] = "module-a3-16"
         deployment_data[METADATA][ANNOTATIONS][SP_BLOCK] = f"{npu_num}"
 
     weight_mount_path = deploy_config.get("weight_mount_path", "/mnt/weight")
@@ -851,6 +1151,13 @@ def handle_update_config(deploy_config, user_config_path):
             "P/D instance count in user_config differs from the deployed baseline. "
             "Use --update_instance_num to scale instances instead of --update_config."
         )
+    baseline_backend = baseline_deploy.get(DEPLOYMENT_BACKEND_KEY, DEPLOY_MODE_INFER_SERVICE_SET)
+    current_backend = deploy_config.get(DEPLOYMENT_BACKEND_KEY, DEPLOY_MODE_INFER_SERVICE_SET)
+    if baseline_backend != current_backend:
+        raise ValueError(
+            f"motor_deploy_config.{DEPLOYMENT_BACKEND_KEY} cannot be changed when updating config. "
+            f"Current deployment uses '{baseline_backend}', user_config has '{current_backend}'."
+        )
     create_motor_config_configmap(deploy_config[CONFIG_JOB_ID], user_config_path)
     logger.info("Configmap refreshed.")
 
@@ -862,13 +1169,34 @@ def handle_update_instance_num(user_config, deploy_config, user_config_path):
                                 "Please deploy once before scaling.")
     validate_only_instance_changed(user_config, baseline_config)
 
+    baseline_deploy = baseline_config.get("motor_deploy_config", {})
+    deployment_backend = get_deployment_backend_from_config(baseline_deploy)
+
     update_kv_pool_enabled_flag(user_config)
     update_engine_base_name(user_config)
 
-    engine_input_yaml = os.path.join(DEPLOY_YAML_ROOT_PATH, 'engine_init.yaml')
-    engine_output_yaml = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, g_engine_base_name)
-    generate_yaml_engine(engine_input_yaml, engine_output_yaml, deploy_config, user_config)
-    exec_all_kubectl_multi(deploy_config, baseline_config, user_config_path)
+    if deployment_backend == DEPLOY_MODE_INFER_SERVICE_SET:
+        infer_output = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, INFER_SERVICE_OUTPUT_YAML)
+        infer_input = os.path.join(DEPLOY_YAML_ROOT_PATH, INFER_SERVICE_INIT_YAML)
+        if os.path.exists(infer_output):
+            update_infer_service_replicas_only(infer_output, deploy_config)
+        else:
+            if not os.path.exists(infer_input):
+                raise FileNotFoundError(f"InferServiceSet init yaml not found: {infer_input}.")
+            init_service_domain_name(
+                os.path.join(DEPLOY_YAML_ROOT_PATH, 'controller_init.yaml'),
+                os.path.join(DEPLOY_YAML_ROOT_PATH, 'coordinator_init.yaml'),
+                os.path.join(DEPLOY_YAML_ROOT_PATH, 'kv_pool_init.yaml'),
+                deploy_config
+            )
+            init_infer_service_domain_name(infer_input, deploy_config)
+            generate_yaml_infer_service_set(infer_input, infer_output, user_config, deploy_config)
+    else:
+        engine_input_yaml = os.path.join(DEPLOY_YAML_ROOT_PATH, 'engine_init.yaml')
+        engine_output_yaml = os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, g_engine_base_name)
+        generate_yaml_engine(engine_input_yaml, engine_output_yaml, deploy_config, user_config)
+
+    exec_all_kubectl_multi(deploy_config, baseline_config, user_config_path, deployment_backend)
     logger.info("instance num update end.")
 
 
@@ -882,10 +1210,50 @@ def get_deploy_paths(single_container_yaml_file):
         "engine_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, g_engine_base_name),
         "kv_pool_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, 'kv_pool_init.yaml'),
         "kv_pool_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, 'mindie_ms_kv_pool.yaml'),
+        "infer_service_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, INFER_SERVICE_INIT_YAML),
+        "infer_service_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT, INFER_SERVICE_OUTPUT_YAML),
         "singer_container_input_yaml": os.path.join(DEPLOY_YAML_ROOT_PATH, single_container_yaml_file),
         "singer_container_output_yaml": os.path.join(OUTPUT_ROOT_PATH, DEPLOYMENT,
                                                      'mindie_motor_single_container.yaml')
     }
+
+
+def deploy_services_multi_yaml(paths, user_config, deploy_config, user_config_path):
+    init_service_domain_name(
+        paths["controller_input_yaml"], paths["coordinator_input_yaml"],
+        paths["kv_pool_input_yaml"], deploy_config
+    )
+    generate_yaml_controller_or_coordinator(
+        paths["controller_input_yaml"], paths["controller_output_yaml"], user_config, deploy_config
+    )
+    generate_yaml_controller_or_coordinator(
+        paths["coordinator_input_yaml"], paths["coordinator_output_yaml"], user_config, deploy_config
+    )
+    generate_yaml_engine(paths["engine_input_yaml"], paths["engine_output_yaml"], deploy_config, user_config)
+    if g_kv_pool_enabled:
+        kv_pool_config = normalize_kv_cache_pool_config(user_config)
+        generate_yaml_kv_pool(
+            paths["kv_pool_input_yaml"], paths["kv_pool_output_yaml"], deploy_config, kv_pool_config
+        )
+    exec_all_kubectl_multi(deploy_config, None, user_config_path, DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
+
+
+def deploy_services_infer_service_set(paths, user_config, deploy_config, user_config_path):
+    init_service_domain_name(
+        paths["controller_input_yaml"], paths["coordinator_input_yaml"],
+        paths["kv_pool_input_yaml"], deploy_config
+    )
+    infer_input = paths["infer_service_input_yaml"]
+    if not os.path.exists(infer_input):
+        raise FileNotFoundError(
+            f"InferServiceSet init yaml not found: {infer_input}. "
+            "Please ensure infer_service_init.yaml exists in deployment folder."
+        )
+    init_infer_service_domain_name(infer_input, deploy_config)
+    generate_yaml_infer_service_set(
+        infer_input, paths["infer_service_output_yaml"], user_config, deploy_config
+    )
+    exec_all_kubectl_multi(deploy_config, None, user_config_path, DEPLOY_MODE_INFER_SERVICE_SET)
 
 
 def deploy_services(user_config, deploy_config, user_config_path, single_container_yaml_file):
@@ -893,6 +1261,7 @@ def deploy_services(user_config, deploy_config, user_config_path, single_contain
     update_engine_base_name(user_config)
     set_env_to_shell(deploy_config, user_config)
 
+    deployment_backend = get_deployment_backend_from_config(deploy_config)
     paths = get_deploy_paths(single_container_yaml_file)
 
     deploy_mode = user_config["motor_coordinator_config"].get("scheduler_config", {}).get("deploy_mode", "")
@@ -902,19 +1271,10 @@ def deploy_services(user_config, deploy_config, user_config_path, single_contain
         generate_yaml_single_container(paths["singer_container_input_yaml"],
                                        paths["singer_container_output_yaml"], user_config)
         exec_all_kubectl_singer(deploy_config, user_config_path, paths["singer_container_output_yaml"])
+    elif deployment_backend == DEPLOY_MODE_INFER_SERVICE_SET:
+        deploy_services_infer_service_set(paths, user_config, deploy_config, user_config_path)
     else:
-        init_service_domain_name(paths["controller_input_yaml"], paths["coordinator_input_yaml"],
-                                paths["kv_pool_input_yaml"], deploy_config)
-        generate_yaml_controller_or_coordinator(paths["controller_input_yaml"], paths["controller_output_yaml"],
-                                                user_config, deploy_config)
-        generate_yaml_controller_or_coordinator(paths["coordinator_input_yaml"], paths["coordinator_output_yaml"],
-                                                user_config, deploy_config)
-        generate_yaml_engine(paths["engine_input_yaml"], paths["engine_output_yaml"], deploy_config, user_config)
-        if g_kv_pool_enabled:
-            kv_pool_config = normalize_kv_cache_pool_config(user_config)
-            generate_yaml_kv_pool(paths["kv_pool_input_yaml"], paths["kv_pool_output_yaml"],
-                                  deploy_config, kv_pool_config)
-        exec_all_kubectl_multi(deploy_config, None, user_config_path)
+        deploy_services_multi_yaml(paths, user_config, deploy_config, user_config_path)
 
     logger.info("all deploy end.")
 
