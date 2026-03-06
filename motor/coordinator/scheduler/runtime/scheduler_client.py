@@ -516,12 +516,15 @@ class AsyncSchedulerClient:
         return success
 
     async def disconnect(self) -> None:
-        if self._push_subscriber:
-            await self._push_subscriber.disconnect()
-        if self._workload_reader:
-            self._workload_reader.detach()
-            self._workload_reader = None
-        await self._transport.disconnect()
+        try:
+            if self._push_subscriber:
+                await self._push_subscriber.disconnect()
+            if self._workload_reader:
+                self._workload_reader.detach()
+                self._workload_reader = None
+        finally:
+            # Always close transport so ZMQ context is terminated even if above steps raise.
+            await self._transport.disconnect()
 
     async def select_instance_and_endpoint(self, req_info: RequestInfo, role: PDRole | None = None):
         """Select instance and endpoint from cache or GET_AVAILABLE_INSTANCES. Returns (Instance, Endpoint) or None."""

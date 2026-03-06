@@ -25,6 +25,7 @@ from fastapi import FastAPI
 
 from motor.common.standby.standby_manager import StandbyRole, StandbyManager
 from motor.coordinator.api_server.management_server import ManagementServer
+from motor.coordinator.domain.probe import RoleHeartbeatResult
 from motor.coordinator.api_server.inference_server import InferenceServer
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
@@ -118,6 +119,11 @@ class _TestServerShell:
     @instance_manager.setter
     def instance_manager(self, value) -> None:
         self._mgmt.instance_manager = value
+
+    @property
+    def _daemon_liveness(self):
+        """Expose for tests that patch read_role_and_heartbeat."""
+        return self._mgmt._daemon_liveness
 
     @property
     def lifespan(self):
@@ -331,14 +337,17 @@ class TestCoordinatorServer:
         im.get_required_instances_status.return_value = InstanceReadiness.NONE
         self.coordinator_server.instance_manager = im
         self.coordinator_config.standby_config.enable_master_standby = True
+        self.coordinator_server._mgmt._readiness_probe._enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
         standby_manager.current_role = StandbyRole.MASTER
 
-        # Readiness reads role from shm; test has no shm, so mock (is_master, heartbeat_stale)
+        # Mock daemon liveness (no shm in test); patch the provider instance the probe uses
         with patch.object(
-            ManagementServer,
-            "_read_role_and_heartbeat_from_ipc",
-            return_value=(True, False),
+            self.coordinator_server._daemon_liveness,
+            "read_role_and_heartbeat",
+            return_value=RoleHeartbeatResult(
+                is_master=True, heartbeat_stale=False, orphaned=False
+            ),
         ):
             response = self.mgmt_client.get("/readiness")
         assert response.status_code == 200
@@ -349,14 +358,17 @@ class TestCoordinatorServer:
     def test_readiness_endpoints_fail_when_enable_standby_is_standby(self):
         """Test readiness endpoints"""
         self.coordinator_config.standby_config.enable_master_standby = True
+        self.coordinator_server._mgmt._readiness_probe._enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
         standby_manager.current_role = StandbyRole.STANDBY
 
-        # Readiness reads role from shm; mock (is_master=False, heartbeat_stale=False)
+        # Mock daemon liveness: not master
         with patch.object(
-            ManagementServer,
-            "_read_role_and_heartbeat_from_ipc",
-            return_value=(False, False),
+            self.coordinator_server._daemon_liveness,
+            "read_role_and_heartbeat",
+            return_value=RoleHeartbeatResult(
+                is_master=False, heartbeat_stale=False, orphaned=False
+            ),
         ):
             response = self.mgmt_client.get("/readiness")
         assert response.status_code == 503, f"Readiness check failed: {response.status_code}"
@@ -366,14 +378,17 @@ class TestCoordinatorServer:
     def test_readiness_endpoints_fail_when_enable_standby_is_master(self):
         """Test readiness endpoints"""
         self.coordinator_config.standby_config.enable_master_standby = True
+        self.coordinator_server._mgmt._readiness_probe._enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
         standby_manager.current_role = StandbyRole.MASTER
 
-        # Readiness reads role from shm; test has no shm, so mock (is_master, heartbeat_stale)
+        # Mock daemon liveness: master, heartbeat ok
         with patch.object(
-            ManagementServer,
-            "_read_role_and_heartbeat_from_ipc",
-            return_value=(True, False),
+            self.coordinator_server._daemon_liveness,
+            "read_role_and_heartbeat",
+            return_value=RoleHeartbeatResult(
+                is_master=True, heartbeat_stale=False, orphaned=False
+            ),
         ):
             response = self.mgmt_client.get("/readiness")
         assert response.status_code == 200

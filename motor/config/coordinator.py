@@ -56,6 +56,15 @@ SLO_TPOT = "slo_tpot"
 
 logger = get_logger(__name__)
 
+# Role shm and heartbeat (Coordinator Daemon liveness).
+# Not configurable; use these constants so Daemon and Mgmt stay in sync.
+ROLE_SHM_NAME = "coordinator_standby_role"
+ROLE_SHM_SIZE = 9  # 1 byte role (byte0) + 8 bytes heartbeat (bytes 1-8, little-endian uint64)
+ROLE_SHM_MASTER = 1  # byte0 value when this node is master
+ROLE_SHM_STANDBY = 0  # byte0 value when standby or unknown
+ROLE_HEARTBEAT_INTERVAL_SEC = 2.0
+ROLE_HEARTBEAT_STALE_SEC = 5.0
+
 
 def _default_skip_paths() -> set[str]:
     return {
@@ -285,6 +294,7 @@ class CoordinatorConfig:
     api_key_config: APIKeyConfig = field(default_factory=APIKeyConfig)
     rate_limit_config: RateLimitConfig = field(default_factory=RateLimitConfig)
     standby_config: StandbyConfig = field(default_factory=StandbyConfig)
+
     etcd_config: EtcdConfig = field(default_factory=EtcdConfig)
     http_config: HttpConfig = field(default_factory=HttpConfig)
     aigw_model: dict[str, Any] | None = None
@@ -306,10 +316,6 @@ class CoordinatorConfig:
         # Refresh master lock key with coordinator prefix
         if self.standby_config.master_lock_key == "/master_lock":
             self.standby_config.master_lock_key = LOCK_SLASH + "coordinator" + self.standby_config.master_lock_key
-        # When master/standby is enabled and role_shm_name is empty (e.g. JSON override),
-        # use default for Daemon->Mgmt IPC
-        if self.standby_config.enable_master_standby and not (self.standby_config.role_shm_name or "").strip():
-            self.standby_config.role_shm_name = "coordinator_standby_role"
         self.validate_config()
 
     @classmethod
@@ -414,12 +420,6 @@ class CoordinatorConfig:
             for section_name, config_obj, special_handlers in config_mappings:
                 if section_name in cfg:
                     update_config_from_dict(config_obj, cfg[section_name], special_handlers)
-
-            # Set default role_shm_name for coordinator when standby is on and name is empty (e.g. after JSON load)
-            if config.standby_config.enable_master_standby and not (
-                config.standby_config.role_shm_name or ""
-            ).strip():
-                config.standby_config.role_shm_name = "coordinator_standby_role"
 
             if 'aigw' in cfg:
                 config.aigw_model = dict(cfg['aigw'])

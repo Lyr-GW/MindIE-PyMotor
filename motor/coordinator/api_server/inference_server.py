@@ -11,7 +11,6 @@
 
 """
 Inference plane: Worker subprocess only; provides /v1/completions, /v1/chat/completions, /v1/models, etc.
-Does not hold management_app or _main_instance_manager; does not start subprocesses.
 """
 
 from __future__ import annotations

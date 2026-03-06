@@ -11,7 +11,6 @@
 import asyncio
 import os
 import socket
-import sys
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from typing import Any
@@ -190,10 +189,7 @@ def run_inference_worker_proc(
             conn = getattr(inference_server, "_scheduler_connection", None)
             if conn is not None:
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    loop.run_until_complete(conn.disconnect())
-                    loop.close()
+                    asyncio.run(conn.disconnect())
                 except Exception as e:
                     logger.warning(
                         "Ignored error disconnecting scheduler client in worker %s: %s",
@@ -203,16 +199,12 @@ def run_inference_worker_proc(
         # Close HTTP client pool connections
         try:
             client_pool = HTTPClientPool()
-            # Create a new event loop for cleanup since asyncio.run() closes the loop
             try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(client_pool.close_all())
-                loop.close()
+                asyncio.run(client_pool.close_all())
                 logger.info(f"HTTP client pool closed in worker process {worker_index}")
             except Exception as loop_error:
                 logger.warning(
-                    "Failed to create event loop for cleanup in worker %s: %s",
+                    "Failed to close HTTP client pool in worker %s: %s",
                     worker_index, loop_error, exc_info=True
                 )
         except Exception as e:
@@ -286,8 +278,27 @@ class InferenceProcessManager(BaseProcessManager):
         """Alias for stop(); kept for backward compatibility."""
         self.stop()
 
-    def _get_process_count(self) -> int:
-        return self.num_workers
+    def is_running(self) -> bool:
+        """True only if all worker processes are alive. Any single exit triggers restart."""
+        if not self._processes:
+            return False
+        return all(p.is_alive() for p in self._processes)
+
+    def restart_dead_workers(self) -> bool:
+        """Replace and start only dead worker process(es). Leaves alive workers running."""
+        dead_indices = [i for i, p in enumerate(self._processes) if not p.is_alive()]
+        if not dead_indices:
+            return True
+        logger.warning("Restarting %s dead worker(s) at index(es) %s", self.process_name, dead_indices)
+        for i in dead_indices:
+            try:
+                proc = self._create_process(i)
+                proc.start()
+                self._processes[i] = proc
+                logger.info("Started %s process %s (PID: %s) replacing dead worker", self.process_name, i, proc.pid)
+            except Exception as e:
+                logger.error("Failed to restart %s worker %s: %s", self.process_name, i, e, exc_info=True)
+        return self.is_running()
 
     def _create_process(self, index: int) -> BaseProcess:
         return self._spawn_context.Process(
@@ -296,8 +307,10 @@ class InferenceProcessManager(BaseProcessManager):
             args=(self.listen_address, self.sock, self.config, index),
         )
 
+    def _get_process_count(self) -> int:
+        return self.num_workers
 
-# (e.g. Linux UDS or Windows AF_UNIX where SO_REUSEPORT is unavailable)
+
 def create_shared_socket(host: str, port: int) -> socket.socket | None:
     """Create a socket that can be shared between multiple processes
 
@@ -311,20 +324,11 @@ def create_shared_socket(host: str, port: int) -> socket.socket | None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    # Set socket options for multiprocess sharing
-    # SO_REUSEPORT allows multiple processes to bind to the same port
-    # Note: SO_REUSEPORT is not available on Windows
-    if "win32" not in sys.platform:
-        try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except AttributeError:
-            logger.warning("SO_REUSEPORT not available on this platform")
-            sock.close()
-            return None
-    else:
-        # Windows doesn't support SO_REUSEPORT
-        logger.warning("Windows platform detected, SO_REUSEPORT not supported. "
-                      "Consider using uvicorn workers instead.")
+    # SO_REUSEPORT allows multiple processes to bind to the same port (coordinator is Linux-only).
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except AttributeError:
+        logger.warning("SO_REUSEPORT not available on this platform")
         sock.close()
         return None
 

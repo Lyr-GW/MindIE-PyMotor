@@ -30,11 +30,6 @@ MAX_RESTART_PER_MINUTE = 5
 RESTART_WINDOW_SECONDS = 60.0
 
 
-def _always_master() -> bool:
-    """Default when no standby: always consider this node master."""
-    return True
-
-
 class RestartLimiter:
     """Sliding window: track restart timestamps, enforce max per minute."""
 
@@ -62,25 +57,35 @@ class SubprocessSupervisor:
     def __init__(
         self,
         process_managers: dict[str, BaseProcessManager],
-        is_master_provider: Callable[[], bool] | None = None,
+        get_supervised_keys: Callable[[], set[str]] | None = None,
     ):
         self._managers = process_managers
         self._check_interval = CHECK_INTERVAL
         self._restart_limits: dict[str, RestartLimiter] = {}
-        self._is_master_provider = is_master_provider or _always_master
+        self._get_supervised_keys = get_supervised_keys
 
     async def run(self, stop_event: asyncio.Event) -> None:
-        """Main loop: periodic check, restart on failure (only when Master)."""
+        """Main loop: periodic check, restart on failure."""
         while not stop_event.is_set():
             try:
                 await asyncio.sleep(self._check_interval)
-                if not self._is_master():
-                    continue
+                supervised = (
+                    self._get_supervised_keys()
+                    if self._get_supervised_keys is not None
+                    else set(self._managers)
+                )
                 for name, mgr in self._managers.items():
+                    if name not in supervised:
+                        continue
                     if not mgr.is_running() and not stop_event.is_set():
                         if self._can_restart(name):
-                            logger.warning("Restarting %s (detected exit)", name)
-                            started = mgr.start()
+                            if hasattr(mgr, "restart_dead_workers"):
+                                logger.warning("Restarting dead %s worker(s)", name)
+                                started = mgr.restart_dead_workers()
+                            else:
+                                logger.warning("Restarting %s (detected exit)", name)
+                                mgr.stop()
+                                started = mgr.start()
                             if started:
                                 self._record_restart(name)
                             else:
@@ -93,9 +98,6 @@ class SubprocessSupervisor:
                 raise
             except Exception as e:
                 logger.exception("Subprocess supervisor loop error: %s", e)
-
-    def _is_master(self) -> bool:
-        return self._is_master_provider()
 
     def _can_restart(self, name: str) -> bool:
         if name not in self._restart_limits:

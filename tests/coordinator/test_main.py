@@ -83,7 +83,7 @@ def test_daemon_stop_all_processes_no_exclude(mock_create_socket):
 
 @patch('motor.coordinator.daemon.coordinator_daemon.create_shared_socket')
 def test_stop_inference_only_stops_inference_only(mock_create_socket):
-    """_stop_inference_only stops only Inference; Mgmt and Scheduler are not stopped."""
+    """_on_become_standby stops only Inference; Mgmt and Scheduler are not stopped."""
     mock_create_socket.return_value = None
 
     mock_config = MagicMock()
@@ -103,7 +103,7 @@ def test_stop_inference_only_stops_inference_only(mock_create_socket):
         PROCESS_KEY_INFERENCE: mock_infer,
     }
 
-    daemon._stop_inference_only()
+    daemon._on_become_standby()
 
     mock_infer.stop.assert_called_once()
     mock_mgmt.stop.assert_not_called()
@@ -112,7 +112,7 @@ def test_stop_inference_only_stops_inference_only(mock_create_socket):
 
 @patch('motor.coordinator.daemon.coordinator_daemon.create_shared_socket')
 def test_start_inference_only_starts_inference_only(mock_create_socket):
-    """_start_inference_only starts only Inference; Scheduler and Mgmt are not started."""
+    """_on_become_master starts only Inference; Scheduler and Mgmt are not started."""
     mock_create_socket.return_value = None
 
     mock_config = MagicMock()
@@ -133,7 +133,7 @@ def test_start_inference_only_starts_inference_only(mock_create_socket):
         PROCESS_KEY_INFERENCE: mock_infer,
     }
 
-    daemon._start_inference_only()
+    daemon._on_become_master()
 
     mock_infer.start.assert_called_once()
     mock_scheduler.start.assert_not_called()

@@ -10,11 +10,9 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import struct
 import threading
 import time
-from multiprocessing import shared_memory
-from typing import Any, Callable, Protocol
+from typing import Callable, Protocol
 from enum import Enum
 
 from motor.common.utils.logger import get_logger
@@ -54,12 +52,9 @@ class StandbyManager(ThreadSafeSingleton):
         )
         standby_config = config.standby_config
         self.current_role = StandbyRole.STANDBY
-        self._role_shm_name = (standby_config.role_shm_name or "").strip()
-        self._role_shm: Any = None  # SharedMemory when role_shm_name set and start() called
         self.role_lock = threading.Lock()
         self.stop_event = threading.Event()
         self.stanyby_loop_thread: threading.Thread | None = None
-        self._heartbeat_thread: threading.Thread | None = None
         self.is_running = False
         self.has_set_role = False
 
@@ -68,8 +63,8 @@ class StandbyManager(ThreadSafeSingleton):
         self.lock_retry_interval = standby_config.master_lock_retry_interval
         self.max_lock_failures = standby_config.master_lock_max_failures
 
-        # Callbacks
-        self.on_become_master: Callable[[], None] | None = None
+        # Callbacks (on_become_master receives should_report_event from etcd)
+        self.on_become_master: Callable[[bool], None] | None = None
         self.on_become_standby: Callable[[], None] | None = None
 
         self.stanyby_loop_thread = threading.Thread(
@@ -82,10 +77,10 @@ class StandbyManager(ThreadSafeSingleton):
 
     def start(
         self,
-        on_become_master: Callable[[], None],
+        on_become_master: Callable[[bool], None],
         on_become_standby: Callable[[], None]
     ) -> None:
-        """Start the master/standby management thread"""
+        """Start the master/standby management thread."""
         if self.is_running:
             logger.warning("Master/standby manager is already running")
             return
@@ -101,24 +96,6 @@ class StandbyManager(ThreadSafeSingleton):
         # Start the pre-created thread
         self.stanyby_loop_thread.start()
         self.is_running = True
-        if self._role_shm_name:
-            self._init_role_shm()
-            interval = self.config.standby_config.role_heartbeat_interval_sec
-            stale_sec = getattr(self.config.standby_config, "role_heartbeat_stale_sec", 0.0) or 0.0
-            if interval > 0 and stale_sec > 0 and stale_sec < 2 * interval:
-                logger.warning(
-                    "[Standby] role_heartbeat_stale_sec=%.1f < 2*role_heartbeat_interval_sec=%.1f, may cause false 503",
-                    stale_sec,
-                    interval,
-                )
-            if interval > 0 and self._role_shm is not None:
-                self._heartbeat_thread = threading.Thread(
-                    target=self._heartbeat_loop,
-                    name="StandbyRoleHeartbeat",
-                    daemon=False,
-                )
-                self._heartbeat_thread.start()
-                logger.debug("[Standby] Role shm heartbeat thread started, interval=%.1fs", interval)
         logger.info("Master/standby manager started")
 
     def stop(self) -> None:
@@ -136,22 +113,7 @@ class StandbyManager(ThreadSafeSingleton):
             else:
                 logger.info("Master/standby manager thread stopped successfully")
 
-        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
-            self._heartbeat_thread.join(timeout=10)
-            if self._heartbeat_thread.is_alive():
-                logger.warning("Role shm heartbeat thread did not finish within timeout")
-            self._heartbeat_thread = None
-
         self.is_running = False
-
-        if self._role_shm:
-            try:
-                self._role_shm.close()
-                self._role_shm.unlink()
-                logger.debug("[Standby] Role shm unlinked: name=%s", self._role_shm_name)
-            except Exception as e:
-                logger.debug("Unlink role shm %s: %s", self._role_shm_name, e)
-            self._role_shm = None
 
         # Close etcd client
         if hasattr(self, 'etcd_client'):
@@ -173,133 +135,10 @@ class StandbyManager(ThreadSafeSingleton):
                 old_role = self.current_role
                 self.current_role = role
                 logger.info(
-                    "[Standby] Role changed from %s to %s (role shm updated for Mgmt readiness)",
+                    "[Standby] Role changed from %s to %s",
                     old_role.value,
                     role.value,
                 )
-            if self.is_running and self._role_shm:
-                self._write_role_shm(role)
-
-    _ROLE_SHM_MASTER = 1
-    _ROLE_SHM_STANDBY = 0
-    _ROLE_SHM_SIZE = 1
-    _ROLE_SHM_SIZE_WITH_HEARTBEAT = 9
-
-    def _role_shm_has_heartbeat(self) -> bool:
-        """True if heartbeat is enabled (Daemon writes bytes 1-8)."""
-        return (
-            self.config.standby_config.role_heartbeat_interval_sec > 0
-            and self._role_shm is not None
-            and len(self._role_shm.buf) >= self._ROLE_SHM_SIZE_WITH_HEARTBEAT
-        )
-
-    def _init_role_shm(self) -> None:
-        """Create SharedMemory and write initial role (only in Daemon process after start()).
-        If name already exists (e.g. previous Daemon crashed without unlink), attach and take over
-        when existing size is sufficient; otherwise unlink and create new.
-        """
-        if not self._role_shm_name or self._role_shm is not None:
-            return
-        interval = self.config.standby_config.role_heartbeat_interval_sec
-        needed_size = (
-            self._ROLE_SHM_SIZE_WITH_HEARTBEAT if interval > 0 else self._ROLE_SHM_SIZE
-        )
-        try:
-            self._role_shm = shared_memory.SharedMemory(
-                name=self._role_shm_name, create=True, size=needed_size
-            )
-            self._write_role_shm(self.current_role)
-            if needed_size >= self._ROLE_SHM_SIZE_WITH_HEARTBEAT:
-                logger.info(
-                    "[Standby] Role shm created with heartbeat: name=%s size=%s (Mgmt can detect Daemon liveness)",
-                    self._role_shm_name,
-                    needed_size,
-                )
-            logger.debug(
-                "[Standby] Role shm created: name=%s, initial_role=%s, size=%s",
-                self._role_shm_name,
-                self.current_role.value,
-                needed_size,
-            )
-        except FileExistsError:
-            try:
-                existing = shared_memory.SharedMemory(
-                    name=self._role_shm_name,
-                    create=False,
-                )
-                size = len(existing.buf)
-                if size >= needed_size:
-                    self._role_shm = existing
-                    self._write_role_shm(self.current_role)
-                    logger.info(
-                        "[Standby] Role shm attached to existing: name=%s size=%s (take over after restart)",
-                        self._role_shm_name,
-                        size,
-                    )
-                else:
-                    existing.close()
-                    existing.unlink()
-                    logger.debug(
-                        "[Standby] Removed stale role shm name=%s size=%s, will create new",
-                        self._role_shm_name,
-                        size,
-                    )
-                    self._role_shm = shared_memory.SharedMemory(
-                        name=self._role_shm_name, create=True, size=needed_size
-                    )
-                    self._write_role_shm(self.current_role)
-                    logger.info(
-                        "[Standby] Role shm created: name=%s size=%s (Mgmt can detect Daemon liveness)",
-                        self._role_shm_name,
-                        needed_size,
-                    )
-            except Exception as e2:
-                logger.warning("Failed to attach to or recreate role shm %s: %s", self._role_shm_name, e2)
-                self._role_shm = None
-        except Exception as e:
-            logger.warning("Failed to create role shm %s: %s", self._role_shm_name, e)
-            self._role_shm = None
-
-    def _write_role_shm(self, role: StandbyRole) -> None:
-        """Write role byte (and optional heartbeat bytes 1-8) to shared memory for Mgmt."""
-        if not self._role_shm:
-            return
-        try:
-            byte_val = (
-                self._ROLE_SHM_MASTER if role == StandbyRole.MASTER else self._ROLE_SHM_STANDBY
-            )
-            self._role_shm.buf[0] = byte_val
-            if self._role_shm_has_heartbeat():
-                ns = time.monotonic_ns()
-                self._role_shm.buf[1:9] = struct.pack("<Q", ns)
-            logger.debug(
-                "[Standby] Role shm written: name=%s role=%s byte=%s",
-                self._role_shm_name,
-                role.value,
-                byte_val,
-            )
-        except Exception as e:
-            logger.warning("Failed to write role shm: %s", e)
-
-    def _write_heartbeat_only(self) -> None:
-        """Write only heartbeat bytes 1-8 (used by heartbeat thread)."""
-        if not self._role_shm_has_heartbeat():
-            return
-        try:
-            ns = time.monotonic_ns()
-            self._role_shm.buf[1:9] = struct.pack("<Q", ns)
-        except Exception as e:
-            logger.warning("Failed to write role shm heartbeat: %s", e)
-
-    def _heartbeat_loop(self) -> None:
-        """Periodically write heartbeat to role shm so Mgmt can detect Daemon liveness."""
-        interval = self.config.standby_config.role_heartbeat_interval_sec
-        if interval <= 0:
-            return
-        while not self.stop_event.is_set():
-            if self.stop_event.wait(timeout=interval):
-                break
-            self._write_heartbeat_only()
 
     def _master_standby_loop(self) -> None:
         """Master/standby management loop"""

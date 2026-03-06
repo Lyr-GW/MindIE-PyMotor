@@ -8,7 +8,7 @@
 # See the Mulan PSL v2 for more details.
 
 """
-Domain logic: contracts (protocols) and implementations (instance pool, request state).
+Domain logic: contracts (protocols) and implementations (instance pool, request state, probe).
 """
 
 __all__ = [
@@ -20,6 +20,16 @@ __all__ = [
     "SchedulingFacade",
     "UpdateInstanceMode",
     "UpdateWorkloadParams",
+    # probe
+    "DaemonLivenessProvider",
+    "is_master_from_role_shm",
+    "LivenessProbe",
+    "LivenessResult",
+    "ReadinessProbe",
+    "ReadinessProbeOutput",
+    "ReadinessResult",
+    "RoleHeartbeatResult",
+    "RoleShmDaemonLivenessProvider",
 ]
 
 from motor.coordinator.domain.instance_manager import (
@@ -27,6 +37,17 @@ from motor.coordinator.domain.instance_manager import (
     UpdateInstanceMode,
 )
 from motor.coordinator.domain.instance_provider import InstanceProvider
+from motor.coordinator.domain.probe import (
+    DaemonLivenessProvider,
+    is_master_from_role_shm,
+    LivenessProbe,
+    LivenessResult,
+    ReadinessProbe,
+    ReadinessProbeOutput,
+    ReadinessResult,
+    RoleHeartbeatResult,
+    RoleShmDaemonLivenessProvider,
+)
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.domain.scheduling import (
     InstanceReadiness,

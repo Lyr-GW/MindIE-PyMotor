@@ -26,8 +26,11 @@ from motor.common.utils.logger import get_logger, reconfigure_logging
 logger = get_logger(__name__)
 
 
-def run_mgmt_server_proc(config: CoordinatorConfig) -> None:
-    """Mgmt subprocess entry point (similar to run_scheduler_server_proc)."""
+def run_mgmt_server_proc(
+    config: CoordinatorConfig,
+    daemon_pid: int | None = None,
+) -> None:
+    """Mgmt subprocess entry point. daemon_pid is passed by Daemon for orphan detection (no env var)."""
     reconfigure_logging(config.logging_config)
 
     try:
@@ -41,7 +44,7 @@ def run_mgmt_server_proc(config: CoordinatorConfig) -> None:
     # Initialize MetricsCollector singleton with config (used by /metrics, lifespan)
     MetricsCollector(config)
 
-    server = ManagementServer(config)
+    server = ManagementServer(config, daemon_pid=daemon_pid)
     mgmt_config_watcher = None
 
     if config.config_path and os.path.exists(config.config_path):
@@ -71,10 +74,16 @@ def run_mgmt_server_proc(config: CoordinatorConfig) -> None:
 
 
 class MgmtProcessManager(BaseProcessManager):
-    """Single-process Mgmt manager."""
+    """Single-process Mgmt manager. Daemon injects daemon_pid via set_daemon_pid() before start."""
+
+    daemon_pid: int | None = None  # Set by CoordinatorDaemon via SupportsSpawnContext; passed as process arg
 
     def __init__(self, config: CoordinatorConfig):
         super().__init__(config, process_name="MgmtServer")
+
+    def set_daemon_pid(self, daemon_pid: int | None) -> None:
+        """Implement SupportsSpawnContext. Called by Daemon before start()."""
+        self.daemon_pid = daemon_pid
 
     def _get_process_count(self) -> int:
         return 1
@@ -83,5 +92,5 @@ class MgmtProcessManager(BaseProcessManager):
         return self._spawn_context.Process(
             target=run_mgmt_server_proc,
             name="MgmtServer",
-            args=(self.config,),
+            args=(self.config, self.daemon_pid),
         )

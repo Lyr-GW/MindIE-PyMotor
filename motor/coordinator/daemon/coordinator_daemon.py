@@ -20,9 +20,16 @@ import os
 import signal
 import time
 
-from motor.config.coordinator import CoordinatorConfig
+from motor.config.coordinator import (
+    CoordinatorConfig,
+    ROLE_HEARTBEAT_INTERVAL_SEC,
+    ROLE_HEARTBEAT_STALE_SEC,
+    ROLE_SHM_MASTER,
+    ROLE_SHM_NAME,
+    ROLE_SHM_STANDBY,
+)
 from motor.coordinator.daemon.subprocess_supervisor import SubprocessSupervisor
-from motor.coordinator.process.base import BaseProcessManager
+from motor.coordinator.process.base import BaseProcessManager, SupportsSpawnContext
 from motor.coordinator.process.constants import (
     PROCESS_KEY_INFERENCE,
     PROCESS_KEY_MGMT,
@@ -35,7 +42,7 @@ from motor.coordinator.process.inference_manager import (
 )
 from motor.coordinator.process.mgmt_manager import MgmtProcessManager
 from motor.coordinator.process.scheduler_manager import SchedulerProcessManager
-from motor.common.standby.daemon_heartbeat_writer import DaemonHeartbeatWriter
+from motor.coordinator.daemon.role_shm_holder import RoleShmHolder
 from motor.common.standby.standby_manager import StandbyManager
 from motor.common.utils.logger import get_logger
 
@@ -45,8 +52,10 @@ logger = get_logger(__name__)
 class CoordinatorDaemon:
     """Coordinator daemon: starts and monitors Mgmt / Scheduler / Infer processes.
 
-    With master/standby enabled: Scheduler and Mgmt run on both nodes; only Inference
-    is started on master and stopped on standby (on_become_master / on_become_standby).
+    Scheduler and Mgmt run on both master and standby (Scheduler first so Mgmt can connect).
+    With master/standby enabled: only Infer is started on master and stopped on standby
+    (on_become_master / on_become_standby). Role shm is created by Daemon; role byte is written
+    in on_role_changed callback so StandbyManager stays shm-agnostic (controller does not use shm).
     """
 
     def __init__(self, config: CoordinatorConfig):
@@ -54,47 +63,58 @@ class CoordinatorDaemon:
         self._process_managers: dict[str, BaseProcessManager] = {}
         self._supervisor: SubprocessSupervisor | None = None
         self._standby_manager: StandbyManager | None = None
-        self._heartbeat_writer: DaemonHeartbeatWriter | None = None
+        self._role_shm_holder: RoleShmHolder | None = None
         self._stop_event = asyncio.Event()
 
     async def run(self) -> None:
         """Daemon main loop."""
         self._initialize_process_managers()
 
-        # So Mgmt can detect Daemon crash: if getppid() != MOTOR_DAEMON_PID then we're orphaned.
-        # Required because in containers Daemon is often PID 1, so getppid()==1 cannot mean "orphaned".
+        # Inject daemon PID into any process manager that supports spawn context (e.g. Mgmt for orphan detection).
+        # When Daemon is PID 1, ppid check is unreliable; Mgmt also uses role shm heartbeat.
         daemon_pid = os.getpid()
-        os.environ["MOTOR_DAEMON_PID"] = str(daemon_pid)
-        logger.debug(
-            "[Standby] MOTOR_DAEMON_PID set for child processes: daemon_pid=%s",
-            daemon_pid,
-        )
+        for key, mgr in self._process_managers.items():
+            if isinstance(mgr, SupportsSpawnContext):
+                mgr.set_daemon_pid(daemon_pid)
+                logger.debug("[Daemon] set_daemon_pid=%s for %s", daemon_pid, key)
 
-        # Scheduler always first (both master and standby); Mgmt can then connect to it.
-        self._start_processes([PROCESS_KEY_SCHEDULER])
+        sc = self.config.standby_config
+        need_shm = (
+            sc.enable_master_standby
+            or ROLE_HEARTBEAT_INTERVAL_SEC > 0
+        )
+        if need_shm:
+            # When master/standby is enabled, initial role must be standby (0) so Mgmt does
+            # not report master before etcd lock is acquired. See coordinator-master-standby-ipc-analysis.md.
+            self._role_shm_holder = RoleShmHolder(
+                ROLE_SHM_NAME,
+                ROLE_HEARTBEAT_INTERVAL_SEC,
+                stale_sec=ROLE_HEARTBEAT_STALE_SEC,
+                initial_role_master=not sc.enable_master_standby,
+            )
+            if not self._role_shm_holder.start():
+                self._role_shm_holder = None
+            elif self.config.standby_config.enable_master_standby:
+                # Initial role standby so Mgmt does not report master until etcd lock is acquired.
+                self._write_role_shm_byte(ROLE_SHM_STANDBY)
+
+        # Scheduler first (both master and standby), then Mgmt, so Mgmt connect() succeeds.
+        self._start_processes([PROCESS_KEY_SCHEDULER, PROCESS_KEY_MGMT])
 
         if self.config.standby_config.enable_master_standby:
             self._standby_manager = StandbyManager(self.config)
             self._standby_manager.start(
-                on_become_master=self._start_inference_only,
-                on_become_standby=self._stop_inference_only,
+                on_become_master=self._on_become_master,
+                on_become_standby=self._on_become_standby,
             )
-            is_master_provider = self._is_master_via_standby
+            get_supervised_keys = self._get_supervised_keys
         else:
             self._start_processes([PROCESS_KEY_INFERENCE])
-            is_master_provider = None
-            # Non-standby: still write heartbeat if configured, so Mgmt can detect Daemon liveness
-            sc = self.config.standby_config
-            if float(getattr(sc, "role_heartbeat_interval_sec", 0) or 0) > 0:
-                self._heartbeat_writer = DaemonHeartbeatWriter(sc)
-                self._heartbeat_writer.start()
-
-        # Mgmt always runs last (readiness/metrics; after Scheduler so connect() succeeds).
-        self._start_processes([PROCESS_KEY_MGMT])
+            get_supervised_keys = None
 
         self._supervisor = SubprocessSupervisor(
             self._process_managers,
-            is_master_provider=is_master_provider,
+            get_supervised_keys=get_supervised_keys,
         )
 
         loop = asyncio.get_running_loop()
@@ -114,16 +134,20 @@ class CoordinatorDaemon:
             if self._standby_manager is not None:
                 self._standby_manager.stop()
                 logger.info("Standby manager stopped")
-            if self._heartbeat_writer is not None:
-                self._heartbeat_writer.stop()
-                self._heartbeat_writer = None
+            if self._role_shm_holder is not None:
+                self._role_shm_holder.stop()
+                self._role_shm_holder = None
 
-    def _start_inference_only(self) -> None:
-        """Start only Inference (used when becoming master; Scheduler and Mgmt already running)."""
+    def _on_become_master(self, should_report_event: bool = False) -> None:
+        """Called when this node becomes master: write role shm (if any), then start Inference only."""
+        if self._role_shm_holder is not None:
+            self._write_role_shm_byte(ROLE_SHM_MASTER)
         self._start_processes([PROCESS_KEY_INFERENCE])
 
-    def _stop_inference_only(self) -> None:
-        """Stop only Inference (used when becoming standby); keep Mgmt and Scheduler."""
+    def _on_become_standby(self) -> None:
+        """Called when this node becomes standby: write role shm (if any), then stop Inference only."""
+        if self._role_shm_holder is not None:
+            self._write_role_shm_byte(ROLE_SHM_STANDBY)
         self._stop_all_processes(
             exclude_processes={PROCESS_KEY_MGMT, PROCESS_KEY_SCHEDULER}
         )
@@ -189,6 +213,23 @@ class CoordinatorDaemon:
         logger.info("Received stop signal")
         self._stop_event.set()
 
-    def _is_master_via_standby(self) -> bool:
-        """Return whether this node is master (standby mode)."""
-        return self._standby_manager.is_master()
+    def _write_role_shm_byte(self, byte_val: int) -> None:
+        """Write role byte to shm for Mgmt readiness. No-op if no holder."""
+        if self._role_shm_holder is None:
+            return
+        shm = self._role_shm_holder.get_shm()
+        if shm is None:
+            return
+        try:
+            shm.buf[0] = byte_val
+            logger.debug("[Daemon] Role shm written: byte=%s", byte_val)
+        except Exception as e:
+            logger.warning("Failed to write role shm: %s", e)
+
+    def _get_supervised_keys(self) -> set[str]:
+        """Return process keys to supervise this round"""
+        if not self.config.standby_config.enable_master_standby:
+            return set(self._process_managers)
+        if self._standby_manager is not None and self._standby_manager.is_master():
+            return set(self._process_managers)
+        return {PROCESS_KEY_SCHEDULER, PROCESS_KEY_MGMT}

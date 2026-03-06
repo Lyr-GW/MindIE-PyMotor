@@ -17,11 +17,18 @@ import multiprocessing
 import weakref
 from abc import ABC, abstractmethod
 from multiprocessing.process import BaseProcess
-from typing import Any
-
+from typing import Any, Protocol, runtime_checkable
+from motor.common.utils.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
 
-from motor.common.utils.logger import get_logger
+
+@runtime_checkable
+class SupportsSpawnContext(Protocol):
+    """Optional protocol for process managers that need Daemon context before spawn (e.g. daemon_pid)."""
+
+    def set_daemon_pid(self, daemon_pid: int | None) -> None:
+        """Set daemon PID so the child can detect orphan (getppid() != daemon_pid). Called by Daemon before start()."""
+        ...
 
 logger = get_logger(__name__)
 
