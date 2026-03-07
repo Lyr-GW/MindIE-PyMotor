@@ -26,7 +26,10 @@ import vllm.envs as envs
 
 from vllm.reasoning import ReasoningParserManager
 from vllm.entrypoints.launcher import serve_http
-from vllm.entrypoints.openai.api_server import load_log_config
+try:
+    from vllm.entrypoints.openai.server_utils import load_log_config
+except Exception as et:
+    from vllm.entrypoints.openai.api_server import load_log_config
 from vllm.entrypoints.openai.api_server import build_async_engine_client
 from vllm.entrypoints.openai.api_server import build_app
 from vllm.entrypoints.openai.api_server import init_app_state
