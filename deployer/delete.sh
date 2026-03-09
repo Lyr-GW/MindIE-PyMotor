@@ -40,8 +40,8 @@ done
 
 for file in ./*user_config*; do
     if [ -f "$file" ]; then
-        sed -i -E 's/("model_id"\s*:\s*)"[^"]*"/\1""/g' "$file"
-        echo "change $file model_id to empty"
+        sed -i -E 's/("service_id"\s*:\s*)"[^"]*"/\1""/g' "$file"
+        echo "change $file service_id to empty"
     fi
 done
 

@@ -9,12 +9,15 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 import argparse
-import os
 import json
 import logging
+import os
 import subprocess
-import uuid
 import time
+import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import yaml as ym
 
 # Set up logging
@@ -25,6 +28,7 @@ logger = logging.getLogger(__name__)
 P_INSTANCES_NUM = "p_instances_num"
 D_INSTANCES_NUM = "d_instances_num"
 CONFIG_JOB_ID = "job_id"
+SERVICE_ID = "service_id"
 SINGER_P_INSTANCES_NUM = "single_p_instance_pod_num"
 SINGER_D_INSTANCES_NUM = "single_d_instance_pod_num"
 P_POD_NPU_NUM = "p_pod_npu_num"
@@ -106,6 +110,12 @@ def read_json(file_path):
     """Read JSON file"""
     with open(file_path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def write_json(file_path, data):
+    """Write data to JSON file"""
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def write_yaml(data, output_file, single_doc=True):
@@ -227,6 +237,19 @@ def generate_unique_id():
     timestamp = str(int(time.time() * 1000))
     random_part = str(uuid.uuid4()).split('-')[0]
     return f"{timestamp}{random_part}"
+
+
+def ensure_service_id(user_config, user_config_path):
+    service_id = (get_json_by_path(user_config, "motor_deploy_config.service_id") or "").strip()
+    if not service_id:
+        service_id = (
+            f"{get_json_by_path(user_config, 'motor_deploy_config.job_id')}_"
+            f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d%H%M%S')}"
+        )
+        user_config["motor_deploy_config"][SERVICE_ID] = service_id
+        write_json(user_config_path, user_config)
+        logger.info(f"Generated new service_id: {service_id}")
+    return service_id
 
 
 def update_kv_pool_enabled_flag(user_config):
@@ -1087,8 +1110,8 @@ def get_json_by_path(data, path, default=None):
     return current
 
 
-def set_env_to_shell(deploy_config, user_config):
-    env_config_path = deploy_config.get("env_path", "./conf/env.json")
+def set_env_to_shell(user_config):
+    env_config_path = get_json_by_path(user_config, "motor_deploy_config.env_path", "./conf/env.json")
     if os.path.exists(env_config_path):
         env_config = read_json(env_config_path)
 
@@ -1109,6 +1132,10 @@ def set_env_to_shell(deploy_config, user_config):
 
         env_config[MOTOR_COMMON_ENV]["NORTH_PLATFORM"] = north_platform
         logger.info(f"Set NORTH_PLATFORM environment variable to: {north_platform}")
+
+        service_id = get_json_by_path(user_config, "motor_deploy_config.service_id", "")
+        env_config[MOTOR_COMMON_ENV]["SERVICE_ID"] = service_id
+        logger.info(f"Set SERVICE_ID environment variable to: {service_id}")
 
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, MOTOR_COMMON_ENV, "set_common_env")
         update_shell_script_safely(BOOT_SHELL_PATH, env_config, "motor_controller_env", "set_controller_env")
@@ -1254,6 +1281,12 @@ def handle_update_config(deploy_config, user_config_path):
             "P/D instance count in user_config differs from the deployed baseline. "
             "Use --update_instance_num to scale instances instead of --update_config."
         )
+
+    if deploy_config.get(SERVICE_ID) != baseline_deploy.get(SERVICE_ID):
+        raise ValueError(f"service_id has changed, it is not allowed to modify. "
+                         f"Current: {deploy_config.get(SERVICE_ID)!r}, "
+                         f"Deployed: {baseline_deploy.get(SERVICE_ID)!r}.")
+
     baseline_backend = baseline_deploy.get(DEPLOYMENT_BACKEND_KEY, DEPLOY_MODE_INFER_SERVICE_SET)
     current_backend = deploy_config.get(DEPLOYMENT_BACKEND_KEY, DEPLOY_MODE_INFER_SERVICE_SET)
     if baseline_backend != current_backend:
@@ -1261,6 +1294,7 @@ def handle_update_config(deploy_config, user_config_path):
             f"motor_deploy_config.{DEPLOYMENT_BACKEND_KEY} cannot be changed when updating config. "
             f"Current deployment uses '{baseline_backend}', user_config has '{current_backend}'."
         )
+
     create_motor_config_configmap(deploy_config[CONFIG_JOB_ID], user_config_path)
     logger.info("Configmap refreshed.")
 
@@ -1372,7 +1406,7 @@ def deploy_services(user_config, deploy_config, user_config_path, single_contain
     update_kv_pool_enabled_flag(user_config)
     update_kv_conductor_enabled_flag(user_config)
     update_engine_base_name(user_config)
-    set_env_to_shell(deploy_config, user_config)
+    set_env_to_shell(user_config)
 
     deployment_backend = get_deployment_backend_from_config(deploy_config)
     paths = get_deploy_paths(single_container_yaml_file)
@@ -1405,6 +1439,7 @@ def main():
 
     user_config = read_json(user_config_path)
     deploy_config = user_config["motor_deploy_config"]
+    ensure_service_id(user_config, user_config_path)
     validate_instance_nums(deploy_config)
 
     if args.update_config:

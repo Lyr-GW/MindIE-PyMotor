@@ -326,7 +326,7 @@ class CoordinatorConfig:
         """Load configuration from JSON file"""
         if json_path is None:
             # Read from environment variable
-            json_path = os.getenv("MOTOR_COORDINATOR_CONFIG_PATH")
+            json_path = Env.user_config_path
 
         config_path = Path(json_path) if json_path else None
 

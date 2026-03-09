@@ -195,8 +195,7 @@ class NodeManagerConfig:
         """Validate configuration after initialization"""
         # Set internal paths with defaults only if not already set (e.g., by from_json)
         if not hasattr(self, 'config_path') or self.config_path is None:
-            config_dir = Env.config_path or os.getcwd()
-            self.config_path = os.path.join(config_dir, "node_manager_config.json")
+            self.config_path = Env.user_config_path
 
         if not hasattr(self, 'hccl_path') or self.hccl_path is None:
             # Handle HCCL path: if it's a directory, append hccl.json; otherwise use as-is
@@ -222,16 +221,7 @@ class NodeManagerConfig:
         """Load configuration from config and HCCL files"""
 
         if config_path is None:
-            env_config_path = os.getenv("MOTOR_NODE_MANAGER_CONFIG_PATH") or Env.user_config_path
-            if env_config_path:
-                config_path = env_config_path
-            else:
-                config_path = os.path.join(Env.config_path or os.getcwd(), "node_manager_config.json")
-        else:
-            # If config_path is a directory, append the default config filename
-            config_path_obj = Path(config_path)
-            if config_path_obj.is_dir():
-                config_path = str(config_path_obj / "node_manager_config.json")
+            config_path = Env.user_config_path
 
         config_path_obj = Path(config_path)
         logger.info("Loading configuration files: config=%s", config_path_obj)

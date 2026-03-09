@@ -115,7 +115,7 @@ class Daemon(ThreadSafeSingleton):
                     "--host", str(endpoint.ip),
                     "--port", str(int(endpoint.business_port)),
                     "--mgmt-port", str(int(endpoint.mgmt_port)),
-                    "--config-path", str(Env.motor_engine_path)
+                    "--config-path", str(Env.user_config_path)
                 ]
                 if self.single_container_flag:
                     cmd.extend(["--kv-port", str(self.kv_port)])

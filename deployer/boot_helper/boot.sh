@@ -146,10 +146,6 @@ gen_kv_pool_config() {
 }
 
 if [ "$ROLE" = "SINGLE_CONTAINER" ]; then
-    export MOTOR_COORDINATOR_CONFIG_PATH="$USER_CONFIG_PATH"
-    export MOTOR_CONTROLLER_CONFIG_PATH="$USER_CONFIG_PATH"
-    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
-    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
     export CONTROLLER_SERVICE="$POD_IP"
     export COORDINATOR_SERVICE="$POD_IP"
 
@@ -169,7 +165,7 @@ if [ "$ROLE" = "SINGLE_CONTAINER" ]; then
 
     # Start controller
     set_controller_env
-    ROLE=controller python3 -m motor.controller.main --config $MOTOR_CONTROLLER_CONFIG_PATH &
+    ROLE=controller python3 -m motor.controller.main --config $USER_CONFIG_PATH &
     pids+=($!)
 
     # Set kv cache pool config
@@ -207,9 +203,6 @@ if [ "$ROLE" = "SINGLE_CONTAINER" ]; then
 fi
 
 if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
-    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
-    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
-
     # Use hccl_tools.py to generate ranktable.json
     gen_ranktable_config
 
@@ -258,16 +251,14 @@ fi
 
 if [ "$ROLE" = "controller" ]; then
     set_controller_env
-    export MOTOR_CONTROLLER_CONFIG_PATH="$USER_CONFIG_PATH"
     setup_motor_log_path
 
     # Controller start command
-    python3 -m motor.controller.main --config $MOTOR_CONTROLLER_CONFIG_PATH
+    python3 -m motor.controller.main --config $USER_CONFIG_PATH
 fi
 
 if [ "$ROLE" == "coordinator" ]; then
     set_coordinator_env
-    export MOTOR_COORDINATOR_CONFIG_PATH="$USER_CONFIG_PATH"
     setup_motor_log_path
 
     # Coordinator start command

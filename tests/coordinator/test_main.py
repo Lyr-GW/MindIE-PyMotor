@@ -177,7 +177,7 @@ async def test_main_daemon_flow():
     """Test main() creates CoordinatorDaemon and runs it"""
     daemon_run = AsyncMock()
 
-    with patch.dict('os.environ', {'MOTOR_COORDINATOR_CONFIG_PATH': '/fake/config.json'}), \
+    with patch.dict('os.environ', {'USER_CONFIG_PATH': '/fake/config.json'}), \
             patch('motor.config.coordinator.CoordinatorConfig.from_json') as mock_from_json, \
             patch('motor.coordinator.main.CoordinatorDaemon') as mock_daemon_class, \
             patch('motor.coordinator.main.logger') as mock_logger:

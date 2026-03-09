@@ -28,7 +28,7 @@ from motor.common.resources.instance import PDRole, ParallelConfig
 def create_config_mock(config_data, hccl_data):
     def mock_side_effect(file_path, mode):
         file_path_str = str(file_path)
-        if "node_manager_config.json" in file_path_str:
+        if "user_config.json" in file_path_str:
             return mock_open(read_data=json.dumps(config_data)).return_value
         elif "hccl.json" in file_path_str:
             return mock_open(read_data=json.dumps(hccl_data)).return_value
@@ -74,7 +74,10 @@ def daemon(config_data, hccl_data):
         if Daemon in Daemon._instances:
             del Daemon._instances[Daemon]
 
-    with patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': 'tests/jsons', 'HCCL_PATH': 'tests/jsons', 'ROLE': 'both'}):
+    config_path = os.path.join(os.path.dirname(__file__), '..', 'jsons', 'user_config.json')
+    hccl_path = os.path.join(os.path.dirname(__file__), '..', 'jsons', 'hccl_a2.json')
+    
+    with patch.dict('os.environ', {'JOB_NAME': 'test_job', 'USER_CONFIG_PATH': config_path, 'HCCL_PATH': hccl_path, 'ROLE': 'both'}):
         config = NodeManagerConfig()
         # Manually set the configuration data
         config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])

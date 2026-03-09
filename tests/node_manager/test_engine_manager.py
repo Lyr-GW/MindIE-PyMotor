@@ -18,6 +18,10 @@ import tempfile
 import shutil
 import signal
 from unittest.mock import patch, MagicMock, Mock, mock_open
+
+# Set environment variable for config path
+os.environ['USER_CONFIG_PATH'] = 'tests/jsons/useruser_config.json'.replace('\\', '/')
+os.environ['ROLE'] = 'both'
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -63,7 +67,7 @@ def hccl_data():
 def create_config_mock(config_data, hccl_data):
     def mock_side_effect(file_path, mode):
         file_path_str = str(file_path)
-        if "node_manager_config.json" in file_path_str:
+        if "user_config.json" in file_path_str:
             return mock_open(read_data=json.dumps(config_data)).return_value
         elif "hccl.json" in file_path_str:
             return mock_open(read_data=json.dumps(hccl_data)).return_value

@@ -66,7 +66,7 @@ def hccl_data():
 
 def create_config_mock(config_data, hccl_data):
     def mock_side_effect(file_path, mode):
-        if "node_manager_config.json" in file_path:
+        if "user_config.json" in file_path:
             return mock_open(read_data=json.dumps(config_data)).return_value
         elif "hccl.json" in file_path:
             return mock_open(read_data=json.dumps(hccl_data)).return_value
@@ -260,7 +260,7 @@ def test_generate_endpoint_ports(config_data, hccl_data):
     assert config.endpoint_config.mgmt_ports == ["10001", "10003"]
     assert config.endpoint_config.service_ports == ["10000", "10002"]
     
-@patch.dict('os.environ', {'ROLE': 'both'})
+@patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': 'tests/jsons/user_config.json'.replace('\\', '/')})
 @patch('motor.config.node_manager.safe_open')
 def test_non_singleton_behavior(mock_safe_open, config_data, hccl_data):
     """Test that NodeManagerConfig is no longer a singleton"""
@@ -353,7 +353,7 @@ def test_hccl_empty_device_list(config_data):
     with pytest.raises(ValueError, match="Device count"):
         NodeManagerConfig._generate_endpoint_ports(config)
 
-@patch.dict('os.environ', {'ROLE': 'both'})
+@patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': 'tests/jsons/user_config.json'.replace('\\', '/')})
 @patch('motor.config.node_manager.safe_open')
 def test_reload_success(mock_safe_open, config_data, hccl_data):
     """Test successful configuration reload"""
@@ -367,8 +367,9 @@ def test_reload_success(mock_safe_open, config_data, hccl_data):
     original_node_manager_port = config.api_config.node_manager_port
 
     # Set valid config paths for reload testing
-    config.config_path = "/tmp/test_node_manager_config.json"
+    config.config_path = "/tmp/user_config.json"
     config.hccl_path = "/tmp/test_hccl.json"
+    config.last_modified = None  # Force reload
 
     # Create modified config data for reload
     modified_config_data = config_data.copy()
@@ -381,7 +382,7 @@ def test_reload_success(mock_safe_open, config_data, hccl_data):
 
     # Update mock to return modified data on reload
     def reload_mock_side_effect(file_path, mode):
-        if "node_manager_config.json" in file_path or "/tmp/test_node_manager_config.json" in file_path:
+        if "user_config.json" in file_path or "/tmp/test_user_config.json" in file_path:
             return mock_open(read_data=json.dumps(modified_config_data)).return_value
         elif "hccl.json" in file_path or "/tmp/test_hccl.json" in file_path:
             return mock_open(read_data=json.dumps(modified_hccl_data)).return_value
@@ -398,7 +399,7 @@ def test_reload_success(mock_safe_open, config_data, hccl_data):
     assert config.basic_config.model_name == "modified_model"
     assert config.api_config.node_manager_port == 9090
 
-@patch.dict('os.environ', {'ROLE': 'both'})
+@patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': '/tmp/test_node_manager_config.json'})
 @patch('motor.config.node_manager.safe_open')
 def test_reload_config_file_not_found(mock_safe_open, config_data, hccl_data):
     """Test reload when configuration file doesn't exist"""
@@ -408,17 +409,17 @@ def test_reload_config_file_not_found(mock_safe_open, config_data, hccl_data):
     config = NodeManagerConfig()
 
     # Set config_path to a non-existent path
-    config.config_path = "/non/existent/path/node_manager_config.json"
+    config.config_path = "/non/existent/path/user_config.json"
     config.hccl_path = "/tmp/test_hccl.json"  # Valid path for hccl
 
     def exists_side_effect(path):
-        return path != "/non/existent/path/node_manager_config.json"
+        return path != "/non/existent/path/user_config.json"
 
     with patch('os.path.exists', side_effect=exists_side_effect):
         result = config.reload()
     assert result is False
 
-@patch.dict('os.environ', {'ROLE': 'both'})
+@patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': '/tmp/test_node_manager_config.json'})
 @patch('motor.config.node_manager.safe_open')
 def test_reload_hccl_file_not_found(mock_safe_open, config_data, hccl_data):
     """Test reload when HCCL file doesn't exist"""
@@ -438,7 +439,7 @@ def test_reload_hccl_file_not_found(mock_safe_open, config_data, hccl_data):
         result = config.reload()
     assert result is False
 
-@patch.dict('os.environ', {'ROLE': 'both'})
+@patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': '/tmp/test_node_manager_config.json'})
 @patch('motor.config.node_manager.safe_open')
 def test_reload_invalid_json(mock_safe_open, config_data, hccl_data):
     """Test reload with invalid JSON in config file"""

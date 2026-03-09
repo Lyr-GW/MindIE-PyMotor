@@ -268,7 +268,7 @@ def main() -> None:
     else:
         # Read from environment variable
         config = ControllerConfig.from_json()
-        logger.info("Using configuration from environment variable MOTOR_CONTROLLER_CONFIG_PATH")
+        logger.info("Using configuration from environment variable USER_CONFIG_PATH")
 
     # Initialize previous fault tolerance state
     previous_fault_tolerance_enabled = config.fault_tolerance_config.enable_fault_tolerance

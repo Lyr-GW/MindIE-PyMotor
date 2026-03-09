@@ -118,9 +118,6 @@ GEN_CERT_SCRIPT="/mnt/cert_scripts/openssl_gen_cert.sh"
 
 # prefill和decode角色启动前生成证书
 if [ "$ROLE" = "prefill" ] || [ "$ROLE" = "decode" ]; then
-    export MOTOR_NODE_MANAGER_CONFIG_PATH="$USER_CONFIG_PATH"
-    export MOTOR_ENGINE_PATH="$USER_CONFIG_PATH"
-
     # 生成证书
     apply_openssl_gen_cert "$CA_PATH" "$BASE_CERT_PATH" "$CERT_NAMES"
 
@@ -134,21 +131,17 @@ fi
 
 # controller角色启动前生成证书
 if [ "$ROLE" = "controller" ]; then
-    export MOTOR_CONTROLLER_CONFIG_PATH="$USER_CONFIG_PATH"
-
     # 生成证书
     apply_openssl_gen_cert "$CA_PATH" "$BASE_CERT_PATH" "$CERT_NAMES"
 
     # ... 其他初始化代码 ...
 
     # Controller start command
-    python3 -m motor.controller.main --config $MOTOR_CONTROLLER_CONFIG_PATH
+    python3 -m motor.controller.main --config $USER_CONFIG_PATH
 fi
 
 # coordinator角色启动前生成证书
 if [ "$ROLE" == "coordinator" ]; then
-    export MOTOR_COORDINATOR_CONFIG_PATH="$USER_CONFIG_PATH"
-
     # 生成证书
     apply_openssl_gen_cert "$CA_PATH" "$BASE_CERT_PATH" "$CERT_NAMES"
 
