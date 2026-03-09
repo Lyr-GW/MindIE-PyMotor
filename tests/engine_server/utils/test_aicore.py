@@ -16,85 +16,86 @@ import pytest
 from motor.engine_server.utils.aicore import get_aicore_usage, get_device_info_from_rank_table
 
 
-def test_get_device_info_from_rank_table_success():
+def test_get_device_info_from_rank_table_success(monkeypatch):
     mock_rank_table_path = "test_rank_table.json"
-    with mock.patch.dict(os.environ, {'RANK_TABLE_PATH': mock_rank_table_path}):
-        mock_rank_table = {
-            "server_list": [
-                {
-                    "device": [
-                        {
-                            "device_id": "3",
-                            "rank_id": "0"
-                        }
-                    ]
-                }
-            ]
-        }
-        with mock.patch('builtins.open', mock.mock_open(read_data='{"server_list":[{"device":[{"device_id":"3","rank_id":"0"}]}]}')):
-            with mock.patch('json.load', return_value=mock_rank_table):
-                device_id, chip_id = get_device_info_from_rank_table()
-                assert device_id == 1  # 3 // 2 = 1
-                assert chip_id == 1     # 3 % 2 = 1
+    monkeypatch.setenv("RANKTABLE_PATH", mock_rank_table_path)
+    mock_rank_table = {
+        "server_list": [
+            {
+                "device": [
+                    {
+                        "device_id": "3",
+                        "rank_id": "0"
+                    }
+                ]
+            }
+        ]
+    }
+    with mock.patch('builtins.open', mock.mock_open(read_data='{"server_list":[{"device":[{"device_id":"3","rank_id":"0"}]}]}')):
+        with mock.patch('json.load', return_value=mock_rank_table):
+            device_id, chip_id = get_device_info_from_rank_table()
+            assert device_id == 1  # 3 // 2 = 1
+            assert chip_id == 1     # 3 % 2 = 1
 
 
-def test_get_device_info_from_rank_table_no_env():
-    with mock.patch.dict(os.environ, {}, clear=True):
+def test_get_device_info_from_rank_table_no_env(monkeypatch):
+    if "RANKTABLE_PATH" in os.environ:
+        monkeypatch.delenv("RANKTABLE_PATH")
+    with pytest.raises(ValueError) as cm:
+        get_device_info_from_rank_table()
+    assert "Environment variable RANKTABLE_PATH is not set" in str(cm.value)
+
+
+def test_get_device_info_from_rank_table_file_error(monkeypatch):
+    mock_rank_table_path = "test_rank_table.json"
+    monkeypatch.setenv("RANKTABLE_PATH", mock_rank_table_path)
+    with mock.patch('builtins.open', side_effect=IOError("File open failed")):
         with pytest.raises(RuntimeError) as cm:
             get_device_info_from_rank_table()
-        assert "Environment variable RANK_TABLE_PATH is not set" in str(cm.value)
+        assert "Error reading RANK_TABLE_PATH file" in str(cm.value)
 
 
-def test_get_device_info_from_rank_table_file_error():
+def test_get_device_info_from_rank_table_no_device_id(monkeypatch):
     mock_rank_table_path = "test_rank_table.json"
-    with mock.patch.dict(os.environ, {'RANK_TABLE_PATH': mock_rank_table_path}):
-        with mock.patch('builtins.open', side_effect=IOError("File open failed")):
-            with pytest.raises(RuntimeError) as cm:
+    monkeypatch.setenv("RANKTABLE_PATH", mock_rank_table_path)
+    mock_rank_table = {
+        "server_list": [
+            {
+                "device": [
+                    {
+                        "rank_id": "0"
+                    }
+                ]
+            }
+        ]
+    }
+    with mock.patch('builtins.open', mock.mock_open(read_data='{"server_list":[{"device":[{"rank_id":"0"}]}]}')):
+        with mock.patch('json.load', return_value=mock_rank_table):
+            with pytest.raises(ValueError) as cm:
                 get_device_info_from_rank_table()
-            assert "Error reading RANK_TABLE_PATH file" in str(cm.value)
+            assert "device_id field not found in RANK_TABLE_PATH file" in str(cm.value)
 
 
-def test_get_device_info_from_rank_table_no_device_id():
+def test_get_device_info_from_rank_table_invalid_device_id(monkeypatch):
     mock_rank_table_path = "test_rank_table.json"
-    with mock.patch.dict(os.environ, {'RANK_TABLE_PATH': mock_rank_table_path}):
-        mock_rank_table = {
-            "server_list": [
-                {
-                    "device": [
-                        {
-                            "rank_id": "0"
-                        }
-                    ]
-                }
-            ]
-        }
-        with mock.patch('builtins.open', mock.mock_open(read_data='{"server_list":[{"device":[{"rank_id":"0"}]}]}')):
-            with mock.patch('json.load', return_value=mock_rank_table):
-                with pytest.raises(ValueError) as cm:
-                    get_device_info_from_rank_table()
-                assert "device_id field not found in RANK_TABLE_PATH file" in str(cm.value)
-
-
-def test_get_device_info_from_rank_table_invalid_device_id():
-    mock_rank_table_path = "test_rank_table.json"
-    with mock.patch.dict(os.environ, {'RANK_TABLE_PATH': mock_rank_table_path}):
-        mock_rank_table = {
-            "server_list": [
-                {
-                    "device": [
-                        {
-                            "device_id": "invalid",
-                            "rank_id": "0"
-                        }
-                    ]
-                }
-            ]
-        }
-        with mock.patch('builtins.open', mock.mock_open(read_data='{"server_list":[{"device":[{"device_id":"invalid","rank_id":"0"}]}]}')):
-            with mock.patch('json.load', return_value=mock_rank_table):
-                with pytest.raises(ValueError) as cm:
-                    get_device_info_from_rank_table()
-                assert f"device_id field value is not a valid integer" in str(cm.value)
+    monkeypatch.setenv("RANKTABLE_PATH", mock_rank_table_path)
+    mock_rank_table = {
+        "server_list": [
+            {
+                "device": [
+                    {
+                        "device_id": "invalid",
+                        "rank_id": "0"
+                    }
+                ]
+            }
+        ]
+    }
+    with mock.patch('builtins.open', mock.mock_open(read_data='{"server_list":[{"device":[{"device_id":"invalid","rank_id":"0"}]}]}')):
+        with mock.patch('json.load', return_value=mock_rank_table):
+            with pytest.raises(ValueError) as cm:
+                get_device_info_from_rank_table()
+            assert f"device_id field value is not a valid integer" in str(cm.value)
 
 
 def test_get_aicore_usage_success():

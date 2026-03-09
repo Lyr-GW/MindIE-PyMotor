@@ -13,15 +13,16 @@ import os
 import re
 import json
 import subprocess
+from motor.common.utils.env import Env
 
 
 def get_device_info_from_rank_table():
     """
     Get device_info from RANK_TABLE_PATH file
     """
-    rank_table_path = os.environ.get('RANK_TABLE_PATH')
+    rank_table_path = Env.ranktable_path
     if not rank_table_path:
-        raise RuntimeError("Environment variable RANK_TABLE_PATH is not set")
+        raise ValueError("Environment variable RANKTABLE_PATH is not set")
     
     try:
         with open(rank_table_path, 'r', encoding='utf-8') as f:
