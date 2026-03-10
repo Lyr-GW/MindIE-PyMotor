@@ -55,7 +55,7 @@ class Observability(ThreadSafeSingleton):
             
             is_succeed = self.alarm_store.add_alarm(record)
             if is_succeed:
-                logger.info("Alarm added successfully via observability, %s", str(record))
+                logger.debug("Alarm added successfully via observability, %s", str(record))
             else:
                 logger.warning("Alarm added failed via observability, %s", str(record))
             return is_succeed

@@ -43,7 +43,7 @@ class AlarmStore(ThreadSafeSingleton):
                 else:
                     for value in self._alarms.values():
                         value.append(record)
-                logger.info("Current alarms: %s", self._alarms)
+                logger.debug("Current alarms: %s", self._alarms)
 
             return True
                 

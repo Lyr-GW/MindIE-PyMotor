@@ -52,9 +52,9 @@ class ObservabilityConfig:
     """observability configuration class"""
 
     # observability enable/disable
-    observability_enable: bool = True
+    observability_enable: bool = False
 
-    metrics_ttl: int = 15
+    metrics_ttl: int = 5
 
 
 @dataclass
