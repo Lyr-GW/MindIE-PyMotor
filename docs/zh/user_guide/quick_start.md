@@ -76,6 +76,9 @@
 
 ### 3.2 PD分离部署
 
+> [!NOTE]部署后端说明
+> 当前默认采用 **CRD 方式**（基于 MindCluster 的 PD 分离 CRD 与 Operator）进行部署。该方式尚未完成 RAS 能力与池化能力的适配验证。若您需要 RAS（可靠性、可用性、可服务性）或 KV 池化能力，可在 `user_config.json` 中增加相应配置，切换为原有的多 YAML Deployment 方式（由 `deploy.py` 生成并 apply 多个 Deployment YAML）。完整部署说明请参考 [PD 分离服务部署](./service_deployment/pd_disaggregation_deployment.md)。
+
 1. **将本代码仓的deployer目录上传至K8s集群的master服务器上**
 2. **配置服务化参数**
 
