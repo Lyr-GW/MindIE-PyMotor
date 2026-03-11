@@ -106,20 +106,6 @@
           "hardware_type": "800I_A2",
           "env_path": "./conf/env.json",
           "weight_mount_path": "/mnt/weight/",
-          "tls_config": {
-            "infer_tls_config": {
-              "enable_tls": false
-            },
-            "mgmt_tls_config": {
-              "enable_tls": false
-            },
-            "etcd_tls_config": {
-              "enable_tls": false
-            },
-            "grpc_tls_config": {
-              "enable_tls": false
-            }
-          }
         },
         "motor_controller_config": {},
         "motor_coordinator_config": {},
@@ -144,10 +130,7 @@
               "kv_buffer_device": "npu",
               "kv_role": "kv_producer",
               "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
-              "kv_connector_extra_config": {
-                "prefill": {},
-                "decode": {}
-              }
+              "kv_connector_extra_config": {}
             }
           }
         },
@@ -171,10 +154,7 @@
               "kv_buffer_device": "npu",
               "kv_role": "kv_producer",
               "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
-              "kv_connector_extra_config": {
-                "prefill": {},
-                "decode": {}
-              }
+              "kv_connector_extra_config": {}
             }
           }
         }

@@ -52,7 +52,7 @@ def attach_metrics_router(app: FastAPI):
 
     metrics_route.path_regex = re.compile("^/metrics(?P<path>.*)$")
     app.routes.append(metrics_route)
-    logger.info(f"Created Endpoint metrics route: /metrics successfully")
+    logger.info("Created Endpoint metrics route: /metrics successfully")
 
 
 class Endpoint:

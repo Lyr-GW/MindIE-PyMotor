@@ -75,16 +75,7 @@
         "engine_id": "0",
         "kv_rank": 0,
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
-        "kv_connector_extra_config": {
-          "prefill": {
-            "dp_size": 2,
-            "tp_size": 2
-          },
-          "decode": {
-            "dp_size": 2,
-            "tp_size": 2
-          }
-        }
+        "kv_connector_extra_config": {}
       }
     }
   },
@@ -116,16 +107,7 @@
         "engine_id": "0",
         "kv_rank": 0,
         "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
-        "kv_connector_extra_config": {
-          "prefill": {
-            "dp_size": 2,
-            "tp_size": 2
-          },
-          "decode": {
-            "dp_size": 2,
-            "tp_size": 2
-          }
-        }
+        "kv_connector_extra_config": {}
       }
     }
   },

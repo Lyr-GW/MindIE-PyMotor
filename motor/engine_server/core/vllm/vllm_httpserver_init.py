@@ -32,7 +32,6 @@ from vllm.entrypoints.chat_utils import load_chat_template
 
 from motor.engine_server.openai.vllm.serving_chat import OpenAIServingChat
 from motor.engine_server.openai.vllm.serving_completion import OpenAIServingCompletion
-from motor.engine_server.core.vllm.vllm_engine_control import VllmEngineController
 from motor.engine_server.config.base import IConfig
 from motor.common.utils.logger import get_logger
 
@@ -53,19 +52,13 @@ def create_vllm_lifespan(config: IConfig, init_params: dict):
         logger.info("HttpServer lifespan: Creating engine_client...")
         client_config = init_params
         args = config.get_args()
-        engine_type = config.get_server_config().engine_type
         try:
             async with build_async_engine_client(
-                    args,
-                    usage_context=UsageContext.OPENAI_API_SERVER,
-                    client_config=client_config,
+                args,
+                usage_context=UsageContext.OPENAI_API_SERVER,
+                client_config=client_config,
             ) as engine_client:
                 logger.info("HttpServer lifespan: Engine_client created successfully")
-
-                data_parallel_rank = 0
-                if hasattr(args, 'data_parallel_rank') and args.data_parallel_rank is not None:
-                    data_parallel_rank = args.data_parallel_rank
-                app.state.engine_ctl_client = VllmEngineController(dp_rank=data_parallel_rank)
 
                 app.state.health_checker = vllm_health_checker
                 app.state.engine_client = engine_client

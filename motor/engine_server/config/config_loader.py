@@ -52,8 +52,8 @@ class ModelConfig:
             model_name=data["model_name"],
             model_path=data["model_path"],
             npu_mem_utils=data["npu_mem_utils"],
-            prefill_parallel_config=ParallelConfig.from_dict(data["prefill_parallel_config"]),
-            decode_parallel_config=ParallelConfig.from_dict(data["decode_parallel_config"])
+            prefill_parallel_config=ParallelConfig.from_dict(data[PREFILL_PARALLEL_CONFIG_KEY]),
+            decode_parallel_config=ParallelConfig.from_dict(data[DECODE_PARALLEL_CONFIG_KEY])
         )
 
 
@@ -96,20 +96,6 @@ class DeployConfig:
     infer_tls_config: TLSConfig | None
     health_check_config: HealthCheckConfig = field(default_factory=HealthCheckConfig)
 
-    @staticmethod
-    def _sync_parallel_config(role: str | None, data: dict[str, Any]) -> None:
-        if role not in ("prefill", "decode"):
-            return
-        model_cfg = data.get(MODEL_CONFIG_KEY)
-        if not isinstance(model_cfg, dict):
-            return
-        has_prefill = PREFILL_PARALLEL_CONFIG_KEY in model_cfg
-        has_decode = DECODE_PARALLEL_CONFIG_KEY in model_cfg
-        if role == "decode" and not has_prefill and has_decode:
-            model_cfg[PREFILL_PARALLEL_CONFIG_KEY] = model_cfg[DECODE_PARALLEL_CONFIG_KEY]
-        if role == "prefill" and not has_decode and has_prefill:
-            model_cfg[DECODE_PARALLEL_CONFIG_KEY] = model_cfg[PREFILL_PARALLEL_CONFIG_KEY]
-
     @classmethod
     def load(cls, file_path: str | Path, role: str | None = None) -> "DeployConfig":
         """
@@ -132,7 +118,15 @@ class DeployConfig:
             )
             data = raw_data.get(key, {})
             _update_engine_server_tls_config(data, raw_data)
-        cls._sync_parallel_config(role, data)
+
+            model_cfg = data.get(MODEL_CONFIG_KEY, {})
+            prefill_cfg = raw_data.get(MOTOR_ENGINE_PREFILL_CONFIG_KEY, {}).get(MODEL_CONFIG_KEY, {})
+            decode_cfg = raw_data.get(MOTOR_ENGINE_DECODE_CONFIG_KEY, {}).get(MODEL_CONFIG_KEY, {})
+
+            if PREFILL_PARALLEL_CONFIG_KEY not in model_cfg and PREFILL_PARALLEL_CONFIG_KEY in prefill_cfg:
+                model_cfg[PREFILL_PARALLEL_CONFIG_KEY] = prefill_cfg[PREFILL_PARALLEL_CONFIG_KEY]
+            if DECODE_PARALLEL_CONFIG_KEY not in model_cfg and DECODE_PARALLEL_CONFIG_KEY in decode_cfg:
+                model_cfg[DECODE_PARALLEL_CONFIG_KEY] = decode_cfg[DECODE_PARALLEL_CONFIG_KEY]
 
         mgmt_tls_config = data.get("mgmt_tls_config")
         infer_tls_config = data.get("infer_tls_config")

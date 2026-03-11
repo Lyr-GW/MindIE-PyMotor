@@ -85,14 +85,6 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
               "kv_port": "20001",
               "kv_connector_extra_config": {
                   "send_type": "PUT",
-                  "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 2
-                  },
-                  "decode": {
-                    "dp_size": 2,
-                    "tp_size": 2
-                  }
               }
             },
             {
@@ -136,14 +128,6 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
               "kv_port": "20002",
               "kv_connector_extra_config": {
                   "send_type": "PUT",
-                  "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 2
-                  },
-                  "decode": {
-                    "dp_size": 2,
-                    "tp_size": 2
-                  }
               }
             },
             {

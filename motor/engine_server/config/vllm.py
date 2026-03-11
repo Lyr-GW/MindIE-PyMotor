@@ -143,15 +143,17 @@ class VLLMConfig(BaseConfig):
         prefill_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
         decode_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_DECODE)
 
-        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
-            constants.DP_SIZE] = prefill_parallel.dp_size
-        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL][
-            constants.TP_SIZE] = prefill_parallel.tp_size
+        if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG] = {}
 
-        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
-            constants.DP_SIZE] = decode_parallel.dp_size
-        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE][
-            constants.TP_SIZE] = decode_parallel.tp_size
+        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL] = {
+            constants.DP_SIZE: prefill_parallel.dp_size,
+            constants.TP_SIZE: prefill_parallel.tp_size
+        }
+        kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE] = {
+            constants.DP_SIZE: decode_parallel.dp_size,
+            constants.TP_SIZE: decode_parallel.tp_size
+        }
 
     def _process_store_connector(self, kv_config):
         role = self.server_config.role
