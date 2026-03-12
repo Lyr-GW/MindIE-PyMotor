@@ -263,10 +263,9 @@ def generate_user_config_sample(output_path: str):
         "single_d_instance_pod_num": 1,
         "p_pod_npu_num": 16,
         "d_pod_npu_num": 16,
-        "image_name": "mindie-motor-vllm:dev-2.2.RC1.B153-800I-A3-py311-Ubuntu24.04-lts-aarch64",
+        "image_name": "",
         "job_id": "mindie-motor",
         "hardware_type": "800I_A3",
-        "env_path": "./conf/env.json",
         "weight_mount_path": "/mnt/weight/",
         "tls_config": {
             "infer_tls_config": all_tls_configs.get("infer_tls_config", {

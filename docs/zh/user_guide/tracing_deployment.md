@@ -62,10 +62,9 @@ pyMotor开启tracing能力需修改env.json配置文件和user_config.json配置
     "single_d_instance_pod_num": 1,
     "p_pod_npu_num": 4,
     "d_pod_npu_num": 4,
-    "image_name": "mindie-motor-vllm:dev-2.2.RC1.B153-800I-A3-py311-Ubuntu24.04-lts-aarch64",
+    "image_name": "",
     "job_id": "mindie-motor",
     "hardware_type": "800I_A2",
-    "env_path": "./conf/env.json",
     "weight_mount_path": "/mnt/weight/"
   },
   "motor_controller_config": {
