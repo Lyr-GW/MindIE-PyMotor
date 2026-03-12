@@ -16,14 +16,12 @@
   "single_d_instance_pod_num": 1,
   "p_pod_npu_num": 16,
   "d_pod_npu_num": 16,
-  "image_name": "mindie-motor-vllm:dev-xxx",
+  "image_name": "",
   "job_id": "mindie-motor",
   "hardware_type": "800I_A3",
-  "env_path": "./conf/env.json",
   "weight_mount_path": "/mnt/weight/",
   "deployment_backend": "infer_service_set",
   "tls_config": { ... },
-  "service_id": ""
 }
 ```
 
@@ -38,11 +36,9 @@
 | image_name | string | 推理镜像名（需包含 MindIE-PyMotor 与 vLLM 等运行环境），与 [PD 分离服务部署](./pd_disaggregation_deployment.md#2-准备镜像) 中准备/加载的镜像名一致 |
 | job_id | string | 部署任务名，同时作为 K8s 命名空间使用，如 `mindie-motor` |
 | hardware_type | string | 硬件类型：`800I_A2` 或 `800I_A3` |
-| env_path | string | env.json 路径，如 `"./conf/env.json"` |
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 model_path 需与此挂载路径一致，如 `"/mnt/weight/"` |
 | deployment_backend | string | 部署后端方式。可选：`infer_service_set`（默认，基于 InferServiceSet CRD，生成单个 infer_service.yaml 由 CRD controller 拉起各 pod）、`multi_deployment`（传统方式，生成 controller、coordinator、engine_*、kv_pool 等多个独立 YAML 分别 apply）。不配置时默认为 `infer_service_set`。CRD 方式尚未完成 RAS 能力与池化能力的适配验证；若需 RAS（可靠性、可用性、可服务性）或 KV 池化能力，请设置为 `multi_deployment` |
 | tls_config | object | 可选；TLS 相关配置，含 infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config 四类，结构见 [PD 分离服务部署](./pd_disaggregation_deployment.md#46-tls_config可选) |
-| service_id | string | Motor 服务的唯一标识，对接 CCAE 时使用。执行 `python deploy.py` 时自动生成并写入配置；执行 `bash delete.sh` 时清空该值。用户一般无需手动配置 |
 
 ---
 
