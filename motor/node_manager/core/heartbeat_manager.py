@@ -259,7 +259,7 @@ class HeartbeatManager(ThreadSafeSingleton):
                     self._reregister()
                 else:
                     with self.config_lock:
-                        logger.error("Exception occurred while reporting endpoint status to controller...")
+                        logger.error("Exception occurred while reporting endpoint status to controller: %s", e)
 
             with self.config_lock:
                 time.sleep(self.heartbeat_interval_seconds)

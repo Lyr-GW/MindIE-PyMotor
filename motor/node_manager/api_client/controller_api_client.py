@@ -59,7 +59,7 @@ class ControllerApiClient:
     @staticmethod
     def report_heartbeat(heartbeat_msg: HeartbeatMsg):
         client_args = ControllerApiClient._generate_client_args()
-        with SafeHTTPSClient(timeout=0.5, **client_args) as client:
+        with SafeHTTPSClient(timeout=5, **client_args) as client:
             response = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
             logger.debug(f"Heartbeat success, response: {response}, "
                          f"message body: {heartbeat_msg.model_dump()}, "
