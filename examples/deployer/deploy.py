@@ -154,9 +154,10 @@ def deploy_services(user_config, env_config_path):
     update_kv_pool_enabled_flag(user_config)
     update_kv_conductor_enabled_flag(user_config)
     update_engine_base_name(user_config)
-    set_env_to_shell(user_config, env_config_path)
 
     deploy_mode_arg = get_deploy_mode_from_config(deploy_config)
+    set_env_to_shell(user_config, env_config_path, deploy_mode_arg)
+
     k8s_utils.g_generate_yaml_list = []
     paths = get_deploy_paths()
 
