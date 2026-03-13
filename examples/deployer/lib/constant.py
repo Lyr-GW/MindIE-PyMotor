@@ -51,6 +51,7 @@ CONTROLLER_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/controller.sh")
 COORDINATOR_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/coordinator.sh")
 ENGINE_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/engine.sh")
 KV_POOL_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/kv_pool.sh")
+SINGLE_CONTAINER_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/all_combine_in_single_container.sh")
 MOTOR_COMMON_ENV = "motor_common_env"
 WEIGHT_MOUNT = "weight-mount"
 KV_CACHE_POOL_CONFIG = "kv_cache_pool_config"

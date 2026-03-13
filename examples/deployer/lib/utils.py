@@ -86,7 +86,7 @@ def shell_escape(value):
     return value
 
 
-def update_shell_script_safely(script_path, env_config, component_key="", function_name="set_common_env"):
+def update_shell_safely(script_path, env_config, component_key="", function_name="set_common_env"):
     all_env_vars = {}
     all_env_vars.update(env_config[C.MOTOR_COMMON_ENV])
     if component_key and component_key in env_config:
@@ -172,7 +172,7 @@ def modify_log_mount(deployment_data, user_config, app_type):
             volume["hostPath"]["path"] = host_log_dir
 
 
-def set_env_to_shell(user_config, env_config_path):
+def set_env_to_shell(user_config, env_config_path, deploy_mode):
     if not env_config_path or not os.path.exists(env_config_path):
         logger.error("env_config_path %s does not exist!", env_config_path)
         return
@@ -202,15 +202,26 @@ def set_env_to_shell(user_config, env_config_path):
     env_config[C.MOTOR_COMMON_ENV][C.SERVICE_ID] = service_id
     logger.info(f"Set {C.SERVICE_ID} environment variable to: {service_id}")
 
-    update_shell_script_safely(C.COMMON_SHELL_PATH, env_config, C.MOTOR_COMMON_ENV, "set_common_env")
-    update_shell_script_safely(C.CONTROLLER_SHELL_PATH, env_config, "motor_controller_env", "set_controller_env")
-    update_shell_script_safely(C.COORDINATOR_SHELL_PATH, env_config, "motor_coordinator_env", "set_coordinator_env")
-    update_shell_script_safely(C.ENGINE_SHELL_PATH, env_config, "motor_engine_prefill_env", "set_prefill_env")
-    update_shell_script_safely(C.ENGINE_SHELL_PATH, env_config, "motor_engine_decode_env", "set_decode_env")
-    update_shell_script_safely(C.KV_POOL_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
-    update_shell_script_safely(
-        C.KV_CONDUCTOR_SHELL_PATH, env_config, "motor_kv_conductor_env", "set_kv_conductor_env"
-    )
+    update_shell_safely(C.COMMON_SHELL_PATH, env_config, C.MOTOR_COMMON_ENV, "set_common_env")
+
+    if deploy_mode == C.DEPLOY_MODE_SINGLE_CONTAINER:
+        update_shell_safely(C.SINGLE_CONTAINER_SHELL_PATH, env_config, "motor_controller_env", "set_controller_env")
+        update_shell_safely(C.SINGLE_CONTAINER_SHELL_PATH, env_config, "motor_coordinator_env", "set_coordinator_env")
+        update_shell_safely(C.SINGLE_CONTAINER_SHELL_PATH, env_config, "motor_engine_prefill_env", "set_prefill_env")
+        update_shell_safely(C.SINGLE_CONTAINER_SHELL_PATH, env_config, "motor_engine_decode_env", "set_decode_env")
+        update_shell_safely(C.SINGLE_CONTAINER_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
+        update_shell_safely(
+            C.SINGLE_CONTAINER_SHELL_PATH, env_config, "motor_kv_conductor_env", "set_kv_conductor_env"
+        )
+    else:
+        update_shell_safely(C.CONTROLLER_SHELL_PATH, env_config, "motor_controller_env", "set_controller_env")
+        update_shell_safely(C.COORDINATOR_SHELL_PATH, env_config, "motor_coordinator_env", "set_coordinator_env")
+        update_shell_safely(C.ENGINE_SHELL_PATH, env_config, "motor_engine_prefill_env", "set_prefill_env")
+        update_shell_safely(C.ENGINE_SHELL_PATH, env_config, "motor_engine_decode_env", "set_decode_env")
+        update_shell_safely(C.KV_POOL_SHELL_PATH, env_config, "motor_kv_cache_pool_env", "set_kv_pool_env")
+        update_shell_safely(
+            C.KV_CONDUCTOR_SHELL_PATH, env_config, "motor_kv_conductor_env", "set_kv_conductor_env"
+        )
 
 
 def get_deploy_paths():

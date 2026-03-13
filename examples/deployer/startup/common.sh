@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Current node role: ROLE=$ROLE"
 
+set_common_env
+
 setup_motor_log_path() {
     if [ -n "$MOTOR_LOG_ROOT_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$SERVICE_ID" ]; then
         chmod 750 "$MOTOR_LOG_ROOT_PATH"
