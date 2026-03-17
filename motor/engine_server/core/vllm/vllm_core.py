@@ -9,20 +9,25 @@
 # See the Mulan PSL v2 for more details.
 
 import signal
+import importlib.metadata as md
 
 import vllm
 from vllm.entrypoints.utils import cli_env_setup
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.engine.coordinator import DPCoordinator
-from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
+from vllm.v1.engine.utils import CoreEngineProcManager
 
 from motor.engine_server.config.base import IConfig
 from motor.engine_server.core.base_core import BaseServerCore
 from motor.engine_server.constants import constants
 from motor.common.utils.logger import get_logger
 
+
 logger = get_logger("engine_server")
+
+vllm_version = md.version("vllm")
+logger.info(f"vLLM version: {vllm_version}")
 
 
 class VLLMServerCore(BaseServerCore):
@@ -91,10 +96,28 @@ class VLLMServerCore(BaseServerCore):
             raise ValueError(validation_msg)
 
         self.client_config = None
-        with launch_core_engines(
+        try:
+            from vllm.v1.engine.utils import get_engine_zmq_addresses, launch_core_engines
+            if get_engine_zmq_addresses is None:
+                raise AttributeError("get_engine_zmq_addresses is not available")
+
+            addresses = get_engine_zmq_addresses(vllm_server_config)
+            launch_context = launch_core_engines(
                 vllm_server_config,
                 selected_executor,
-                enable_statistics) as (self.core_manager, self.coordinator, server_addresses):
+                enable_statistics,
+                addresses,
+            )
+        except (TypeError, AttributeError):
+            logger.info("[VLLMServerCore] Fallback to legacy launch_core_engines signature")
+            from vllm.v1.engine.utils import launch_core_engines
+            launch_context = launch_core_engines(
+                vllm_server_config,
+                selected_executor,
+                enable_statistics,
+            )
+
+        with launch_context as (self.core_manager, self.coordinator, server_addresses):
             self.client_config = {
                 "input_address": server_addresses.inputs[0],
                 "output_address": server_addresses.outputs[0],
