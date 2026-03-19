@@ -29,7 +29,7 @@ spec:
             capabilities:
               drop: ["ALL"]
             seccompProfile:
-              type: "RuntimeDefault"
+              type: Unconfined
           env:
             - name: POD_IP
               valueFrom:

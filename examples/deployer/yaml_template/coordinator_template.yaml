@@ -32,6 +32,12 @@ spec:
         - image: mindie:1.0.0-aarch64-800I-A2
           imagePullPolicy: IfNotPresent
           name: mindie-motor-coordinator
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: Unconfined
           startupProbe:
             exec:
               command:

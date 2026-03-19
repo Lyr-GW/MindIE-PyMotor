@@ -62,3 +62,11 @@
 	<br>Kubernetes版本高于1.23：Kubernetes 通过 CRI 与容器运行时通信，默认使用 containerd，不经过 Docker。
 - 解决方案
     <br>k8s的版本较高，需要使用ctr -n k8s.io image import [imageName] 命令加载镜像。
+
+## 5. 容器启动后报错 RuntimeError: can't start new thread
+- 问题描述
+	<br>某些节点上，Pod 启动后 Python 侧抛出 `RuntimeError: can't start new thread`；将容器的 `seccompProfile` 改为 `Unconfined` 后恢复正常。
+- 原因分析
+	<br>Linux seccomp 在拦截创建线程/进程相关的 syscall（如 `clone3`）。当使用 `seccompProfile.type: RuntimeDefault` 时，部分容器运行时的默认策略未放行 `clone3`，导致 glibc/pthread 创建线程失败。
+- 解决方案
+	<br>本仓库部署模板默认使用 `seccompProfile.type: Unconfined`，可避免该问题。若需更高安全等级或使用 RuntimeDefault，请参考 [Pod 权限说明](../../../examples/features/pod_permission_guide/README.md)。

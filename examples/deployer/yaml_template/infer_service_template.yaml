@@ -91,6 +91,12 @@ spec:
             - image: mindie:1.0.0-aarch64-800I-A2
               imagePullPolicy: IfNotPresent
               name: mindie-motor-controller
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: Unconfined
               startupProbe:
                 exec:
                   command: ["bash", "-c", "$CONFIGMAP_PATH/probe.sh startup"]
@@ -204,6 +210,12 @@ spec:
             - image: mindie:1.0.0-aarch64-800I-A2
               imagePullPolicy: IfNotPresent
               name: mindie-motor-coordinator
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: Unconfined
               startupProbe:
                 exec:
                   command: ["bash", "-c", "$CONFIGMAP_PATH/probe.sh startup"]
@@ -296,6 +308,10 @@ spec:
             - image: mindie:1.0.0-aarch64-800I-A2
               imagePullPolicy: IfNotPresent
               name: mindie-server
+              securityContext:
+                allowPrivilegeEscalation: false
+                seccompProfile:
+                  type: Unconfined
               env:
               - name: POD_IP
                 valueFrom:
@@ -407,6 +423,10 @@ spec:
             - image: mindie:1.0.0-aarch64-800I-A2
               imagePullPolicy: IfNotPresent
               name: mindie-server
+              securityContext:
+                allowPrivilegeEscalation: false
+                seccompProfile:
+                  type: Unconfined
               env:
               - name: POD_IP
                 valueFrom:
