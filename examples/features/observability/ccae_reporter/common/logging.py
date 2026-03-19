@@ -42,7 +42,7 @@ def recursive_chmod(cur_path, mode=0o750):
 
 @dataclass
 class LogParams:
-    path: str = '~/motor/log/'
+    path: str = '/root/ascend/log'
     level: str = 'INFO'
     to_file: bool = True
     to_console: bool = False
@@ -108,7 +108,9 @@ def _create_log_file(log_file):
 def init_logger() -> LogParams:
     log_params = LogParams()
     # set log path
-    log_params.path = os.getenv("MOTOR_LOG_PATH")
+    root_log_path = os.getenv("MOTOR_LOG_PATH")
+    if not root_log_path:
+        log_params.path = root_log_path
     log_params.rotate_options = {
             FILE_SIZE: 20 * 1024 * 1024,
             FILE_COUNT: 10,
@@ -149,15 +151,6 @@ def _filter_files(directory, prefix, max_num):
     for file in files_to_delete:
         file_path = os.path.join(directory, file[0])
         os.remove(file_path)
-
-
-def _complete_relative_path(cur_path: str, base_dir: str):
-    if os.path.isabs(cur_path):
-        return cur_path
-    base_directory = Path(base_dir)
-    relative_path = cur_path
-    combined_path = base_directory / relative_path
-    return str(combined_path.resolve())
 
 
 def _close_logger(parent_directory: str, base_filename, ts):
@@ -257,13 +250,8 @@ class Log(metaclass=Singleton):
         # 输出日志文件
         if log_params.to_file and self.log_level.upper() != UNSET_LOGGER:
             # 创建文件处理器并将日志写入到指定的文件中
-            base_dir = os.path.expanduser('~/mindie/log')
             log_path = os.path.expanduser(log_params.path)
-            log_path = _complete_relative_path(log_path, base_dir)
-            if base_dir == log_path:
-                log_path = os.path.join(log_path, 'debug')
-            else:
-                log_path = os.path.join(log_path, 'log/debug')
+            log_path = os.path.join(log_path, 'ccae_reporter')
             os.makedirs(log_path, exist_ok=True)
             recursive_chmod(log_path)
             pid = os.getpid()
