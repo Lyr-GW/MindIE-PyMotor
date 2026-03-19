@@ -346,8 +346,32 @@ class SeparatePDRouter(BaseRouter):
         self.req_info.req_len = len(json.dumps(req_data).encode("utf-8"))
         self.req_info.req_data = req_data
 
-        self.logger.info("Recomputing request %s, retry count: %d, new req_info: %s",
-                         self.req_info.req_id, self.retry_count, self.req_info)
+        original_req_id = self.req_info.req_id
+        self.req_info.req_id = self._check_and_modify_req_id()
+
+        self.logger.info("Recomputing old req_id %s, new req_id %s, retry count: %d, new req_info: %s",
+                          original_req_id, self.req_info.req_id, self.retry_count, self.req_info)
+ 
+    def _check_and_modify_req_id(self):
+        index = 16
+        str_len = 2
+
+        if len(self.req_info.req_id) > index:
+            target_char = self.req_info.req_id[index:index + str_len]
+            if target_char.isdigit():
+                new_digit = (int(target_char) + 1) % 100
+
+                new_request_id = (
+                        self.req_info.req_id[:index] +
+                        f"{new_digit:02d}" +
+                        self.req_info.req_id[index + str_len:]
+                    )
+                    
+                return new_request_id
+            else:
+                return self.req_info.req_id
+        else:
+            return self.req_info.req_id
 
     async def _handle_stream_error(self, prefill_resource: ScheduledResource, error: Exception):
         """Handle streaming errors"""
