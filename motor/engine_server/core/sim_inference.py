@@ -25,7 +25,7 @@ logger = get_logger("engine_server")
 class SimInference:
     """Virtual inference utility class for sending virtual health check requests"""
     
-    def __init__(self, args, infer_tls_config, health_check_config=None):
+    def __init__(self, args, infer_tls_config, health_check_config=None, role=None):
         """Initialize virtual inference utility
         
         Args:
@@ -39,15 +39,16 @@ class SimInference:
         self._health_check_task: Optional[asyncio.Task] = None
         self._abnormal_status_lock = threading.Lock()
         self._is_abnormal = False
+        self.role = role
         
         self.health_check_config = health_check_config or None
         # Get npu_usage_threshold with default value
         if self.health_check_config:
             self.npu_usage_threshold = getattr(self.health_check_config, 'npu_usage_threshold', 10)
-            self.enable_virtual_inference = getattr(self.health_check_config, 'enable_virtual_inference', True)
+            self.enable_virtual_inference = getattr(self.health_check_config, 'enable_virtual_inference', False)
         else:
             self.npu_usage_threshold = 10
-            self.enable_virtual_inference = True
+            self.enable_virtual_inference = False
         
         self._shared_data_lock = threading.Lock()
         self._max_aicore_usage = 0
@@ -169,6 +170,14 @@ class SimInference:
             "prompt": "1",
             "max_tokens": 1
         }
+        if self.role == constants.DECODE_ROLE:
+            logger.debug("make virtual request for decode")
+            virtual_request["kv_transfer_params"] = {
+                "do_remote_decode": False,
+                "do_remote_prefill": True,
+                "metaserver": f"http://{self.args.host}:{self.args.port}/v1/metaserver",
+                "do_virtual": True
+            }
         
         logger.debug(f"Sending virtual health check request {virtual_request} to {self._client_address}/v1/completions")
         try:

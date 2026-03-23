@@ -40,8 +40,12 @@ def mock_tls_config():
 
 @pytest.fixture
 def sim_inference(mock_args, mock_tls_config):
-    """Create SimInference instance"""
-    return SimInference(mock_args, mock_tls_config)
+    """Create SimInference instance with health check enabled"""
+    # Create a mock health_check_config with enable_virtual_inference=True
+    mock_health_config = mock.MagicMock()
+    mock_health_config.npu_usage_threshold = 10
+    mock_health_config.enable_virtual_inference = True
+    return SimInference(mock_args, mock_tls_config, mock_health_config)
 
 
 def test_init(sim_inference, mock_args, mock_tls_config):

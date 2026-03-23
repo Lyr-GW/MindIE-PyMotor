@@ -66,7 +66,8 @@ class Endpoint:
         args = config.get_args()
         infer_tls_config = config.get_server_config().deploy_config.infer_tls_config
         health_check_config = config.get_server_config().deploy_config.health_check_config or {}
-        self.sim_inference = SimInference(args, infer_tls_config, health_check_config)
+        role = config.get_server_config().role
+        self.sim_inference = SimInference(args, infer_tls_config, health_check_config, role)
 
         self._stop_event = threading.Event()
         self._server_core = None
