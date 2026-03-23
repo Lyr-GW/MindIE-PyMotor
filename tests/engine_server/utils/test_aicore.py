@@ -13,12 +13,16 @@ import os
 import subprocess
 from unittest import mock
 import pytest
-from motor.engine_server.utils.aicore import get_aicore_usage, get_device_info_from_rank_table
+from motor.engine_server.utils.aicore import get_aicore_usage, get_device_info_from_rank_table, _get_hardware_type
 
 
 def test_get_device_info_from_rank_table_success(monkeypatch):
+    # Test with default hardware type (not 800I-A2)
     mock_rank_table_path = "test_rank_table.json"
     monkeypatch.setenv("RANKTABLE_PATH", mock_rank_table_path)
+    # Remove USER_CONFIG_PATH to ensure no config file is found
+    if "USER_CONFIG_PATH" in os.environ:
+        monkeypatch.delenv("USER_CONFIG_PATH")
     mock_rank_table = {
         "server_list": [
             {
@@ -36,6 +40,39 @@ def test_get_device_info_from_rank_table_success(monkeypatch):
             device_id, chip_id = get_device_info_from_rank_table()
             assert device_id == 1  # 3 // 2 = 1
             assert chip_id == 1     # 3 % 2 = 1
+
+
+def test_get_device_info_from_rank_table_800I_A2(monkeypatch):
+    # Test with hardware type 800I-A2
+    mock_rank_table_path = "test_rank_table.json"
+    monkeypatch.setenv("RANKTABLE_PATH", mock_rank_table_path)
+    mock_config_path = "/path/to/config"
+    monkeypatch.setenv("USER_CONFIG_PATH", mock_config_path)
+    mock_rank_table = {
+        "server_list": [
+            {
+                "device": [
+                    {
+                        "device_id": "3",
+                        "rank_id": "0"
+                    }
+                ]
+            }
+        ]
+    }
+    mock_config = {
+        "motor_deploy_config": {
+            "hardware_type": "800I_A2"
+        }
+    }
+    with mock.patch('builtins.open', side_effect=[
+        mock.mock_open(read_data='{"server_list":[{"device":[{"device_id":"3","rank_id":"0"}]}]}')(),  # Rank table
+        mock.mock_open(read_data='{"motor_deploy_config":{"hardware_type":"800I-A2"}}')()  # Config file
+    ]):
+        with mock.patch('json.load', side_effect=[mock_rank_table, mock_config]):
+            device_id, chip_id = get_device_info_from_rank_table()
+            assert device_id == 3  # For 800I-A2, device_id = i
+            assert chip_id == 0     # For 800I-A2, chip_id = 0
 
 
 def test_get_device_info_from_rank_table_no_env(monkeypatch):

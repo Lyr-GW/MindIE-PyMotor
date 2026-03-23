@@ -54,15 +54,18 @@ class SimInference:
         self._check_count = 0
         self._max_check_count = 4
         
+        # add _max_failure_count to measure consecutive failure times
+        self._failure_count = 0
+        self._max_failure_count = 3
+        
         # Condition variable to control aicore usage check execution
         self._aicore_check_condition = threading.Condition()
         self._aicore_check_active = False
         self._aicore_thread = None
         
-        # 初始化HTTP客户端
+        # init http client
         self._client = None
         self._client_address = f"{self.args.host}:{self.args.port}"
-    
 
     @staticmethod
     def generate_request_id() -> str:
@@ -75,7 +78,6 @@ class SimInference:
         logger.debug("Generated virtual request ID: %s", request_id)
         return request_id
 
-    
     def set_status(self, status):
         self._status = status
 
@@ -151,10 +153,7 @@ class SimInference:
                 self._aicore_check_active = False
                 self._aicore_check_condition.notify_all()
 
-
-    
     async def init_client(self, timeout):
-        """初始化HTTP客户端（异步）"""
         if self._client is None or self._client.is_closed:
             logger.debug(f"Initializing HTTP client for address: {self._client_address}")
             self._client = AsyncSafeHTTPSClient.create_client(
@@ -237,19 +236,25 @@ class SimInference:
                 if max_usage < self.npu_usage_threshold and not sim_inference_success:
                     logger.warning(
                         f"AICore usage ({max_usage}%) < threshold ({self.npu_usage_threshold}%) "
-                        f"and virtual request failed, setting abnormal status"
+                        f"and virtual request failed"
                     )
-                    self.set_abnormal_status()
+                    self._failure_count += 1
+                    logger.warning(f"Current failure count: {self._failure_count}/{self._max_failure_count}")
+                    if self._failure_count >= self._max_failure_count:
+                        logger.warning(f"Reach maximum failure count ({self._max_failure_count}), set abnormal status")
+                        self.set_abnormal_status()
                 else:
+                    if self._failure_count > 0:
+                        logger.info(f"Resetting failure count from {self._failure_count} to 0")
+                        self._failure_count = 0
                     if self.is_abnormal():
                         self.reset_abnormal_status()
             except Exception as e:
                 logger.error(f"Error in health check loop: {e}")
                 self.set_abnormal_status()
-                logger.warning(f"Status changed to ABNORMAL_STATUS due to health check failure")
+                logger.warning("Status changed to ABNORMAL_STATUS due to health check failure")
             
             await asyncio.sleep(5)
-    
     
     def set_abnormal_status(self):
         """Set abnormal status (thread-safe)"""

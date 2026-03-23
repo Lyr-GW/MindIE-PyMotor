@@ -16,6 +16,31 @@ import subprocess
 from motor.common.utils.env import Env
 
 
+def _get_hardware_type():
+    """
+    Get hardware_type from config file
+    """
+    config_path = Env.user_config_path
+    if not config_path:
+        # Config path not set, return empty string
+        return ""
+    
+    try:
+        # Check if config_path is already pointing to user_config.json
+        if os.path.basename(config_path) == "user_config.json":
+            config_file_path = config_path
+        else:
+            config_file_path = os.path.join(config_path, "user_config.json")
+        
+        with open(config_file_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config.get("motor_deploy_config", {}).get("hardware_type", "")
+    except Exception as e:
+        # Failed to read config, return empty string
+        logger.debug(f"Failed to read hardware_type from config: {e}")
+        return ""
+
+
 def get_device_info_from_rank_table():
     """
     Get device_info from RANK_TABLE_PATH file
@@ -54,9 +79,16 @@ def get_device_info_from_rank_table():
     except ValueError as e:
         raise ValueError(f"device_id field value is not a valid integer") from e
     
-    # Calculate actual device_id and chip_id
-    device_id = i // 2
-    chip_id = i % 2
+    # Get hardware type from config
+    hardware_type = _get_hardware_type()
+    
+    # Calculate actual device_id and chip_id based on hardware type
+    if hardware_type == "800I_A2":
+        device_id = i
+        chip_id = 0
+    else:
+        device_id = i // 2
+        chip_id = i % 2
     
     return device_id, chip_id
 
