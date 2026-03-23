@@ -50,7 +50,7 @@ async def handle_completions(request: Request):
 @pytest.fixture
 def mock_forward_stream_request(monkeypatch):
     """Mock forward_stream_request 并自动设置和清理"""
-    async def generator():
+    async def mock_impl(self, req_data: dict, client, timeout):
         responses = [
             b'{"choices": [{"text": "chunk 1"}]}',
             b'{"choices": [{"text": "chunk 2"}]}',
@@ -58,15 +58,13 @@ def mock_forward_stream_request(monkeypatch):
         ]
         for chunk in responses:
             yield chunk
-    
-    async def mock_impl(self, req_data: dict, client, timeout):
         trace_obj = getattr(self.req_info, "trace_obj", None)
         if trace_obj is not None:
             trace_obj.set_count_token(1)
-        return generator
+    
     # Patch the forward_stream_request function to return an async generator directly
     monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_impl)
-    return mock_impl
+    yield mock_impl
 
 
 class TestRouterPDHybrid:
@@ -98,7 +96,7 @@ class TestRouterPDHybrid:
         
         # Mock functions (Scheduler uses get_required_instances_status for readiness)
         def mock_get_required_instances_status(self, deploy_mode=None):
-            return InstanceReadiness.ONLY_PREFILL
+            return InstanceReadiness.REQUIRED_MET
 
         def mock_has_required_instances(self, deploy_mode=None):
             return True
@@ -230,7 +228,7 @@ class TestRouterPDHybrid:
         async def mock_forward_stream_request(self, req_data, client, timeout):
             # This function should be an async generator that raises an exception
             raise Exception(error_message)
-
+            yield
         monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward_stream_request)
         
         # Test the PD hybrid forwarding function with failure
@@ -240,10 +238,13 @@ class TestRouterPDHybrid:
             request_manager=RequestManager(_config)
         )
         # Create an async generator and consume it
-        with pytest.raises(Exception) as exc_info:
-            _ = await hybrid_router.handle_request()
+        stream_resp = await hybrid_router.handle_request()
+        chunks = []
+        async for chunk in stream_resp.body_iterator:
+            chunks.append(chunk)
+        chunk_str = "".join(chunks)
         
-        assert error_message in str(exc_info.value)
+        assert error_message in chunk_str
 
     @pytest.mark.asyncio
     async def test_successful_request_with_pd_hybrid(self, client, monkeypatch: MonkeyPatch,

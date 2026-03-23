@@ -12,7 +12,6 @@
 import asyncio
 import contextlib
 import logging
-import json
 import time
 from abc import ABC, abstractmethod
 from typing import Any, AsyncGenerator
@@ -269,56 +268,39 @@ class BaseRouter(ABC):
             is_meta=self.is_meta
         )
         t0_forward = time.perf_counter()
-        cm = client.stream(
+        async with client.stream(
             "POST",
             f"/{self.req_info.api}",
             json=req_data,
             headers=headers,
             timeout=timeout
-        )
-        response = await cm.__aenter__()
-        trace_obj.add_trace_event(f"Stream ok: {response.status_code}", is_meta=self.is_meta)
-        elapsed_to_connect_ms = (time.perf_counter() - t0_forward) * 1000
-        if _should_log_scheduling_sample(self.req_info.req_id):
-            self.logger.info(
-                "Scheduling latency stage=forward_to_engine_connect elapsed_ms=%.2f api=%s",
-                elapsed_to_connect_ms, self.req_info.api
-            )
-        if not response.is_success:
-            error_bytes = await response.aread()
-            
-            try:
-                error_message = json.loads(error_bytes.decode())
-            except json.JSONDecodeError:
-                error_message = error_bytes.decode()
-                
-            await cm.__aexit__(None, None, None)
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=error_message,
-            )
-        
-        async def generator():
+        ) as response:
+            trace_obj.add_trace_event(f"Stream ok: {response.status_code}", is_meta=self.is_meta)
+            elapsed_to_connect_ms = (time.perf_counter() - t0_forward) * 1000
+            if _should_log_scheduling_sample(self.req_info.req_id):
+                self.logger.info(
+                    "Scheduling latency stage=forward_to_engine_connect elapsed_ms=%.2f api=%s",
+                    elapsed_to_connect_ms, self.req_info.api
+                )
+            if not response.is_success:
+                await response.aread()
+            response.raise_for_status()
             count_token = 0
-            try:
-                async for chunk in response.aiter_bytes():
-                    if not self.first_chunk_sent and chunk:
-                        self.first_chunk_sent = True
-                        trace_obj.set_time_first_token()
-                        elapsed_first_chunk_ms = (time.perf_counter() - t0_forward) * 1000
-                        if _should_log_scheduling_sample(self.req_info.req_id):
-                            self.logger.info(
-                                "Scheduling latency stage=forward_to_engine_first_chunk elapsed_ms=%.2f api=%s",
-                                elapsed_first_chunk_ms, self.req_info.api
-                            )
-                        self.req_info.update_state(ReqState.FIRST_TOKEN_FINISH)
-                    else:
-                        count_token += 1
-                    yield chunk
-            finally:
-                await cm.__aexit__(None, None, None)
+            async for chunk in response.aiter_bytes():
+                if not self.first_chunk_sent and chunk:
+                    self.first_chunk_sent = True
+                    trace_obj.set_time_first_token()
+                    elapsed_first_chunk_ms = (time.perf_counter() - t0_forward) * 1000
+                    if _should_log_scheduling_sample(self.req_info.req_id):
+                        self.logger.info(
+                            "Scheduling latency stage=forward_to_engine_first_chunk elapsed_ms=%.2f api=%s",
+                            elapsed_first_chunk_ms, self.req_info.api
+                        )
+                    self.req_info.update_state(ReqState.FIRST_TOKEN_FINISH)
+                else:
+                    count_token += 1
+                yield chunk
             trace_obj.set_count_token(count_token)
-        return generator
 
     async def forward_request(self,
                              req_data: dict,
@@ -363,15 +345,8 @@ class BaseRouter(ABC):
                 "Scheduling latency stage=forward_to_engine elapsed_ms=%.2f api=%s",
                 elapsed_forward_ms, self.req_info.api
             )
-        if not response.is_success:
-            try:
-                error_message = json.loads(response.content.decode())
-            except json.JSONDecodeError:
-                error_message = response.content.decode()
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=error_message,
-            )
+        response.raise_for_status()
+        await response.aclose()
         return response
 
     async def release_all(self, resource: ScheduledResource):

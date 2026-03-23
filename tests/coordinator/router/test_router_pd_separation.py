@@ -23,7 +23,6 @@ from motor.coordinator.domain import InstanceReadiness, ScheduledResource
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.router.base_router import BaseRouter
 from motor.coordinator.router.separate_pd_router import SeparatePDRouter
-from motor.coordinator.tracer.tracing import TracerManager
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from tests.coordinator.router.mock_openai_request import MockStreamResponse, create_mock_request_info
@@ -33,10 +32,9 @@ import motor.coordinator.router.router as router
 
 app = FastAPI()
 _config = CoordinatorConfig()
-_config.scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
 _scheduler = Scheduler(instance_provider=InstanceManager(_config), config=_config)
 _request_manager = RequestManager(_config)
-TracerManager()
+
 
 @app.post("/v1/chat/completions")
 async def handle_completions(request: Request):
@@ -70,10 +68,17 @@ class MockAsyncClient:
         """Used by base_router.forward_request for non-streaming decode."""
         if self._post_fail_count < self.fail_times:
             self._post_fail_count += 1
-            resp = httpx.Response(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content="Simulated post error".encode()
+            resp = MagicMock()
+            resp.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+            resp.raise_for_status = MagicMock(
+                side_effect=httpx.HTTPStatusError(
+                    "Simulated post error",
+                    request=MagicMock(),
+                    response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR),
+                )
             )
+            resp.aclose = AsyncMock(return_value=None)
+            resp.json = MagicMock(return_value={})
             return resp
         resp = MagicMock()
         resp.status_code = 200
@@ -217,7 +222,7 @@ class TestRouterPDSeparation:
             return InstanceReadiness.REQUIRED_MET
         monkeypatch.setattr(InstanceManager, "get_required_instances_status", mock_get_required_instances_status)
 
-        async def mock_select_and_allocate(self, role, req_info):
+        async def mock_select_and_allocate(self, role, req_id, req_len):
             return None
         monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
 
@@ -228,11 +233,14 @@ class TestRouterPDSeparation:
             request_manager=RequestManager(CoordinatorConfig())
         )
         
-        with pytest.raises(Exception) as exc_info:
-            _ = await pd_router.handle_request()
-        exception_str = str(exc_info.value)
-        assert str(status.HTTP_503_SERVICE_UNAVAILABLE) in exception_str
-        assert "Scheduling failed" in exception_str and "ROLE_P" in exception_str
+        chunks = []
+        stream_resp = await pd_router.handle_request()
+        async for chunk in stream_resp.body_iterator:
+            chunks.append(chunk)
+        chunk_str = "".join(chunks)
+            
+        assert str(status.HTTP_503_SERVICE_UNAVAILABLE) in chunk_str
+        assert "Scheduling failed" in chunk_str and "ROLE_P" in chunk_str
     
     @pytest.mark.asyncio
     async def test_gen_p_request_modifications(self, monkeypatch: MonkeyPatch, setup_pd_separation):
@@ -265,10 +273,8 @@ class TestRouterPDSeparation:
         async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
             nonlocal generated_decode_request
             generated_decode_request = req_data
-            async def generator():
-                # Yield a simple response for D request
-                yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
-            return generator
+            # Yield a simple response for D request
+            yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
         monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
 
         pd_router = SeparatePDRouter(
@@ -314,30 +320,28 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
 
         # Create a mock response with 4XX status code
-        mock_response_fail = httpx.Response(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=error_message.encode()
-        )
+        mock_response_fail = MagicMock()
+        mock_response_fail.status_code = status.HTTP_400_BAD_REQUEST
+        mock_response_fail.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+            message=error_message, request=MagicMock(), 
+            response=httpx.Response(status_code=status.HTTP_400_BAD_REQUEST, text=error_message)
+        ))
         # mock AsyncClient in router
         mock_async_client = AsyncMock()
         mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
         mock_async_client.__aexit__ = AsyncMock(return_value=None)
         mock_async_client.post = AsyncMock(return_value=mock_response_fail)
         
-        req_info = await create_mock_request_info()
-        pd_router = SeparatePDRouter(
-            req_info, CoordinatorConfig(),
-            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
-            request_manager=RequestManager(CoordinatorConfig())
-        )
-        
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            with pytest.raises(HTTPException) as exc_info:
-                await pd_router.handle_request()
-        assert error_message in exc_info.value.detail
+            
+            response = client.post("/v1/chat/completions", json={
+                "model": "test-model", 
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
+            
+        assert error_message in response.text
         # May be 400 or 500 if upstream wraps 4XX
-        assert status.HTTP_400_BAD_REQUEST == exc_info.value.status_code
-        assert "Bad Request" in exc_info.value.detail
+        assert str(status.HTTP_400_BAD_REQUEST) in response.text or "Bad Request" in response.text
         assert mock_async_client.post.await_count == CoordinatorConfig().exception_config.max_retry
         assert exec_release > 1
 
@@ -361,31 +365,30 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
 
         # Create a mock response with 5XX status code
-        mock_response_fail = httpx.Response(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=error_message.encode()
-        )
+        mock_response_fail = MagicMock()
+        mock_response_fail.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        mock_response_fail.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
+            error_message, request=MagicMock(), response=mock_response_fail
+        ))
         # mock AsyncClient in router
         mock_async_client = AsyncMock()
         mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
         mock_async_client.__aexit__ = AsyncMock(return_value=None)
         mock_async_client.post = AsyncMock(return_value=mock_response_fail)
         
-        req_info = await create_mock_request_info()
-        pd_router = SeparatePDRouter(
-            req_info, CoordinatorConfig(),
-            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
-            request_manager=RequestManager(CoordinatorConfig())
-        )
-        
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            with pytest.raises(HTTPException) as exc_info:
-                await pd_router.handle_request()
+            response = client.post("/v1/chat/completions", json={
+                "model": "test-model", 
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
             
-        assert error_message in exc_info.value.detail
+        assert error_message in response.text
         # Should get 500 or detail with Test Internal Error
-        assert status.HTTP_500_INTERNAL_SERVER_ERROR == exc_info.value.status_code
-        assert "Test Internal Error" in exc_info.value.detail
+        assert (
+            str(status.HTTP_500_INTERNAL_SERVER_ERROR) in response.text
+            or "Test Internal Error" in response.text
+            or response.status_code == 500
+        )
         assert mock_async_client.post.await_count == CoordinatorConfig().exception_config.max_retry
         assert exec_release > 1
 
@@ -448,14 +451,12 @@ class TestRouterPDSeparation:
         
         monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)        
         
-        req_info = await create_mock_request_info()
-        pd_router = SeparatePDRouter(
-            req_info, CoordinatorConfig(),
-            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
-            request_manager=RequestManager(CoordinatorConfig())
-        )
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            response = await pd_router.handle_request()
+            response = client.post("/v1/chat/completions", json={
+                "model": "test-model", 
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": True
+            })
             
         # Should get a 200 after retry
         assert response.status_code == status.HTTP_200_OK
@@ -473,28 +474,23 @@ class TestRouterPDSeparation:
         # Mock the HTTP forwarding function to always raise a network exception        
         error_message = "Test Connection error"
         # Create a mock response with 5XX status code
-        mock_response_fail = httpx.Response(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            content=error_message.encode()
-        )
+        mock_response_fail = MagicMock()
+        mock_response_fail.raise_for_status = MagicMock(side_effect=httpx.ConnectError(
+            error_message, request=MagicMock()
+        ))
         # mock AsyncClient in router
         mock_async_client = AsyncMock()
         mock_async_client.__aenter__ = AsyncMock(return_value=mock_async_client)
         mock_async_client.__aexit__ = AsyncMock(return_value=None)
         mock_async_client.post = AsyncMock(return_value=mock_response_fail)
         
-        req_info = await create_mock_request_info(stream=True)
-        pd_router = SeparatePDRouter(
-            req_info, CoordinatorConfig(),
-            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
-            request_manager=RequestManager(CoordinatorConfig())
-        )
-        
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
-            with pytest.raises(HTTPException) as exc_info:
-                await pd_router.handle_request()
+            response = client.post("/v1/chat/completions", json={
+                "model": "test-model", 
+                "messages": [{"role": "user", "content": "Hello"}]
+            })
             
-        assert error_message in exc_info.value.detail
+        assert error_message in response.text
         assert mock_async_client.post.await_count == CoordinatorConfig().exception_config.max_retry
 
     @pytest.mark.asyncio

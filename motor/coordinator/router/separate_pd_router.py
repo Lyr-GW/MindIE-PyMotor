@@ -15,6 +15,7 @@ from fastapi import HTTPException, status
 
 from motor.coordinator.domain import ScheduledResource
 from motor.coordinator.models.request import ReqState
+from motor.coordinator.models.response import ErrorResponse
 from motor.coordinator.router.base_router import BaseRouter
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import PDRole
@@ -39,6 +40,7 @@ class SeparatePDRouter(BaseRouter):
         self.retry = True  # Need to re-request when recomputing
         self.retry_count = 0  # Recomputation count
         self.total_generated_token = ""  # Record all generated tokens during recomputation
+        self.is_finished = False
 
     @staticmethod
     def _extract_content_from_choice(choice: dict) -> str:
@@ -65,60 +67,40 @@ class SeparatePDRouter(BaseRouter):
             request_info[completion_tokens_key] += usage.get("completion_tokens", 0)
 
     async def generate_stream(self):
-        max_retry = self.config.exception_config.max_retry
-        prefill_resource = None
-        p_resp_json = None
-        
-        for attempt in range(max_retry):
-            try:
-                prefill_resource, p_resp_json = await self.process_prefill(attempt)
-            except Exception as e:
-                if attempt == max_retry - 1:
-                    raise e
-                continue
-            
-            async def generator(attempt, prefill_resource, p_resp_json):
-                try:
-                    while self.retry:
-                        # set False to avoid recompute
-                        self.retry = False
+        for attempt in range(self.config.exception_config.max_retry):
+            # set True to start forward request
+            self.retry = True
+            while self.retry:
+                self.first_chunk_sent = False
+                # set False to avoid recompute
+                self.retry = False
 
-                        if not prefill_resource or not p_resp_json:
-                            prefill_resource, p_resp_json = await self.process_prefill(attempt)
-                        
-                        async for chunk in self.process_single_attempt(attempt, prefill_resource, p_resp_json):
-                            yield chunk
-                        prefill_resource = None
-                        attempt += 1
-                except Exception as e:
-                    self.logger.error("Error occurred while forwarding request (attempt %d/%d): %s",
-                                      attempt + 1, max_retry, str(e), exc_info=(attempt == 0))
-                    yield self._generate_streaming_error_chunk(e)
+                async for chunk in self.process_single_attempt(attempt):
+                    yield chunk
+                if self.is_finished:
                     return
-            return StreamingResponse(
-                generator(attempt, prefill_resource, p_resp_json),
-                media_type="text/event-stream"
-            )
 
     async def handle_request(self) -> StreamingResponse:
         """Handle request with separate P and D instances"""
-        return await self.generate_stream()
+        return StreamingResponse(self.generate_stream(),
+                                 media_type="application/json")
 
-    async def process_prefill(self, attempt: int):
-        prefill_resource = None
+    async def process_single_attempt(self, attempt):
+        prefill_resource: ScheduledResource = None
         try:
             # Schedule P instance
             prefill_resource = await self.prepare_resource(PDRole.ROLE_P)
             # Forward P request
             p_resp_json = await self._forward_p_request(prefill_resource)
             self.logger.debug("Prefill response received: %s", p_resp_json)
-            return prefill_resource, p_resp_json
         except Exception as e:
-            self.logger.error(
-                "Error in post Prefill (attempt %d/%d): %s",
-                attempt + 1, self.config.exception_config.max_retry, str(e), exc_info=(attempt == 0)
-            )
-            raise e
+            self.logger.error("Error occurred while forwarding P request: %s", e)
+            if attempt != self.config.exception_config.max_retry - 1:
+                self.is_finished = False
+                return
+            yield self._generate_streaming_error_chunk(e)
+            self.is_finished = True
+            return
         finally:
             if prefill_resource and self.req_info.state != ReqState.PREFILL_END:
                 if not await self.release_all(prefill_resource):
@@ -126,35 +108,20 @@ class SeparatePDRouter(BaseRouter):
                         "release_all(prefill) returned False instance_id=%s endpoint_id=%s state=%s",
                         prefill_resource.instance.id, prefill_resource.endpoint.id, self.req_info.state)
 
-    async def process_single_attempt(self, attempt, prefill_resource, p_resp_json):
-
         decode_resource: ScheduledResource = None
         try:
             # Schedule D instance
             decode_resource = await self.prepare_resource(PDRole.ROLE_D)
             # Forward D request
-            req_data = self._gen_d_request(p_resp_json)
-            request_info = self._extract_request_info(req_data)
-
-            async for chunk in self._process_stream_chunks(
-                req_data,
-                request_info, 
-                prefill_resource,
-                decode_resource
-            ):
+            async for chunk in self._forward_d_request(p_resp_json, prefill_resource, decode_resource):
                 yield chunk
-
-            self.req_info.update_state(ReqState.DECODE_END)
+            if not self.retry:
+                self.is_finished = True
+                return
         except Exception as e:
-            # No chunk has been returned indicates that the P resource has not yet been released.
-            if not self.first_chunk_sent:
-                await self.release_kv(prefill_resource)
-        
             self.logger.error("Error occurred while forwarding Decode request: %s", e)
             if self.first_chunk_sent or attempt == self.config.exception_config.max_retry - 1:
                 yield self._generate_streaming_error_chunk(e)
-            else:
-                self.retry = True
         finally:
             if decode_resource:
                 released = await self.release_tokens(decode_resource)
@@ -207,6 +174,31 @@ class SeparatePDRouter(BaseRouter):
             req_data["kv_transfer_params"] = kv_transfer_params
         return req_data
 
+    async def _forward_d_request(
+        self,
+        resp_json: dict,
+        prefill_resource: ScheduledResource,
+        decode_resource: ScheduledResource
+    ):
+        """Forward D request to the given resource"""
+        try:
+            req_data = self._gen_d_request(resp_json)
+            request_info = self._extract_request_info(req_data)
+
+            async for chunk in self._process_stream_chunks(
+                req_data,
+                request_info, 
+                prefill_resource,
+                decode_resource
+            ):
+                yield chunk
+
+            self.req_info.update_state(ReqState.DECODE_END)
+            self.logger.debug("Completed streaming for request %s", self.req_info)
+        except Exception as e:
+            await self._handle_stream_error(prefill_resource, e)
+            raise e
+
     def _extract_request_info(self, req_data: dict) -> dict:
         """Extract request information from req_data"""
         stream_flag = bool(req_data.get("stream", False))
@@ -244,11 +236,10 @@ class SeparatePDRouter(BaseRouter):
         async with self._manage_client_context(
                 decode_resource
             ) as decode_client:
-            
-            generator = await self.forward_stream_request(
-                req_data, decode_client, self.config.exception_config.first_token_timeout
-            )
-            async for chunk in generator():
+            async for chunk in self.forward_stream_request(
+                req_data=req_data, 
+                client=decode_client,
+                timeout=self.config.exception_config.infer_timeout):
                 if not release_kv and chunk:
                     release_kv = True
                     await self.release_kv(prefill_resource)
@@ -360,7 +351,7 @@ class SeparatePDRouter(BaseRouter):
 
         self.logger.info("Recomputing old req_id %s, new req_id %s, retry count: %d, new req_info: %s",
                           original_req_id, self.req_info.req_id, self.retry_count, self.req_info)
-
+ 
     def _check_and_modify_req_id(self):
         index = 16
         str_len = 2
@@ -375,9 +366,17 @@ class SeparatePDRouter(BaseRouter):
                         f"{new_digit:02d}" +
                         self.req_info.req_id[index + str_len:]
                     )
-
+                    
                 return new_request_id
             else:
                 return self.req_info.req_id
         else:
             return self.req_info.req_id
+
+    async def _handle_stream_error(self, prefill_resource: ScheduledResource, error: Exception):
+        """Handle streaming errors"""
+        if not self.first_chunk_sent:
+            await self.release_kv(prefill_resource)
+
+        self.logger.error("Error during streaming from decoder %s, aborted request %s, error: %s",
+                          self.req_info.api, self.req_info.req_id, str(error))

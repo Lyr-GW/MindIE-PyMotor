@@ -9,7 +9,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import asyncio
 import time
 from enum import Enum
 
@@ -17,6 +16,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 import anyio
 
+from motor.common.resources.instance import PDRole
 from motor.coordinator.tracer.tracing import TraceObj
 
 
@@ -52,8 +52,7 @@ class RequestInfo(BaseModel):
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
     trace_obj: TraceObj = Field(default_factory=TraceObj, description="Tracing object")
     _p_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
-    _p_event: asyncio.Event = PrivateAttr(default=asyncio.Event())
-    _last_exception: Exception = PrivateAttr(default=None)
+    _d_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -61,30 +60,21 @@ class RequestInfo(BaseModel):
         
     @property
     def is_cancelled(self) -> bool:
-        return (self._p_cancel_scope and self._p_cancel_scope.cancel_called)
+        return (self._p_cancel_scope and self._p_cancel_scope.cancel_called) \
+            or (self._d_cancel_scope and self._d_cancel_scope.cancel_called)
 
     def update_state(self, new_state: ReqState):
         self.state = new_state
         self.status[new_state] = time.time()
 
-    def set_cancel_scope(self, cancel_scope: anyio.CancelScope):
-        self._p_cancel_scope = cancel_scope
+    def set_cancel_scope(self, cancel_scope: anyio.CancelScope, role: PDRole):
+        if role == PDRole.ROLE_P:
+            self._p_cancel_scope = cancel_scope
+        elif role == PDRole.ROLE_D:
+            self._d_cancel_scope = cancel_scope
     
     def cancel_scope(self):
         if self._p_cancel_scope and not self._p_cancel_scope.cancel_called:
             self._p_cancel_scope.cancel()
-    
-    def reset_event(self):
-        self._p_event.clear()
-    
-    async def wait_for_prefill(self):
-        await self._p_event.wait()
-        
-    def finish_prefill(self):
-        self._p_event.set()
-        
-    def set_last_exception(self, e: Exception):
-        self._last_exception = e
-    
-    def get_last_exception(self):
-        return self._last_exception
+        if self._d_cancel_scope and not self._d_cancel_scope.cancel_called:
+            self._d_cancel_scope.cancel()
