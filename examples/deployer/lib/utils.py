@@ -186,21 +186,21 @@ def set_env_to_shell(user_config, env_config_path, deploy_mode):
     if C.MOTOR_COMMON_ENV not in env_config:
         env_config[C.MOTOR_COMMON_ENV] = {}
 
-    env_config[C.MOTOR_COMMON_ENV][C.ENGINE_TYPE] = engine_type
-    logger.info(f"Set {C.ENGINE_TYPE} environment variable to: {engine_type}")
+    env_config[C.MOTOR_COMMON_ENV][C.ENV_ENGINE_TYPE] = engine_type
+    logger.info(f"Set {C.ENV_ENGINE_TYPE} environment variable to: {engine_type}")
 
-    env_config[C.MOTOR_COMMON_ENV][C.MODEL_NAME] = model_name
-    logger.info(f"Set {C.MODEL_NAME} environment variable to: {model_name}")
+    env_config[C.MOTOR_COMMON_ENV][C.ENV_MODEL_NAME] = model_name
+    logger.info(f"Set {C.ENV_MODEL_NAME} environment variable to: {model_name}")
 
-    env_config[C.MOTOR_COMMON_ENV][C.NORTH_PLATFORM] = north_platform
-    logger.info(f"Set {C.NORTH_PLATFORM} environment variable to: {north_platform}")
+    env_config[C.MOTOR_COMMON_ENV][C.ENV_NORTH_PLATFORM] = north_platform
+    logger.info(f"Set {C.ENV_NORTH_PLATFORM} environment variable to: {north_platform}")
 
     service_id = (
         f"{get_json_by_path(user_config, 'motor_deploy_config.job_id')}_"
         f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d%H%M%S')}"
     )
-    env_config[C.MOTOR_COMMON_ENV][C.SERVICE_ID] = service_id
-    logger.info(f"Set {C.SERVICE_ID} environment variable to: {service_id}")
+    env_config[C.MOTOR_COMMON_ENV][C.ENV_SERVICE_ID] = service_id
+    logger.info(f"Set {C.ENV_SERVICE_ID} environment variable to: {service_id}")
 
     update_shell_safely(C.COMMON_SHELL_PATH, env_config, C.MOTOR_COMMON_ENV, "set_common_env")
 

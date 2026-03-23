@@ -45,6 +45,7 @@ class SafeHTTPSClient:
         self.protocol = protocol
         self.timeout = timeout
         self.session = requests.Session()
+        self.verify = tls_config.enable_tls if tls_config else False
 
         if tls_config and tls_config.enable_tls:
             self.protocol = 'https://'
@@ -104,7 +105,8 @@ class SafeHTTPSClient:
                 url=url,
                 json=data,
                 params=params,
-                timeout=self.timeout
+                timeout=self.timeout,
+                verify=self.verify
             )
 
             response.raise_for_status()
