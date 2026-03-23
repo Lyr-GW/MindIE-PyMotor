@@ -162,7 +162,7 @@ async def handle_request(
         req_info, config, scheduler=scheduler,
         request_manager=request_manager
     )
-
+    
     try:
         return await router_impl.handle_request()
     except Exception as e:

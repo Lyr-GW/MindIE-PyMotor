@@ -8,10 +8,8 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
-from typing import Dict, Any
+from typing import Dict, AsyncGenerator, Any
 import asyncio
-import sys
-
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from motor.coordinator.models.request import ReqState
@@ -28,10 +26,13 @@ class PDHybridRouter(BaseRouter):
         req_data = self.req_info.req_data.copy()
 
         if self.req_info.req_data.get("stream", False):
-            return await self._generate_stream(req_data)
+            return StreamingResponse(
+                self._generate_stream(req_data),
+                media_type="text/event-stream"
+            )
         return await self._generate_post(req_data)
 
-    async def _generate_stream(self, req_data: Dict[str, Any]) -> StreamingResponse:
+    async def _generate_stream(self, req_data: Dict[str, Any]) -> AsyncGenerator[str, None]:
         """
         Handling hybrid streaming requests
         """
@@ -50,66 +51,35 @@ class PDHybridRouter(BaseRouter):
             max_retry = self.config.exception_config.max_retry
             
             for attempt in range(max_retry):
-                # Initialize context variables to None
-                resource_ctx = None
-                client_ctx = None
-                
                 try:
-                    # Initialize resource context
-                    resource_ctx = self._manage_resource_context(PDRole.ROLE_P, self.release_all)
-                    resource = await resource_ctx.__aenter__()
-                    client_ctx = self._manage_client_context(resource)
-                    client = await client_ctx.__aenter__()
-                    
-                    generator = await self.forward_stream_request(
-                        req_data, client, self.config.exception_config.first_token_timeout
-                    )
-                    
-                    async def create_stream(generator, resource_ctx, client_ctx):
-                        try:
-                            async for chunk in generator():
-                                yield chunk
-                        except asyncio.CancelledError:
-                            self.logger.info("The streaming request was terminated because of "
-                                            "infer timeout or client disconnect.")
-                            raise
-                        except Exception as e:
-                            self.logger.error("Error in streaming: %s", str(e), exc_info=True)
-                            trace_obj.set_trace_status(e)
-                            self.req_info.update_state(ReqState.EXCEPTION)
-                            # If chunk was already sent, cannot retry the HTTP stream.
-                            # Send error chunk and terminate.
-                            yield self._generate_streaming_error_chunk(e)
-                        finally:
-                            # The cleanup order is reverse of the inital order.
-                            await client_ctx.__aexit__(None, None, None)
-                            await resource_ctx.__aexit__(None, None, None)
-                        return
+                    async with self._manage_resource_context(PDRole.ROLE_P, self.release_all) as resource, \
+                        self._manage_client_context(resource) as client:
 
-                    self.req_info.update_state(ReqState.DECODE_END)
-                    self.logger.info(trace_obj.set_end_and_ttft_tpot())
-                    return StreamingResponse(
-                        create_stream(generator, resource_ctx, client_ctx),
-                        media_type="text/event-stream"
-                    )
+                        async for chunk in self.forward_stream_request(
+                                req_data, client, self.config.exception_config.first_token_timeout
+                            ):
+                            yield chunk
+
+                        self.req_info.update_state(ReqState.DECODE_END)
+                        self.logger.info(trace_obj.set_end_and_ttft_tpot())
+                        return
+                except asyncio.CancelledError:
+                    self.logger.debug("Stream request was cancelled")
+                    raise
                 except Exception as e:
                     self.logger.error(
                         "Error in streaming (attempt %d/%d): %s",
-                        attempt + 1, max_retry, str(e), exc_info=(attempt == 0)
+                        attempt + 1, max_retry, str(e), exc_info=True
                     )
 
-                    # The cleanup order is reverse of the inital order.
-                    if client_ctx is not None:
-                        await client_ctx.__aexit__(*sys.exc_info())
-                    if resource_ctx is not None:
-                        await resource_ctx.__aexit__(*sys.exc_info())
-
-                    if attempt == max_retry - 1:
+                    # If chunk was already sent, cannot retry the HTTP stream.
+                    # Send error chunk and terminate.
+                    if self.first_chunk_sent or attempt == max_retry - 1:
                         trace_obj.set_trace_status(e)
-                        self.logger.error("All retries failed for streaming hybrid request.")
                         self.req_info.update_state(ReqState.EXCEPTION)
-                        raise e
-                
+                        yield self._generate_streaming_error_chunk(e)
+                        return
+
                     wait_time = self.config.exception_config.retry_delay * (2 ** attempt)
                     self.logger.info("Retrying streaming request in %.2f seconds...", wait_time)
                     await asyncio.sleep(wait_time)

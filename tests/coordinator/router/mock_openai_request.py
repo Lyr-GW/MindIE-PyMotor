@@ -201,11 +201,9 @@ class MockStreamResponse:
     async def aread(self):
         if isinstance(self.exc, httpx.HTTPStatusError):
             self.text = self.exc.response.text
-            self.status_code = self.exc.response.status_code
         elif isinstance(self.exc, httpx.RequestError):
             self.text = str(self.exc)
-            self.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-        return self.text.encode()
+        return self.text
         
     async def __aenter__(self):
         return self
