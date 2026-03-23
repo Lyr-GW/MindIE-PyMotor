@@ -70,3 +70,28 @@
 	<br>Linux seccomp 在拦截创建线程/进程相关的 syscall（如 `clone3`）。当使用 `seccompProfile.type: RuntimeDefault` 时，部分容器运行时的默认策略未放行 `clone3`，导致 glibc/pthread 创建线程失败。
 - 解决方案
 	<br>本仓库部署模板默认使用 `seccompProfile.type: Unconfined`，可避免该问题。若需更高安全等级或使用 RuntimeDefault，请参考 [Pod 权限说明](../../../examples/features/pod_permission_guide/README.md)。
+
+## 6. show_log.sh 日志中出现 failed to create fsnotify watcher: too many open files
+- 问题描述
+	<br>通过 `show_log.sh` 查看日志时，出现类似 `failed to create fsnotify watcher: too many open files` 的报错。
+- 原因分析
+	<br>该报错通常与 Linux **inotify** 资源上限有关（与进程 `ulimit -n` 的「打开文件数」不是同一项）。当需要监视的目录/文件数量较多时，若 `max_user_watches` 或 `max_user_instances` 过小，fsnotify 创建 watcher 会失败。可在问题节点上执行以下命令查看当前值，常见默认值约为 `8192` 与 `128`，偏小易触发本问题。
+	```bash
+	cat /proc/sys/fs/inotify/max_user_watches
+	cat /proc/sys/fs/inotify/max_user_instances
+	```
+- 解决方案
+	<br>在**宿主机或出现问题的运行环境**上提高 inotify 上限（需 root）。推荐编辑 `sysctl` 持久化配置后执行 `sysctl -p` 生效，例如将监视数与实例数调整为更大值：
+	```bash
+	# 编辑 sysctl 配置文件
+	sudo vim /etc/sysctl.conf
+	```
+	在文件中添加或修改为（数值可按现场规模调整）：
+	```text
+	fs.inotify.max_user_watches=1048576
+	fs.inotify.max_user_instances=512
+	```
+	保存后应用配置：
+	```bash
+	sudo sysctl -p
+	```

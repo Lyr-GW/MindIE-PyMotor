@@ -83,7 +83,7 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
               "kv_role": "kv_producer",
               "kv_port": "20001",
               "kv_connector_extra_config": {
-                  "send_type": "PUT",
+                  "send_type": "PUT"
               }
             },
             {
@@ -126,7 +126,7 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
               "kv_role": "kv_consumer",
               "kv_port": "20002",
               "kv_connector_extra_config": {
-                  "send_type": "PUT",
+                  "send_type": "PUT"
               }
             },
             {

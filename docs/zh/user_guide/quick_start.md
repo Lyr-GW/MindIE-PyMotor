@@ -154,7 +154,7 @@
             "kv_transfer_config": {
               "kv_connector": "MooncakeLayerwiseConnector",
               "kv_buffer_device": "npu",
-              "kv_role": "kv_producer",
+              "kv_role": "kv_consumer",
               "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
               "kv_connector_extra_config": {}
             }
