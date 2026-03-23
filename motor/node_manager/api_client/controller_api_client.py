@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -29,7 +27,7 @@ class ControllerApiClient:
         client_args = {}
         try:
             client_args = ControllerApiClient._generate_client_args()
-            with SafeHTTPSClient(timeout=1, **client_args) as client:
+            with SafeHTTPSClient(timeout=15, **client_args) as client:
                 response = client.post("/controller/register", register_msg.model_dump())
                 logger.info("Register success!")
                 return True
@@ -45,7 +43,7 @@ class ControllerApiClient:
         client_args = {}
         try:
             client_args = ControllerApiClient._generate_client_args()
-            with SafeHTTPSClient(timeout=1, **client_args) as client:
+            with SafeHTTPSClient(timeout=15, **client_args) as client:
                 response = client.post("/controller/reregister", re_register_msg.model_dump())
                 logger.info("Register success!")
                 return True
@@ -59,7 +57,7 @@ class ControllerApiClient:
     @staticmethod
     def report_heartbeat(heartbeat_msg: HeartbeatMsg):
         client_args = ControllerApiClient._generate_client_args()
-        with SafeHTTPSClient(timeout=5, **client_args) as client:
+        with SafeHTTPSClient(timeout=15, **client_args) as client:
             response = client.post("/controller/heartbeat", heartbeat_msg.model_dump())
             logger.debug(f"Heartbeat success, response: {response}, "
                          f"message body: {heartbeat_msg.model_dump()}, "

@@ -204,6 +204,12 @@ class InstanceAssembler(ThreadSafeSingleton):
                 with metadata.lock:
                     metadata.register_timestamp = time.time()
 
+        if metadata.instance.has_node_mgr(msg.pod_ip):
+            logger.info(
+                "Pod %s already registered in node_managers, skip duplicate registration.", msg.pod_ip
+            )
+            return 0
+
         pod_endpoints = build_endpoints(msg, metadata.instance.get_endpoints_num())
         metadata.instance.add_endpoints(msg.pod_ip, pod_endpoints)
         metadata.instance.add_node_mgr(msg.pod_ip, msg.nm_port)

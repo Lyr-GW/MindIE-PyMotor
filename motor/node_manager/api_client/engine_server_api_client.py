@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -23,7 +21,7 @@ class EngineServerApiClient:
     @staticmethod
     def query_status(address: str):
         client_args = EngineServerApiClient._generate_client_args(address)
-        client = SafeHTTPSClient(**client_args, timeout=2)
+        client = SafeHTTPSClient(**client_args, timeout=5)
         response = client.get("/status")
         logger.debug(f"Query engine server status success, "
                     f"response: {response}, "
@@ -37,4 +35,3 @@ class EngineServerApiClient:
             "tls_config": cls.tls_config
         }
         return client_ars
-

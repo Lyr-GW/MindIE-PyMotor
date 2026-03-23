@@ -166,6 +166,15 @@ class Instance(BaseModel):
             else:
                 logger.info(f"Node manager {pod_ip}:{port} not in instance:{self.job_name}")
 
+    def has_node_mgr(self, pod_ip: str) -> bool:
+        if pod_ip is None:
+            return False
+        with self._lock:
+            for nm in self.node_managers:
+                if nm.pod_ip == pod_ip:
+                    return True
+            return False
+
     def add_endpoints(self, pod_ip: str, endpoints: dict[int, Endpoint]) -> None:
         if endpoints is None or not isinstance(endpoints, dict):
             logger.warning("Invalid endpoints for pod_ip: %s", pod_ip)
