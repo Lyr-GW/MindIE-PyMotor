@@ -11,7 +11,7 @@
 # See the Mulan PSL v2 for more details.
 
 from pytest import MonkeyPatch
-from fastapi import FastAPI, status, Request
+from fastapi import FastAPI, status, Request, HTTPException
 from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 import asyncio
@@ -88,8 +88,10 @@ class MockAsyncClient:
         self.post_count += 1
         if self.post_exc and self.post_fail_count < self.post_fail_times:
             self.post_fail_count += 1
-            mock_response_fail = MagicMock()
-            mock_response_fail.raise_for_status = MagicMock(side_effect=self.post_exc)
+            mock_response_fail = httpx.Response(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content=str(self.post_exc).encode()
+            )
             return mock_response_fail
         
         self.req_data_from_metaserver = json
@@ -206,12 +208,16 @@ class TestRouterCDPSeparation:
 
         async def mock_update_workload(self, params):
             return True
+        
+        async def mock_wait_for_prefill(self):
+            pass
 
         monkeypatch.setattr(InstanceManager, "get_required_instances_status", mock_get_required_instances_status)
         monkeypatch.setattr(InstanceManager, "has_required_instances", mock_has_required_instances)
         monkeypatch.setattr(InstanceManager, "get_available_instances", mock_get_available_instances)
         monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
         monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(RequestInfo, "wait_for_prefill", mock_wait_for_prefill)
 
         # Mock CoordinatorConfig to return CDP_SEPARATE deploy mode
         mock_scheduler_config = MagicMock()
@@ -220,6 +226,7 @@ class TestRouterCDPSeparation:
         mock_exception_config = MagicMock()
         mock_exception_config.retry_delay = 0.0001
         mock_exception_config.max_retry = 5
+        mock_exception_config.first_token_timeout = 5
         mock_http_config = MagicMock()
         mock_http_config.coordinator_api_host = "127.0.0.1"
         mock_http_config.coordinator_api_mgmt_port = 1025
@@ -348,16 +355,13 @@ class TestRouterCDPSeparation:
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
                 request_manager=_request_manager
             )
-            response = await cdp_router.handle_request()
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk)
-            chunk_str = "".join(chunks)
+            with pytest.raises(HTTPException) as exc_info:
+                _ = await cdp_router.handle_request()
             
         assert req_info.state == ReqState.EXCEPTION
-        assert error_message in chunk_str
+        assert error_message in exc_info.value.detail
         # Should get a 4XX error
-        assert str(status.HTTP_400_BAD_REQUEST) in chunk_str
+        assert status.HTTP_400_BAD_REQUEST == exc_info.value.status_code
         assert mock_async_client.stream_count == CoordinatorConfig().exception_config.max_retry 
         assert release_d_tokens >= 1
         assert release_p_tokens == 0
@@ -370,7 +374,7 @@ class TestRouterCDPSeparation:
         2) Trigger request retry
         3) Request retry fails: return error message
         """
-        # Mock the HTTP forwarding function to return a 4XX error
+        # Mock the HTTP forwarding function to return a 5XX error
         error_message = "Test Internal Server Error"
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
@@ -378,7 +382,7 @@ class TestRouterCDPSeparation:
             response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, text=error_message)
         ), stream_fail_times=CoordinatorConfig().exception_config.max_retry)
         req_info = await create_mock_request_info()
-        
+
         exec_release = 0
         async def mock_update_workload(self, resource: ScheduledResource, action: WorkloadAction):
             nonlocal exec_release
@@ -392,19 +396,16 @@ class TestRouterCDPSeparation:
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
                 request_manager=_request_manager
             )
-            response = await cdp_router.handle_request()
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk)
-            chunk_str = "".join(chunks)
-            
-        assert req_info.state == ReqState.EXCEPTION
-        assert error_message in chunk_str
-        # Should get a 500 error after max retries
-        assert str(status.HTTP_500_INTERNAL_SERVER_ERROR) in chunk_str
-        # Should retry exactly max_retry times
-        assert mock_async_client.stream_count == CoordinatorConfig().exception_config.max_retry
-        assert exec_release >= 1
+            with pytest.raises(HTTPException) as exc_info:
+                _ = await cdp_router.handle_request()
+
+            assert req_info.state == ReqState.EXCEPTION
+            assert error_message in exc_info.value.detail
+            # Should get a 500 error after max retries
+            assert status.HTTP_500_INTERNAL_SERVER_ERROR == exc_info.value.status_code
+            # Should retry exactly max_retry times
+            assert mock_async_client.stream_count == CoordinatorConfig().exception_config.max_retry
+            assert exec_release >= 1
         
     @pytest.mark.asyncio
     async def test_engine_server_decode_once_5xx_status_code(
@@ -453,28 +454,26 @@ class TestRouterCDPSeparation:
         2) No request retry triggered
         3) Directly return error message
         """
-        # Mock the HTTP forwarding function to always raise a network exception        
+        # Mock the HTTP forwarding function to always raise a network exception
         error_message = "Connection error"
         # mock AsyncClient in router
         mock_async_client = MockAsyncClient(stream_exc=httpx.ConnectError(
-            error_message, 
+            error_message,
             request=MagicMock()
         ), stream_fail_times=CoordinatorConfig().exception_config.max_retry)
-        
+
         req_info = await create_mock_request_info()
-        
+
         with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparateCDPRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
                 request_manager=_request_manager
             )
-            response = await cdp_router.handle_request()
-            chunks = []
-            async for chunk in response.body_iterator:
-                chunks.append(chunk)
-            chunk_str = "".join(chunks)
-        assert error_message in chunk_str
+            with pytest.raises(HTTPException) as exc_info:
+                _ = await cdp_router.handle_request()
+
+        assert error_message in exc_info.value.detail
         assert mock_async_client.stream_count == CoordinatorConfig().exception_config.max_retry
         assert mock_async_client.stream_fail_count == CoordinatorConfig().exception_config.max_retry
         assert req_info.state == ReqState.EXCEPTION
@@ -509,7 +508,8 @@ class TestRouterCDPSeparation:
                 "/v1/chat/completions",
                 json={
                     "model": "test-model",
-                    "messages": [{"role": "user", "content": "Hello"}]
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "stream": True
                 },
             ) as response:
                 chunks = []
