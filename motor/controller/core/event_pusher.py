@@ -137,6 +137,11 @@ class EventPusher(Observer):
 
         self.event_queue.put(event)
 
+    def push_event(self, event_type: EventType) -> None:
+        event = Event(event_type, None)
+        self.event_queue.put(event)
+        logger.info("Pushed event: %s", event_type)
+
     def _event_consumer(self) -> None:
         while not self.stop_event.is_set():
             event = self.event_queue.get()

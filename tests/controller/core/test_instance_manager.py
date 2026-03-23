@@ -24,8 +24,10 @@ from motor.common.resources.instance import (
     InsConditionEvent,
     ReadOnlyInstance
 )
+from motor.common.resources import EventType
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
+from motor.controller.core.event_pusher import EventPusher
 
 
 # Helper functions
@@ -279,17 +281,17 @@ def test_persist_data_failure():
 
 def test_restore_data_success():
     """Test successful data restoration"""
-    # Mock persistent state (new format: single PersistentState)
-    # Use Workload object or dict with proper structure for gathered_workload
-    instance_data = {"id": 1, "job_name": "test_job", "model_name": "test_model",
-                     "role": "prefill", "endpoints": {}, "status": "initial",
-                     "parallel_config": None, "node_managers": [], 
-                     "gathered_workload": {"active_kv_cache": 0, "active_tokens": 0}}
+    instance_data = {
+        "id": 1, "job_name": "test_job", "model_name": "test_model",
+        "role": "prefill", "endpoints": {}, "status": "initial",
+        "parallel_config": None, "node_managers": [], 
+        "gathered_workload": {"active_kv_cache": 0, "active_tokens": 0}
+    }
     persistent_state = PersistentState(
         data={"1": instance_data},
         version=1,
         timestamp=time.time(),
-        checksum=""  # Will be calculated
+        checksum=""
     )
     persistent_state.checksum = persistent_state.calculate_checksum()
     
@@ -303,9 +305,14 @@ def test_restore_data_success():
         mock_etcd_class.return_value = mock_client
 
         manager = create_instance_manager_with_config(enable_etcd=True)
+        
+        mock_event_pusher = MagicMock(spec=EventPusher)
+        manager.attach(mock_event_pusher)
+        
         result = manager.restore_data()
         assert result is True
-        assert 1 in manager.instances  # Verify instance was restored
+        assert 1 in manager.instances
+        mock_event_pusher.push_event.assert_called_once_with(EventType.SET)
 
 
 def test_restore_data_no_data():

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,14 +13,16 @@ from collections.abc import Callable
 
 from fastapi import HTTPException
 
-from motor.common.resources import (HeartbeatMsg, Instance, InsStatus,
-                                    InsConditionEvent, ReadOnlyInstance, EndpointStatus)
+from motor.common.resources import (
+    HeartbeatMsg, Instance, InsStatus, InsConditionEvent, ReadOnlyInstance, EndpointStatus, EventType
+)
 from motor.common.etcd.etcd_client import EtcdClient
 from motor.common.etcd.persistent_state import PersistentState
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import Observer, ObserverEvent
+from motor.controller.core.event_pusher import EventPusher
 from motor.common.utils.logger import get_logger
 from motor.common.alarm.instance_exception_alarm import InstanceExceptionAlarm, InstanceExceptionReason
 from motor.common.alarm.coordinator_exception_alarm import CoordinatorExceptionAlarm, CoordinatorExceptionReason
@@ -266,6 +267,13 @@ class InstanceManager(ThreadSafeSingleton):
                         logger.error("Error reconstructing instance %s: %s", ins_id_str, e)
                         invalid_instances += 1
                         continue
+
+                # Notify Coordinator that Controller just restarted,
+                # it should refresh all instance status.
+                for observer in self.observers:
+                    if isinstance(observer, EventPusher):
+                        observer.push_event(EventType.SET)
+                        break
 
                 logger.info("Successfully restored %d valid instances, %d invalid instances skipped",
                             valid_instances, invalid_instances)
