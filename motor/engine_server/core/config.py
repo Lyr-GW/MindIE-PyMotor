@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -10,15 +8,35 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
+import argparse
 from abc import ABC, abstractmethod
 
+from motor.common.utils.logger import get_logger
+from motor.config.endpoint import EndpointConfig
 
-class EngineController(ABC):
+logger = get_logger(__name__)
 
+supported_engine = ["vllm", "sglang"]
+supported_role = ["prefill", "decode", "union"]
+
+
+class IConfig(ABC):
     @abstractmethod
-    def control(self, cmd):
+    def initialize(self):
         pass
 
     @abstractmethod
-    def stop(self):
+    def validate(self):
+        pass
+
+    @abstractmethod
+    def convert(self):
+        pass
+
+    @abstractmethod
+    def get_args(self) -> argparse.Namespace | None:
+        pass
+
+    @abstractmethod
+    def get_endpoint_config(self) -> EndpointConfig | None:
         pass

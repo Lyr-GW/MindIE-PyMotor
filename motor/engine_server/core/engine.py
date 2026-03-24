@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -9,3 +7,25 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
+
+from abc import abstractmethod, ABC
+from typing import Any
+
+from motor.common.utils.logger import get_logger
+
+
+logger = get_logger(__name__)
+
+
+class Engine(ABC):
+
+    @abstractmethod
+    def launch(self) -> Any:
+        """Launch the engine."""
+        pass
+
+
+    @abstractmethod
+    def shutdown(self) -> None:
+        """Shutdown the engine."""
+        pass

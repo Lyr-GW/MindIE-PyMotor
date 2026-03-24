@@ -15,7 +15,7 @@ import psutil
 
 from motor.common.utils.logger import get_logger
 
-logger = get_logger("engine_server")
+logger = get_logger(__name__)
 
 
 class ProcManager:

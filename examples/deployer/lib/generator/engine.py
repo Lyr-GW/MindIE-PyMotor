@@ -27,7 +27,7 @@ def update_engine_base_name(user_config):
         set_engine_base_name(C.ENGINE_TYPE_MINDIE_SERVER)
 
 
-def build_engine_env_items(role, job_name, include_kv_pool=False):
+def build_engine_env_items(role, deploy_config, job_name, include_kv_pool=False):
     env_items = [
         {C.NAME: C.ENV_ROLE, C.VALUE: role},
         {C.NAME: C.ENV_JOB_NAME, C.VALUE: job_name},
@@ -37,7 +37,6 @@ def build_engine_env_items(role, job_name, include_kv_pool=False):
     if include_kv_pool and k8s_utils.g_kv_pool_enabled:
         env_items.append({C.NAME: C.ENV_KVP_MASTER_SERVICE, C.VALUE: k8s_utils.g_kv_pool_service})
     if k8s_utils.g_mf_store_enabled:
-        deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
         ascend_mf_store_url = f"tcp://{k8s_utils.g_mf_store_service}:{C.DEFAULT_MF_STORE_PORT}"
         hardware_type = deploy_config.get(C.HARDWARE_TYPE, C.HARDWARE_TYPE_800I_A2)
         ascend_mf_transfer_protocol = "device_rdma" if hardware_type == C.HARDWARE_TYPE_800I_A2 else "sdma"
@@ -67,11 +66,11 @@ def set_engine_metadata(deployment_data, deploy_config, index, node_type, job_na
     deployment_data[C.METADATA][C.LABELS][C.JOB_NAME] = job_name
 
 
-def set_engine_env(container, node_type, job_name):
+def set_engine_env(container, deploy_config, node_type, job_name):
     role = C.ROLE_PREFILL if node_type == C.NODE_TYPE_P else C.ROLE_DECODE
     if C.ENV not in container:
         container[C.ENV] = []
-    container[C.ENV].extend(build_engine_env_items(role, job_name, include_kv_pool=True))
+    container[C.ENV].extend(build_engine_env_items(role, deploy_config, job_name, include_kv_pool=True))
 
 
 def set_engine_replicas(deployment_data, deploy_config, node_type):
@@ -148,8 +147,7 @@ def modify_engine_yaml(deployment_data, user_config, index, node_type):
     container = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC][C.CONTAINERS][0]
 
     if k8s_utils.g_engine_type == C.ENGINE_TYPE_SGLANG:
-        if C.SECURITY_CONTEXT not in container:
-            container[C.SECURITY_CONTEXT] = {}
+        container[C.SECURITY_CONTEXT] = {}
         container[C.SECURITY_CONTEXT][C.PRIVILEGED] = True
 
     container[C.IMAGE] = deploy_config[C.IMAGE_NAME]
@@ -158,7 +156,7 @@ def modify_engine_yaml(deployment_data, user_config, index, node_type):
     container[C.NAME] = k8s_utils.g_engine_base_name
     if C.ENV not in container:
         container[C.ENV] = []
-    set_engine_env(container, node_type, job_name)
+    set_engine_env(container, deploy_config, node_type, job_name)
     set_engine_replicas(deployment_data, deploy_config, node_type)
     set_engine_npu(container, deploy_config, node_type)
     set_engine_node_selector(deployment_data, deploy_config, node_type)

@@ -8,20 +8,20 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from motor.engine_server.config.base import IConfig
+from motor.engine_server.core.config import IConfig
 from motor.common.utils.http_client import AsyncSafeHTTPSClient
 from motor.common.utils.logger import get_logger
 
-logger = get_logger("engine_server")
+logger = get_logger(__name__)
 
 
 class HealthCollector:
     def __init__(self, config: IConfig):
-        server_config = config.get_server_config()
-        self.host = server_config.server_host
-        self.port = server_config.engine_port
-        self.infer_tls_config = server_config.deploy_config.infer_tls_config
-        self.timeout = server_config.deploy_config.health_check_config.health_collector_timeout
+        endpoint_config = config.get_endpoint_config()
+        self.host = endpoint_config.host
+        self.port = endpoint_config.port
+        self.infer_tls_config = endpoint_config.deploy_config.infer_tls_config
+        self.timeout = endpoint_config.deploy_config.health_check_config.health_collector_timeout
         self.address = f"{self.host}:{self.port}"
         self._has_connected = False
 

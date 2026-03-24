@@ -106,3 +106,5 @@ STATUS_INTERFACE = "/status"
 # service type
 METRICS_SERVICE = "metrics_service"
 HEALTH_SERVICE = "health_service"
+
+DISAGGREGATION_MODE = "disaggregation-mode"

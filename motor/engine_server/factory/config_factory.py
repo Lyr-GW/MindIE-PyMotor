@@ -10,22 +10,24 @@
 
 import importlib
 
-from motor.engine_server.config.base import IConfig, ServerConfig
+from motor.config.endpoint import EndpointConfig
+from motor.engine_server.core.config import IConfig
 from motor.common.utils.logger import get_logger
 
-logger = get_logger("engine_server")
+logger = get_logger(__name__)
 
 
-class ConfigParser:
+class ConfigFactory:
     _ENGINE_CONFIG_MAP: dict[str, str] = {
-        "vllm": "motor.engine_server.config.vllm.VLLMConfig"
+        "vllm": "motor.engine_server.core.vllm.vllm_config.VLLMConfig",
+        "sglang": "motor.engine_server.core.sglang.sglang_config.SGLangConfig",
     }
 
-    def __init__(self, server_config: ServerConfig):
-        self.server_config = server_config
+    def __init__(self, endpoint_config: EndpointConfig):
+        self.endpoint_config = endpoint_config
 
     def parse(self) -> IConfig:
-        engine_type = self.server_config.engine_type
+        engine_type = self.endpoint_config.engine_type
         config_class_path = self._ENGINE_CONFIG_MAP.get(engine_type)
 
         if not config_class_path:
@@ -40,7 +42,7 @@ class ConfigParser:
             module = importlib.import_module(module_path)
             config_class = getattr(module, class_name)
 
-            config_instance = config_class(server_config=self.server_config)
+            config_instance = config_class(endpoint_config=self.endpoint_config)
             config_instance.initialize()
             config_instance.convert()
             config_instance.validate()

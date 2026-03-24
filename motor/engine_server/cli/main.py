@@ -7,31 +7,40 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
+import os
 
-from motor.engine_server.utils.prometheus import setup_multiprocess_prometheus
-from motor.engine_server.config.base import ServerConfig
-from motor.engine_server.utils.config_parser import ConfigParser
 from motor.common.utils.logger import get_logger
+from motor.config.endpoint import EndpointConfig
+from motor.engine_server.core.infer_endpoint import InferEndpoint
+from motor.engine_server.core.mgmt_endpoint import MgmtEndpoint
+from motor.engine_server.factory.config_factory import ConfigFactory
+from motor.engine_server.factory.endpoint_factory import EndpointFactory
+from motor.engine_server.utils.proc import ProcManager
+from motor.engine_server.utils.prometheus import setup_multiprocess_prometheus
 
-logger = get_logger("engine_server")
+logger = get_logger(__name__)
 
 
 def main():
-    setup_multiprocess_prometheus()
-    server_config = ServerConfig.init_engine_server_config()
-    config_parser = ConfigParser(server_config=server_config)
-    config = config_parser.parse()
-    logger.info(f"successfully parsed {server_config.engine_type} engine configuration")
-
     # Execute setup_multiprocess_prometheus before importing ServerCoreFactory to ensure
     # PROMETHEUS_MULTIPROC_DIR is detected when Prometheus low-level code creates ValueClass.
-    from motor.engine_server.factory.core_factory import ServerCoreFactory
-    factory = ServerCoreFactory()
-    server_core = factory.create_server_core(config=config)
+    setup_multiprocess_prometheus()
+    endpoint_config = EndpointConfig.init_endpoint_config()
+    config_factory = ConfigFactory(endpoint_config=endpoint_config)
+    config = config_factory.parse()
+    logger.info(f"successfully parsed {endpoint_config.engine_type} engine configuration")
 
-    server_core.initialize()
-    server_core.run()
-    server_core.join()
+    infer_endpoint: InferEndpoint = EndpointFactory().get_infer_endpoint(config)
+    mgmt_endpoint: MgmtEndpoint = MgmtEndpoint(config)
+    proc_manager = ProcManager(os.getpid())
+
+    mgmt_endpoint.run()
+    infer_endpoint.run()
+    proc_manager.join()
+
+    mgmt_endpoint.shutdown()
+    infer_endpoint.shutdown()
+    proc_manager.shutdown()
 
 
 if __name__ == "__main__":

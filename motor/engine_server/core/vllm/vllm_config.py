@@ -16,11 +16,12 @@ from dataclasses import dataclass, field
 
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 
-from motor.engine_server.config.base import BaseConfig, ServerConfig
+from motor.config.endpoint import EndpointConfig
+from motor.engine_server.core.config import IConfig
 from motor.common.utils.logger import get_logger
 from motor.engine_server.constants import constants
 
-logger = get_logger("engine_server")
+logger = get_logger(__name__)
 
 
 def _add_argument_to_list(arg_list: list, key: str, value: Any):
@@ -54,29 +55,27 @@ def _get_default_mapping() -> dict[str, str]:
 
 
 @dataclass
-class VLLMConfig(BaseConfig):
+class VLLMConfig(IConfig):
     args: argparse.Namespace | None = None
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
     kv_transfer_config: str | None = None
     mapping: dict[str, str] | None = field(default_factory=_get_default_mapping)
+    endpoint_config: EndpointConfig | None = None
 
     def initialize(self):
-        super().initialize()
-        if self.server_config.deploy_config.get_parallel_config(self.server_config.role).dp_size > 1:
-            self.data_parallel_address = self.server_config.master_dp_ip
-            self.data_parallel_rpc_port = self.server_config.deploy_config. \
-                get_parallel_config(self.server_config.role).dp_rpc_port
-        if self.server_config.role == constants.PREFILL_ROLE or self.server_config.role == constants.DECODE_ROLE:
+        if self.endpoint_config.deploy_config.get_parallel_config(self.endpoint_config.role).dp_size > 1:
+            self.data_parallel_address = self.endpoint_config.master_dp_ip
+            self.data_parallel_rpc_port = self.endpoint_config.deploy_config. \
+                get_parallel_config(self.endpoint_config.role).dp_rpc_port
+        if self.endpoint_config.role == constants.PREFILL_ROLE or self.endpoint_config.role == constants.DECODE_ROLE:
             self._process_kv_transfer_config()
 
     def validate(self):
-        super().validate()
         if self.args is not None:
             validate_parsed_serve_args(self.args)
 
     def convert(self):
-        super().convert()
         arg_list = self._get_param_list()
         logger.info(f'engine server parsed arg_list: {arg_list}')
 
@@ -93,15 +92,15 @@ class VLLMConfig(BaseConfig):
     def get_args(self) -> argparse.Namespace:
         return self.args
 
-    def get_server_config(self) -> ServerConfig:
-        return self.server_config
+    def get_endpoint_config(self) -> EndpointConfig:
+        return self.endpoint_config
 
     def _process_kv_transfer_config(self):
-        role = self.server_config.role
+        role = self.endpoint_config.role
         if role == constants.UNION_ROLE:
             return
 
-        kv_config = self.server_config.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG)
+        kv_config = self.endpoint_config.deploy_config.engine_config.get(constants.KV_TRANSFER_CONFIG)
         if kv_config is None:
             raise ValueError(f"{constants.KV_TRANSFER_CONFIG} is None in engine_config")
         try:
@@ -116,12 +115,12 @@ class VLLMConfig(BaseConfig):
             raise ValueError(f"Failed to process kv_transfer_config: {e}") from e
 
     def _process_multi_connector(self, kv_config):
-        role = self.server_config.role
+        role = self.endpoint_config.role
         if role == constants.PREFILL_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
         elif role == constants.DECODE_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
-        kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
+        kv_config[constants.ENGINE_ID] = str(self.endpoint_config.instance_id)
         if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
             raise ValueError("KV connector extra config missing from multi connector")
         connectors = kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.CONNECTORS]
@@ -131,16 +130,16 @@ class VLLMConfig(BaseConfig):
         self._process_store_connector(connectors[1])
 
     def _process_mooncake_connector(self, kv_config, add_engine_id: bool = True):
-        role = self.server_config.role
+        role = self.endpoint_config.role
         if role == constants.PREFILL_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
         elif role == constants.DECODE_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_CONSUMER
         if add_engine_id:
-            kv_config[constants.ENGINE_ID] = str(self.server_config.instance_id)
+            kv_config[constants.ENGINE_ID] = str(self.endpoint_config.instance_id)
 
-        prefill_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
-        decode_parallel = self.server_config.deploy_config.get_parallel_config(constants.KV_DECODE)
+        prefill_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
+        decode_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_DECODE)
 
         if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
             kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG] = {}
@@ -155,7 +154,7 @@ class VLLMConfig(BaseConfig):
         }
 
     def _process_store_connector(self, kv_config):
-        role = self.server_config.role
+        role = self.endpoint_config.role
         if role == constants.PREFILL_ROLE:
             kv_config[constants.KV_ROLE] = constants.KV_PRODUCER
         elif role == constants.DECODE_ROLE:
@@ -163,9 +162,9 @@ class VLLMConfig(BaseConfig):
 
         if kv_config[constants.KV_CONNECTOR] == constants.MOON_CAKE_STORE_V1:
             kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.MOON_CAKE_RPC_PORT] \
-                = str(self.server_config.instance_id)
+                = str(self.endpoint_config.instance_id)
         elif kv_config[constants.KV_CONNECTOR] == constants.ASCEND_STORE_CONNECTOR:
-            kv_config[constants.LOOKUP_RPC_PORT] = str(self.server_config.instance_id)
+            kv_config[constants.LOOKUP_RPC_PORT] = str(self.endpoint_config.instance_id)
         else:
             raise ValueError(f"{constants.KV_CONNECTOR} is not supported")
 
@@ -179,7 +178,7 @@ class VLLMConfig(BaseConfig):
         """
         flattened = {}
 
-        deploy_config = self.server_config.deploy_config
+        deploy_config = self.endpoint_config.deploy_config
 
         flattened.update(deploy_config.engine_config.configs)
 
@@ -190,18 +189,18 @@ class VLLMConfig(BaseConfig):
                 if value is not None:
                     flattened[vllm_key] = value
 
-        parallel_config = deploy_config.get_parallel_config(self.server_config.role)
+        parallel_config = deploy_config.get_parallel_config(self.endpoint_config.role)
         for server_key, vllm_key in self.mapping.items():
             if hasattr(parallel_config, server_key):
                 value = getattr(parallel_config, server_key)
                 if value is not None:
                     flattened[vllm_key] = value
 
-        flattened.update({"host": self.server_config.server_host, "port": self.server_config.engine_port})
+        flattened.update({"host": self.endpoint_config.host, "port": self.endpoint_config.port})
         if self.data_parallel_address is not None:
             flattened["data_parallel_address"] = self.data_parallel_address
             flattened["data_parallel_rpc_port"] = self.data_parallel_rpc_port
-            flattened["data_parallel_rank"] = self.server_config.dp_rank
+            flattened["data_parallel_rank"] = self.endpoint_config.dp_rank
         if self.kv_transfer_config is not None:
             flattened["kv_transfer_config"] = self.kv_transfer_config
 
