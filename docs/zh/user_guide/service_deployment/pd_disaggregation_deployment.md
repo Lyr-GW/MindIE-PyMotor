@@ -257,7 +257,8 @@ examples/
       "tp_size": 2,
       "pp_size": 1,
       "enable_ep": false,
-      "dp_rpc_port": 9000
+      "dp_rpc_port": 9000,
+      "world_size": 4
     }
   },
   "engine_config": {
@@ -287,7 +288,8 @@ examples/
       "tp_size": 2,
       "pp_size": 1,
       "enable_ep": false,
-      "dp_rpc_port": 9000
+      "dp_rpc_port": 9000,
+      "world_size": 4
     }
   },
   "engine_config": {
@@ -326,6 +328,8 @@ examples/
 | pp_size | int | 流水并行大小 |
 | enable_ep | bool | 是否启用 EP |
 | dp_rpc_port | int | DP 侧 RPC 端口 |
+| world_size | int | 总卡数，vLLM等于 dp_size * tp_size * pp_size, SGLang根据是否开启enable-dp-attention而不同，开启后不需要乘dp_size |
+
 
 #### engine_config 配置项
 

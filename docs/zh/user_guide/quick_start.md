@@ -123,7 +123,8 @@
               "tp_size": 2,
               "pp_size": 1,
               "enable_ep": false,
-              "dp_rpc_port": 9000
+              "dp_rpc_port": 9000,
+              "world_size": 4
             }
           },
           "engine_config": {
@@ -147,7 +148,8 @@
               "tp_size": 2,
               "pp_size": 1,
               "enable_ep": false,
-              "dp_rpc_port": 9000
+              "dp_rpc_port": 9000,
+              "world_size": 4
             }
           },
           "engine_config": {
@@ -189,6 +191,8 @@
      | prefill_parallel_config.pp_size | int | ≥1 | 流水线并行参数 |
      | prefill_parallel_config.enable_ep | bool | [true, false] | 专家并行开关 |
      | prefill_parallel_config.dp_rpc_port | int | 有效端口范围 | RPC通信的端口号 |
+     | prefill_parallel_config.world_size | int | ≥1 | 单个实例的总卡数，由于不同引擎的计算方式不同，建议显示指定 |
+
      | engine_config |dict | 推理引擎原生参数 | 参考对应推理引擎的说明，直接已json对象形式填写 |
 
 

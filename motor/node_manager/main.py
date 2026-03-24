@@ -56,12 +56,12 @@ def on_config_updated() -> None:
     log_config_summary()
 
 
-def init_all_modules(config_path: str | None = None, hccl_path: str | None = None) -> None:
+def init_all_modules(config_path: str | None = None) -> None:
     """Initialize all modules but don't start them yet"""
 
     global config
     if config is None:
-        config = NodeManagerConfig.from_json(config_path, hccl_path)
+        config = NodeManagerConfig.from_json(config_path)
 
     modules.append(config)
     modules.append(NodeManagerAPI(config=config))
@@ -125,7 +125,7 @@ def main() -> int:
     # Initialize all modules
     # Prefer mounted user_config when provided, fallback to CONFIG_PATH
     config_path = Env.user_config_path or Env.config_path
-    init_all_modules(config_path, Env.hccl_path)
+    init_all_modules(config_path)
 
     # Log configuration summary
     log_config_summary()
@@ -173,6 +173,7 @@ def main() -> int:
 
     # -1: rescheduling; 0: restart
     return -1
+
 
 if __name__ == '__main__':
     exit_code = main()

@@ -134,7 +134,8 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
         "tp_size": 8,
         "pp_size": 1,
         "enable_ep": true,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 16
       }
     },
     "engine_config": {
@@ -189,7 +190,8 @@ mindie-motor-vllm:dev-2.3.RC1.B132-800I-A3-py311-Ubuntu24.04-lts-aarch64
         "tp_size": 1,
         "pp_size": 1,
         "enable_ep": true,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 32
       }
     },
     "engine_config": {

@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -18,6 +16,8 @@ __all__ = [
     # From http_msg_spec
     "RegisterMsg",
     "StartCmdMsg",
+    "Ranktable",
+    "ServerInfo",
     "ReregisterMsg",
     "HeartbeatMsg",
     "TerminateInstanceMsg",
@@ -42,6 +42,8 @@ __all__ = [
 from .http_msg_spec import (
     RegisterMsg,
     StartCmdMsg,
+    Ranktable,
+    ServerInfo,
     ReregisterMsg,
     HeartbeatMsg,
     TerminateInstanceMsg,

@@ -42,7 +42,7 @@ def prefill_instances():
             id=i+1,
             role=PDRole.ROLE_P,
             status=InsStatus.ACTIVE,
-            parallel_config=ParallelConfig(dp=2)
+            parallel_config=ParallelConfig(dp_size=2)
         )
         instances.append(instance)
     return instances
@@ -59,7 +59,7 @@ def decode_instances():
             id=i+4,
             role=PDRole.ROLE_D,
             status=InsStatus.ACTIVE,
-            parallel_config=ParallelConfig(dp=2)
+            parallel_config=ParallelConfig(dp_size=2)
         )
         instances.append(instance)
     return instances
@@ -76,7 +76,7 @@ def mix_instances():
             id=i+6,
             role=PDRole.ROLE_U,
             status=InsStatus.ACTIVE,
-            parallel_config=ParallelConfig(dp=2)
+            parallel_config=ParallelConfig(dp_size=2)
         )
         instances.append(instance)
     return instances

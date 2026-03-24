@@ -30,7 +30,8 @@ class TestParallelConfig:
             "tp_size": 4,
             "pp_size": 1,
             "enable_ep": True,
-            "dp_rpc_port": 9000
+            "dp_rpc_port": 9000,
+            "world_size": 8
         }
         config = ParallelConfig.from_dict(data)
 
@@ -39,12 +40,13 @@ class TestParallelConfig:
         assert config.pp_size == 1
         assert config.enable_ep is True
         assert config.dp_rpc_port == 9000
+        assert config.world_size == 8
 
     def test_equality(self):
         """Test equality of ParallelConfig instances"""
-        config1 = ParallelConfig(2, 4, 1, True, 9000)
-        config2 = ParallelConfig(2, 4, 1, True, 9000)
-        config3 = ParallelConfig(1, 2, 1, False, 9001)
+        config1 = ParallelConfig(2, 4, 1, True, 9000, 8)
+        config2 = ParallelConfig(2, 4, 1, True, 9000, 8)
+        config3 = ParallelConfig(1, 2, 1, False, 9001, 4)
 
         assert config1 == config2
         assert config1 != config3
@@ -62,14 +64,16 @@ class TestModelConfig:
                 "tp_size": 4,
                 "pp_size": 1,
                 "enable_ep": True,
-                "dp_rpc_port": 9000
+                "dp_rpc_port": 9000,
+                "world_size": 8
             },
             "decode_parallel_config": {
                 "dp_size": 1,
                 "tp_size": 2,
                 "pp_size": 1,
                 "enable_ep": False,
-                "dp_rpc_port": 9001
+                "dp_rpc_port": 9001,
+                "world_size": 2
             }
         }
 

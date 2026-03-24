@@ -92,7 +92,8 @@ pyMotor开启tracing能力需修改env.json配置文件和user_config.json配置
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 4
       }
     },
     "engine_config": {
@@ -119,7 +120,8 @@ pyMotor开启tracing能力需修改env.json配置文件和user_config.json配置
       "tp_size": 2,
       "pp_size": 1,
       "enable_ep": false,
-      "dp_rpc_port": 9000
+      "dp_rpc_port": 9000,
+      "world_size": 4
     }
   },
   "engine_config": {

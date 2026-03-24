@@ -46,30 +46,10 @@ def config_data():
     }
 
 
-@pytest.fixture
-def hccl_data():
-    return {
-        "status": "completed",
-        "server_count": "1",
-        "version": "1.2",
-        "server_list": [{
-            "server_id": "90.90.97.30",
-            "container_ip": "127.0.0.1",  # Used by NodeManagerConfig, not Ranktable
-            "hardware_type": "Ascend910",  # Used by NodeManagerConfig, not Ranktable
-            "device": [
-                {"device_id": str(i), "device_ip": "192.168.1.%d" % (i+1), "super_device_id": "12645532%d" % i, "rank_id": str(i)}
-                for i in range(8)  # 8 devices for TYPE_800I_A2
-            ]
-        }]
-    }
-
-
-def create_config_mock(config_data, hccl_data):
+def create_config_mock(config_dataa):
     def mock_side_effect(file_path, mode):
         if "user_config.json" in file_path:
             return mock_open(read_data=json.dumps(config_data)).return_value
-        elif "hccl.json" in file_path:
-            return mock_open(read_data=json.dumps(hccl_data)).return_value
         return mock_open().return_value
     return mock_side_effect
 
@@ -83,7 +63,7 @@ def create_config_object():
     """Helper to create a config object manually"""
     config = NodeManagerConfig.__new__(NodeManagerConfig)
     for field_name, field_info in config.__dataclass_fields__.items():
-        if field_name not in ['config_path', 'hccl_path', 'last_modified']:
+        if field_name not in ['config_path', 'last_modified']:
             if field_info.default_factory is not None:
                 setattr(config, field_name, field_info.default_factory())
             else:
@@ -92,47 +72,19 @@ def create_config_object():
             setattr(config, field_name, None)
     return config
 
-
-def create_hccl_data(device_count, version="1.0"):
-    """Helper to create HCCL data with specified device count"""
-    return {
-        "status": "completed",
-        "server_count": "1",
-        "version": version,
-        "server_list": [{
-            "server_id": "127.0.0.1",
-            "container_ip": "127.0.0.1",
-            "host_ip": "127.0.0.1",
-            "device": [
-                {"device_id": str(i), "device_ip": "127.0.0.1", "rank_id": str(i)}
-                for i in range(device_count)
-            ]
-        }]
-    }
-
-
-@pytest.fixture
-def valid_hccl_a2_data():
-    """Valid HCCL data for A2 hardware (8 devices)"""
-    return create_hccl_data(8)
-
-
-@pytest.fixture
-def valid_hccl_a3_data():
-    """Valid HCCL data for A3 hardware (2 devices)"""
-    return create_hccl_data(2)
     
 @patch.dict('os.environ', {'ROLE': 'both'})
 @patch('motor.config.node_manager.safe_open')
-def test_init_success(mock_safe_open, config_data, hccl_data):
+def test_init_success(mock_safe_open, config_data):
     clear_node_manager_config()
-    mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+    mock_safe_open.side_effect = create_config_mock(config_data)
 
     config = create_config_object()
 
     try:
         NodeManagerConfig._update_from_config_data(config, config_data)
-        NodeManagerConfig._update_from_hccl_data(config, hccl_data)
+        # Set device_num for testing (simulating visible devices)
+        config.basic_config.device_num = 8  # 8 devices for testing
         NodeManagerConfig._generate_endpoint_ports(config)
     except Exception as e:
         pytest.skip(f"Configuration loading failed: {e}")
@@ -142,7 +94,6 @@ def test_init_success(mock_safe_open, config_data, hccl_data):
     assert isinstance(config.basic_config.parallel_config, ParallelConfig)
     assert config.basic_config.role == PDRole.ROLE_U
     assert config.basic_config.device_num == 8
-    assert config.api_config.pod_ip == "127.0.0.1"
 
     # Verify logging config
     assert config.logging_config.log_level == "DEBUG"
@@ -151,6 +102,7 @@ def test_init_success(mock_safe_open, config_data, hccl_data):
     assert config.logging_config.log_format == "%(levelname)s [%(filename)s:%(lineno)d] %(message)s"
     assert config.logging_config.log_date_format == "%Y-%m-%d %H:%M:%S"
     
+
 @pytest.mark.parametrize("invalid_config,expected_error,role_env", [
     ({"role": "both"}, "Missing required config field", "both"),
     ({"parallel_config": {"tp_size": 1, "pp_size": 1}, "role": "invalid", "controller_api_dns": "localhost", "controller_api_port": 8080, "node_manager_port": 8080, "model_name": "vllm"}, "Invalid role value", "invalid"),
@@ -175,8 +127,9 @@ def test_config_validation_errors(invalid_config, expected_error, role_env):
     except ValueError:
         pass
 
+
 @patch.dict('os.environ', {'ROLE': 'both'})
-def test_logging_config_defaults(config_data, hccl_data):
+def test_logging_config_defaults(config_data):
     """Test logging configuration defaults when not specified"""
     config_data_no_logging = {
         "parallel_config": {"tp_size": 2, "pp_size": 1},
@@ -189,7 +142,6 @@ def test_logging_config_defaults(config_data, hccl_data):
 
     config = create_config_object()
     NodeManagerConfig._update_from_config_data(config, config_data_no_logging)
-    NodeManagerConfig._update_from_hccl_data(config, hccl_data)
 
     # Test default values
     assert config.logging_config.log_level == "INFO"
@@ -200,6 +152,7 @@ def test_logging_config_defaults(config_data, hccl_data):
         '%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(processName)s]  %(message)s'
     )
     assert config.logging_config.log_date_format == '%Y-%m-%d %H:%M:%S'
+
 
 @pytest.mark.parametrize("invalid_config,expected_error", [
     ({"parallel_config": {"tp_size": 2, "pp_size": 1}, "role": "both", "controller_api_dns": "localhost",
@@ -216,7 +169,7 @@ def test_logging_config_defaults(config_data, hccl_data):
       "logging_config": {"log_format": ""}}, "log_format must be a string"),
 ])
 @patch.dict('os.environ', {'ROLE': 'both'})
-def test_logging_config_validation_errors(invalid_config, expected_error, hccl_data):
+def test_logging_config_validation_errors(invalid_config, expected_error):
     """Test logging configuration validation errors"""
     config = create_config_object()
 
@@ -226,32 +179,18 @@ def test_logging_config_validation_errors(invalid_config, expected_error, hccl_d
     except ValueError:
         pass
 
-@pytest.mark.parametrize("invalid_hccl,expected_error", [
-    ({}, "Device count"),
-    ({"status": "pending"}, "Device count"),
-    ({"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}, "Device count"),
-    ({"status": "completed", "server_count": "1", "version": "1.0",
-      "server_list": [{"server_id": "1", "container_ip": "127.0.0.1", "device": []}]}, "Device count"),
-])
-@patch.dict('os.environ', {'ROLE': 'both'})
-def test_hccl_validation_errors(invalid_hccl, expected_error, config_data):
-    config = create_config_object()
-    NodeManagerConfig._update_from_config_data(config, config_data)
-
-    try:
-        NodeManagerConfig._update_from_hccl_data(config, invalid_hccl)
-        NodeManagerConfig._generate_endpoint_ports(config)
-    except ValueError as e:
-        assert expected_error in str(e)
     
 @patch.dict('os.environ', {'ROLE': 'both'})
-def test_generate_endpoint_ports(config_data, hccl_data):
+def test_generate_endpoint_ports(config_data):
     config_data_with_dp = config_data.copy()
     config_data_with_dp["parallel_config"] = {"tp_size": 2, "pp_size": 1, "dp_size": 2}
 
     config = create_config_object()
     NodeManagerConfig._update_from_config_data(config, config_data_with_dp)
-    NodeManagerConfig._update_from_hccl_data(config, hccl_data)
+    
+    # Set device_num for testing (simulating visible devices)
+    config.basic_config.device_num = 8  # 8 devices for testing
+    
     NodeManagerConfig._generate_endpoint_ports(config)
 
     assert config.endpoint_config.endpoint_num == 2
@@ -262,10 +201,10 @@ def test_generate_endpoint_ports(config_data, hccl_data):
     
 @patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': 'tests/jsons/user_config.json'.replace('\\', '/')})
 @patch('motor.config.node_manager.safe_open')
-def test_non_singleton_behavior(mock_safe_open, config_data, hccl_data):
+def test_non_singleton_behavior(mock_safe_open, config_data):
     """Test that NodeManagerConfig is no longer a singleton"""
     clear_node_manager_config()
-    mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+    mock_safe_open.side_effect = create_config_mock(config_data)
     with patch('os.path.exists', return_value=True):
         config1 = NodeManagerConfig()
         config2 = NodeManagerConfig()
@@ -274,101 +213,18 @@ def test_non_singleton_behavior(mock_safe_open, config_data, hccl_data):
     # But they should have the same configuration values
     assert config1.basic_config.role == config2.basic_config.role
     
-@patch.dict('os.environ', {'ROLE': 'both'})
-def test_hccl_data_structure_validation(valid_hccl_a2_data, valid_hccl_a3_data):
-    """Test HCCL data structure validation with predefined valid data"""
-    assert valid_hccl_a2_data["status"] == "completed"
-    assert len(valid_hccl_a2_data["server_list"][0]["device"]) == 8
-    assert valid_hccl_a3_data["status"] == "completed"
-    assert len(valid_hccl_a3_data["server_list"][0]["device"]) == 2
-
-    config_data = {
-        "parallel_config": {"tp_size": 1, "pp_size": 1, "dp_size": 1},
-        "role": "both",
-        "controller_api_dns": "localhost",
-        "controller_api_port": 8080,
-        "node_manager_port": 8080,
-        "model_name": "vllm"
-    }
-
-    # Test with A2 data
-    config_a2 = create_config_object()
-    NodeManagerConfig._update_from_config_data(config_a2, config_data)
-    NodeManagerConfig._update_from_hccl_data(config_a2, valid_hccl_a2_data)
-    assert config_a2.basic_config.device_num == 8
-
-    # Test with A3 data
-    config_a3 = create_config_object()
-    NodeManagerConfig._update_from_config_data(config_a3, config_data)
-    NodeManagerConfig._update_from_hccl_data(config_a3, valid_hccl_a3_data)
-    assert config_a3.basic_config.device_num == 2
-    
-@patch.dict('os.environ', {'ROLE': 'both'})
-def test_hccl_with_super_device_id(config_data):
-    """Test parsing HCCL with super_device_id"""
-    hccl_with_super = create_hccl_data(8)
-    hccl_with_super["server_list"][0]["device"] = [
-        {"device_id": str(i), "device_ip": f"192.168.1.{i+1}", "rank_id": str(i), "super_device_id": f"12345{i}"}
-        for i in range(8)
-    ]
-    hccl_with_super["server_list"][0]["container_ip"] = "192.168.1.100"
-
-    config = create_config_object()
-    NodeManagerConfig._update_from_config_data(config, config_data)
-    NodeManagerConfig._update_from_hccl_data(config, hccl_with_super)
-
-    assert config.basic_config.device_num == 8
-    
-@patch.dict('os.environ', {'ROLE': 'both'})
-def test_hccl_empty_server_list(config_data):
-    """Test parsing HCCL with empty server_list (should fail device count validation)"""
-    hccl_empty = {"status": "completed", "server_count": "0", "version": "1.0", "server_list": []}
-
-    config = create_config_object()
-    NodeManagerConfig._update_from_config_data(config, config_data)
-    NodeManagerConfig._update_from_hccl_data(config, hccl_empty)
-
-    with pytest.raises(ValueError, match="Device count"):
-        NodeManagerConfig._generate_endpoint_ports(config)
-
-@patch.dict('os.environ', {'ROLE': 'both'})
-def test_hccl_empty_device_list(config_data):
-    """Test parsing HCCL with empty device list (should fail device count validation)"""
-    hccl_no_devices = {
-        "status": "completed",
-        "server_count": "1",
-        "version": "1.0",
-        "server_list": [{
-            "server_id": "1",
-            "host_ip": "192.168.1.100",
-            "container_ip": "192.168.1.100",
-            "device": []
-        }]
-    }
-
-    config = create_config_object()
-    NodeManagerConfig._update_from_config_data(config, config_data)
-    NodeManagerConfig._update_from_hccl_data(config, hccl_no_devices)
-
-    with pytest.raises(ValueError, match="Device count"):
-        NodeManagerConfig._generate_endpoint_ports(config)
 
 @patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': 'tests/jsons/user_config.json'.replace('\\', '/')})
 @patch('motor.config.node_manager.safe_open')
-def test_reload_success(mock_safe_open, config_data, hccl_data):
+def test_reload_success(mock_safe_open, config_data):
     """Test successful configuration reload"""
     clear_node_manager_config()
-    mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+    mock_safe_open.side_effect = create_config_mock(config_data)
 
     config = NodeManagerConfig()
 
-    # Store original values
-    original_model_name = config.basic_config.model_name
-    original_node_manager_port = config.api_config.node_manager_port
-
     # Set valid config paths for reload testing
     config.config_path = "/tmp/user_config.json"
-    config.hccl_path = "/tmp/test_hccl.json"
     config.last_modified = None  # Force reload
 
     # Create modified config data for reload
@@ -376,16 +232,10 @@ def test_reload_success(mock_safe_open, config_data, hccl_data):
     modified_config_data["basic_config"]["model_name"] = "modified_model"
     modified_config_data["api_config"]["node_manager_port"] = 9090
 
-    # Create modified HCCL data for reload
-    modified_hccl_data = hccl_data.copy()
-    modified_hccl_data["version"] = "2.0"
-
     # Update mock to return modified data on reload
     def reload_mock_side_effect(file_path, mode):
         if "user_config.json" in file_path or "/tmp/test_user_config.json" in file_path:
             return mock_open(read_data=json.dumps(modified_config_data)).return_value
-        elif "hccl.json" in file_path or "/tmp/test_hccl.json" in file_path:
-            return mock_open(read_data=json.dumps(modified_hccl_data)).return_value
         return mock_open().return_value
 
     mock_safe_open.side_effect = reload_mock_side_effect
@@ -401,16 +251,15 @@ def test_reload_success(mock_safe_open, config_data, hccl_data):
 
 @patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': '/tmp/test_node_manager_config.json'})
 @patch('motor.config.node_manager.safe_open')
-def test_reload_config_file_not_found(mock_safe_open, config_data, hccl_data):
+def test_reload_config_file_not_found(mock_safe_open, config_data):
     """Test reload when configuration file doesn't exist"""
     clear_node_manager_config()
-    mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+    mock_safe_open.side_effect = create_config_mock(config_data)
 
     config = NodeManagerConfig()
 
     # Set config_path to a non-existent path
     config.config_path = "/non/existent/path/user_config.json"
-    config.hccl_path = "/tmp/test_hccl.json"  # Valid path for hccl
 
     def exists_side_effect(path):
         return path != "/non/existent/path/user_config.json"
@@ -419,45 +268,23 @@ def test_reload_config_file_not_found(mock_safe_open, config_data, hccl_data):
         result = config.reload()
     assert result is False
 
-@patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': '/tmp/test_node_manager_config.json'})
-@patch('motor.config.node_manager.safe_open')
-def test_reload_hccl_file_not_found(mock_safe_open, config_data, hccl_data):
-    """Test reload when HCCL file doesn't exist"""
-    clear_node_manager_config()
-    mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
-
-    config = NodeManagerConfig()
-
-    # Set hccl_path to a non-existent path
-    config.config_path = "/tmp/test_node_manager_config.json"  # Valid path for config
-    config.hccl_path = "/non/existent/path/hccl.json"
-
-    def exists_side_effect(path):
-        return path != "/non/existent/path/hccl.json"
-
-    with patch('os.path.exists', side_effect=exists_side_effect):
-        result = config.reload()
-    assert result is False
 
 @patch.dict('os.environ', {'ROLE': 'both', 'USER_CONFIG_PATH': '/tmp/test_node_manager_config.json'})
 @patch('motor.config.node_manager.safe_open')
-def test_reload_invalid_json(mock_safe_open, config_data, hccl_data):
+def test_reload_invalid_json(mock_safe_open, config_data):
     """Test reload with invalid JSON in config file"""
     clear_node_manager_config()
-    mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+    mock_safe_open.side_effect = create_config_mock(config_data)
 
     config = NodeManagerConfig()
 
     # Set valid paths for testing
     config.config_path = "/tmp/test_node_manager_config.json"
-    config.hccl_path = "/tmp/test_hccl.json"
 
     # Mock invalid JSON for config file
     def invalid_json_mock(file_path, mode):
         if "/tmp/test_node_manager_config.json" in file_path:
             return mock_open(read_data="invalid json content").return_value
-        elif "/tmp/test_hccl.json" in file_path:
-            return mock_open(read_data=json.dumps(hccl_data)).return_value
         return mock_open().return_value
 
     mock_safe_open.side_effect = invalid_json_mock
@@ -466,10 +293,12 @@ def test_reload_invalid_json(mock_safe_open, config_data, hccl_data):
         result = config.reload()
     assert result is False
 
+
 def test_validate_config_success():
     """Test successful configuration validation"""
     config = create_config_object()
     config.validate_config()
+
 
 @pytest.mark.parametrize("param,value,expected_error", [
     ("node_manager_port", 0, "node_manager_port must be in range 1-65535"),
@@ -496,6 +325,7 @@ def test_validate_config_errors(param, value, expected_error):
     with pytest.raises(ValueError, match=expected_error):
         config.validate_config()
 
+
 def test_to_dict():
     """Test conversion to dictionary"""
     config = create_config_object()
@@ -511,19 +341,18 @@ def test_to_dict():
     assert config_dict["basic_config"]["model_name"] == "test_model"
 
     assert "config_path" not in config_dict
-    assert "hccl_path" not in config_dict
+
 
 def test_save_to_json_success():
     """Test successful saving configuration to JSON file"""
     config = create_config_object()
     config.config_path = "/tmp/test_config.json"
-    config.hccl_path = "/tmp/test_hccl.json"
 
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
         temp_path = f.name
 
     try:
-        result = config.save_to_json(temp_path, temp_path)
+        result = config.save_to_json(temp_path)
         assert result is True
 
         with open(temp_path, 'r') as f:
@@ -532,6 +361,7 @@ def test_save_to_json_success():
     finally:
         os.unlink(temp_path)
 
+
 def test_save_to_json_no_path():
     """Test saving configuration to unspecified path"""
     # Create config manually to avoid loading from files
@@ -539,6 +369,7 @@ def test_save_to_json_no_path():
 
     # Config without paths should fail
     assert config.save_to_json() is False
+
 
 def test_get_config_summary():
     """Test getting configuration summary"""
@@ -553,6 +384,7 @@ def test_get_config_summary():
     assert "8080" in summary
     assert "test_model" in summary
     assert "127.0.0.1" in summary
+
 
 @patch.dict('os.environ', {'ROLE': 'both'})
 def test_from_json_success():
@@ -573,15 +405,15 @@ def test_from_json_success():
         }
     }
 
-    hccl_data = create_hccl_data(1)
-
     config = create_config_object()
     NodeManagerConfig._update_from_config_data(config, test_config)
-    NodeManagerConfig._update_from_hccl_data(config, hccl_data)
+    
+    # Set device_num for testing (simulating visible devices)
+    config.basic_config.device_num = 8  # 8 devices for testing
+    
     NodeManagerConfig._generate_endpoint_ports(config)
 
     assert config.api_config.node_manager_port == 8080
     assert config.basic_config.model_name == "test_model"
     assert config.logging_config.log_level == "DEBUG"
     assert config.logging_config.log_max_line_length == 4096
-

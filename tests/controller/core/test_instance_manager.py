@@ -105,8 +105,8 @@ def test_config():
     # Generate pod IPs using list comprehension
     pod_ips = [f"127.0.0.{i}" for i in range(1, 9)]
 
-    p_parallel_config = ParallelConfig(dp=dp, tp=tp)
-    d_parallel_config = ParallelConfig(dp=dp * 4, tp=tp / 2)
+    p_parallel_config = ParallelConfig(dp_size=dp, tp_size=tp)
+    d_parallel_config = ParallelConfig(dp_size=dp * 4, tp_size=tp // 2)
 
     return {
         'dp': dp,
@@ -370,7 +370,7 @@ def test_add_instance(instance_manager, test_config):
         model_name="test_model",
         id=100,
         role=test_config['p_role'],
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
+        parallel_config=ParallelConfig(dp_size=test_config['dp'], tp_size=test_config['tp'] // 2)
     ))
     assert instance_manager.get_instance_num() == cur_instance_num + 1
 
@@ -380,7 +380,7 @@ def test_add_instance(instance_manager, test_config):
         model_name="test_model",
         id=100,
         role=test_config['p_role'],
-        parallel_config=ParallelConfig(dp=test_config['dp'], tp=test_config['tp'] / 2)
+        parallel_config=ParallelConfig(dp_size=test_config['dp'], tp_size=test_config['tp'] // 2)
     ))
     assert instance_manager.get_instance_num() == cur_instance_num + 1  # Should not increase
 

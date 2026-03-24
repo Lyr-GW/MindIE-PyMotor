@@ -18,7 +18,6 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 
 from motor.engine_server.config.base import BaseConfig, ServerConfig
 from motor.common.utils.logger import get_logger
-from motor.engine_server.utils.ranktable import get_data_parallel_address
 from motor.engine_server.constants import constants
 
 logger = get_logger("engine_server")
@@ -65,7 +64,7 @@ class VLLMConfig(BaseConfig):
     def initialize(self):
         super().initialize()
         if self.server_config.deploy_config.get_parallel_config(self.server_config.role).dp_size > 1:
-            self.data_parallel_address = get_data_parallel_address()
+            self.data_parallel_address = self.server_config.master_dp_ip
             self.data_parallel_rpc_port = self.server_config.deploy_config. \
                 get_parallel_config(self.server_config.role).dp_rpc_port
         if self.server_config.role == constants.PREFILL_ROLE or self.server_config.role == constants.DECODE_ROLE:

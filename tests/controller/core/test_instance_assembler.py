@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -13,13 +12,12 @@ import hashlib
 import pytest
 from unittest.mock import MagicMock, patch
 
-from motor.common.utils.data_builder import build_pod_ranktable, build_endpoints
 from motor.common.resources import Instance, ParallelConfig, Endpoint
-from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg
+from motor.common.resources.http_msg_spec import RegisterMsg, ReregisterMsg, Ranktable, ServerInfo, DeviceInfo
 from motor.controller.core.instance_assembler import (
     InstanceAssembler,
     AssembleInstanceMetadata,
-    RegisterStatus
+    RegisterStatus,
 )
 from motor.common.etcd.persistent_state import PersistentState
 from motor.common.utils.singleton import ThreadSafeSingleton
@@ -27,6 +25,37 @@ from motor.controller.core import InstanceManager
 from motor.config.controller import ControllerConfig
 
 
+def build_pod_ranktable(
+    pod_ip: str, 
+    pod_device_num: int, 
+    rank_offset: int = 0, 
+    is_supperpod: bool = True,
+) -> Ranktable:
+    """
+    Build pod level ranktable, it only have on server, so server_list size is 1.
+    This function is mainly for test case to build ranktable.
+    """
+    ranktable = Ranktable(
+        version="1.2",
+        status="completed",
+        server_count="1",
+        server_list=[
+            ServerInfo(
+                server_id=pod_ip,
+                container_ip=pod_ip,
+                device=[
+                    DeviceInfo(
+                        device_ip=pod_ip,
+                        device_id=str(i),
+                        rank_id=str(rank_offset + i),
+                        super_device_id="0" if is_supperpod else None,
+                    )
+                    for i in range(pod_device_num)
+                ]
+            )
+        ],
+    )
+    return ranktable
 
 @pytest.fixture
 def test_config():
@@ -36,7 +65,7 @@ def test_config():
     role = "prefill"
     pod_ip1 = "127.0.0.1"
     pod_ip2 = "127.0.0.2"
-    parallel_config = ParallelConfig(dp=dp, tp=tp)
+    parallel_config = ParallelConfig(dp_size=dp, tp_size=tp)
     return {
         'dp': dp,
         'tp': tp,
@@ -108,7 +137,8 @@ def create_register_msg(job_name: str, pod_ip: str, config: dict, **kwargs) -> R
         'mgmt_port': ["9090", "9094"],
         'nm_port': "8088",
         'parallel_config': config['parallel_config'],
-        'ranktable': build_pod_ranktable(pod_ip=pod_ip, pod_device_num=2*config['tp'])
+        'enable_multi_endpoints': True,
+        'device_num': 2 * config['tp']  # device count based on tp size
     }
     defaults.update(kwargs)
 
@@ -135,7 +165,8 @@ def create_reregister_msg(job_name: str, pod_ip: str, instance_id: int, config: 
         pod_ip=pod_ip,
         nm_port="8088",
         parallel_config=config['parallel_config'],
-        endpoints=endpoints_list
+        endpoints=endpoints_list,
+        enable_multi_endpoints=True,
     )
 
 
@@ -298,7 +329,7 @@ def test_reregister_new_instance(instance_assembler, test_config):
 
     # Build endpoints for reregister
     reg_msg = create_register_msg(job_name, test_config['pod_ip1'], test_config)
-    endpoints = build_endpoints(reg_msg)
+    endpoints = instance_assembler._build_single_endpoint(reg_msg, 0)
 
     msg = create_reregister_msg(job_name, test_config['pod_ip1'], instance_id=5, config=test_config, endpoints=endpoints)
     result = instance_assembler.reregister(msg)
@@ -316,21 +347,23 @@ def test_reregister_already_assembled_instance(instance_assembler, test_config):
     """Test reregistering to an already assembled instance returns -1"""
     job_name = "test_reregister"
 
-    # First reregister and assemble
+    # First reregister and assemble (multi-endpoint mode: 2 pods × 2 endpoints = 4 endpoints)
     reg_msg = create_register_msg(job_name, test_config['pod_ip1'], test_config)
-    endpoints = build_endpoints(reg_msg)
+    endpoints = instance_assembler._build_multi_endpoints(reg_msg, 0)
     msg = create_reregister_msg(job_name, test_config['pod_ip1'], instance_id=0, config=test_config, endpoints=endpoints)
     result = instance_assembler.reregister(msg)
     assert result == 0
 
     # Register second pod to complete assembly
-    reg_msg2 = create_register_msg(job_name, test_config['pod_ip2'], test_config,
-                                  ranktable=build_pod_ranktable(
-                                      pod_ip=test_config['pod_ip2'],
-                                      pod_device_num=2 * test_config['tp'],
-                                      rank_offset=2 * test_config['tp']
-                                  ))
-    endpoints2 = build_endpoints(reg_msg2, id_offset=test_config['tp'])
+    reg_msg2 = create_register_msg(
+        job_name, test_config['pod_ip2'], test_config,
+        ranktable=build_pod_ranktable(
+            pod_ip=test_config['pod_ip2'],
+            pod_device_num=2 * test_config['tp'],
+            rank_offset=2 * test_config['tp']
+        )
+    )
+    endpoints2 = instance_assembler._build_multi_endpoints(reg_msg2, 2)
     msg2 = create_reregister_msg(job_name, test_config['pod_ip2'], instance_id=0, config=test_config, endpoints=endpoints2)
     result2 = instance_assembler.reregister(msg2)
     assert result2 == 0
@@ -370,24 +403,6 @@ def test_eval_register_status(instance_assembler, test_config):
     with patch.object(InstanceManager(), 'has_active_instance_by_job_name', return_value=True):
         status = instance_assembler._eval_register_status(job_name_assembled)
         assert status == RegisterStatus.ASSEMBLED
-
-
-def test_invalid_register_message(instance_assembler):
-    """Test exception handling for invalid register messages"""
-    with pytest.raises(Exception, match="Invalid msg provided to register"):
-        instance_assembler.register(None)
-
-    with pytest.raises(Exception, match="Invalid msg provided to register"):
-        instance_assembler.register({})
-
-
-def test_invalid_reregister_message(instance_assembler):
-    """Test exception handling for invalid reregister messages"""
-    with pytest.raises(Exception, match="Invalid msg provided to reregister"):
-        instance_assembler.reregister(None)
-
-    with pytest.raises(Exception, match="Invalid msg provided to reregister"):
-        instance_assembler.reregister({})
 
 
 def test_assembly_incomplete_instance(instance_assembler, test_config):
@@ -430,17 +445,19 @@ def test_assembly_complete_instance_reregistration(instance_assembler, test_conf
     """Test assembly of complete instance (reregistration)"""
     job_name = "test_complete_reregister"
 
-    # Build endpoints for reregistration
+    # Build endpoints for reregistration (multi-endpoint mode: 2 pods × 2 endpoints = 4 endpoints)
     reg_msg1 = create_register_msg(job_name, test_config['pod_ip1'], test_config)
-    reg_msg2 = create_register_msg(job_name, test_config['pod_ip2'], test_config,
-                                  ranktable=build_pod_ranktable(
-                                      pod_ip=test_config['pod_ip2'],
-                                      pod_device_num=2 * test_config['tp'],
-                                      rank_offset=2 * test_config['tp']
-                                  ))
+    reg_msg2 = create_register_msg(
+        job_name, test_config['pod_ip2'], test_config,
+        ranktable=build_pod_ranktable(
+            pod_ip=test_config['pod_ip2'],
+            pod_device_num=2 * test_config['tp'],
+            rank_offset=2 * test_config['tp']
+        )
+    )
 
-    endpoints1 = build_endpoints(reg_msg1)
-    endpoints2 = build_endpoints(reg_msg2, id_offset=test_config['tp'])
+    endpoints1 = instance_assembler._build_multi_endpoints(reg_msg1, 0)
+    endpoints2 = instance_assembler._build_multi_endpoints(reg_msg2, 2)
 
     # Reregister both pods
     msg1 = create_reregister_msg(job_name, test_config['pod_ip1'], 0, config=test_config, endpoints=endpoints1)
@@ -547,7 +564,7 @@ def test_send_start_command_no_endpoints(instance_assembler, test_config):
 
     # Only add endpoints for first node manager
     reg_msg = create_register_msg("test", "127.0.0.1", test_config)
-    pod_endpoints = build_endpoints(reg_msg)
+    pod_endpoints = instance_assembler._build_single_endpoint(reg_msg, 0)
     instance.add_endpoints("127.0.0.1", pod_endpoints)
 
     metadata = AssembleInstanceMetadata(instance=instance)
@@ -1559,3 +1576,205 @@ def test_assemble_instance_with_healthy_endpoints(instance_assembler, test_confi
         assert metadata.register_status == RegisterStatus.ASSEMBLED
         # InstanceManager.add_instance should be called
         mock_im.add_instance.assert_called_once_with(instance)
+
+
+def test_is_endpoints_enough_multi_endpoint_disabled():
+    """Test is_endpoints_enough when enable_multi_endpoints is False"""
+    # Test case 1: Not enough node managers
+    instance1 = Instance(
+        job_name="test_not_enough_nodes",
+        model_name="test_model",
+        id=1,
+        role="both",
+        parallel_config=ParallelConfig(world_size=16),  # world_size=16
+        enable_multi_endpoints=False
+    )
+    instance1.add_node_mgr("127.0.0.1", "8080", device_num=8)  # 1 node with 8 devices
+    assert instance1.is_endpoints_enough() == False  # Need 2 nodes (16/8=2)
+    
+    # Test case 2: Enough node managers
+    instance2 = Instance(
+        job_name="test_enough_nodes",
+        model_name="test_model",
+        id=2,
+        role="both",
+        parallel_config=ParallelConfig(world_size=16),  # world_size=16
+        enable_multi_endpoints=False
+    )
+    instance2.add_node_mgr("127.0.0.1", "8080", device_num=8)
+    instance2.add_node_mgr("127.0.0.2", "8081", device_num=8)  # 2 nodes with 8 devices each
+    assert instance2.is_endpoints_enough() == True  # Have 2 nodes (16/8=2)
+    
+    # Test case 3: World size not divisible by device_num (should use ceiling)
+    instance3 = Instance(
+        job_name="test_ceiling_nodes",
+        model_name="test_model",
+        id=3,
+        role="both",
+        parallel_config=ParallelConfig(world_size=20),  # world_size=20
+        enable_multi_endpoints=False
+    )
+    instance3.add_node_mgr("127.0.0.1", "8080", device_num=8)
+    instance3.add_node_mgr("127.0.0.2", "8081", device_num=8)
+    instance3.add_node_mgr("127.0.0.3", "8082", device_num=8)  # 3 nodes with 8 devices each
+    assert instance3.is_endpoints_enough() == True  # Need 3 nodes (ceil(20/8)=3)
+    
+    # Test case 4: Multi-endpoint enabled (should check dp_size)
+    instance4 = Instance(
+        job_name="test_multi_endpoint",
+        model_name="test_model",
+        id=4,
+        role="both",
+        parallel_config=ParallelConfig(dp_size=4, tp_size=1, pp_size=1),
+        enable_multi_endpoints=True
+    )
+    # Add 2 endpoints (less than dp_size=4)
+    endpoints = {
+        0: Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="9000"),
+        1: Endpoint(id=1, ip="127.0.0.1", business_port="8001", mgmt_port="9001"),
+    }
+    instance4.add_endpoints("127.0.0.1", endpoints)
+    assert instance4.is_endpoints_enough() == False  # Need 4 endpoints
+    
+    # Add more endpoints to reach dp_size
+    endpoints2 = {
+        2: Endpoint(id=2, ip="127.0.0.2", business_port="8002", mgmt_port="9002"),
+        3: Endpoint(id=3, ip="127.0.0.2", business_port="8003", mgmt_port="9003"),
+    }
+    instance4.add_endpoints("127.0.0.2", endpoints2)
+    assert instance4.is_endpoints_enough() == True  # Have 4 endpoints
+
+
+def test_get_all_endpoints_multi_endpoint_disabled():
+    """Test get_all_endpoints when enable_multi_endpoints is False"""
+    # Test case 1: Multi-endpoint disabled - should only return endpoint with id=0
+    instance1 = Instance(
+        job_name="test_single_endpoint",
+        model_name="test_model",
+        id=1,
+        role="both",
+        parallel_config=ParallelConfig(dp_size=2, tp_size=1, pp_size=1),
+        enable_multi_endpoints=False
+    )
+    
+    # Add multiple endpoints
+    endpoints = {
+        0: Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="9000"),
+        1: Endpoint(id=1, ip="127.0.0.1", business_port="8001", mgmt_port="9001"),
+        2: Endpoint(id=2, ip="127.0.0.1", business_port="8002", mgmt_port="9002"),
+    }
+    instance1.add_endpoints("127.0.0.1", endpoints)
+    
+    all_eps = instance1.get_all_endpoints()
+    assert len(all_eps) == 1  # Only 1 endpoint
+    assert all_eps[0].id == 0  # Only endpoint with id=0
+    
+    # Test case 2: Multi-endpoint enabled - should return all endpoints
+    instance2 = Instance(
+        job_name="test_all_endpoints",
+        model_name="test_model",
+        id=2,
+        role="both",
+        parallel_config=ParallelConfig(dp_size=3, tp_size=1, pp_size=1),
+        enable_multi_endpoints=True
+    )
+    
+    instance2.add_endpoints("127.0.0.1", endpoints)
+    all_eps2 = instance2.get_all_endpoints()
+    assert len(all_eps2) == 3  # All 3 endpoints
+    assert set([ep.id for ep in all_eps2]) == {0, 1, 2}
+    
+    # Test case 3: Multiple pods with multi-endpoint disabled
+    instance3 = Instance(
+        job_name="test_multi_pods",
+        model_name="test_model",
+        id=3,
+        role="both",
+        parallel_config=ParallelConfig(dp_size=2, tp_size=1, pp_size=1),
+        enable_multi_endpoints=False
+    )
+    
+    # Add endpoints from multiple pods
+    endpoints_pod1 = {
+        0: Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="9000"),
+        1: Endpoint(id=1, ip="127.0.0.1", business_port="8001", mgmt_port="9001"),
+    }
+    endpoints_pod2 = {
+        2: Endpoint(id=2, ip="127.0.0.2", business_port="8002", mgmt_port="9002"),
+        3: Endpoint(id=3, ip="127.0.0.2", business_port="8003", mgmt_port="9003"),
+    }
+    instance3.add_endpoints("127.0.0.1", endpoints_pod1)
+    instance3.add_endpoints("127.0.0.2", endpoints_pod2)
+    
+    all_eps3 = instance3.get_all_endpoints()
+    assert len(all_eps3) == 1  # Only 1 endpoint (id=0)
+    assert all_eps3[0].id == 0
+
+
+def test_assemble_instance_multi_endpoint_disabled(instance_assembler):
+    """Test _assemble_instance when enable_multi_endpoints is False"""
+    # Create instance with enable_multi_endpoints=False
+    instance = Instance(
+        job_name="test_assemble_multi_disabled",
+        model_name="test_model",
+        id=1,
+        role="both",
+        parallel_config=ParallelConfig(world_size=16),  # world_size=16
+        enable_multi_endpoints=False
+    )
+    
+    # Add node managers with device_num
+    instance.add_node_mgr("127.0.0.1", "8080", device_num=8)
+    instance.add_node_mgr("127.0.0.2", "8081", device_num=8)
+    
+    # Add endpoints (only id=0 for each pod)
+    endpoints1 = {0: Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="9000")}
+    endpoints2 = {0: Endpoint(id=0, ip="127.0.0.2", business_port="8000", mgmt_port="9000")}
+    instance.add_endpoints("127.0.0.1", endpoints1)
+    instance.add_endpoints("127.0.0.2", endpoints2)
+    
+    # Create metadata
+    metadata = AssembleInstanceMetadata(instance=instance, register_timestamp=time.time())
+    
+    # Mock _filter_abnormal_endpoints and InstanceManager
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints'), \
+         patch('motor.controller.core.instance_assembler.InstanceManager') as mock_im_class:
+        
+        mock_im = MagicMock()
+        mock_im_class.return_value = mock_im
+        
+        instance_assembler._assemble_instance(metadata)
+        
+        # Should be assembled because we have enough node managers
+        assert metadata.register_status == RegisterStatus.ASSEMBLED
+        mock_im.add_instance.assert_called_once_with(instance)
+
+
+def test_assemble_instance_multi_endpoint_disabled_not_enough_nodes(instance_assembler):
+    """Test _assemble_instance when enable_multi_endpoints is False but not enough nodes"""
+    # Create instance with enable_multi_endpoints=False
+    instance = Instance(
+        job_name="test_assemble_not_enough",
+        model_name="test_model",
+        id=1,
+        role="both",
+        parallel_config=ParallelConfig(world_size=16),  # world_size=16
+        enable_multi_endpoints=False
+    )
+    
+    # Add only 1 node manager (need 2 for world_size=16 with device_num=8)
+    instance.add_node_mgr("127.0.0.1", "8080", device_num=8)
+    
+    # Add endpoint
+    endpoints = {0: Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="9000")}
+    instance.add_endpoints("127.0.0.1", endpoints)
+    
+    # Create metadata
+    metadata = AssembleInstanceMetadata(instance=instance, register_timestamp=time.time())
+    
+    # Mock _filter_abnormal_endpoints
+    with patch.object(instance_assembler, '_filter_abnormal_endpoints'):
+        instance_assembler._assemble_instance(metadata)
+        
+        # Should NOT be assembled because not enough node managers
+        assert metadata.register_status != RegisterStatus.ASSEMBLED

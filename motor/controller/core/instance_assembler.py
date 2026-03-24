@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,8 +13,9 @@ from enum import Enum
 from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
-from motor.common.resources import RegisterMsg, StartCmdMsg, ReregisterMsg, Instance
-from motor.common.utils.data_builder import build_ins_ranktable, build_endpoints
+from motor.common.resources import (
+    RegisterMsg, StartCmdMsg, ReregisterMsg, Instance, Endpoint, DeviceInfo, Ranktable
+)
 from motor.common.etcd.etcd_client import EtcdClient
 from motor.common.etcd.persistent_state import PersistentState
 from motor.common.utils.singleton import ThreadSafeSingleton
@@ -42,6 +42,8 @@ class AssembleInstanceMetadata(BaseModel):
     start_command_send_times: int = Field(default=0, description="Number of times start command was sent")
     register_timestamp: float = Field(default=0.0, description="Registration timestamp")
     is_reregister: bool = Field(default=False, description="Whether this is a re-registration")
+    ranktable: Ranktable | None = Field(default=None,
+                                        description="Instance level ranktable, only use in A2, A3. A5 will be None")
     
     # Non-serializable field (excluded from serialization)
     lock: Any = Field(default=None, exclude=True)
@@ -55,6 +57,7 @@ class AssembleInstanceMetadata(BaseModel):
 
 
 class InstanceAssembler(ThreadSafeSingleton):
+
     def __init__(self, config: ControllerConfig | None = None) -> None:
         super().__init__()
         # If the instance assembler is already initialized, return.
@@ -163,119 +166,6 @@ class InstanceAssembler(ThreadSafeSingleton):
             self.etcd_client = EtcdClient(etcd_config=self.etcd_config, tls_config=self.etcd_tls_config)
             logger.info("InstanceAssembler configuration updated")
 
-    def register(self, msg: RegisterMsg) -> int:
-        """
-        Each node manager(nm) will register to instance assembler when it starts,
-        and instance assembler will create or update the instance, then check
-        wether the instance is ready to be start. If ready, notify the relative
-        node manager to start inference engine and handle this instance to the
-        instance manager to manager instance's status.
-
-        Args:
-            msg (RegisterMsg):
-        """
-        if msg is None or not isinstance(msg, RegisterMsg):
-            raise Exception(f"Invalid msg provided to register. "
-                            f"expect RegisterMsg, got {type(msg)}")
-
-        with self.lock:
-            status = self._eval_register_status(msg.job_name)
-            if status == RegisterStatus.ASSEMBLED:
-                logger.info("Instance %s already registered, no need to register again.",
-                            msg.job_name)
-                return -1
-            elif status == RegisterStatus.NOT_REGISTERED:
-                instance = Instance(
-                    job_name=msg.job_name,
-                    model_name=msg.model_name,
-                    id=self.ins_id_cnt,
-                    role=msg.role,
-                    parallel_config=msg.parallel_config
-                )
-                metadata = AssembleInstanceMetadata(
-                    instance=instance,
-                    register_timestamp=time.time()
-                )
-                self.instances[msg.job_name] = metadata
-                self.ins_id_cnt += 1
-                logger.info("New instance %s(id:%d) created and added.", msg.job_name, instance.id)
-            elif status == RegisterStatus.ASSEMBLING:
-                metadata = self.instances[msg.job_name]
-                with metadata.lock:
-                    metadata.register_timestamp = time.time()
-
-        if metadata.instance.has_node_mgr(msg.pod_ip):
-            logger.info(
-                "Pod %s already registered in node_managers, skip duplicate registration.", msg.pod_ip
-            )
-            return 0
-
-        pod_endpoints = build_endpoints(msg, metadata.instance.get_endpoints_num())
-        metadata.instance.add_endpoints(msg.pod_ip, pod_endpoints)
-        metadata.instance.add_node_mgr(msg.pod_ip, msg.nm_port)
-        logger.info("Endpoints added for instance %s from pod %s.", msg.job_name, msg.pod_ip)
-
-        # Persist data on state change
-        with self.config_lock:
-            enable_persistence = self.etcd_config.enable_etcd_persistence
-        if enable_persistence and not self.persist_data():
-            logger.warning("Failed to persist instance assembler data to ETCD")
-
-        return 0
-
-    def reregister(self, msg: ReregisterMsg) -> int:
-        """
-        When controller restarts, all node manager will re-register to controller,
-        instance assembler will recover its instance info and max instance's id and
-        max device's cluster id according to the reregister msg.
-        """
-        if msg is None or not isinstance(msg, ReregisterMsg):
-            raise Exception(f"Invalid msg provided to reregister. "
-                            f"expect ReregisterMsg, got {type(msg)}")
-
-        with self.lock:
-            status = self._eval_register_status(msg.job_name)
-            if status == RegisterStatus.ASSEMBLED:
-                logger.info("Instance %s already registered, no need to reregister again.",
-                            msg.job_name)
-                return -1
-            elif status == RegisterStatus.NOT_REGISTERED:
-                instance = Instance(
-                    job_name=msg.job_name,
-                    model_name=msg.model_name,
-                    id=msg.instance_id,
-                    role=msg.role,
-                    parallel_config=msg.parallel_config
-                )
-                metadata = AssembleInstanceMetadata(
-                    instance=instance,
-                    register_timestamp=time.time(),
-                    is_reregister=True
-                )
-                self.instances[msg.job_name] = metadata
-                logger.info("New instance %s(id:%d) created and added by re-registration.",
-                            msg.job_name, instance.id)
-            elif status == RegisterStatus.ASSEMBLING:
-                metadata = self.instances[msg.job_name]
-                with metadata.lock:
-                    metadata.register_timestamp = time.time()
-                    metadata.is_reregister = True
-
-            # recover ins_id_cnt
-            self.ins_id_cnt = max(self.ins_id_cnt, msg.instance_id + 1)
-
-        metadata.instance.add_endpoints(msg.pod_ip, {endpoint.id: endpoint for endpoint in msg.endpoints})
-        metadata.instance.add_node_mgr(msg.pod_ip, msg.nm_port)
-        logger.info("Recovery instance assembler's info, current ins_id_idx is %d.", self.ins_id_cnt)
-
-        # Persist data on state change
-        with self.config_lock:
-            enable_persistence = self.etcd_config.enable_etcd_persistence
-        if enable_persistence and not self.persist_data():
-            logger.warning("Failed to persist instance assembler data to ETCD after reregistration")
-
-        return 0
-
     def persist_data(self) -> bool:
         """Persist instance assembler data to ETCD with version control and checksum"""
         try:
@@ -375,6 +265,111 @@ class InstanceAssembler(ThreadSafeSingleton):
             logger.error("Error restoring instance assembler data: %s", e)
             return False
 
+    def register(self, msg: RegisterMsg) -> int:
+        """
+        Each node manager(nm) will register to instance assembler when it starts,
+        and instance assembler will create or update the instance, then check
+        wether the instance is ready to be start. If ready, notify the relative
+        node manager to start inference engine and handle this instance to the
+        instance manager to manager instance's status.
+        """
+        with self.lock:
+            status = self._eval_register_status(msg.job_name)
+            if status == RegisterStatus.ASSEMBLED:
+                logger.info("Instance %s already registered, no need to register again.",
+                            msg.job_name)
+                return -1
+            elif status == RegisterStatus.NOT_REGISTERED:
+                instance = Instance(
+                    job_name=msg.job_name,
+                    model_name=msg.model_name,
+                    id=self.ins_id_cnt,
+                    role=msg.role,
+                    parallel_config=msg.parallel_config,
+                    enable_multi_endpoints=msg.enable_multi_endpoints
+                )
+                metadata = AssembleInstanceMetadata(
+                    instance=instance,
+                    register_timestamp=time.time()
+                )
+                self.instances[msg.job_name] = metadata
+                self.ins_id_cnt += 1
+                logger.info("New instance %s(id:%d) created and added.", msg.job_name, instance.id)
+            elif status == RegisterStatus.ASSEMBLING:
+                metadata = self.instances[msg.job_name]
+                with metadata.lock:
+                    metadata.register_timestamp = time.time()
+
+        if metadata.instance.has_node_mgr(msg.pod_ip):
+            logger.info(
+                "Pod %s already registered in node_managers, skip duplicate registration.", msg.pod_ip
+            )
+            return 0
+
+        metadata.instance.add_node_mgr(msg.pod_ip, msg.nm_port, msg.device_num)
+        pod_endpoints = self._build_endpoints(msg, metadata)
+        metadata.instance.add_endpoints(msg.pod_ip, pod_endpoints)
+        
+        logger.info("Endpoints added for instance %s from pod %s.", msg.job_name, msg.pod_ip)
+
+        # Persist data on state change
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if enable_persistence and not self.persist_data():
+            logger.warning("Failed to persist instance assembler data to ETCD")
+
+        return 0
+
+    def reregister(self, msg: ReregisterMsg) -> int:
+        """
+        When controller restarts, all node manager will re-register to controller,
+        instance assembler will recover its instance info and max instance's id and
+        max device's cluster id according to the reregister msg.
+        """
+        with self.lock:
+            status = self._eval_register_status(msg.job_name)
+            if status == RegisterStatus.ASSEMBLED:
+                logger.info("Instance %s already registered, no need to reregister again.",
+                            msg.job_name)
+                return -1
+            elif status == RegisterStatus.NOT_REGISTERED:
+                instance = Instance(
+                    job_name=msg.job_name,
+                    model_name=msg.model_name,
+                    id=msg.instance_id,
+                    role=msg.role,
+                    parallel_config=msg.parallel_config,
+                    enable_multi_endpoints=msg.enable_multi_endpoints
+                )
+                metadata = AssembleInstanceMetadata(
+                    instance=instance,
+                    register_timestamp=time.time(),
+                    is_reregister=True
+                )
+                self.instances[msg.job_name] = metadata
+                logger.info("New instance %s(id:%d) created and added by re-registration.",
+                            msg.job_name, instance.id)
+            elif status == RegisterStatus.ASSEMBLING:
+                metadata = self.instances[msg.job_name]
+                with metadata.lock:
+                    metadata.register_timestamp = time.time()
+                    metadata.is_reregister = True
+
+            # recover ins_id_cnt
+            self.ins_id_cnt = max(self.ins_id_cnt, msg.instance_id + 1)
+
+        metadata.instance.add_node_mgr(msg.pod_ip, msg.nm_port, msg.device_num)
+        metadata.instance.add_endpoints(msg.pod_ip, {endpoint.id: endpoint for endpoint in msg.endpoints})
+        logger.info("Recovery instance assembler's info, current ins_id_idx is %d.", self.ins_id_cnt)
+
+        # Persist data on state change
+        with self.config_lock:
+            enable_persistence = self.etcd_config.enable_etcd_persistence
+        if enable_persistence and not self.persist_data():
+            logger.warning("Failed to persist instance assembler data to ETCD after reregistration")
+
+        return 0
+
     def _eval_register_status(self, job_name: str) -> RegisterStatus:
         # First check if instance is already managed by InstanceManager (fully registered)
         if InstanceManager().has_active_instance_by_job_name(job_name):
@@ -386,6 +381,97 @@ class InstanceAssembler(ThreadSafeSingleton):
 
         # Instance not found anywhere
         return RegisterStatus.NOT_REGISTERED
+
+    def _build_endpoints(self, msg: RegisterMsg, metadata: AssembleInstanceMetadata) -> dict[int, Endpoint]:
+        id_offset = metadata.instance.get_endpoints_num()
+        
+        if msg.enable_multi_endpoints:
+            pod_endpoints = self._build_multi_endpoints(msg, id_offset)
+        else:
+            pod_endpoints = self._build_single_endpoint(msg, id_offset)
+        
+        if msg.ranktable is not None:
+            if metadata.ranktable is None:
+                metadata.ranktable = msg.ranktable
+            else:
+                for server_info in msg.ranktable.server_list:
+                    metadata.ranktable.server_list.append(server_info)
+                metadata.ranktable.server_count = str(len(metadata.ranktable.server_list))
+        
+        return pod_endpoints
+
+    def _build_single_endpoint(self, msg: RegisterMsg, id_offset: int) -> dict[int, Endpoint]:
+        devices_per_endpoint = msg.parallel_config.tp_size * msg.parallel_config.pp_size
+        device_infos = self._build_device_infos(msg, 0, devices_per_endpoint, id_offset)
+        
+        logger.info("Building single endpoint for pod %s, %d devices per endpoint",
+                    msg.pod_ip, devices_per_endpoint)
+        return {
+            0: Endpoint(
+                id=id_offset,
+                ip=msg.pod_ip,
+                business_port=msg.business_port[0],
+                mgmt_port=msg.mgmt_port[0],
+                device_infos=device_infos,
+            )
+        }
+
+    def _build_multi_endpoints(self, msg: RegisterMsg, id_offset: int) -> dict[int, Endpoint]:
+        devices_per_endpoint = msg.parallel_config.tp_size * msg.parallel_config.pp_size
+        total_devices_needed = len(msg.business_port) * devices_per_endpoint
+        total_devices_available = msg.device_num
+        
+        logger.info(
+            "Building multi endpoints: %d ports, %d devices per endpoint, total needed: %d, available: %d",
+            len(msg.business_port), devices_per_endpoint, total_devices_needed, total_devices_available,
+        )
+        
+        if total_devices_needed > total_devices_available:
+            logger.warning("Not enough devices: need %d, have %d. Will use available devices.",
+                           total_devices_needed, total_devices_available,)
+            max_endpoints = total_devices_available // devices_per_endpoint
+            actual_ports = msg.business_port[:max_endpoints]
+            logger.info("Will create %d endpoints instead of %d", max_endpoints, len(msg.business_port))
+        else:
+            actual_ports = msg.business_port
+
+        pod_endpoints: dict[int, Endpoint] = {}
+        for i, port in enumerate(actual_ports):
+            start_idx = devices_per_endpoint * i
+            end_idx = start_idx + devices_per_endpoint
+            
+            if end_idx > msg.device_num:
+                logger.warning("Not enough devices for endpoint %d, skipping", i)
+                break
+            
+            device_infos = self._build_device_infos(msg, start_idx, devices_per_endpoint, id_offset)
+            pod_endpoints[i] = Endpoint(
+                id=id_offset + i,
+                ip=msg.pod_ip,
+                business_port=port,
+                mgmt_port=msg.mgmt_port[i],
+                device_infos=device_infos,
+            )
+        logger.debug("Built %d endpoints for pod %s", len(pod_endpoints), msg.pod_ip)
+        return pod_endpoints
+
+    def _build_device_infos(
+        self,
+        msg: RegisterMsg,
+        start_idx: int,
+        devices_per_endpoint: int,
+        id_offset: int
+    ) -> list[DeviceInfo]:
+        if isinstance(msg.ranktable, Ranktable):
+            return msg.ranktable.server_list[0].device
+        
+        device_infos = []
+        for j in range(devices_per_endpoint):
+            device_idx = start_idx + j
+            if device_idx < msg.device_num:
+                global_rank_id = id_offset * devices_per_endpoint + device_idx
+                device_infos.append(DeviceInfo(device_id=str(device_idx), rank_id=str(global_rank_id)))
+        return device_infos
 
     def _start_commmand_sender(self) -> None:
         while not self.stop_event.is_set():
@@ -438,9 +524,21 @@ class InstanceAssembler(ThreadSafeSingleton):
             time.sleep(sleep_interval)
 
     def _send_start_command(self, metadata: AssembleInstanceMetadata) -> bool:
-        ins_ranktable = build_ins_ranktable(metadata.instance)
-
         is_succeed = True
+        
+        # Find master DP address (endpoint with id 0)
+        master_dp_ip = None
+        all_endpoints = metadata.instance.get_all_endpoints()
+        for endpoint in all_endpoints:
+            if endpoint.id == 0:
+                master_dp_ip = endpoint.ip
+                break
+        
+        if not master_dp_ip:
+            logger.error("Failed to find master DP address (endpoint with id 0) for instance %s", 
+                        metadata.instance.job_name)
+            return False
+        
         for node_mgr in metadata.instance.get_node_managers():
             endpoints = metadata.instance.get_endpoints(node_mgr.pod_ip)
             if not endpoints:
@@ -451,7 +549,8 @@ class InstanceAssembler(ThreadSafeSingleton):
                 role=metadata.instance.role,
                 instance_id=metadata.instance.id,
                 endpoints=[endpoint for endpoint in endpoints.values()],
-                ranktable=ins_ranktable
+                master_dp_ip=master_dp_ip,
+                ranktable=metadata.ranktable
             )
 
             is_succeed = NodeManagerApiClient.send_start_command(node_mgr, start_cmd_msg) and is_succeed

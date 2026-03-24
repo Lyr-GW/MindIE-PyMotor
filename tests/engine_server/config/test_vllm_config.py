@@ -14,7 +14,7 @@ import pytest
 import sys
 import json
 import argparse
-from unittest.mock import patch, MagicMock, Mock, mock_open
+from unittest.mock import patch, MagicMock, Mock
 from dataclasses import dataclass, field
 
 
@@ -32,11 +32,8 @@ def mock_vllm_module():
     ]
 
     # Save other modules that might be mocked
-    other_modules = [
-        'motor.engine_server.utils.ranktable'
-    ]
 
-    for module_name in vllm_related_modules + other_modules:
+    for module_name in vllm_related_modules:
         if module_name in sys.modules:
             original_modules[module_name] = sys.modules[module_name]
 
@@ -55,10 +52,6 @@ def mock_vllm_module():
     mock_run_log = MagicMock()
     mock_logger_module.get_logger = MagicMock(return_value=mock_run_log)
 
-    # Mock ranktable.get_data_parallel_address
-    mock_ranktable = Mock()
-    mock_ranktable.get_data_parallel_address = MagicMock(return_value="127.0.0.1")
-
     # Replace modules in sys.modules
     sys.modules['vllm'] = mock_vllm
     sys.modules['vllm.utils'] = mock_vllm.utils
@@ -66,7 +59,6 @@ def mock_vllm_module():
     sys.modules['vllm.entrypoints.openai'] = mock_vllm.entrypoints.openai
     sys.modules['vllm.entrypoints.openai.cli_args'] = mock_vllm.entrypoints.openai.cli_args
     sys.modules['motor.common.utils.logger'] = mock_logger_module
-    sys.modules['motor.engine_server.utils.ranktable'] = mock_ranktable
 
     # Build dictionary of mock objects to return
     mock_objects = {
@@ -75,14 +67,13 @@ def mock_vllm_module():
         'make_arg_parser': mock_vllm.entrypoints.openai.cli_args.make_arg_parser,
         'validate_args': mock_vllm.entrypoints.openai.cli_args.validate_parsed_serve_args,
         'run_log': mock_run_log,
-        'get_data_parallel_address': mock_ranktable.get_data_parallel_address
     }
 
     # Provide mock objects to tests
     yield mock_objects
 
     # Cleanup: restore original modules or remove mock modules
-    for module_name in vllm_related_modules + other_modules:
+    for module_name in vllm_related_modules:
         if module_name in original_modules:
             sys.modules[module_name] = original_modules[module_name]
         elif module_name in sys.modules:
@@ -247,8 +238,6 @@ class TestVLLMConfig:
     def test_initialize_no_data_parallel(self, imports, server_config, mock_vllm_module):
         VLLMConfig = imports['VLLMConfig']
         vllm_config = VLLMConfig(server_config=server_config)
-        mock_get_data_parallel_address = mock_vllm_module['get_data_parallel_address']
-        mock_get_data_parallel_address.return_value = None
 
         with patch.object(vllm_config, 'server_config') as mock_server_config:
             mock_deploy_config = MagicMock()
@@ -257,6 +246,7 @@ class TestVLLMConfig:
             mock_deploy_config.get_parallel_config.return_value = mock_parallel_config
             mock_server_config.deploy_config = mock_deploy_config
             mock_server_config.role = "union"
+            mock_server_config.master_dp_ip = "127.0.0.1"
 
             vllm_config.initialize()
 
@@ -266,8 +256,6 @@ class TestVLLMConfig:
     def test_initialize_with_data_parallel(self, imports, server_config, mock_vllm_module):
         VLLMConfig = imports['VLLMConfig']
         vllm_config = VLLMConfig(server_config=server_config)
-        mock_get_data_parallel_address = mock_vllm_module['get_data_parallel_address']
-        mock_get_data_parallel_address.return_value = "192.168.1.100"
 
         # For prefill role, we need to mock _process_kv_transfer_config method
         with patch.object(vllm_config, '_process_kv_transfer_config'):
@@ -279,6 +267,7 @@ class TestVLLMConfig:
                 mock_deploy_config.get_parallel_config.return_value = mock_parallel_config
                 mock_server_config.deploy_config = mock_deploy_config
                 mock_server_config.role = "prefill"
+                mock_server_config.master_dp_ip = "192.168.1.100"
 
                 vllm_config.initialize()
 

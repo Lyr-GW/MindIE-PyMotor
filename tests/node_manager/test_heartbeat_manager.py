@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -35,13 +33,11 @@ with mock_patch('motor.config.node_manager.NodeManagerConfig.from_json', return_
     from motor.config.node_manager import NodeManagerConfig
 
 
-def create_config_mock(config_data, hccl_data):
+def create_config_mock(config_data):
     def mock_side_effect(file_path, mode):
         file_path_str = str(file_path)
         if "user_config.json" in file_path_str:
             return mock_open(read_data=json.dumps(config_data)).return_value
-        elif "hccl.json" in file_path_str:
-            return mock_open(read_data=json.dumps(hccl_data)).return_value
         return mock_open().return_value
     return mock_side_effect
 
@@ -58,33 +54,15 @@ def config_data():
     }
 
 
-@pytest.fixture
-def hccl_data():
-    return {
-        "status": "completed",
-        "server_count": "1",
-        "version": "1.0",
-        "server_list": [{
-            "server_id": "192.168.1.100",
-            "host_ip": "192.168.1.200",
-            "container_ip": "192.168.1.100",
-            "device": [
-                {"device_id": "0", "device_ip": "192.168.1.1", "rank_id": "0"},
-                {"device_id": "1", "device_ip": "192.168.1.2", "rank_id": "1"}
-            ]
-        }]
-    }
-
-
 class TestHeartBeatManager:
     """HeartBeatManager test class"""
     @pytest.fixture
-    def heart_beat_manager(self, config_data, hccl_data):
+    def heart_beat_manager(self, config_data):
         """return HeartBeatManager instance"""
         with patch('motor.config.node_manager.safe_open') as mock_safe_open, \
              patch('threading.Thread') as mock_thread_class, \
-             patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': 'tests/jsons', 'USER_CONFIG_PATH': 'tests/jsons/user_config.json', 'HCCL_PATH': 'tests/jsons', 'ROLE': 'both'}):
-            mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+             patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': 'tests/jsons', 'USER_CONFIG_PATH': 'tests/jsons/user_config.json', 'ROLE': 'both'}):
+            mock_safe_open.side_effect = create_config_mock(config_data)
             mock_thread = MagicMock()
             mock_thread_class.return_value = mock_thread
             # clear HeartBeatManager instance (HeartbeatManager is still singleton)
@@ -103,12 +81,6 @@ class TestHeartBeatManager:
             config.basic_config.role = PDRole(config_data.get("role", "both"))
             config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
 
-            # Set device info from hccl_data
-            server = (hccl_data.get("server_list") or [None])[0]
-            if server:
-                devices = server.get("device") or []
-                config.basic_config.device_num = len(devices)
-
             manager = HeartbeatManager(config)
             yield manager
 
@@ -123,15 +95,12 @@ class TestHeartBeatManager:
     @pytest.fixture
     def sample_start_cmd_msg(self, sample_endpoints):
         """return start command message"""
-        device_info = DeviceInfo( device_id="0", device_ip="192.168.0.1",super_device_id="0",rank_id="0",cluster_id="0")
-        sever_info = ServerInfo(server_id="1", container_ip="192.168.1.100", device=[device_info])
-        test_rank_table = Ranktable(version="1.0", status="normal", server_count="1",server_list=[sever_info])
         return StartCmdMsg(
             job_name="test_job",
             role="prefill",
             instance_id=1,
             endpoints=sample_endpoints,
-            ranktable=test_rank_table
+            master_dp_ip="192.168.1.100"
         )
 
     @pytest.fixture
@@ -142,10 +111,10 @@ class TestHeartBeatManager:
             yield mock_report_heartbeat
 
     @patch('motor.config.node_manager.safe_open')
-    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'USER_CONFIG_PATH': './user_config.json', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'})
-    def test_singleton_pattern(self, mock_safe_open, config_data, hccl_data):
+    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'USER_CONFIG_PATH': './user_config.json', 'ROLE': 'both'})
+    def test_singleton_pattern(self, mock_safe_open, config_data):
         """test singleton pattern"""
-        mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+        mock_safe_open.side_effect = create_config_mock(config_data)
         # Clear singleton instance
         if hasattr(HeartbeatManager, '_instances') and HeartbeatManager in HeartbeatManager._instances:
             if HeartbeatManager in HeartbeatManager._instances:
@@ -287,11 +256,11 @@ class TestHeartBeatManager:
         assert mock_report_heartbeat.called
 
     @patch('motor.config.node_manager.safe_open')
-    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'USER_CONFIG_PATH': './user_config.json', 'HCCL_PATH': './tests/jsons/hccl.json', 'ROLE': 'both'})
-    def test_thread_safety(self, mock_safe_open, sample_start_cmd_msg, config_data, hccl_data):
+    @patch.dict('os.environ', {'JOB_NAME': 'test_job', 'CONFIG_PATH': './', 'USER_CONFIG_PATH': './user_config.json', 'ROLE': 'both'})
+    def test_thread_safety(self, mock_safe_open, sample_start_cmd_msg, config_data):
         """test thread safety"""
         import threading
-        mock_safe_open.side_effect = create_config_mock(config_data, hccl_data)
+        mock_safe_open.side_effect = create_config_mock(config_data)
         # Clear singleton instance
         if hasattr(HeartbeatManager, '_instances') and HeartbeatManager in HeartbeatManager._instances:
             if HeartbeatManager in HeartbeatManager._instances:

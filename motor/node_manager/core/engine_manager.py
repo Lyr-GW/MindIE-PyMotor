@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -79,8 +77,8 @@ class EngineManager(ThreadSafeSingleton):
         logger.info("start_cmd is %s", start_cmd)
         self.instance_id = start_cmd.instance_id
         self.endpoints = start_cmd.endpoints
-        self.instance_ranktable = start_cmd.ranktable
-        self._write_ranktable_to_file()
+        
+        self._write_ranktable_to_file(start_cmd.ranktable)
         return True
 
     def stop(self) -> None:
@@ -90,20 +88,23 @@ class EngineManager(ThreadSafeSingleton):
         except Exception as e:
             logger.error("Failed to stop engine manager: %s", e)
 
-    def _write_ranktable_to_file(self):
-        """
-        Write the instance's ranktable to a local JSON file.
-        """
-
-        # Determine output directory and filename
-        output_path = os.path.join(Env.ranktable_path)
+    def _write_ranktable_to_file(self, ins_ranktable: Ranktable | None):
+        """Write the instance's ranktable to a local JSON file."""
+        if ins_ranktable is None:
+            logger.info("Ranktable is None, skip writing to file")
+            return
+        
+        output_path = Env.ranktable_path
+        if output_path is None:
+            logger.warning("RANKTABLE_PATH env is not set, skip writing ranktable to file")
+            return
 
         try:
             # If ranktable is Ranktable type, use model_dump; otherwise, use as list[DeviceInfo]
-            if isinstance(self.instance_ranktable, Ranktable):
-                rk_dump = self.instance_ranktable.model_dump(exclude_none=True)
+            if isinstance(ins_ranktable, Ranktable):
+                rk_dump = ins_ranktable.model_dump(exclude_none=True)
             else:
-                rk_dump = self.instance_ranktable
+                rk_dump = ins_ranktable
 
             with open(output_path, "w") as f:
                 json.dump(rk_dump, f, ensure_ascii=False, indent=2)
@@ -127,12 +128,6 @@ class EngineManager(ThreadSafeSingleton):
                 "check job_name:%s, endpoint_num:%d error",
                 job_name, endpoint_num
             )
-            return False
-        if (
-            not isinstance(start_cmd.instance_id, int)
-            or not isinstance(start_cmd.ranktable, Ranktable)
-        ):
-            logger.error("check start_cmd ranktable error")
             return False
         for endpoint in start_cmd.endpoints:
             if endpoint.ip != pod_ip:
@@ -195,12 +190,8 @@ class EngineManager(ThreadSafeSingleton):
 
     def _get_ranktable(self) -> Ranktable | None:
         """Get ranktable from HCCL file"""
-        # Read config values under lock protection
-        with self.config_lock:
-            hccl_path = self._config.hccl_path
-
         try:
-            with open(hccl_path, 'r') as f:
+            with open(Env.hccl_path, 'r') as f:
                 data = json.load(f)
             if self._config.single_container_config.single_container_flag:
                 device_offset = self._config.single_container_config.device_offset
@@ -210,21 +201,17 @@ class EngineManager(ThreadSafeSingleton):
                 if server_list_key in data and len(data[server_list_key]) > 0 and \
                         device_key in data[server_list_key][0]:
                     data[server_list_key][0][device_key] = \
-                            data[server_list_key][0][device_key][device_offset: device_offset + device_num]
+                        data[server_list_key][0][device_key][device_offset: device_offset + device_num]
             return Ranktable(**data)
         except Exception as e:
-            logger.error("Failed to load ranktable from %s: %s", hccl_path, e)
+            logger.error("Failed to load ranktable from %s: %s", Env.hccl_path, e)
             return None
 
     def _gen_register_msg(self) -> RegisterMsg | None:
         if not self._check_config_paras():
             return None
 
-        # Get ranktable from HCCL file
         self.ranktable = self._get_ranktable()
-        if self.ranktable is None:
-            logger.error("Failed to get ranktable")
-            return None
 
         # Read config values under lock protection
         with self.config_lock:
@@ -236,6 +223,8 @@ class EngineManager(ThreadSafeSingleton):
             mgmt_port = self._config.endpoint_config.mgmt_ports
             node_manager_port = self._config.api_config.node_manager_port
             parallel_config = self._config.basic_config.parallel_config
+            enable_multi_endpoints = self._config.basic_config.enable_multi_endpoints
+            device_num = self._config.basic_config.device_num
 
         register_msg = RegisterMsg(
             job_name=job_name,
@@ -246,7 +235,9 @@ class EngineManager(ThreadSafeSingleton):
             mgmt_port=mgmt_port,
             nm_port=str(node_manager_port),
             parallel_config=parallel_config,
-            ranktable=self.ranktable,
+            enable_multi_endpoints=enable_multi_endpoints,
+            device_num=device_num,
+            ranktable=self.ranktable
         )
         return register_msg
 
@@ -269,6 +260,8 @@ class EngineManager(ThreadSafeSingleton):
             pod_ip = self._config.api_config.pod_ip
             node_manager_port = self._config.api_config.node_manager_port
             parallel_config = self._config.basic_config.parallel_config
+            enable_multi_endpoints = self._config.basic_config.enable_multi_endpoints
+            device_num = self._config.basic_config.device_num
 
         reregister_msg = ReregisterMsg(
             job_name=job_name,
@@ -277,6 +270,8 @@ class EngineManager(ThreadSafeSingleton):
             pod_ip=pod_ip,
             nm_port=str(node_manager_port),
             parallel_config=parallel_config,
+            enable_multi_endpoints=enable_multi_endpoints,
+            device_num=device_num,
             instance_id=self.instance_id,
             endpoints=self.endpoints,
         )

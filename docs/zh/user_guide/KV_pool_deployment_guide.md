@@ -66,7 +66,8 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 4
       }
     },
     "engine_config": {
@@ -110,7 +111,8 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 4
       }
     },
     "engine_config": {

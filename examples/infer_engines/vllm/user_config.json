@@ -45,6 +45,7 @@
   },
   "motor_engine_prefill_config": {
     "engine_type": "vllm",
+    "enable_multi_endpoints": true,
     "model_config": {
       "model_name": "qwen3-8B",
       "model_path": "/mnt/weight/qwen3_8B",
@@ -54,7 +55,8 @@
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 4
       }
     },
     "engine_config": {
@@ -80,6 +82,7 @@
   },
   "motor_engine_decode_config": {
     "engine_type": "vllm",
+    "enable_multi_endpoints": true,
     "model_config": {
       "model_name": "qwen3-8B",
       "model_path": "/mnt/weight/qwen3_8B",
@@ -89,7 +92,8 @@
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
-        "dp_rpc_port": 9000
+        "dp_rpc_port": 9000,
+        "world_size": 4
       }
     },
     "engine_config": {

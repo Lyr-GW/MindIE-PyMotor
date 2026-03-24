@@ -26,11 +26,16 @@ DECODE_PARALLEL_CONFIG_KEY = "decode_parallel_config"
 @dataclass
 class ParallelConfig:
     """Configuration for parallel processing (both prefill and decode)"""
-    dp_size: int
-    tp_size: int
-    pp_size: int
-    enable_ep: bool
-    dp_rpc_port: int
+    dp_size: int = 1
+    tp_size: int = 1
+    pp_size: int = 1
+    enable_ep: bool = False
+    dp_rpc_port: int = 9000
+    world_size: int | None = None
+
+    def __post_init__(self):
+        if self.world_size is None:
+            self.world_size = self.dp_size * self.tp_size * self.pp_size
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ParallelConfig":

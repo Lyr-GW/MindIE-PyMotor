@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -11,13 +9,9 @@
 # See the Mulan PSL v2 for more details.
 
 import os
-import sys
 import json
-import signal
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from motor.node_manager.core.daemon import Daemon
 from motor.config.node_manager import NodeManagerConfig
@@ -25,13 +19,11 @@ from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.instance import PDRole, ParallelConfig
 
 
-def create_config_mock(config_data, hccl_data):
+def create_config_mock(config_data):
     def mock_side_effect(file_path, mode):
         file_path_str = str(file_path)
         if "user_config.json" in file_path_str:
             return mock_open(read_data=json.dumps(config_data)).return_value
-        elif "hccl.json" in file_path_str:
-            return mock_open(read_data=json.dumps(hccl_data)).return_value
         return mock_open().return_value
     return mock_side_effect
 
@@ -49,47 +41,23 @@ def config_data():
 
 
 @pytest.fixture
-def hccl_data():
-    return {
-        "status": "completed",
-        "server_count": "1",
-        "version": "1.0",
-        "server_list": [{
-            "server_id": "192.168.1.100",
-            "host_ip": "192.168.1.200",
-            "container_ip": "192.168.1.100",
-            "hardware_type": "Ascend910",
-            "device": [
-                {"device_id": str(i), "device_ip": f"192.168.1.{i+1}", "rank_id": str(i)}
-                for i in range(8)  # 8 devices for TYPE_800I_A2
-            ]
-        }]
-    }
-
-
-@pytest.fixture
-def daemon(config_data, hccl_data):
+def daemon(config_data):
     # Clear singleton instance (Daemon is still singleton)
     if hasattr(Daemon, '_instances') and Daemon in Daemon._instances:
         if Daemon in Daemon._instances:
             del Daemon._instances[Daemon]
 
     config_path = os.path.join(os.path.dirname(__file__), '..', 'jsons', 'user_config.json')
-    hccl_path = os.path.join(os.path.dirname(__file__), '..', 'jsons', 'hccl_a2.json')
-    
-    with patch.dict('os.environ', {'JOB_NAME': 'test_job', 'USER_CONFIG_PATH': config_path, 'HCCL_PATH': hccl_path, 'ROLE': 'both'}):
+    with patch.dict('os.environ', {'JOB_NAME': 'test_job', 'USER_CONFIG_PATH': config_path, 'ROLE': 'both'}):
         config = NodeManagerConfig()
         # Manually set the configuration data
         config.basic_config.parallel_config = ParallelConfig(tp_size=config_data["parallel_config"]["tp_size"], pp_size=config_data["parallel_config"]["pp_size"])
         config.basic_config.job_name = config_data.get("model_name", "test_job")
         config.basic_config.role = PDRole(config_data.get("role", "both"))
         config.api_config.node_manager_port = config_data.get("node_manager_port", 8080)
-
-        # Set device info from hccl_data
-        server = (hccl_data.get("server_list") or [None])[0]
-        if server:
-            devices = server.get("device") or []
-            config.basic_config.device_num = len(devices)
+        
+        # Set device_num for testing (simulating visible devices)
+        config.basic_config.device_num = 8  # 8 devices for testing
 
         daemon_instance = Daemon(config)
         yield daemon_instance
@@ -104,17 +72,14 @@ def endpoints():
 
 
 class TestDaemon:
-    
-    # Note: gen_engine_ports method doesn't exist in Daemon class
-    # This test is removed as the method doesn't exist in the implementation
-    
     @patch('subprocess.Popen')
     def test_pull_engine_success(self, mock_popen, daemon, endpoints):
         mock_process = MagicMock(pid=12345)
         mock_process.poll.return_value = None  # Process is still running
         mock_popen.return_value = mock_process
         instance_id = 1
-        daemon.pull_engine(PDRole.ROLE_P, endpoints, instance_id)
+        master_dp_ip = "192.168.1.100"
+        daemon.pull_engine(PDRole.ROLE_P, endpoints, instance_id, master_dp_ip)
         # Verify that process was added to engine_pids
         assert len(daemon.engine_pids) > 0
         assert 12345 in daemon.engine_pids
@@ -125,7 +90,7 @@ class TestDaemon:
     ])
     def test_pull_engine_invalid_params(self, daemon, invalid_endpoint, error_msg):
         with pytest.raises(RuntimeError, match=error_msg):
-            daemon.pull_engine(PDRole.ROLE_U, [invalid_endpoint], instance_id=1)
+            daemon.pull_engine(PDRole.ROLE_U, [invalid_endpoint], instance_id=1, master_dp_ip="192.168.1.100")
     
     @pytest.mark.parametrize("exception,should_not_raise", [
         (None, True),
@@ -166,7 +131,8 @@ class TestDaemon:
         
         endpoint = Endpoint(id=5, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
         instance_id = 1
-        daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id)
+        master_dp_ip = "192.168.1.100"
+        daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id, master_dp_ip)
         
         # Verify that process was added to engine_pids
         assert len(daemon.engine_pids) > 0

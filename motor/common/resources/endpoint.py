@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -16,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from motor.common.utils.logger import get_logger
 
-HEARTBEAT_TIMEOUT = 5 # 5 second
+HEARTBEAT_TIMEOUT = 5  # 5 seconds
 
 logger = get_logger(__name__)
 
@@ -66,10 +64,10 @@ class WorkloadAction(Enum):
 
 
 class DeviceInfo(BaseModel):
+    device_ip: str | None = Field(default=None, description="IP address of the device, A5 will be None")
     device_id: str = Field(..., description="Local rank id")
-    device_ip: str = Field(..., description="Device IP address")
-    super_device_id: str | None = Field(None, description="Super device id, default is None")
     rank_id: str = Field(..., description="Global rank id")
+    super_device_id: str | None = Field(default=None, description="Super device id, A5 will be None")
 
 
 class EndpointStatus(str, Enum):

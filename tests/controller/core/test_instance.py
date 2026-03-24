@@ -15,7 +15,7 @@ from motor.common.resources.endpoint import Endpoint
 
 
 def test_instance_active() -> None:
-    parallel_config = ParallelConfig(dp=2, tp=2)
+    parallel_config = ParallelConfig(dp_size=2, tp_size=2)
     pod_ip = "127.0.0.1"
     endpoints = {
         1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
@@ -33,7 +33,7 @@ def test_instance_active() -> None:
 
 
 def test_add_endpoints() -> None:
-    parallel_config = ParallelConfig(dp=4, tp=2)
+    parallel_config = ParallelConfig(dp_size=4, tp_size=2)
     pod_ip1 = "127.0.0.1"
     endpoints1 = {
         1: Endpoint(id=1, ip=pod_ip1, business_port="1001", mgmt_port="9001"),
@@ -50,7 +50,7 @@ def test_add_endpoints() -> None:
 
 
 def test_del_endpoints() -> None:
-    parallel_config = ParallelConfig(dp=2, tp=2)
+    parallel_config = ParallelConfig(dp_size=2, tp_size=2)
     pod_ip = "127.0.0.1"
     endpoints = {
         1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
@@ -171,7 +171,7 @@ def test_readonly_instance_to_instance() -> None:
 
 def test_is_endpoints_enough_equal_dp_size() -> None:
     """Test is_endpoints_enough returns True when endpoints equal dp size"""
-    parallel_config = ParallelConfig(dp=2, tp=2)
+    parallel_config = ParallelConfig(dp_size=2, tp_size=2)
     pod_ip = "127.0.0.1"
     endpoints = {
         1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
@@ -192,7 +192,7 @@ def test_is_endpoints_enough_equal_dp_size() -> None:
 
 def test_is_endpoints_enough_greater_than_dp_size() -> None:
     """Test is_endpoints_enough returns False when endpoints greater than dp size"""
-    parallel_config = ParallelConfig(dp=2, tp=2)
+    parallel_config = ParallelConfig(dp_size=2, tp_size=2)
     pod_ip = "127.0.0.1"
     endpoints = {
         1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
@@ -214,7 +214,7 @@ def test_is_endpoints_enough_greater_than_dp_size() -> None:
 
 def test_is_endpoints_enough_less_than_dp_size() -> None:
     """Test is_endpoints_enough returns False when endpoints less than dp size"""
-    parallel_config = ParallelConfig(dp=4, tp=2)
+    parallel_config = ParallelConfig(dp_size=4, tp_size=2)
     pod_ip = "127.0.0.1"
     endpoints = {
         1: Endpoint(id=1, ip=pod_ip, business_port="1001", mgmt_port="9001"),
@@ -235,7 +235,7 @@ def test_is_endpoints_enough_less_than_dp_size() -> None:
 
 def test_is_endpoints_enough_no_endpoints() -> None:
     """Test is_endpoints_enough returns False when no endpoints"""
-    parallel_config = ParallelConfig(dp=2, tp=2)
+    parallel_config = ParallelConfig(dp_size=2, tp_size=2)
     instance = Instance(
         job_name="test_no_endpoints",
         model_name="test_model",

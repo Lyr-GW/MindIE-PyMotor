@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -54,6 +52,8 @@ SERVER_LIST = "server_list"
 DEVICE = 'device'
 HARDWARE_TYPE_KEY = "hardware_type"
 MODEL_NAME_KEY = "model_name"
+ENABLE_MULTI_ENDPOINTS_KEY = "enable_multi_endpoints"
+
 
 logger = get_logger(__name__)
 
@@ -83,6 +83,8 @@ class BasicConfig:
     device_num: int = 0
     # Parallel configuration
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
+    # Multi-endpoints configuration
+    enable_multi_endpoints: bool = True
 
 
 @dataclass
@@ -120,7 +122,7 @@ class SingleContainerNodemanagerConfig:
     def from_json(cls, user_config_data: dict[str, Any]) -> 'SingleContainerNodemanagerConfig':
         config = cls()
         deploy_mode = user_config_data.get('motor_coordinator_config', {}).get(
-                "scheduler_config", {}).get('deploy_mode', '')
+            "scheduler_config", {}).get('deploy_mode', '')
         if not deploy_mode == 'pd_disaggregation_single_container' or not Env.role or Env.index is None:
             return config
 
@@ -173,10 +175,7 @@ class SingleContainerNodemanagerConfig:
 
 @dataclass
 class NodeManagerConfig:
-    """
-    Global configuration singleton for node manager.
-    Loads basic config and HCCL config file.
-    """
+    """ Global configuration singleton for node manager """
 
     # Configuration sections
     api_config: APIConfig = field(default_factory=APIConfig)
@@ -188,7 +187,6 @@ class NodeManagerConfig:
 
     # Internal fields
     config_path: str = field(init=False)
-    hccl_path: str = field(init=False)
     last_modified: float | None = field(default=None, init=False)
 
     def __post_init__(self):
@@ -196,15 +194,6 @@ class NodeManagerConfig:
         # Set internal paths with defaults only if not already set (e.g., by from_json)
         if not hasattr(self, 'config_path') or self.config_path is None:
             self.config_path = Env.user_config_path
-
-        if not hasattr(self, 'hccl_path') or self.hccl_path is None:
-            # Handle HCCL path: if it's a directory, append hccl.json; otherwise use as-is
-            hccl_base_path = Env.hccl_path or (Env.config_path or os.getcwd())
-            hccl_path_obj = Path(hccl_base_path)
-            if hccl_path_obj.is_dir():
-                self.hccl_path = str(hccl_path_obj / "hccl.json")
-            else:
-                self.hccl_path = hccl_base_path
 
         # Set last modified time if config file exists
         try:
@@ -217,8 +206,8 @@ class NodeManagerConfig:
         self.validate_config()
 
     @classmethod
-    def from_json(cls, config_path: str | None = None, hccl_path: str | None = None) -> 'NodeManagerConfig':
-        """Load configuration from config and HCCL files"""
+    def from_json(cls, config_path: str | None = None) -> 'NodeManagerConfig':
+        """Load configuration from config"""
 
         if config_path is None:
             config_path = Env.user_config_path
@@ -226,26 +215,12 @@ class NodeManagerConfig:
         config_path_obj = Path(config_path)
         logger.info("Loading configuration files: config=%s", config_path_obj)
 
-        if hccl_path is None:
-            # Try to find HCCL file in the same directory
-            config_dir = config_path_obj.parent
-            hccl_path = str(config_dir / "hccl.json")
-        else:
-            # If hccl_path is a directory, append the default hccl filename
-            hccl_path_obj = Path(hccl_path)
-            if hccl_path_obj.is_dir():
-                hccl_path = str(hccl_path_obj / "hccl.json")
-
-        hccl_path_obj = Path(hccl_path)
-        logger.info("HCCL file: %s", hccl_path_obj)
-
         # Create configuration instance with default values
         try:
             config = cls()
 
             # Set the resolved paths
             config.config_path = config_path
-            config.hccl_path = hccl_path
 
             # Load config JSON
             config_data = {}
@@ -269,9 +244,19 @@ class NodeManagerConfig:
                         if Env.role == "prefill":
                             config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
                                 user_cfg[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][PREFILL_PARALLEL_CONFIG_KEY]
+                            # Set enable_multi_endpoints from prefill config
+                            enable_multi_endpoints = user_cfg[
+                                MOTOR_ENGINE_PREFILL_CONFIG_KEY
+                            ].get(ENABLE_MULTI_ENDPOINTS_KEY, True)
+                            config_data[BASIC_CONFIG_KEY][ENABLE_MULTI_ENDPOINTS_KEY] = enable_multi_endpoints
                         elif Env.role == "decode":
                             config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
                                 user_cfg[MOTOR_ENGINE_DECODE_CONFIG_KEY][MODEL_CONFIG_KEY][DECODE_PARALLEL_CONFIG_KEY]
+                            # Set enable_multi_endpoints from decode config
+                            enable_multi_endpoints = user_cfg[
+                                MOTOR_ENGINE_DECODE_CONFIG_KEY
+                            ].get(ENABLE_MULTI_ENDPOINTS_KEY, True)
+                            config_data[BASIC_CONFIG_KEY][ENABLE_MULTI_ENDPOINTS_KEY] = enable_multi_endpoints
                         tls_configs = [MGMT_TLS_CONFIG]
                         _update_tls_config(tls_configs, config_data, user_cfg)
                     else:
@@ -284,35 +269,10 @@ class NodeManagerConfig:
                     raise ValueError(f"Unable to read config file {config_path}: {e}") from e
             else:
                 logger.warning("Config file does not exist, using default configuration: %s", config_path_obj)
+                raw = None
 
-
-            # Load HCCL JSON
-            hccl_data = {}
-            if os.path.exists(str(hccl_path_obj)):
-                try:
-                    with safe_open(str(hccl_path_obj), "r") as f:
-                        hccl_data = json.load(f)
-                    logger.info("Successfully loaded HCCL file: %s", hccl_path_obj)
-                    if config.single_container_config.single_container_flag:
-                        device_offset = config.single_container_config.device_offset
-                        device_num = config.single_container_config.device_num
-                        if SERVER_LIST in hccl_data and len(hccl_data[SERVER_LIST]) > 0 and \
-                                DEVICE in hccl_data[SERVER_LIST][0]:
-                            hccl_data[SERVER_LIST][0][DEVICE] = \
-                                hccl_data[SERVER_LIST][0][DEVICE][device_offset: device_offset + device_num]
-                    # Update configuration from loaded data
-                    cls._update_from_hccl_data(config, hccl_data)
-                    # Generate endpoint ports only if we have HCCL data
-                    cls._generate_endpoint_ports(config)
-                except Exception as e:
-                    logger.error("Failed to read HCCL file: %s", e)
-                    raise ValueError(f"Unable to read HCCL file {hccl_path}: {e}") from e
-            else:
-                logger.warning("HCCL file does not exist, using default configuration: %s", hccl_path_obj)
-                # No HCCL data, set default endpoint configuration
-                config.endpoint_config.endpoint_num = 0
-                config.endpoint_config.service_ports = []
-                config.endpoint_config.mgmt_ports = []
+            # Get device count from config
+            cls._set_device_count_from_config(config, raw)
 
             config.validate_config()
 
@@ -373,18 +333,64 @@ class NodeManagerConfig:
             raise ValueError("Invalid role value from environment") from e
 
     @classmethod
-    def _update_from_hccl_data(cls, config: 'NodeManagerConfig', data: dict[str, Any]):
-        """Update configuration from HCCL JSON data"""
-        # Extract server and device information
-        server = (data.get("server_list") or [None])[0]
-        if server:
-            # Update API config with server information
-            config.api_config.pod_ip = server.get("container_ip")
+    def _set_device_count_from_config(cls, config: 'NodeManagerConfig', raw: dict | None):
+        """
+        Set device count from config based on role.
+        For prefill role, use p_pod_npu_num.
+        For decode role, use d_pod_npu_num.
+        For single_container mode, use parallel_config.world_size instead.
+        """
+        try:
+            if not isinstance(raw, dict) or "motor_deploy_config" not in raw:
+                logger.warning("No motor_deploy_config found, using default device configuration")
+                config.basic_config.device_num = 0
+                config.endpoint_config.endpoint_num = 0
+                config.endpoint_config.service_ports = []
+                config.endpoint_config.mgmt_ports = []
+                return
 
-            # Extract device count
-            devices = server.get("device") or []
-            device_count = len(devices)
+            if config.single_container_config.single_container_flag:
+                cls._set_device_count_for_single_container(config)
+            else:
+                cls._set_device_count_for_normal_mode(config, raw)
+
+            cls._generate_endpoint_ports(config)
+            
+        except Exception as e:
+            logger.error("Failed to get device count from config: %s", e)
+            config.basic_config.device_num = 0
+            config.endpoint_config.endpoint_num = 0
+            config.endpoint_config.service_ports = []
+            config.endpoint_config.mgmt_ports = []
+
+    @classmethod
+    def _set_device_count_for_single_container(cls, config: 'NodeManagerConfig'):
+        """Set device count for single container mode using parallel_config.world_size"""
+        device_count = config.basic_config.parallel_config.world_size
+        if device_count > 0:
+            logger.info("Single container mode: using world_size %d from parallel_config", device_count)
             config.basic_config.device_num = device_count
+        else:
+            logger.warning("Single container mode: world_size is 0, falling back to single_container_config.device_num")
+            config.basic_config.device_num = config.single_container_config.device_num or 0
+
+    @classmethod
+    def _set_device_count_for_normal_mode(cls, config: 'NodeManagerConfig', raw: dict):
+        """Set device count for normal mode using motor_deploy_config"""
+        deploy_config = raw["motor_deploy_config"]
+        if Env.role == "prefill":
+            device_count = deploy_config.get("p_pod_npu_num", 0)
+        elif Env.role == "decode":
+            device_count = deploy_config.get("d_pod_npu_num", 0)
+        else:
+            device_count = 0
+        
+        if device_count > 0:
+            logger.info("Using %d devices from config for role %s", device_count, Env.role)
+            config.basic_config.device_num = device_count
+        else:
+            logger.warning("No device count found in config for role %s", Env.role)
+            config.basic_config.device_num = 0
 
     @classmethod
     def _generate_endpoint_ports(cls, config: 'NodeManagerConfig'):
@@ -395,14 +401,21 @@ class NodeManagerConfig:
         dp = config.basic_config.parallel_config.dp_size
         devices_per_dp = config.basic_config.parallel_config.tp_size * config.basic_config.parallel_config.pp_size
 
-        if config.basic_config.device_num < devices_per_dp or dp < 1:
+        # only enable multi endpoints should check device count
+        if (
+            (config.basic_config.enable_multi_endpoints and config.basic_config.device_num < devices_per_dp)
+            or dp < 1
+        ):
             raise ValueError(
                 f"Device count ({config.basic_config.device_num}) must bigger than "
                 f"or equal to devices per dp ({devices_per_dp}) "
                 f"and dp must be bigger than 0"
             )
 
-        config.endpoint_config.endpoint_num = min(dp, config.basic_config.device_num // devices_per_dp)
+        if not config.basic_config.enable_multi_endpoints:
+            config.endpoint_config.endpoint_num = 1
+        else:
+            config.endpoint_config.endpoint_num = min(dp, config.basic_config.device_num // devices_per_dp)
         config.endpoint_config.service_ports = [
             str(config.endpoint_config.base_port + i * 2)
             for i in range(config.endpoint_config.endpoint_num)
@@ -465,11 +478,11 @@ class NodeManagerConfig:
                 return True
 
             logger.info("Configuration file change detected, reloading...")
-            new_config = NodeManagerConfig.from_json(self.config_path, self.hccl_path)
+            new_config = NodeManagerConfig.from_json(self.config_path)
 
             # Update current configuration
             for field_name in self.__dataclass_fields__:
-                if field_name not in ['config_path', 'hccl_path', 'last_modified']:
+                if field_name not in ['config_path', 'last_modified']:
                     setattr(self, field_name, getattr(new_config, field_name))
 
             self.last_modified = current_mtime
@@ -495,17 +508,15 @@ class NodeManagerConfig:
 
         # Remove internal fields that shouldn't be in the output
         config_dict.pop('config_path', None)
-        config_dict.pop('hccl_path', None)
         config_dict.pop('last_modified', None)
 
         return config_dict
 
-    def save_to_json(self, config_path: str | None = None, hccl_path: str | None = None) -> bool:
+    def save_to_json(self, config_path: str | None = None) -> bool:
         """Save configuration to JSON files"""
         save_config_path = config_path or self.config_path
-        save_hccl_path = hccl_path or self.hccl_path
 
-        if not save_config_path or not save_hccl_path:
+        if not save_config_path:
             logger.error("Save paths not specified")
             return False
 
@@ -520,10 +531,6 @@ class NodeManagerConfig:
                 component_name="node manager",
             )
             logger.info("Configuration saved to: %s", save_config_path)
-
-            # Note: HCCL file saving is not implemented as it's typically read-only
-            # from the cluster management system
-
             return True
         except Exception as e:
             logger.error("Failed to save configuration: %s", e)
@@ -552,6 +559,7 @@ class NodeManagerConfig:
             f"    ├─ Role:                {self.basic_config.role}\n"
             f"    ├─ Model:               {self.basic_config.model_name}\n"
             f"    ├─ Device Count:        {self.basic_config.device_num}\n"
+            f"    ├─ Multi Endpoints:     {self.basic_config.enable_multi_endpoints}\n"
             f"    ├─ Endpoint Count:      {self.endpoint_config.endpoint_num}\n"
             f"    └─ Hardware Type:       {self.basic_config.hardware_type}\n"
             "\n"

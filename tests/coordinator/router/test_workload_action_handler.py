@@ -83,7 +83,7 @@ class TestWorkloadActionHandler:
             id=1,
             role=PDRole.ROLE_P,
             status=InsStatus.ACTIVE,
-            parallel_config=ParallelConfig(dp=1),
+            parallel_config=ParallelConfig(dp_size=1),
         )
         endpoint = Endpoint(
             id=1,

@@ -53,7 +53,8 @@
           "tp_size": 8,
           "pp_size": 1,
           "enable_ep": true,
-          "dp_rpc_port": 9000
+          "dp_rpc_port": 9000,
+          "world_size": 16
         }
       },
       "engine_config": {
@@ -96,7 +97,8 @@
           "tp_size": 1,
           "pp_size": 1,
           "enable_ep": true,
-          "dp_rpc_port": 9000
+          "dp_rpc_port": 9000,
+          "world_size": 32
         }
       },
       "engine_config": {

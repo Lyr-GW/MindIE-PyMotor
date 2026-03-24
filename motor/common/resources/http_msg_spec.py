@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
@@ -11,7 +10,7 @@
 # See the Mulan PSL v2 for more details.
 
 from enum import Enum
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field
 
 from motor.common.utils.logger import get_logger
 from motor.common.resources.instance import Instance, ParallelConfig
@@ -48,7 +47,9 @@ class RegisterMsg(BaseModel):
     mgmt_port: list[str] = Field(..., description="Management port for all endpoints managed by this nm")
     nm_port: str = Field(..., description="Node manager communication port")
     parallel_config: ParallelConfig = Field(..., description="Parallel configuration")
-    ranktable: Ranktable = Field(..., description="Ranktable managed by this nm")
+    enable_multi_endpoints: bool = Field(default=True, description="Whether to enable multi-endpoints mode")
+    device_num: int = Field(..., description="Number of visible devices in the container")
+    ranktable: Ranktable | None = Field(default=None, description="Ranktable managed by this nm")
 
 
 class StartCmdMsg(BaseModel):
@@ -61,7 +62,8 @@ class StartCmdMsg(BaseModel):
     role: str = Field(..., description="Instance role")
     instance_id: int = Field(..., description="Instance id")
     endpoints: list[Endpoint] = Field(..., description="endpoints that managed by nm")
-    ranktable: Ranktable = Field(..., description="DeviceInfo list of this instance")
+    master_dp_ip: str = Field(..., description="Master data parallel node IP address")
+    ranktable: Ranktable | None = Field(default=None, description="Ranktable of the instance")
 
 
 class ReregisterMsg(BaseModel):
@@ -77,6 +79,8 @@ class ReregisterMsg(BaseModel):
     pod_ip: str = Field(..., description="Pod IP address")
     nm_port: str = Field(..., description="Node manager communication port")
     parallel_config: ParallelConfig = Field(..., description="Parallel configuration")
+    enable_multi_endpoints: bool = Field(default=True, description="Whether to enable multi-endpoints mode")
+    device_num: int = Field(default=0, description="Number of visible devices in the container")
     endpoints: list[Endpoint] = Field(..., description="endpoints that managed by nm")
 
 

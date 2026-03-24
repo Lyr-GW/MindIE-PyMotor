@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -15,7 +13,6 @@ import signal
 import ipaddress
 import subprocess
 import threading
-
 
 from motor.common.resources.instance import PDRole
 from motor.common.resources.endpoint import Endpoint
@@ -43,6 +40,7 @@ class Daemon(ThreadSafeSingleton):
         self.parallel_config = config.basic_config.parallel_config
         self.device_num = config.basic_config.device_num
         self.single_container_flag = config.single_container_config.single_container_flag
+        self.enable_multi_endpoints = config.basic_config.enable_multi_endpoints
         if self.single_container_flag:
             self.device_offset = config.single_container_config.device_offset
             self.kv_port = config.single_container_config.kv_port
@@ -73,7 +71,13 @@ class Daemon(ThreadSafeSingleton):
 
         return True
 
-    def pull_engine(self, pd_role_info: PDRole, endpoints_info: list[Endpoint], instance_id: int):
+    def pull_engine(
+        self,
+        pd_role_info: PDRole,
+        endpoints_info: list[Endpoint],
+        instance_id: int,
+        master_dp_ip: str
+    ):
         """
         start engine processes based on the provided role and endpoint information.
         engine_server parameters:
@@ -83,30 +87,21 @@ class Daemon(ThreadSafeSingleton):
             --host engine service ip
             --port engine service port
             --mgmt-port endpoint management port
+            --master-dp-ip master data parallel node IP address
             --config-path engine config file path
         """
         try:
-            parallel_config = self.parallel_config
-            local_world_size = parallel_config.tp_size * parallel_config.pp_size
             env = os.environ.copy()
             device_size = self.device_num
             for i, endpoint in enumerate(endpoints_info):
                 if not self._check_params(endpoint):
                     raise ValueError("Invalid endpoint parameters")
-                start_device_id = (i * local_world_size % device_size)
-                end_device_id = start_device_id + local_world_size
-                if end_device_id > device_size:
-                    device_ids = (
-                        list(range(start_device_id, device_size))
-                        + list(range(0, end_device_id - device_size))
-                    )
-                else:
-                    device_ids = list(range(start_device_id, end_device_id))
-                if self.single_container_flag:
-                    device_ids = [x + self.device_offset for x in device_ids]
-                device_ids_str = ",".join(map(str, device_ids))
-                logger.info(f"Device IDs: {device_ids_str}")
-                env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids_str
+
+                if self.enable_multi_endpoints:
+                    device_ids_str = self._calc_visible_device_ids(i, device_size)
+                    logger.info(f"Device IDs: {device_ids_str}")
+                    env["ASCEND_RT_VISIBLE_DEVICES"] = device_ids_str
+
                 cmd = [
                     "engine_server",
                     "--dp-rank", str(endpoint.id),
@@ -115,6 +110,7 @@ class Daemon(ThreadSafeSingleton):
                     "--host", str(endpoint.ip),
                     "--port", str(int(endpoint.business_port)),
                     "--mgmt-port", str(int(endpoint.mgmt_port)),
+                    "--master-dp-ip", master_dp_ip,
                     "--config-path", str(Env.user_config_path)
                 ]
                 if self.single_container_flag:
@@ -123,9 +119,7 @@ class Daemon(ThreadSafeSingleton):
                     if self.lookup_rpc_port is not None:
                         cmd.extend(["--lookup-rpc-port", str(self.lookup_rpc_port)])
                 logger.info(" ".join(cmd))
-                process = subprocess.Popen(cmd,
-                                           shell=False,
-                                           env=env)
+                process = subprocess.Popen(cmd, shell=False, env=env)
                 if process.poll() is not None:
                     raise RuntimeError(f"Engine process exited immediately with code {process.returncode}")
                 with self._pids_lock:
@@ -148,3 +142,22 @@ class Daemon(ThreadSafeSingleton):
             except Exception as e:
                 logger.error(f"Failed to kill process {pid}: {e}")
         return
+
+    def _calc_visible_device_ids(self, index: int, device_size: int) -> str:
+        """Calculate visible device IDs string for ASCEND_RT_VISIBLE_DEVICES.
+        Returns:
+            Comma-separated device IDs string, e.g., "0,1,2,3"
+        """
+        local_world_size = self.parallel_config.tp_size * self.parallel_config.pp_size
+        start_device_id = (index * local_world_size % device_size)
+        end_device_id = start_device_id + local_world_size
+        if end_device_id > device_size:
+            device_ids = (
+                list(range(start_device_id, device_size))
+                + list(range(0, end_device_id - device_size))
+            )
+        else:
+            device_ids = list(range(start_device_id, end_device_id))
+        if self.single_container_flag:
+            device_ids = [x + self.device_offset for x in device_ids]
+        return ",".join(map(str, device_ids))

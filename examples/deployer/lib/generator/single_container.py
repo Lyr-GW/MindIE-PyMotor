@@ -55,8 +55,7 @@ def generate_yaml_single_container(input_yaml, output_file, user_config):
         kv_pool_env = gen_kv_pool_env(kv_pool_config)
         container[C.ENV].extend(kv_pool_env)
 
-    npu_num = int(deploy_config[C.P_POD_NPU_NUM]) * int(deploy_config[C.P_INSTANCES_NUM]) + \
-            int(deploy_config[C.D_POD_NPU_NUM]) * int(deploy_config[C.D_INSTANCES_NUM])
+    npu_num = max(int(deploy_config[C.P_POD_NPU_NUM]), int(deploy_config[C.D_POD_NPU_NUM]))
     container[C.RESOURCES][C.REQUESTS][C.ASCEND_910_NPU_NUM] = npu_num
     container[C.RESOURCES][C.LIMITS][C.ASCEND_910_NPU_NUM] = npu_num
 

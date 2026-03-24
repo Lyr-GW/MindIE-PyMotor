@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -16,9 +14,8 @@ import copy
 from enum import Enum
 from types import MappingProxyType
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field
 from motor.common.utils.logger import get_logger
-from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
 from motor.common.alarm.server_exception_event import ServerExceptionEvent, ServerExceptionReason
 
@@ -61,6 +58,7 @@ class InsConditionEvent(str, Enum):
 class NodeManagerInfo(BaseModel):
     pod_ip: str = Field(..., description="Node manager pod ip")
     port: str = Field(..., description="Node manager port")
+    device_num: int = Field(default=0, description="Number of devices in this node")
 
 
 class ParallelConfig(BaseModel):
@@ -70,36 +68,34 @@ class ParallelConfig(BaseModel):
     sp_size: int = Field(default=1, description="Sequence parallel size, usually it reuse tp's pg")
     ep_size: int = Field(default=1, description="Expert parallel size")
     pp_size: int = Field(default=1, description="Pipeline parallel size")
-    world_size: int = Field(default=0)
+    world_size: int = Field(default=0, description="World size, default is dp * cp * tp * pp")
 
     def __init__(
-            self,
-            dp: int = None,
-            cp: int = None,
-            tp: int = None,
-            sp: int = None,
-            ep: int = None,
-            pp: int = None,
-            world_size: int = None,
-            # support field name parameters, for JSON deserialization
-            dp_size: int = None,
-            cp_size: int = None,
-            tp_size: int = None,
-            sp_size: int = None,
-            ep_size: int = None,
-            pp_size: int = None,
-            **kwargs
+        self,
+        dp_size: int = None,
+        cp_size: int = None,
+        tp_size: int = None,
+        sp_size: int = None,
+        ep_size: int = None,
+        pp_size: int = None,
+        world_size: int = None,
+        **kwargs
     ) -> None:
-        dp_val = dp_size if dp_size is not None else (dp if dp is not None else 1)
-        cp_val = cp_size if cp_size is not None else (cp if cp is not None else 1)
-        tp_val = tp_size if tp_size is not None else (tp if tp is not None else 1)
-        sp_val = sp_size if sp_size is not None else (sp if sp is not None else 1)
-        ep_val = ep_size if ep_size is not None else (ep if ep is not None else 1)
-        pp_val = pp_size if pp_size is not None else (pp if pp is not None else 1)
+        dp_val = dp_size if dp_size is not None else 1
+        cp_val = cp_size if cp_size is not None else 1
+        tp_val = tp_size if tp_size is not None else 1
+        sp_val = sp_size if sp_size is not None else 1
+        pp_val = pp_size if pp_size is not None else 1
         world_size_val = world_size if world_size is not None else 0
 
         if world_size_val == 0:
             world_size_val = dp_val * cp_val * tp_val * pp_val
+
+        enable_ep = kwargs.get('enable_ep', False)
+        if enable_ep:
+            ep_val = world_size_val
+        else:
+            ep_val = ep_size if ep_size is not None else 1
 
         super().__init__(
             dp_size=dp_val,
@@ -110,8 +106,10 @@ class ParallelConfig(BaseModel):
             pp_size=pp_val,
             world_size=world_size_val,
         )
-        logger.debug(f"ParallelConfig initialized with dp:{dp_val}, cp:{cp_val}, "
-                    f"tp:{tp_val}, sp:{sp_val}, ep:{ep_val}, pp:{pp_val}, world_size:{world_size_val}")
+        logger.debug(
+            "ParallelConfig initialized with dp:%d, cp:%d, tp:%d, sp:%d, ep:%d, pp:%d, world_size:%d, enable_ep:%s",
+            dp_val, cp_val, tp_val, sp_val, ep_val, pp_val, world_size_val, enable_ep
+        )
 
 
 class Instance(BaseModel):
@@ -124,6 +122,7 @@ class Instance(BaseModel):
     role: str = Field(..., description="Instance role")
     status: InsStatus = Field(default=InsStatus.INITIAL, description="Instance status")
     parallel_config: ParallelConfig | None = Field(None, description="Parallel configuration")
+    enable_multi_endpoints: bool = Field(default=True, description="Whether to enable multi-endpoints mode")
     node_managers: list[NodeManagerInfo] = Field(default_factory=list,
                                              description="List of node manager info")
     endpoints: dict[str, dict[int, Endpoint]] = Field(default_factory=dict,
@@ -133,19 +132,19 @@ class Instance(BaseModel):
 
     def __init__(self, **data) -> None:
         super().__init__(**data)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # Use RLock to allow reentrant locking
         # Cache for get_all_endpoints() to avoid repeated tuple creation.
         # Version counter tracks structural changes (add/del); O(1) check vs O(n) hashing.
         self._endpoints_version: int = 0  # Incremented when endpoints structure changes
         self._cached_endpoints_tuple: Optional[tuple[Endpoint, ...]] = None
         self._cached_endpoints_version: Optional[int] = None  # Version at cache time
 
-    def add_node_mgr(self, pod_ip: str, port: str) -> None:
+    def add_node_mgr(self, pod_ip: str, port: str, device_num: int = 0) -> None:
         if pod_ip is None or port is None:
             logger.warning("Invalid pod_ip: %s or port: %s", pod_ip, port)
             return
 
-        node_mgr_info = NodeManagerInfo(pod_ip=pod_ip, port=port)
+        node_mgr_info = NodeManagerInfo(pod_ip=pod_ip, port=port, device_num=device_num)
         with self._lock:
             if node_mgr_info not in self.node_managers:
                 self.node_managers.append(node_mgr_info)
@@ -190,10 +189,10 @@ class Instance(BaseModel):
             # Bump version when endpoints structure changes
             self._endpoints_version += 1
 
-        expected_endpoints = self.parallel_config.dp_size if self.parallel_config else 0
+        expected_count = self._get_expected_endpoint_count()
         total_endpoints = current_endpoint_num + actual_added_num
         logger.info("Add endpoints for pod_ip:%s, added endpoints number is %d, total endpoint number is %d/%d",
-                    pod_ip, actual_added_num, total_endpoints, expected_endpoints)
+                    pod_ip, actual_added_num, total_endpoints, expected_count)
 
     def del_endpoints(self, pod_ip: str):
         current_endpoint_num = self.get_endpoints_num()
@@ -207,29 +206,51 @@ class Instance(BaseModel):
                 del_endpoint_num = 0
                 logger.warning(f"Pod_ip:{pod_ip} not found in instance:{self.job_name}")
 
-        expected_endpoints = self.parallel_config.dp_size if self.parallel_config else 0
+        expected_count = self._get_expected_endpoint_count()
         remaining_endpoints = current_endpoint_num - del_endpoint_num
         logger.info("Del endpoints for pod_ip:%s, deleted endpoints number is %d, total endpoint number is %d/%d",
-                    pod_ip, del_endpoint_num, remaining_endpoints, expected_endpoints)
+                    pod_ip, del_endpoint_num, remaining_endpoints, expected_count)
 
     def is_endpoints_enough(self) -> bool:
-        """
-        Return True if the number of endpoints equals dp_size (instance is ready).
+        """ Return True if the instance has enough endpoints or node managers.
+        When enable_multi_endpoints is True:
+            Check if the number of endpoints equals dp_size.
+        When enable_multi_endpoints is False:
+            Check if the number of node managers equals expected node count.
+            Expected node count = world_size / device_num_per_node
 
         Returns:
-            bool: Whether this instance has enough endpoints and is ready.
+            bool: Whether this instance has enough endpoints/node managers and is ready.
         """
         with self._lock:
-            if self.parallel_config is not None:
+            if self.parallel_config is None:
+                return False
+
+            if self.enable_multi_endpoints:
+                if self.endpoints is None:
+                    return False
+                
                 dp_size = self.parallel_config.dp_size
-        if self.endpoints is not None:
-            total_endpoints = self.get_endpoints_num()
-            logger.debug("total endpoint size: %d dp size: %d", total_endpoints, dp_size)
-            if total_endpoints == dp_size:
-                logger.info("Instance %d has enough endpoints now, endpoint number is %d",
-                            self.id, total_endpoints)
-                return True
-        return False
+                total_endpoints = self.get_endpoints_num()
+                logger.debug("total endpoint size: %d dp size: %d", total_endpoints, dp_size)
+                if total_endpoints == dp_size:
+                    logger.info("Instance %d has enough endpoints now, endpoint number is %d",
+                                self.id, total_endpoints)
+                    return True
+                return False
+            else:
+                expected_node_count = self._get_expected_endpoint_count()
+                if expected_node_count <= 0:
+                    return False
+
+                actual_node_count = len(self.node_managers)
+                logger.debug("world_size: %d, expected_node_count: %d, actual_node_count: %d",
+                             self.parallel_config.world_size, expected_node_count, actual_node_count)
+                if actual_node_count == expected_node_count:
+                    logger.info("Instance %d has enough node managers now, node manager number is %d",
+                                self.id, actual_node_count)
+                    return True
+                return False
 
     def is_all_endpoints_alive(self) -> bool:
         timestamp = time.time()
@@ -331,21 +352,32 @@ class Instance(BaseModel):
     def get_all_endpoints(self) -> tuple[Endpoint, ...]:
         """Return a tuple of all endpoints, with versioned caching.
 
+        When enable_multi_endpoints is True:
+            Return all endpoints.
+        When enable_multi_endpoints is False:
+            Return only endpoints with id=0 (one endpoint per pod).
+
         Cache is invalidated only when the endpoints structure changes (add/del),
         not when endpoint content (workload, status) changes. O(1) on cache hit,
         O(n) tuple build on cache miss.
         """
         with self._lock:
             # O(1) version check
-            if (self._cached_endpoints_tuple is not None and
-                self._cached_endpoints_version == self._endpoints_version):
+            if (
+                self._cached_endpoints_tuple is not None
+                and self._cached_endpoints_version == self._endpoints_version
+            ):
                 return self._cached_endpoints_tuple
 
             # Rebuild tuple only when version changed
             eps = []
             for pod_endpoints in self.endpoints.values():
                 for endpoint in pod_endpoints.values():
-                    eps.append(endpoint)
+                    if self.enable_multi_endpoints:
+                        eps.append(endpoint)
+                    else:
+                        if endpoint.id == 0:
+                            eps.append(endpoint)
             
             self._cached_endpoints_tuple = tuple(eps)
             self._cached_endpoints_version = self._endpoints_version
@@ -363,6 +395,29 @@ class Instance(BaseModel):
         with self._lock:
             self.status = status
         logger.info(f"Instance {self.job_name}(id:{self.id}) status updated to {status}")
+
+    def _get_expected_endpoint_count(self) -> int:
+        """ Get expected endpoint count based on enable_multi_endpoints flag.
+        When enable_multi_endpoints is True:
+            Return dp_size (expected endpoint count).
+        When enable_multi_endpoints is False:
+            Return expected node count (world_size / device_num_per_node).
+        """
+        if self.parallel_config is None:
+            logger.warning("parallel_config is None")
+            return 0
+        
+        if self.enable_multi_endpoints:
+            return self.parallel_config.dp_size
+        else:
+            if not self.node_managers or len(self.node_managers) == 0:
+                logger.warning("node_managers is empty")
+                return 0
+            device_num_per_node = self.node_managers[0].device_num
+            if device_num_per_node <= 0:
+                logger.warning("device_num_per_node is %d", device_num_per_node)
+                return 0
+            return (self.parallel_config.world_size + device_num_per_node - 1) // device_num_per_node
 
 
 class ReadOnlyInstance:

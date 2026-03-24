@@ -37,9 +37,10 @@ class ServerConfig:
     dp_rank: int = 0
     config_path: str | None = None
     deploy_config: DeployConfig = None
+    master_dp_ip: str | None = None
 
     @classmethod
-    def parse_cli_args(cls) -> argparse.Namespace:
+    def parse_cli_args(cls) -> argparse.Namespace: 
         parser = argparse.ArgumentParser(description="EngineServer - Universal Inference Engine Service")
         parser.add_argument("--host",
                             help="EngineServer endpoint host")
@@ -59,6 +60,8 @@ class ServerConfig:
                             help="Engine instance id")
         parser.add_argument("--dp-rank", type=int, default=0,
                             help="DP parallel rank")
+        parser.add_argument("--master-dp-ip",
+                            help="Master data parallel node IP address")
         parser.add_argument("--config-path",
                             help="Path to engine-specific configuration file (JSON format)")
         return parser.parse_args()
@@ -75,8 +78,9 @@ class ServerConfig:
             server_port=cli_args.server_port,
             engine_port=cli_args.port,
             instance_id=cli_args.instance_id,
-            config_path=cli_args.config_path,
             dp_rank=cli_args.dp_rank,
+            master_dp_ip=cli_args.master_dp_ip,
+            config_path=cli_args.config_path,
         )
         server_config.validate()
         server_config.load_deploy_config()

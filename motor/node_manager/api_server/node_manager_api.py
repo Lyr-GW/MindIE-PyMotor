@@ -53,7 +53,7 @@ thread_semaphore = asyncio.Semaphore(MAX_CONCURRENT_THREADS)
 
 @app.post("/node-manager/start")
 async def start_instance(request: Request):
-    """ post instance and role、ranktable info """
+    """ post instance and role info """
     try:
         payload = await request.json()
         logger.info(f"payload: {payload}")
@@ -76,7 +76,8 @@ async def start_instance(request: Request):
             await asyncio.to_thread(Daemon().pull_engine,
                                     PDRole(start_msg.role),
                                     start_msg.endpoints,
-                                    start_msg.instance_id)
+                                    start_msg.instance_id,
+                                    start_msg.master_dp_ip)
         except Exception as pull_err:
             logger.error("Failed to pull engine: %s", pull_err)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
