@@ -69,13 +69,13 @@ def test_get_controller_status_standalone_healthy(api_instance) -> None:
     # case1: standalone + all healthy (is_alive return true)
     standalone_config = ControllerConfig()
     standalone_config.standby_config.enable_master_standby = False
-    api_instance.update_config(standalone_config)
+    api_instance_standalone = controller_api.ControllerAPI(standalone_config, api_instance.modules)
 
     healthy_module = MagicMock()
     healthy_module.is_alive.return_value = True
-    api_instance.modules = {"module_a": healthy_module, "module_b": healthy_module}
+    api_instance_standalone.modules = {"module_a": healthy_module, "module_b": healthy_module}
 
-    status = api_instance._get_controller_status()
+    status = api_instance_standalone._get_controller_status()
 
     assert status['deploy_mode'] == 'standalone'
     assert status["overall_healthy"] is True
@@ -86,15 +86,15 @@ def test_get_controller_status_standalone_unhealthy(api_instance) -> None:
     # case2: standalone + some healthy (is_alive return true or false)
     standalone_config = ControllerConfig()
     standalone_config.standby_config.enable_master_standby = False
-    api_instance.update_config(standalone_config)
+    api_instance_standalone = controller_api.ControllerAPI(standalone_config, api_instance.modules)
 
     healthy_module = MagicMock()
     healthy_module.is_alive.return_value = True
     unhealthy_module = MagicMock()
     unhealthy_module.is_alive.return_value = False
-    api_instance.modules = {"module_a": healthy_module, "module_b": unhealthy_module}
+    api_instance_standalone.modules = {"module_a": healthy_module, "module_b": unhealthy_module}
 
-    status = api_instance._get_controller_status()
+    status = api_instance_standalone._get_controller_status()
 
     assert status['deploy_mode'] == 'standalone'
     assert status["overall_healthy"] is False
@@ -625,22 +625,12 @@ def test_update_config():
     config = ControllerConfig()
     api_instance = controller_api.ControllerAPI(config)
 
-    # Store original values
-    original_master_standby = api_instance.enable_master_standby
-    original_enable_tls = api_instance.mgmt_tls_config.enable_tls
-
-    # Create new config with different settings
+    # Create new config with different observability setting
     new_config = ControllerConfig()
-    new_config.standby_config.enable_master_standby = True
-    new_config.mgmt_tls_config.enable_tls = True
-    new_config.mgmt_tls_config.cert_file = "/new/cert.pem"
-    new_config.mgmt_tls_config.key_file = "/new/key.pem"
+    new_config.observability_config.observability_enable = True
 
     # Update config
     api_instance.update_config(new_config)
 
-    # Verify config fields were updated
-    assert api_instance.enable_master_standby is True
-    assert api_instance.mgmt_tls_config.enable_tls is True
-    assert api_instance.mgmt_tls_config.cert_file == "/new/cert.pem"
-    assert api_instance.mgmt_tls_config.key_file == "/new/key.pem"
+    # Verify observability config field was updated
+    assert api_instance.enable_observability_api is True

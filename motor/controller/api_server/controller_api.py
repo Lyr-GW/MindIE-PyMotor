@@ -138,12 +138,8 @@ class ControllerAPI:
         # Note: API server configuration cannot be updated while running
         # Only update the extracted config fields for future use
         with self.config_lock:
-            self.enable_master_standby = config.standby_config.enable_master_standby
-            self.mgmt_tls_config = config.mgmt_tls_config
-
             # Observability API configuration update
             self.enable_observability_api = config.observability_config.observability_enable
-            self.observability_tls_config = config.observability_tls_config
 
             logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
 
@@ -352,13 +348,20 @@ class ControllerAPI:
         if enable_master_standby:
             status["deploy_mode"] = "master_standby"
             # Get singleton instance (assumes it has been initialized)
-            status["role"] = "master" if StandbyManager().is_master() else "standby"
+            if StandbyManager.is_initialized():
+                status["role"] = "master" if StandbyManager().is_master() else "standby"
+            else:
+                status["role"] = "standby"
         else:
             status["deploy_mode"] = "standalone"
 
         # Check module health
         # In master_standby mode, standby node doesn't run modules, so don't check health
-        if enable_master_standby and not StandbyManager().is_master():
+        if (
+            enable_master_standby
+            and StandbyManager.is_initialized()
+            and not StandbyManager().is_master()
+        ):
             # Standby node: modules are not running, but this is expected
             status["overall_healthy"] = True
         else:
@@ -436,11 +439,15 @@ class ControllerAPI:
 
     async def _master_standby_middleware(self, request: Request, call_next):	 
         # if enable master/standby and is standby role then raise exception 
-        if self.enable_master_standby and not StandbyManager().is_master(): 
+        if (
+            self.enable_master_standby
+            and StandbyManager.is_initialized()
+            and not StandbyManager().is_master()
+        ): 
             # raise exception at the middleware layer is an incorrect way. It is better to construct the response. 
             raise_internal_error("This controller is not master") 
         # master continue 
-        response: Response = await call_next(request) 
+        response = await call_next(request) 
         return response
 
     def _run_observability_api_server(self) -> None:

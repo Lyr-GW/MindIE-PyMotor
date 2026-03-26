@@ -75,6 +75,20 @@ class StandbyManager(ThreadSafeSingleton):
 
         self._initialized = True
 
+    @classmethod
+    def is_initialized(cls) -> bool:
+        """Check if the singleton instance has been initialized"""
+        instance = cls._instances.get(cls)
+        return instance is not None and hasattr(instance, '_initialized')
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        """Reset the singleton instance, removing it from the instances dict"""
+        with cls._lock:
+            if cls in cls._instances:
+                del cls._instances[cls]
+                logger.info("StandbyManager singleton instance has been reset")
+
     def start(
         self,
         on_become_master: Callable[[bool], None],
