@@ -63,7 +63,7 @@ def handle_update_instance_num(user_config):
     validate_only_instance_changed(user_config, baseline_config)
 
     baseline_deploy = baseline_config.get(C.MOTOR_DEPLOY_CONFIG, {})
-    deploy_mode_arg = baseline_deploy.get(C.DEPLOY_MODE_CONFIG_KEY, C.DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
+    deploy_mode_arg = baseline_deploy.get(C.DEPLOY_MODE_CONFIG_KEY, C.DEPLOY_MODE_INFER_SERVICE_SET)
     validate_deploy_mode_value(deploy_mode_arg)
 
     update_kv_pool_enabled_flag(user_config)
