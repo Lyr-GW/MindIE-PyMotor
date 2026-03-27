@@ -72,7 +72,7 @@ def _configure_control_role(infer_doc, user_config, role_name, config_key):
     job_id = deploy_config[C.CONFIG_JOB_ID]
     uuid_spec = generate_unique_id()
     job_name = f"{job_id}-{role_name}-{uuid_spec}"
-    set_container_env(container, build_engine_env_items(role_name, job_name))
+    set_container_env(container, build_engine_env_items(role_name, deploy_config, job_name))
 
 
 def _configure_controller_role(infer_doc, user_config):
@@ -125,7 +125,7 @@ def _configure_engine_role(infer_doc, user_config, infer_name, role_name):
     container[C.NAME] = infer_name
     job_id = deploy_config[C.CONFIG_JOB_ID]
     job_name_base = f"{job_id}-{infer_name}"
-    set_container_env(container, build_engine_env_items(role_name, job_name_base, include_kv_pool=True))
+    set_container_env(container, build_engine_env_items(role_name, deploy_config, job_name_base, include_kv_pool=True))
     npu_num = int(deploy_config.get(npu_key, 1))
     set_container_npu(container, npu_num)
     weight_path = deploy_config.get(C.WEIGHT_MOUNT_PATH, C.DEFAULT_WEIGHT_MOUNT_PATH)
