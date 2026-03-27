@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from sglang.srt.managers.tokenizer_manager import TokenizerManager
 
 
-class OpenAIServingCompletion(SglangOpenAIServingCompletion):
+class OpenAIServingCompletion:
     """EngineServer wrapper for SGLang OpenAI Completions; same handle_request contract as vllm."""
 
     def __init__(
@@ -45,11 +45,15 @@ class OpenAIServingCompletion(SglangOpenAIServingCompletion):
         tokenizer_manager: "TokenizerManager",
         template_manager: "TemplateManager",
     ) -> None:
-        super().__init__(tokenizer_manager, template_manager)
+        self._sglang_serving_completion = SglangOpenAIServingCompletion(
+            tokenizer_manager, template_manager
+        )
 
     async def handle_request(self, request: CompletionRequest, raw_request: Request):
         try:
-            return await super().handle_request(request, raw_request)
+            return await self._sglang_serving_completion.handle_request(
+                request, raw_request
+            )
         except OverflowError as e:
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)

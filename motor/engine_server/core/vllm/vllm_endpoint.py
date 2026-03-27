@@ -64,6 +64,7 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await engine_client.check_health()
                 return True
             except Exception:
+                logger.error("VLLM health check failed")
                 return False
 
         app.state.health_checker = vllm_health_checker
@@ -97,6 +98,7 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             base_model_paths=base_model_paths,
             lora_modules=lora_modules,
         )
+        app.state.openai_serving_models = openai_serving_models
 
         try:
             app.state.openai_serving_chat = OpenAIServingChat(

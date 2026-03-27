@@ -44,9 +44,9 @@ class InferEndpoint(Endpoint):
         self._server_process = multiprocessing.Process(
             target=self._run_server,
             name="infer_endpoint_process",
-            daemon=True
+            daemon=False
         )
-        self._run_http_in_process = True
+        self._run_http_in_process = False
         self.engine_type = config.get_endpoint_config().engine_type
         self.init_request_handlers()
         self._register_routes()
@@ -68,6 +68,10 @@ class InferEndpoint(Endpoint):
         elif self._server_process and not self._server_process.is_alive():
             self._server_process.start()
             logger.info(f"InferEndpoint started in process: http://{self.host}:{self.port}")
+
+    def join(self) -> None:
+        self._server_process.join()
+        logger.error(f"infer_endpoint process exited with code {self._server_process.exitcode}")
 
     def shutdown(self):
         if self._server:
@@ -104,6 +108,16 @@ class InferEndpoint(Endpoint):
                 raw_request, self.completion_request
             )
             return await self.app.state.openai_serving_completion.handle_request(request, raw_request)
+        
+        @self.app.get("/v1/models")
+        async def list_models():
+            models = getattr(self.app.state, "openai_serving_models", None)
+            if models is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+                    detail="Model listing is not available for this engine.",
+                )
+            return await models.show_available_models()
 
         @self.app.get("/health")
         async def health(raw_request: Request):

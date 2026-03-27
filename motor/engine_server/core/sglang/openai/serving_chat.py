@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     from sglang.srt.managers.tokenizer_manager import TokenizerManager
 
 
-class OpenAIServingChat(SglangOpenAIServingChat):
+class OpenAIServingChat:
     """EngineServer wrapper for SGLang OpenAI Chat Completions; same handle_request contract as vllm."""
 
     def __init__(
@@ -44,11 +44,13 @@ class OpenAIServingChat(SglangOpenAIServingChat):
         tokenizer_manager: "TokenizerManager",
         template_manager: "TemplateManager",
     ) -> None:
-        super().__init__(tokenizer_manager, template_manager)
+        self._sglang_serving_chat = SglangOpenAIServingChat(
+            tokenizer_manager, template_manager
+        )
 
     async def handle_request(self, request: ChatCompletionRequest, raw_request: Request):
         try:
-            return await super().handle_request(request, raw_request)
+            return await self._sglang_serving_chat.handle_request(request, raw_request)
         except Exception as e:
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
