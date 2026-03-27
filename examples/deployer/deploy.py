@@ -90,7 +90,7 @@ def handle_update_instance_num(user_config):
     logger.info("instance num update end.")
 
 
-def deploy_services_multi_yaml(paths, user_config):
+def deploy_services_multi_yaml(paths, user_config, dry_run=False):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     init_service_domain_name(paths, deploy_config)
     generate_yaml_controller(
@@ -115,10 +115,11 @@ def deploy_services_multi_yaml(paths, user_config):
         generate_yaml_mf_store(
             paths["mf_store_input_yaml"], paths["mf_store_output_yaml"], user_config
         )
-    exec_all_kubectl_multi(deploy_config, None, C.DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
+    if not dry_run:
+        exec_all_kubectl_multi(deploy_config, None, C.DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
 
 
-def deploy_services_infer_service_set(paths, user_config):
+def deploy_services_infer_service_set(paths, user_config, dry_run=False):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     init_service_domain_name(paths, deploy_config)
     infer_input = paths["infer_service_input_yaml"]
@@ -131,19 +132,21 @@ def deploy_services_infer_service_set(paths, user_config):
     generate_yaml_infer_service_set(
         infer_input, paths["infer_service_output_yaml"], user_config
     )
-    exec_all_kubectl_multi(deploy_config, None, C.DEPLOY_MODE_INFER_SERVICE_SET)
+    if not dry_run:
+        exec_all_kubectl_multi(deploy_config, None, C.DEPLOY_MODE_INFER_SERVICE_SET)
 
 
-def deploy_services_single_container(paths, user_config):
+def deploy_services_single_container(paths, user_config, dry_run=False):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     update_kv_pool_enabled_flag(user_config)
     generate_yaml_single_container(
         paths["single_container_input_yaml"], paths["single_container_output_yaml"], user_config
     )
-    exec_all_kubectl_singer(deploy_config, paths["single_container_output_yaml"])
+    if not dry_run:
+        exec_all_kubectl_singer(deploy_config, paths["single_container_output_yaml"])
 
 
-def deploy_services(user_config, env_config_path):
+def deploy_services(user_config, env_config_path, dry_run=False):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     update_kv_pool_enabled_flag(user_config)
     update_kv_conductor_enabled_flag(user_config)
@@ -152,19 +155,25 @@ def deploy_services(user_config, env_config_path):
     update_engine_base_name(user_config)
 
     deploy_mode_arg = get_deploy_mode_from_config(deploy_config)
-    set_env_to_shell(user_config, env_config_path, deploy_mode_arg)
+    if not dry_run:
+        set_env_to_shell(user_config, env_config_path, deploy_mode_arg)
+    else:
+        logger.info("dry-run: skip set_env_to_shell")
 
     k8s_utils.g_generate_yaml_list = []
     paths = get_deploy_paths()
 
     if deploy_mode_arg == C.DEPLOY_MODE_SINGLE_CONTAINER:
-        deploy_services_single_container(paths, user_config)
+        deploy_services_single_container(paths, user_config, dry_run=dry_run)
     elif deploy_mode_arg == C.DEPLOY_MODE_INFER_SERVICE_SET:
-        deploy_services_infer_service_set(paths, user_config)
+        deploy_services_infer_service_set(paths, user_config, dry_run=dry_run)
     else:
-        deploy_services_multi_yaml(paths, user_config)
+        deploy_services_multi_yaml(paths, user_config, dry_run=dry_run)
 
-    logger.info("all deploy end.")
+    if dry_run:
+        logger.info("all deploy end (dry-run: kubectl apply skipped).")
+    else:
+        logger.info("all deploy end.")
 
 
 def parse_arguments():
@@ -198,6 +207,11 @@ def parse_arguments():
         action="store_true",
         help="Scale instances by comparing ConfigMap baseline with current user_config"
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Generate YAML only: skip set_env_to_shell and kubectl apply (normal deploy path only)",
+    )
     return parser.parse_args()
 
 
@@ -221,7 +235,7 @@ def main():
         handle_update_instance_num(user_config)
         return
 
-    deploy_services(user_config, env_config_path)
+    deploy_services(user_config, env_config_path, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
