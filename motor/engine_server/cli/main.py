@@ -7,7 +7,6 @@
 # EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
-import os
 
 from motor.common.utils.logger import get_logger
 from motor.config.endpoint import EndpointConfig
@@ -15,7 +14,6 @@ from motor.engine_server.core.infer_endpoint import InferEndpoint
 from motor.engine_server.core.mgmt_endpoint import MgmtEndpoint
 from motor.engine_server.factory.config_factory import ConfigFactory
 from motor.engine_server.factory.endpoint_factory import EndpointFactory
-from motor.engine_server.utils.proc import ProcManager
 from motor.engine_server.utils.prometheus import setup_multiprocess_prometheus
 
 logger = get_logger(__name__)
@@ -32,16 +30,17 @@ def main():
 
     infer_endpoint: InferEndpoint = EndpointFactory().get_infer_endpoint(config)
     mgmt_endpoint: MgmtEndpoint = MgmtEndpoint(config)
-    proc_manager = ProcManager(os.getpid())
 
     mgmt_endpoint.run()
     infer_endpoint.run()
-    proc_manager.join()
+    
+    # join the infer_endpoint process
+    infer_endpoint.join()
 
+    logger.info("shutting down endpoints and child processes...")
     mgmt_endpoint.shutdown()
     infer_endpoint.shutdown()
-    proc_manager.shutdown()
-
+    logger.info("endpoints and child processes shut down")
 
 if __name__ == "__main__":
     main()

@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 
 
-class OpenAIServingChat(VllmOpenAIServingChat):
+class OpenAIServingChat:
     def __init__(
         self,
         engine_client: EngineClient,
@@ -45,7 +45,7 @@ class OpenAIServingChat(VllmOpenAIServingChat):
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ) -> None:
-        super().__init__(
+        self._vllm_serving_chat = VllmOpenAIServingChat(
             engine_client,
             models,
             response_role,
@@ -56,7 +56,9 @@ class OpenAIServingChat(VllmOpenAIServingChat):
 
     async def handle_request(self, request: ChatCompletionRequest, raw_request: Request):
         try:
-            generator = await self.create_chat_completion(request, raw_request)
+            generator = await self._vllm_serving_chat.create_chat_completion(
+                request, raw_request
+            )
         except Exception as e:
             raise HTTPException(
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)

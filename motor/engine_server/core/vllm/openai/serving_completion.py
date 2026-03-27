@@ -31,7 +31,7 @@ from vllm.entrypoints.openai.completion.protocol import CompletionRequest, Compl
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 
 
-class OpenAIServingCompletion(VllmOpenAIServingCompletion):
+class OpenAIServingCompletion:
     def __init__(
         self,
         engine_client: EngineClient,
@@ -39,7 +39,7 @@ class OpenAIServingCompletion(VllmOpenAIServingCompletion):
         *,
         request_logger: RequestLogger | None,
     ):
-        super().__init__(
+        self._vllm_serving_completion = VllmOpenAIServingCompletion(
             engine_client,
             models,
             request_logger=request_logger,
@@ -47,7 +47,9 @@ class OpenAIServingCompletion(VllmOpenAIServingCompletion):
 
     async def handle_request(self, request: CompletionRequest, raw_request: Request):
         try:
-            generator = await self.create_completion(request, raw_request)
+            generator = await self._vllm_serving_completion.create_completion(
+                request, raw_request
+            )
         except OverflowError as e:
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST.value, detail=str(e)

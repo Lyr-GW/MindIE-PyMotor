@@ -20,6 +20,7 @@ from motor.engine_server.core.infer_endpoint import InferEndpoint, CONFIG_KEY
 from motor.engine_server.core.sglang.sglang_engine import SGLangEngine
 from motor.engine_server.core.sglang.openai.serving_chat import OpenAIServingChat
 from motor.engine_server.core.sglang.openai.serving_completion import OpenAIServingCompletion
+from motor.engine_server.core.sglang.openai.serving_models import OpenAIServingModels
 
 logger = get_logger(__name__)
 
@@ -40,6 +41,9 @@ async def _sglang_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("InferEndpoint lifespan: SGLang serving components created.")
 
     app.state.health_checker = _sglang_health_checker
+    app.state.openai_serving_models = OpenAIServingModels(
+        tokenizer_manager=tokenizer_manager,
+    )
     app.state.openai_serving_chat = OpenAIServingChat(
         tokenizer_manager=tokenizer_manager,
         template_manager=template_manager,
