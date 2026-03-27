@@ -32,7 +32,6 @@ class CheckParams:
     with_cert: bool
     model_name: str
     input_content: str
-    deployment_dir: str
     coordinator_port: str
     coordinator_manage_port: str
     namespace: str
@@ -102,45 +101,58 @@ def fetch_ip_with_namespace_and_name(namespace: str, name: str) -> str:
     return ""
 
 
-def parse_boot_args(boot_args: list) -> dict:
-    default_boot_args = {
-        "--user_config_path": "./user_config.json",
-        "--deploy_yaml_path": "./deployment"
+def resolve_user_config_path(boot_args: list) -> str:
+    """Resolve user_config.json path from deploy-style argv tokens."""
+    file_key, dir_key = "user_config_path", "config_dir"
+    _opt_value_key = {
+        "--user_config_path": file_key,
+        "--config": file_key,
+        "--config_dir": dir_key,
+        "--dir": dir_key,
     }
+    parsed = {file_key: None, dir_key: None}
+    it = iter(boot_args)
+    for token in it:
+        key = _opt_value_key.get(token)
+        if key is None:
+            continue
+        try:
+            value = next(it)
+        except StopIteration:
+            raise ValueError(f"Invalid input args: {token} requires a value") from None
+        if value.startswith("--"):
+            raise ValueError(f"Invalid input args: {token} requires a value")
+        parsed[key] = value
     
-    def match_boot_arg(arg: str) -> str:
-        candidate_list = []
-        for key in default_boot_args.keys():
-            if arg == key:
-                return arg
-            if key.startswith(arg):
-                candidate_list.append(key)
-        if not candidate_list:
-            return ""
-        if len(candidate_list) > 1:
-            raise ValueError(f"boot_arg {arg} mismatch, candidates are: {candidate_list}")
-        logging.info(f"boot_arg {arg} match {candidate_list[0]}")
-        return candidate_list[0]
+    user_config_path = parsed[file_key]
+    config_dir = parsed[dir_key]
+    if user_config_path is None and config_dir is None:
+        raise ValueError(
+            "Missing required configuration. Please check the boot arguments."
+        )
 
-    iterator = enumerate(boot_args)
-    for _, cur_arg in iterator:
-        match_arg = match_boot_arg(cur_arg)
-        if match_arg:
-            try:
-                _, next_value = next(iterator)
-                default_boot_args[match_arg] = next_value
-            except StopIteration:
-                raise ValueError(f"Invalid input args, please check boot arg {cur_arg}!") from None
-        elif cur_arg.startswith("--"):
-            # Unknown parameter, throw error
-            valid_args = ", ".join(default_boot_args.keys())
-            raise ValueError(
-                f"Unknown boot argument: {cur_arg}. "
-                f"Please check your arguments. Valid boot arguments are: {valid_args}"
-            )
+    resolved_user_config_path = None
+    if config_dir:
+        dir_user_config = os.path.join(config_dir, "user_config.json")
+        if not user_config_path:
+            if os.path.exists(dir_user_config):
+                resolved_user_config_path = dir_user_config
+                logging.info(
+                    f"Using user_config.json from config_dir: {resolved_user_config_path}"
+                )
+            else:
+                logging.error(f"user_config.json not found in {config_dir}")
+                raise FileNotFoundError(
+                    f"user_config.json not found in {config_dir}"
+                )
+        else:
+            resolved_user_config_path = user_config_path
+            logging.info(f"User config path: {resolved_user_config_path}")
+    else:
+        resolved_user_config_path = user_config_path
 
-    logging.info(f"boot args: {default_boot_args}")
-    return default_boot_args
+    logging.info(f"resolved user_config_path: {resolved_user_config_path}")
+    return resolved_user_config_path
 
 
 def fetch_user_config(user_config_path: str) -> dict:
@@ -280,13 +292,13 @@ def restart_service(namespace: str, boot_args):
     # restart service
     deploy_res = subprocess.run(["python3", "deploy.py"] + boot_args)
     if is_mindie_service_detected(namespace):
-        logging.info(f"Restart service successfully!")
+        logging.info("Restart service successfully!")
 
 
 def main():
     parser = argparse.ArgumentParser(description="MindIE RAS Starter")
     _, boot_args = parser.parse_known_args()
-    boot_config = parse_boot_args(boot_args)
+    user_config_path = resolve_user_config_path(boot_args)
 
     logging.info(f"Boot arguments: {boot_args}")
 
@@ -311,7 +323,7 @@ def main():
             timeout=http_timeout,
             retries=False
         )
-    user_config = fetch_user_config(boot_config["--user_config_path"])
+    user_config = fetch_user_config(user_config_path)
     model_name = \
         user_config["motor_engine_prefill_config"]["model_config"]["model_name"]
     
@@ -327,7 +339,6 @@ def main():
         with_cert=(cert_context is not None),
         model_name=model_name,
         input_content=input_content,
-        deployment_dir=boot_config["--deploy_yaml_path"],
         coordinator_port=str(infer_port),
         coordinator_manage_port=str(metric_port),
         namespace=user_config["motor_deploy_config"]["job_id"]
@@ -347,6 +358,12 @@ def main():
         f"{params.coordinator_port}, coordinator_manage_port: "
         f"{params.coordinator_manage_port}"
     )
+
+    test_deploy = subprocess.run(["python3", "deploy.py"] + boot_args + ["--dry-run"])
+    if test_deploy.returncode:
+        logging.error(f"Deploy config failed! Please check boot_args: {boot_args}")
+        sys.exit(1)
+
 
     max_retry_time = 10240
     while max_retry_time > 0:
