@@ -73,7 +73,7 @@ class ConductorApiClient():
         prefill_kv_event_config = cls.coordinator_config.prefill_kv_event_config
         kv_endpoints = prefill_kv_event_config.endpoint.split("*:")
         if kv_endpoints.__len__() != 2:
-            logger.error(f"kv_endpoints size not 2  :  {prefill_kv_event_config.endpoint}")
+            logger.debug(f"kv_endpoints size not 2  :  {prefill_kv_event_config.endpoint}")
             return
 
         instance_id = f"vllm-prefill-{instance.id}"
