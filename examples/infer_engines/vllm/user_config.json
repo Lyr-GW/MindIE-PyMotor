@@ -51,7 +51,7 @@
       "model_path": "/mnt/weight/qwen3_8B",
       "npu_mem_utils": 0.9,
       "prefill_parallel_config": {
-        "dp_size": 2,
+        "dp_size": 1,
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
@@ -88,7 +88,7 @@
       "model_path": "/mnt/weight/qwen3_8B",
       "npu_mem_utils": 0.9,
       "decode_parallel_config": {
-        "dp_size": 2,
+        "dp_size": 1,
         "tp_size": 2,
         "pp_size": 1,
         "enable_ep": false,
