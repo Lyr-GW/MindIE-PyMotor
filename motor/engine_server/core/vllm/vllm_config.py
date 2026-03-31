@@ -164,7 +164,8 @@ class VLLMConfig(IConfig):
             kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.MOON_CAKE_RPC_PORT] \
                 = str(self.endpoint_config.instance_id)
         elif kv_config[constants.KV_CONNECTOR] == constants.ASCEND_STORE_CONNECTOR:
-            kv_config[constants.LOOKUP_RPC_PORT] = str(self.endpoint_config.instance_id)
+            kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.LOOKUP_RPC_PORT] = str(
+                self.endpoint_config.instance_id)
         else:
             raise ValueError(f"{constants.KV_CONNECTOR} is not supported")
 

@@ -13,66 +13,38 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
 
 ### 2.1 应用补丁
 
+> **【重要提示】**
+> **仅当 `vllm-ascend` 版本早于 `v0.17.0rc2`（不含 `v0.17.0rc2`）时才需要打此补丁。**
+> 如果您的 `vllm-ascend` 版本为 `v0.17.0rc2` 及以上，补丁已合入主干，**请直接跳过本节内容，无需进行打补丁操作**。
+
 由于vllm代码的layerwise KV-cache传输叠加KV池化存在推理bug，需要应用vllm_multi_connector.patch补丁，具体操作步骤可参考[pyMotor应用补丁](../../../patch/README.md)。
 
 ### 2.2 配置user_config.json
 
-同[vllm-ascend池化文档](https://docs.vllm.ai/projects/ascend/zh-cn/main/user_guide/feature_guide/kv_pool.html)中kv-transfer-config配置，在user_config.json配置文件中需要调整P/D实例kv_transfer_config内的配置，以[pyMotor快速开始](../../../README.md)中实例uesr_config.json为参考基线，适配打开KV池化后的配置文件示例如下
+同[vllm-ascend池化文档](https://docs.vllm.ai/projects/ascend/zh-cn/main/user_guide/feature_guide/kv_pool.html)中kv-transfer-config配置，在user_config.json配置文件中只需要调整P/D实例 `kv_transfer_config` 内的配置以及 `kv_cache_pool_config` 配置。其他配置内容与不开启池化时保持一致即可。以[pyMotor快速开始](../../../README.md)中实例uesr_config.json为参考基线，适配打开KV池化后的配置文件示例如下（省略了其他无关的配置项）：
 
 ```json
 {
   "version": "v2.0",
   "motor_deploy_config": {
-    "p_instances_num": 1,
-    "d_instances_num": 1,
-    "single_p_instance_pod_num": 1,
-    "single_d_instance_pod_num": 1,
-    "p_pod_npu_num": 4,
-    "d_pod_npu_num": 4,
-    "image_name": "",
-    "job_id": "mindie-motor",
-    "hardware_type": "800I_A2",
-    "weight_mount_path": "/mnt/weight/"
+    "..."
   },
   "motor_controller_config": {
-    "standby_config": {
-      "enable_master_standby": false
-    },
-    "fault_tolerance_config": {
-      "enable_fault_tolerance": true,
-      "enable_scale_p2d": true,
-      "enable_lingqu_network_recover": true
-    }
+    "..."
   },
   "motor_coordinator_config": {
-    "standby_config": {
-      "enable_master_standby": false
-    },
-    "request_limit": {
-      "single_node_max_requests": 4096,
-      "max_requests": 10000
-    }
+    "..."
   },
   "motor_nodemanger_config": {
+    "..."
   },
   "motor_engine_prefill_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "qwen3-8B",
-      "model_path": "/mnt/weight/qwen3_8B",
-      "npu_mem_utils": 0.9,
-      "prefill_parallel_config": {
-        "dp_size": 2,
-        "tp_size": 2,
-        "pp_size": 1,
-        "enable_ep": false,
-        "dp_rpc_port": 9000,
-        "world_size": 4
-      }
+      "..."
     },
     "engine_config": {
-      "enforce-eager": true,
-      "max_model_len": 2048,
+      "...",
       "kv_transfer_config": {
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
@@ -103,20 +75,10 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
   "motor_engine_decode_config": {
     "engine_type": "vllm",
     "model_config": {
-      "model_name": "qwen3-8B",
-      "model_path": "/mnt/weight/qwen3_8B",
-      "npu_mem_utils": 0.9,
-      "decode_parallel_config": {
-        "dp_size": 2,
-        "tp_size": 2,
-        "pp_size": 1,
-        "enable_ep": false,
-        "dp_rpc_port": 9000,
-        "world_size": 4
-      }
+      "..."
     },
     "engine_config": {
-      "max_model_len": 2048,
+      "...",
       "kv_transfer_config": {
         "kv_connector": "MultiConnector",
         "kv_role": "kv_consumer",
@@ -155,7 +117,13 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
 }
 ```
 
-说明：`kv_cache_pool_config` 中可选增加 `port` 字段（例如 `50088`）用于配置 KV Pool 的服务端口；若未配置，`deploy.py` 会按默认值 `50088` 进行补充和适配。`eviction_high_watermark_ratio` 与 `eviction_ratio` 用于 `mooncake_master` 进程启动参数。
+说明：`kv_cache_pool_config` 为 KV 池化全局配置项，具体参数说明如下：
+- `metadata_server`：元数据服务器模式，默认为 `P2PHANDSHAKE`（点对点握手模式）。
+- `protocol`：底层传输协议，默认为 `ascend`。
+- `device_name`：指定绑定的网卡名称，为空则自动选择。
+- `global_segment_size`：全局共享显存段大小，默认为 `1GB`。
+- `eviction_high_watermark_ratio` 与 `eviction_ratio`：用于 `mooncake_master` 进程启动参数，分别代表池化空间高水位驱逐线与单次驱逐比例。
+- `port`：（可选）用于配置 KV Pool 的服务端口；若未配置，`deploy.py` 会按默认值 `50088` 进行补充和适配。
 
 ### 2.3 部署服务
 

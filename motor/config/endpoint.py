@@ -259,7 +259,8 @@ class EndpointConfig:
                 if self.kv_port is not None:
                     connectors[0][constants.KV_PORT] = str(self.kv_port)
                 if self.lookup_rpc_port is not None:
-                    connectors[1][constants.LOOKUP_RPC_PORT] = str(self.lookup_rpc_port)
+                    connectors[1][constants.KV_CONNECTOR_EXTRA_CONFIG][constants.LOOKUP_RPC_PORT] = str(
+                        self.lookup_rpc_port)
             else:
                 if self.kv_port is not None:
                     kv_config[constants.KV_PORT] = str(self.kv_port)
