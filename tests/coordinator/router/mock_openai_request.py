@@ -37,19 +37,24 @@ def mock_stream_response(request_data: dict, max_num = 10, recomputed: bool = Fa
     recompute_threshold = 2
     
     # Get the last character from user input as starting point
-    if not messages or not messages[0].get("content"):
+    if not messages:
         return
-    content: str = messages[0]["content"]
-    
-    # Get the last character, convert to number, then generate subsequent numbers
-    try:
-        chunks = content.split(',')
-        last_num = chunks[-1]
-        start_num = int(last_num)
-    except (ValueError, IndexError):
-        logger.info(f"chunks:{chunks}")
-        logger.info(f"last_num:{last_num}")
+    raw_content = messages[0].get("content")
+    if raw_content is None or raw_content == "":
+        return
+    # Token-id retry bodies use list[int] content; emit the same mock sequence as string "Hello" (start 0).
+    if isinstance(raw_content, list):
         start_num = 0
+    else:
+        content: str = raw_content
+        try:
+            chunks = content.split(",")
+            last_num = chunks[-1]
+            start_num = int(last_num)
+        except (ValueError, IndexError):
+            logger.info(f"chunks:{chunks}")
+            logger.info(f"last_num:{last_num}")
+            start_num = 0
     
     # Generate response stream
     for i in range(max_tokens):
@@ -66,7 +71,11 @@ def mock_stream_response(request_data: dict, max_num = 10, recomputed: bool = Fa
                 "stop_reason": "reach_max_token" if not is_finish and is_last_token else None
             }]
         }
-        
+        if request_data.get("return_token_ids"):
+            if i == 0:
+                response_chunk["prompt_token_ids"] = [100]
+            response_chunk["choices"][0]["token_ids"] = [1000 + i]
+
         if recomputed and i >= recompute_threshold:
             response_chunk["choices"][0]["stop_reason"] = "recomputed"
             response_chunk["choices"][0]["delta"]["content"] = ""
@@ -89,21 +98,24 @@ def mock_nostream_response(request_data: dict, max_num = 10, recomputed: bool = 
     messages = request_data.get("messages", [])
     max_tokens = request_data.get("max_tokens", 10)
     recompute_threshold = 2
-    
-    # Get the last character from user input as starting point
-    if not messages or not messages[0].get("content"):
+
+    if not messages:
         return
-    content: str = messages[0]["content"]
-    
-    # Get the last character, convert to number, then generate subsequent numbers
-    try:
-        chunks = content.split(',')
-        last_num = chunks[- 1]
-        start_num = int(last_num)
-    except (ValueError, IndexError):
-        logger.info(f"chunks:{chunks}")
-        logger.info(f"last_num:{last_num}")
+    raw_content = messages[0].get("content")
+    if raw_content is None or raw_content == "":
+        return
+    if isinstance(raw_content, list):
         start_num = 0
+    else:
+        content: str = raw_content
+        try:
+            chunks = content.split(",")
+            last_num = chunks[-1]
+            start_num = int(last_num)
+        except (ValueError, IndexError):
+            logger.info(f"chunks:{chunks}")
+            logger.info(f"last_num:{last_num}")
+            start_num = 0
     
     # Generate response
     all_content = ''
@@ -142,10 +154,16 @@ def mock_nostream_response(request_data: dict, max_num = 10, recomputed: bool = 
             },
         }
         
-        
+
         if recomputed and i >= recompute_threshold:
             response_chunk["choices"][0]["stop_reason"] = "recomputed"
-        
+            if request_data.get("return_token_ids"):
+                # Align with Coordinator token-cache + prepare_retry (synthetic ids).
+                base = 7000 + start_num * 10
+                response_chunk["prompt_token_ids"] = [base, base + 1]
+                out_ids = [base + 2 + j for j in range(completion_tokens)]
+                response_chunk["choices"][0]["token_ids"] = out_ids
+
         chunk_bytes = json.dumps(response_chunk).encode('utf-8')
         yield chunk_bytes
         
@@ -219,7 +237,15 @@ class MockStreamResponse:
         if self.exc:
             return
         stream = self.request_data.get("stream", True)
+        messages = self.request_data.get("messages") or []
+        token_retry_flight = bool(
+            messages and isinstance(messages[0].get("content"), list)
+        )
+        # Second flight after prepare_retry uses list[int] prompt; do not fire "recomputed" again.
+        recomputed_arg = False if token_retry_flight else self.recomputed
         mock_response = mock_stream_response if stream else mock_nostream_response
-        for chunk in mock_response(request_data = self.request_data, recomputed = self.recomputed):
+        for chunk in mock_response(
+            request_data=self.request_data, recomputed=recomputed_arg
+        ):
             await asyncio.sleep(0.00001)
             yield chunk

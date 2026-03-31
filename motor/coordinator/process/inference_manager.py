@@ -60,7 +60,7 @@ def run_inference_worker_proc(
     logger.info(f"Inference worker process {worker_index} starting (PID: {os.getpid()})")
 
     # D direct Worker metaserver: set worker port when CDP/PD separate and worker_metaserver_base_port > 0.
-    # Single or multi worker: metaserver port is used to receive feedback from D instances.
+    # Each inference worker (num_workers >= 1) uses this port to receive metaserver callbacks from D instances.
     mp_cfg = config.inference_workers_config
     base_port = mp_cfg.worker_metaserver_base_port
     deploy_mode = config.scheduler_config.deploy_mode

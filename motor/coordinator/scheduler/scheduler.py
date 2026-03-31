@@ -18,7 +18,7 @@ from motor.common.resources.http_msg_spec import EventType
 from motor.common.utils.logger import get_logger
 from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.coordinator.scheduler.policy.factory import SchedulingPolicyFactory
-from motor.coordinator.router.workload_action_handler import calculate_demand_workload
+from motor.coordinator.domain.workload_calculator import calculate_demand_workload
 from motor.config.coordinator import CoordinatorConfig, DeployMode, SchedulerType
 from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.models.request import RequestInfo

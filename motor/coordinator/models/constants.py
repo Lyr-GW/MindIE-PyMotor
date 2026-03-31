@@ -43,7 +43,7 @@ RESOURCE_KEY: Final[str] = "resource"
 
 
 class OpenAIField(StrEnum):
-    """OpenAI-style API request body field names."""
+    """OpenAI-style API request/response field names (body, choices, usage)."""
 
     MESSAGES = "messages"
     PROMPT = "prompt"
@@ -51,3 +51,12 @@ class OpenAIField(StrEnum):
     STREAM = "stream"
     ROLE = "role"
     CONTENT = "content"
+    MAX_TOKENS = "max_tokens"
+    COMPLETION_TOKENS = "completion_tokens"
+    PROMPT_TOKEN_IDS = "prompt_token_ids"
+    CHOICES = "choices"
+    USAGE = "usage"
+    TOKEN_IDS = "token_ids"
+    DELTA = "delta"
+    TEXT = "text"
+    MESSAGE = "message"

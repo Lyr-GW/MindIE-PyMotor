@@ -15,10 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 from motor.common.resources.endpoint import Workload, WorkloadAction
 from motor.common.resources.instance import PDRole, Instance, InsStatus, ParallelConfig
-from motor.coordinator.router.workload_action_handler import (
-    calculate_demand_workload,
-    WorkloadActionHandler,
-)
+from motor.coordinator.domain.workload_calculator import calculate_demand_workload
+from motor.coordinator.router.workload import WorkloadActionHandler
 from motor.coordinator.domain import ScheduledResource
 from motor.common.resources.endpoint import Endpoint, EndpointStatus
 

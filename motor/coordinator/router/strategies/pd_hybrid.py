@@ -13,9 +13,10 @@ import asyncio
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from motor.coordinator.models.request import ReqState
-from motor.coordinator.router.base_router import BaseRouter
+from motor.coordinator.router.strategies.base import BaseRouter
+import motor.coordinator.router.recompute as recompute_common
+from motor.coordinator.router.adapters.completion_to_chat import adapt_completion_nonstream_to_chat
 from motor.common.resources.instance import PDRole
-from motor.coordinator.tracer.tracing import TracerManager
 
 
 class PDHybridRouter(BaseRouter):
@@ -37,19 +38,10 @@ class PDHybridRouter(BaseRouter):
         Handling hybrid streaming requests
         """
         trace_obj = self.req_info.trace_obj
-        span_ctx = TracerManager().tracer.start_as_current_span(
-            "PDHybrid_stream", context=trace_obj.parent_context
-        )
-        with span_ctx as span:
-            trace_obj.set_time_start()
-            trace_obj.span = span
-            trace_obj.trace_headers = TracerManager().inject_trace_context()
-            trace_obj.set_trace_attribute("requestId", self.req_info.req_id)
-            trace_obj.set_trace_attribute("stream", True)
-
+        with self._trace_span("PDHybrid_stream", True):
             self.logger.debug("Handling hybrid streaming request")
-            max_retry = self.config.exception_config.max_retry
-            
+            max_retry = self.config.exception_config.transport_retry_limit
+
             for attempt in range(max_retry):
                 try:
                     async with self._manage_resource_context(PDRole.ROLE_P, self.release_all) as resource, \
@@ -58,7 +50,12 @@ class PDHybridRouter(BaseRouter):
                         async for chunk in self.forward_stream_request(
                                 req_data, client, self.config.exception_config.first_token_timeout
                             ):
-                            yield chunk
+                            yield recompute_common.strip_stream_chunk_bytes_for_client(
+                                chunk,
+                                client_return_token_ids=self.req_info.req_data.get(
+                                    "_client_return_token_ids", False
+                                ),
+                            )
 
                         self.req_info.update_state(ReqState.DECODE_END)
                         self.logger.info(trace_obj.set_end_and_ttft_tpot())
@@ -89,17 +86,9 @@ class PDHybridRouter(BaseRouter):
         Handling hybrid non-streaming requests
         """
         trace_obj = self.req_info.trace_obj
-        span_ctx = TracerManager().tracer.start_as_current_span(
-            "PDHybrid", context=trace_obj.parent_context
-        )
-        with span_ctx as span:
-            trace_obj.span = span
-            trace_obj.trace_headers = TracerManager().inject_trace_context()
-            trace_obj.set_trace_attribute("requestId", self.req_info.req_id)
-            trace_obj.set_trace_attribute("stream", False)
-
+        with self._trace_span("PDHybrid", False):
             self.logger.debug("Handling hybrid non-streaming request")
-            max_retries = self.config.exception_config.max_retry
+            max_retries = self.config.exception_config.transport_retry_limit
 
             for attempt in range(max_retries):
                 try:
@@ -111,7 +100,21 @@ class PDHybridRouter(BaseRouter):
                             )
 
                         self.req_info.update_state(ReqState.DECODE_END)
-                        return JSONResponse(content=response.json())
+                        body = response.json()
+                        if (
+                            "chat" in self.req_info.effective_entry_api()
+                            and body.get("object") == "text_completion"
+                        ):
+                            adapt_completion_nonstream_to_chat(
+                                body, req_id=self.req_info.req_id
+                            )
+                        recompute_common.strip_nonstream_response_body_for_client(
+                            body,
+                            client_return_token_ids=self.req_info.req_data.get(
+                                "_client_return_token_ids", False
+                            ),
+                        )
+                        return JSONResponse(content=body)
 
                 except asyncio.CancelledError:
                     self.logger.debug("Post request was cancelled")

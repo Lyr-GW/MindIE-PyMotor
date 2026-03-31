@@ -28,16 +28,17 @@ from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 
 from motor.config.coordinator import CoordinatorConfig, DeployMode
+from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.domain.request_manager import RequestManager
-from motor.coordinator.router.base_router import BaseRouter
+from motor.coordinator.router.strategies.base import BaseRouter
 from motor.common.resources.instance import PDRole
-from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
-from motor.coordinator.router.separate_pd_router import SeparatePDRouter
-from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
-from motor.coordinator.router.separate_pd_dual_dispatch_router import SeparatePDDualDispatchRouter
+from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
+from motor.coordinator.router.strategies.pd_separate import SeparatePDRouter
+from motor.coordinator.router.strategies.cdp_separate import SeparateCDPRouter
+from motor.coordinator.router.strategies.pd_dual_dispatch import SeparatePDDualDispatchRouter
 from motor.common.utils.security_utils import (
     sanitize_error_message,
     filter_sensitive_headers,
@@ -154,15 +155,15 @@ async def handle_request(
     router_impl_class = _ROUTER_MAP.get(deploy_mode)
     if not router_impl_class:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unknown deploy mode: {deploy_mode}"
         )
-    
+
     router_impl = router_impl_class(
         req_info, config, scheduler=scheduler,
         request_manager=request_manager
     )
-    
+
     try:
         return await router_impl.handle_request()
     except Exception as e:
@@ -171,7 +172,7 @@ async def handle_request(
             raise e
         safe_error_msg = sanitize_error_message(str(e))
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=safe_error_msg
         ) from e
 
@@ -184,8 +185,7 @@ async def handle_metaserver_request(
     *,
     request_manager: RequestManager,
 ) -> httpx.Response:
-    """Only for CDP mode
-    Handle incoming requests from D Instance and route them to P instance
+    """Handle metaserver forward: route decode-side prefill to a Prefill instance.
 
     Args:
         raw_request: The incoming FastAPI request object from D Instance
@@ -198,15 +198,15 @@ async def handle_metaserver_request(
         HTTPException: If request body is empty or request fail
     """
     req_info = await __create_request_info(raw_request, request_manager, metaserver_request=True)
-    
+
     deploy_mode = config.scheduler_config.deploy_mode
     if not deploy_mode or deploy_mode not in [DeployMode.CDP_SEPARATE, DeployMode.PD_SEPARATE, \
             DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER]:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Unsupport deploy mode: {deploy_mode}"
         )
-    
+
     if scheduler is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -223,7 +223,7 @@ async def handle_metaserver_request(
             raise e
         safe_error_msg = sanitize_error_message(str(e))
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=safe_error_msg
         ) from e
 
@@ -263,10 +263,15 @@ async def __create_request_info(
         req_id = await request_manager.generate_request_id()
     req_len = len(request_body)
     api = validate_and_sanitize_path(raw_request.url.path)
-    
+
+    req_data = request_json.copy()
+    req_data["_client_return_token_ids"] = bool(request_json.get("return_token_ids", False))
+
     return RequestInfo(
         req_id=req_id,
-        req_data=request_json.copy(),
+        req_data=req_data,
         api=api,
-        req_len=req_len
+        req_len=req_len,
+        entry_api=api,
+        client_expects_chat_shape=(OpenAIField.MESSAGES in request_json),
     )

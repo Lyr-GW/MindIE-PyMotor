@@ -16,6 +16,7 @@ from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.utils.logger import get_logger
+from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.api_client.conductor_api_client import ConductorApiClient, TENANT_ID
 from motor.common.utils.singleton import ThreadSafeSingleton
@@ -45,11 +46,11 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         Select an endpoint with the least workload from the given instance.
         """
         encoded_ids = []
-        messages = req_info.req_data.get("messages", None)
+        messages = req_info.req_data.get(OpenAIField.MESSAGES, None)
         if messages is not None:
             encoded_ids = TokenizerManager().apply_chat_template(messages)
         else:
-            prompt = req_info.req_data.get("prompt", None)
+            prompt = req_info.req_data.get(OpenAIField.PROMPT, None)
             if prompt is not None:
                 encoded_ids = TokenizerManager().encode(prompt)
 

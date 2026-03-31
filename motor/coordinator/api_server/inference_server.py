@@ -39,7 +39,7 @@ from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestType
 from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.domain.request_manager import RequestManager
-from motor.coordinator.router.router import handle_request, handle_metaserver_request
+from motor.coordinator.router.dispatch import handle_request, handle_metaserver_request
 from motor.coordinator.tracer.tracing import TracerManager
 
 logger = get_logger(__name__)

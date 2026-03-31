@@ -22,15 +22,15 @@ from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerTyp
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.domain import InstanceReadiness, ScheduledResource
 from motor.coordinator.models.request import ReqState, RequestInfo
-from motor.coordinator.router.base_router import BaseRouter
-from motor.coordinator.router.separate_pd_dual_dispatch_router import SeparatePDDualDispatchRouter
+from motor.coordinator.router.strategies.base import BaseRouter
+from motor.coordinator.router.strategies.pd_dual_dispatch import SeparatePDDualDispatchRouter
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.domain.request_manager import RequestManager
 from tests.coordinator.router.mock_openai_request import MockStreamResponse, create_mock_request_info
-import motor.coordinator.router.router as router
+import motor.coordinator.router.dispatch as router
 
 TracerManager()
 
@@ -180,6 +180,8 @@ class TestPDDualDispatchRouter:
         mock_exception_config = MagicMock()
         mock_exception_config.retry_delay = 0.0001
         mock_exception_config.max_retry = 5
+        mock_exception_config.transport_retry_limit = 5
+        mock_exception_config.recompute_retry_limit = 5
         mock_http_config = MagicMock()
         mock_http_config.coordinator_api_host = "127.0.0.1"
         mock_http_config.coordinator_api_mgmt_port = 1025
@@ -221,7 +223,7 @@ class TestPDDualDispatchRouter:
         mock_async_client = MockAsyncClient()
         req_info = await create_mock_request_info()
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparatePDDualDispatchRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -255,7 +257,7 @@ class TestPDDualDispatchRouter:
         mock_async_client = MockAsyncClient()
         req_info = await create_mock_request_info(stream=False)
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparatePDDualDispatchRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -310,7 +312,7 @@ class TestPDDualDispatchRouter:
 
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
 
             cdp_router = SeparatePDDualDispatchRouter(
                 req_info, CoordinatorConfig(),
@@ -357,7 +359,7 @@ class TestPDDualDispatchRouter:
 
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparatePDDualDispatchRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -396,7 +398,7 @@ class TestPDDualDispatchRouter:
         ), stream_fail_times=1)
         req_info = await create_mock_request_info()
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparatePDDualDispatchRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -436,7 +438,7 @@ class TestPDDualDispatchRouter:
 
         req_info = await create_mock_request_info()
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparatePDDualDispatchRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),

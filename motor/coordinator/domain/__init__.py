@@ -12,6 +12,7 @@ Domain logic: contracts (protocols) and implementations (instance pool, request 
 """
 
 __all__ = [
+    "calculate_demand_workload",
     "InstanceManager",
     "InstanceProvider",
     "InstanceReadiness",
@@ -32,6 +33,7 @@ __all__ = [
     "RoleShmDaemonLivenessProvider",
 ]
 
+from motor.coordinator.domain.workload_calculator import calculate_demand_workload
 from motor.coordinator.domain.instance_manager import (
     InstanceManager,
     UpdateInstanceMode,

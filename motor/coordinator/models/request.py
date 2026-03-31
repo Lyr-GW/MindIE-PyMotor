@@ -48,6 +48,18 @@ class RequestInfo(BaseModel):
     req_data: dict = Field(..., description="Request json content")
     req_len: int = Field(..., description="Request body length")
     api: str = Field(..., description="API need to be forwarded")
+    entry_api: str = Field(
+        default="",
+        description="Original client HTTP path (e.g. v1/chat/completions); unchanged on recompute retry",
+    )
+    recompute_engine_mode: str | None = Field(
+        default=None,
+        description="Set to 'completions' when recompute retry uses v1/completions body",
+    )
+    client_expects_chat_shape: bool = Field(
+        default=False,
+        description="True if the original client request was chat completions (messages present at ingress)",
+    )
     state: ReqState = Field(default=ReqState.ARRIVE, description="Request current status")
     status: dict[ReqState, float] = Field(default={}, description="Request status time")
     trace_obj: TraceObj = Field(default_factory=TraceObj, description="Tracing object")
@@ -62,6 +74,10 @@ class RequestInfo(BaseModel):
     def is_cancelled(self) -> bool:
         return (self._p_cancel_scope and self._p_cancel_scope.cancel_called) \
             or (self._d_cancel_scope and self._d_cancel_scope.cancel_called)
+
+    def effective_entry_api(self) -> str:
+        """Path used for client-contract checks (Chat vs Completion); falls back to ``api``."""
+        return self.entry_api or self.api
 
     def update_state(self, new_state: ReqState):
         self.state = new_state
