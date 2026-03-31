@@ -22,6 +22,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from http import HTTPStatus
+from typing import Any
 
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -32,6 +33,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+
+from motor.engine_server.core.vllm.vllm_openai_compat import kwargs_matching_signature
 
 
 class OpenAIServingChat:
@@ -44,14 +47,21 @@ class OpenAIServingChat:
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        openai_serving_render: Any | None = None,
     ) -> None:
+        chat_kw: dict[str, Any] = {
+            "request_logger": request_logger,
+            "chat_template": chat_template,
+            "chat_template_content_format": chat_template_content_format,
+        }
+        if openai_serving_render is not None:
+            chat_kw["openai_serving_render"] = openai_serving_render
+        chat_kw = kwargs_matching_signature(VllmOpenAIServingChat.__init__, chat_kw)
         self._vllm_serving_chat = VllmOpenAIServingChat(
             engine_client,
             models,
             response_role,
-            request_logger=request_logger,
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
+            **chat_kw,
         )
 
     async def handle_request(self, request: ChatCompletionRequest, raw_request: Request):

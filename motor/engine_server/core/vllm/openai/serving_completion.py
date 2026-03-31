@@ -20,6 +20,7 @@
 # See the respective licenses for more details.
 
 from http import HTTPStatus
+from typing import Any
 
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -30,6 +31,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest, CompletionResponse
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 
+from motor.engine_server.core.vllm.vllm_openai_compat import kwargs_matching_signature
+
 
 class OpenAIServingCompletion:
     def __init__(
@@ -38,11 +41,24 @@ class OpenAIServingCompletion:
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
+        return_tokens_as_token_ids: bool = False,
+        enable_prompt_tokens_details: bool = False,
+        enable_force_include_usage: bool = False,
+        openai_serving_render: Any | None = None,
     ):
+        comp_kw: dict[str, Any] = {
+            "request_logger": request_logger,
+            "return_tokens_as_token_ids": return_tokens_as_token_ids,
+            "enable_prompt_tokens_details": enable_prompt_tokens_details,
+            "enable_force_include_usage": enable_force_include_usage,
+        }
+        if openai_serving_render is not None:
+            comp_kw["openai_serving_render"] = openai_serving_render
+        comp_kw = kwargs_matching_signature(VllmOpenAIServingCompletion.__init__, comp_kw)
         self._vllm_serving_completion = VllmOpenAIServingCompletion(
             engine_client,
             models,
-            request_logger=request_logger,
+            **comp_kw,
         )
 
     async def handle_request(self, request: CompletionRequest, raw_request: Request):
