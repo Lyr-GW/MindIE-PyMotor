@@ -51,6 +51,8 @@ class VLLMEngine(Engine):
         setattr(engine_config, "_api_process_rank", -1)
 
         endpoint_usage_context = UsageContext.OPENAI_API_SERVER
+        if hasattr(engine_config, 'lookup_rpc_port'):
+            delattr(engine_config, 'lookup_rpc_port')
         vllm_endpoint_config = engine_config.create_engine_config(usage_context=endpoint_usage_context)
 
         parallel_setup = vllm_endpoint_config.parallel_config
