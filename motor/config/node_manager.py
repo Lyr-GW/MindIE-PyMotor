@@ -21,10 +21,7 @@ from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
 from motor.common.utils.logger import get_logger, reconfigure_logging
 from motor.config.config_utils import (
-    ConfigKey,
-    save_config_to_json,
-    _update_tls_config,
-    MGMT_TLS_CONFIG,
+    ConfigKey, save_config_to_json, _update_tls_config, MGMT_TLS_CONFIG,
 )
 from motor.config.log_config import LoggingConfig
 
@@ -35,8 +32,7 @@ TP = "tp_size"
 DP = "dp_size"
 BASIC_CONFIG_KEY = "basic_config"
 MODEL_CONFIG_KEY = "model_config"
-PREFILL_PARALLEL_CONFIG_KEY = "prefill_parallel_config"
-DECODE_PARALLEL_CONFIG_KEY = "decode_parallel_config"
+PARALLEL_CONFIG_KEY = "parallel_config"
 MOTOR_NODE_MANAGER_CONFIG_KEY = "motor_nodemanger_config"
 MOTOR_ENGINE_PREFILL_CONFIG_KEY = "motor_engine_prefill_config"
 MOTOR_ENGINE_DECODE_CONFIG_KEY = "motor_engine_decode_config"
@@ -129,10 +125,10 @@ class SingleContainerNodemanagerConfig:
         config.single_container_flag = True
         p_instances_num = user_config_data['motor_deploy_config']['p_instances_num']
         d_instances_num = user_config_data['motor_deploy_config']['d_instances_num']
-        prefill_parallel_config = \
-                user_config_data[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][PREFILL_PARALLEL_CONFIG_KEY]
-        decode_parallel_config = \
-                user_config_data[MOTOR_ENGINE_DECODE_CONFIG_KEY][MODEL_CONFIG_KEY][DECODE_PARALLEL_CONFIG_KEY]
+        prefill_model_cfg = user_config_data[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY]
+        decode_model_cfg = user_config_data[MOTOR_ENGINE_DECODE_CONFIG_KEY][MODEL_CONFIG_KEY]
+        prefill_parallel_config = prefill_model_cfg[PARALLEL_CONFIG_KEY]
+        decode_parallel_config = decode_model_cfg[PARALLEL_CONFIG_KEY]
         p_dp_size = prefill_parallel_config[DP]
         p_tp_size = prefill_parallel_config[TP]
         p_pp_size = prefill_parallel_config[PP]
@@ -207,85 +203,78 @@ class NodeManagerConfig:
 
     @classmethod
     def from_json(cls, config_path: str | None = None) -> 'NodeManagerConfig':
-        """Load configuration from config"""
-
+        """Load configuration from user_config.json"""
         if config_path is None:
             config_path = Env.user_config_path
 
         config_path_obj = Path(config_path)
         logger.info("Loading configuration files: config=%s", config_path_obj)
 
-        # Create configuration instance with default values
-        try:
-            config = cls()
+        config = cls()
+        config.config_path = config_path
 
-            # Set the resolved paths
-            config.config_path = config_path
+        config_data = {}
+        raw = None
+        if os.path.exists(str(config_path_obj)):
+            with safe_open(str(config_path_obj), "r") as f:
+                raw = json.load(f)
+            logger.info("Successfully loaded config file: %s", config_path_obj)
 
-            # Load config JSON
-            config_data = {}
-            if os.path.exists(str(config_path_obj)):
-                try:
-                    with safe_open(str(config_path_obj), "r") as f:
-                        raw = json.load(f)
-                    logger.info("Successfully loaded config file: %s", config_path_obj)
+            config.single_container_config = SingleContainerNodemanagerConfig.from_json(raw)
 
-                    config.single_container_config = SingleContainerNodemanagerConfig.from_json(raw)
-
-                    if isinstance(raw, dict) and MOTOR_NODE_MANAGER_CONFIG_KEY in raw:
-                        user_cfg = raw
-                        config_data = user_cfg.get(MOTOR_NODE_MANAGER_CONFIG_KEY, {})
-                        if BASIC_CONFIG_KEY not in config_data:
-                            config_data[BASIC_CONFIG_KEY] = {}
-                        config_data[BASIC_CONFIG_KEY][MODEL_NAME_KEY] = \
-                            user_cfg[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][MODEL_NAME_KEY]
-                        config_data[BASIC_CONFIG_KEY][HARDWARE_TYPE_KEY] = \
-                            user_cfg["motor_deploy_config"][HARDWARE_TYPE_KEY]
-                        if Env.role == "prefill":
-                            config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
-                                user_cfg[MOTOR_ENGINE_PREFILL_CONFIG_KEY][MODEL_CONFIG_KEY][PREFILL_PARALLEL_CONFIG_KEY]
-                            # Set enable_multi_endpoints from prefill config
-                            enable_multi_endpoints = user_cfg[
-                                MOTOR_ENGINE_PREFILL_CONFIG_KEY
-                            ].get(ENABLE_MULTI_ENDPOINTS_KEY, True)
-                            config_data[BASIC_CONFIG_KEY][ENABLE_MULTI_ENDPOINTS_KEY] = enable_multi_endpoints
-                        elif Env.role == "decode":
-                            config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
-                                user_cfg[MOTOR_ENGINE_DECODE_CONFIG_KEY][MODEL_CONFIG_KEY][DECODE_PARALLEL_CONFIG_KEY]
-                            # Set enable_multi_endpoints from decode config
-                            enable_multi_endpoints = user_cfg[
-                                MOTOR_ENGINE_DECODE_CONFIG_KEY
-                            ].get(ENABLE_MULTI_ENDPOINTS_KEY, True)
-                            config_data[BASIC_CONFIG_KEY][ENABLE_MULTI_ENDPOINTS_KEY] = enable_multi_endpoints
-                        tls_configs = [MGMT_TLS_CONFIG]
-                        _update_tls_config(tls_configs, config_data, user_cfg)
-                    else:
-                        config_data = raw
-
-                    # Update configuration from loaded data
-                    cls._update_from_config_data(config, config_data)
-                except Exception as e:
-                    logger.error("Failed to read config file: %s", e)
-                    raise ValueError(f"Unable to read config file {config_path}: {e}") from e
+            if isinstance(raw, dict):
+                config_data = cls._load_node_manager_config_data(raw)
             else:
-                logger.warning("Config file does not exist, using default configuration: %s", config_path_obj)
-                raw = None
+                config_data = raw
 
-            # Get device count from config
-            cls._set_device_count_from_config(config, raw)
+            cls._update_from_config_data(config, config_data)
+        else:
+            logger.warning("Config file does not exist, using default configuration: %s", config_path_obj)
 
-            config.validate_config()
+        cls._set_device_count_from_config(config, raw)
 
-            # Set last modified time
-            if config_path_obj.exists():
-                config.last_modified = config_path_obj.stat().st_mtime
+        config.validate_config()
 
-            logger.info("Configuration loading completed")
-            return config
+        if config_path_obj.exists():
+            config.last_modified = config_path_obj.stat().st_mtime
 
-        except Exception as e:
-            logger.error("Failed to create configuration instance: %s", e)
-            raise
+        logger.info("Configuration loading completed")
+        return config
+
+    @classmethod
+    def _load_node_manager_config_data(cls, user_cfg: dict[str, Any]) -> dict[str, Any]:
+        """Load node_manager_config from engine config based on role"""
+        engine_config_key = None
+        if Env.role == "prefill":
+            engine_config_key = MOTOR_ENGINE_PREFILL_CONFIG_KEY
+        elif Env.role == "decode":
+            engine_config_key = MOTOR_ENGINE_DECODE_CONFIG_KEY
+        
+        if not engine_config_key or engine_config_key not in user_cfg:
+            return user_cfg
+        
+        engine_config = user_cfg[engine_config_key]
+        if "node_manager_config" in engine_config:
+            config_data = engine_config.get("node_manager_config", {})
+        else:
+            config_data = {}
+        
+        if BASIC_CONFIG_KEY not in config_data:
+            config_data[BASIC_CONFIG_KEY] = {}
+        
+        config_data[BASIC_CONFIG_KEY][MODEL_NAME_KEY] = \
+            engine_config[MODEL_CONFIG_KEY][MODEL_NAME_KEY]
+        config_data[BASIC_CONFIG_KEY][HARDWARE_TYPE_KEY] = user_cfg["motor_deploy_config"][HARDWARE_TYPE_KEY]
+        
+        if Env.role in ("prefill", "decode"):
+            config_data[BASIC_CONFIG_KEY]["parallel_config"] = \
+                engine_config[MODEL_CONFIG_KEY][PARALLEL_CONFIG_KEY]
+            enable_multi_endpoints = engine_config.get(ENABLE_MULTI_ENDPOINTS_KEY, True)
+            config_data[BASIC_CONFIG_KEY][ENABLE_MULTI_ENDPOINTS_KEY] = enable_multi_endpoints
+        
+        _update_tls_config([MGMT_TLS_CONFIG], config_data, user_cfg)
+        
+        return config_data
 
     @classmethod
     def _update_from_config_data(cls, config: 'NodeManagerConfig', cfg: dict[str, Any]):

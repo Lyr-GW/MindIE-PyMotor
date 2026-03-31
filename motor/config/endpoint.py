@@ -27,6 +27,7 @@ supported_role = ["prefill", "decode", "union"]
 MOTOR_ENGINE_PREFILL_CONFIG_KEY = "motor_engine_prefill_config"
 MOTOR_ENGINE_DECODE_CONFIG_KEY = "motor_engine_decode_config"
 MODEL_CONFIG_KEY = "model_config"
+PARALLEL_CONFIG_KEY = "parallel_config"
 PREFILL_PARALLEL_CONFIG_KEY = "prefill_parallel_config"
 DECODE_PARALLEL_CONFIG_KEY = "decode_parallel_config"
 
@@ -136,10 +137,10 @@ class DeployConfig:
             prefill_cfg = raw_data.get(MOTOR_ENGINE_PREFILL_CONFIG_KEY, {}).get(MODEL_CONFIG_KEY, {})
             decode_cfg = raw_data.get(MOTOR_ENGINE_DECODE_CONFIG_KEY, {}).get(MODEL_CONFIG_KEY, {})
 
-            if PREFILL_PARALLEL_CONFIG_KEY not in model_cfg and PREFILL_PARALLEL_CONFIG_KEY in prefill_cfg:
-                model_cfg[PREFILL_PARALLEL_CONFIG_KEY] = prefill_cfg[PREFILL_PARALLEL_CONFIG_KEY]
-            if DECODE_PARALLEL_CONFIG_KEY not in model_cfg and DECODE_PARALLEL_CONFIG_KEY in decode_cfg:
-                model_cfg[DECODE_PARALLEL_CONFIG_KEY] = decode_cfg[DECODE_PARALLEL_CONFIG_KEY]
+            if PREFILL_PARALLEL_CONFIG_KEY not in model_cfg and PARALLEL_CONFIG_KEY in prefill_cfg:
+                model_cfg[PREFILL_PARALLEL_CONFIG_KEY] = prefill_cfg[PARALLEL_CONFIG_KEY]
+            if DECODE_PARALLEL_CONFIG_KEY not in model_cfg and PARALLEL_CONFIG_KEY in decode_cfg:
+                model_cfg[DECODE_PARALLEL_CONFIG_KEY] = decode_cfg[PARALLEL_CONFIG_KEY]
 
         mgmt_tls_config = data.get("mgmt_tls_config")
         infer_tls_config = data.get("infer_tls_config")

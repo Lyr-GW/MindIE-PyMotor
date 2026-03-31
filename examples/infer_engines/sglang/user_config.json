@@ -54,7 +54,7 @@
       "model_name": "qwen3-8B",
       "model_path": "/mnt/share/weight/Qwen3-8B",
       "npu_mem_utils": 0.9,
-      "prefill_parallel_config": {
+      "parallel_config": {
         "dp_size": 1,
         "tp_size": 2,
         "pp_size": 1,
@@ -86,7 +86,7 @@
       "model_name": "qwen3-8B",
       "model_path": "/mnt/share/weight/Qwen3-8B",
       "npu_mem_utils": 0.9,
-      "decode_parallel_config": {
+      "parallel_config": {
         "dp_size": 1,
         "tp_size": 2,
         "pp_size": 1,
