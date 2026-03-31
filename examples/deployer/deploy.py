@@ -12,6 +12,7 @@ import os
 
 import lib.constant as C
 from lib.utils import logger, read_json, set_env_to_shell, get_deploy_paths
+from lib.update_config_whitelist import validate_update_config_whitelist
 from lib.generator import k8s_utils
 from lib.generator.k8s_utils import (
     get_baseline_config_from_configmap, exec_all_kubectl_multi, exec_all_kubectl_singer,
@@ -35,12 +36,14 @@ from lib.config_validator import (
 )
 
 
-def handle_update_config(deploy_config):
+def handle_update_config(user_config):
+    deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     baseline_config = get_baseline_config_from_configmap(deploy_config[C.CONFIG_JOB_ID])
     if baseline_config is None:
         raise FileNotFoundError("ConfigMap motor-config not found or has no user_config in cluster. "
                                 "Please deploy once before updating configmap.")
-    baseline_deploy = baseline_config["motor_deploy_config"]
+
+    baseline_deploy = baseline_config[C.MOTOR_DEPLOY_CONFIG]
     if (deploy_config.get(C.P_INSTANCES_NUM) != baseline_deploy.get(C.P_INSTANCES_NUM)
             or deploy_config.get(C.D_INSTANCES_NUM) != baseline_deploy.get(C.D_INSTANCES_NUM)):
         raise ValueError(
@@ -49,6 +52,7 @@ def handle_update_config(deploy_config):
         )
 
     validate_deploy_mode_consistency(deploy_config, baseline_deploy)
+    validate_update_config_whitelist(user_config, baseline_config)
 
     create_motor_config_configmap(deploy_config[C.CONFIG_JOB_ID])
     logger.info("Configmap refreshed.")
@@ -228,8 +232,7 @@ def main():
     validate_instance_nums(user_config)
 
     if args.update_config:
-        deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
-        handle_update_config(deploy_config)
+        handle_update_config(user_config)
         return
     if args.update_instance_num:
         handle_update_instance_num(user_config)

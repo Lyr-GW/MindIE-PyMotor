@@ -574,6 +574,17 @@ python3 deploy.py --user_config_path ../infer_engines/vllm/user_config.json --en
 - `--update_config`：仅刷新 ConfigMap（motor-config），不重新 apply Deployment
 - `--update_instance_num`：根据配置扩缩容实例数量
 
+`--update_config` 仅支持修改**白名单内**的配置项；脚本会将当前 `user_config.json` 与集群中已部署的 `motor-config` 基线配置进行逐项比对，若存在非白名单字段变更将直接报错并拒绝更新。当前白名单范围主要包括以下几类：
+
+- 各模块日志等级：`motor_controller_config.logging_config.log_level`、`motor_coordinator_config.logging_config.log_level`、`motor_nodemanger_config.logging_config.log_level`
+- Controller 可观测配置：`motor_controller_config.observability_config`
+- Coordinator 异常处理配置：`motor_coordinator_config.exception_config`
+- Coordinator 超时配置：`motor_coordinator_config.timeout_config`
+
+具体允许修改到哪些字段，以及白名单配置块下哪些新增字段会被拦截，请参考 [`--update_config` 白名单说明](./update_config_whitelist.md)。
+
+除白名单外，其他配置项（包括部署资源、实例数量、模型配置、TLS、主备、限流等）均不支持通过 `--update_config` 修改。如需扩缩容，请使用 `--update_instance_num`，如需变更其他配置，请按正常部署流程重新执行部署。
+
 示例：
 
 ```bash
