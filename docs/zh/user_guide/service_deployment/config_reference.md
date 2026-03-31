@@ -232,6 +232,7 @@
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
 | max_retry | int | 请求失败后的最大重试次数。默认：`5` |
+| recompute_enabled | bool | 是否允许 Coordinator 在引擎返回 `stop_reason=recomputed` 时执行 token 缓存重算并重试。默认：`true` |
 | retry_delay | float | 每次重试前的等待时间（秒）。默认：`0.2` |
 | first_token_timeout | int | 等待首 token 返回的超时时间（秒）。默认：`600` |
 | infer_timeout | int | 单次推理请求的总超时时间（秒）。默认：`3600` |

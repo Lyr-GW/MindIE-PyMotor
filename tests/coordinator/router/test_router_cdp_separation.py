@@ -19,19 +19,19 @@ import httpx
 import logging
 import pytest
 
-from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
+from motor.config.coordinator import DeployMode, CoordinatorConfig, ExceptionConfig, SchedulerType
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.domain import InstanceReadiness, ScheduledResource
 from motor.coordinator.models.request import ReqState, RequestInfo
-from motor.coordinator.router.base_router import BaseRouter
-from motor.coordinator.router.separate_cdp_router import SeparateCDPRouter
+from motor.coordinator.router.strategies.base import BaseRouter
+from motor.coordinator.router.strategies.cdp_separate import SeparateCDPRouter
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.domain.request_manager import RequestManager
 from tests.coordinator.router.mock_openai_request import MockStreamResponse, create_mock_request_info
-import motor.coordinator.router.router as router
+import motor.coordinator.router.dispatch as router
 
 TracerManager()
 
@@ -60,6 +60,8 @@ def _assert_decode_retry_logs_deduped_for_label(
 
 app = FastAPI()
 _config = CoordinatorConfig()
+# CDP separate mode requires worker metaserver; set so app-based tests have a valid config
+_config.worker_metaserver_port = getattr(_config, "worker_metaserver_port", None) or 12000
 _scheduler = Scheduler(instance_provider=InstanceManager(_config), config=_config)
 _request_manager = RequestManager(_config)
 
@@ -93,8 +95,9 @@ class MockAsyncClient:
         self.stream_fail_count = 0
         
         self.req_data_from_metaserver = {}
+        self.req_data_d_request = {}  # D request (with metaserver URL), not overwritten by inner post()
         self.req_headers_from_router = {}
-        
+
         self.base_url = "test-base-url"
         self.timeout = 1
         self.is_closed = True
@@ -131,6 +134,7 @@ class MockAsyncClient:
         self.stream_count += 1
         if json:
             self.req_data_from_metaserver = json
+            self.req_data_d_request = json  # keep D request; post() may overwrite req_data_from_metaserver
         # logger.info(f"----------req_data_from_coordinator:{json}")
         if self.stream_exc and self.stream_fail_count < self.stream_fail_times:
             self.stream_fail_count += 1
@@ -165,6 +169,48 @@ class MockAsyncClient:
         
         # Return an async context manager
         return MockStreamResponse(json or {}, recomputed=False, exc=None)
+
+
+class MockAsyncClientFirstStreamRecompute(MockAsyncClient):
+    """First decode stream simulates recompute after partial output; second completes."""
+
+    def stream(self, method, url, json=None, headers=None, **kwargs):
+        self.stream_count += 1
+        if json:
+            self.req_data_from_metaserver = json
+            self.req_data_d_request = json
+        if self.stream_exc and self.stream_fail_count < self.stream_fail_times:
+            self.stream_fail_count += 1
+            return MockStreamResponse(json or {}, recomputed=False, exc=self.stream_exc)
+
+        from urllib.parse import urlparse
+        client = TestClient(app)
+        self.req_headers_from_router = headers or {}
+
+        url_ms = json["kv_transfer_params"]["metaserver"]
+        parsed_url = urlparse(url_ms)
+
+        response = None
+        try:
+            response = client.post(parsed_url.path, json={
+                "request_id": headers.get("X-Request-Id"),
+                "do_remote_decode": False,
+                "do_remote_prefill": True,
+                "remote_engine_id": "test-engine",
+                "remote_host": parsed_url.hostname,
+                "remote_port": str(parsed_url.port)
+            })
+            response.raise_for_status()
+        except Exception as e:
+            err_text = getattr(response, "text", str(e)) if response is not None else str(e)
+            err_status = getattr(response, "status_code", 500) if response is not None else 500
+            return MockStreamResponse(json or {}, recomputed=False, exc=httpx.HTTPStatusError(
+                message=err_text, request=MagicMock(),
+                response=httpx.Response(status_code=err_status, text=err_text)
+            ))
+
+        recomputed = self.stream_count == 1
+        return MockStreamResponse(json or {}, recomputed=recomputed, exc=None)
 
 
 class TestRouterCDPSeparation:
@@ -241,12 +287,11 @@ class TestRouterCDPSeparation:
         mock_scheduler_config = MagicMock()
         mock_scheduler_config.deploy_mode = DeployMode.CDP_SEPARATE
         mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
-        mock_exception_config = MagicMock()
-        mock_exception_config.retry_delay = 0.0001
-        mock_exception_config.max_retry = 5
+        # Real ExceptionConfig so transport_retry_limit / recompute_retry_limit properties work;
+        # MagicMock lacks @property implementation and breaks decode transport loops (range / last-attempt check).
+        mock_exception_config = ExceptionConfig(max_retry=5, retry_delay=0.0001)
         mock_http_config = MagicMock()
         mock_http_config.coordinator_api_host = "127.0.0.1"
-        mock_http_config.coordinator_api_mgmt_port = 1025
         mock_tls_config = MagicMock()
         mock_tls_config.enable_tls = False
 
@@ -256,8 +301,8 @@ class TestRouterCDPSeparation:
         mock_config.http_config = mock_http_config
         mock_config.infer_tls_config = mock_tls_config
         mock_config.mgmt_tls_config = mock_tls_config
-        # So _gen_d_request uses coordinator_api_mgmt_port; avoid MagicMock as parsed_url.port
-        mock_config.worker_metaserver_port = None
+        # CDP separate requires worker metaserver; use a fixed port for test
+        mock_config.worker_metaserver_port = 12000
 
         monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
     
@@ -270,8 +315,10 @@ class TestRouterCDPSeparation:
         mock_req.headers = {}
         mock_req.url.path = "/v1/chat/completions"
         # Must be awaitable so listen_for_disconnect() does not raise; never completes so handler wins.
-        never = asyncio.Future()
-        mock_req.receive = AsyncMock(return_value=never)
+        async def _never_receive():
+            await asyncio.Event().wait()
+
+        mock_req.receive = AsyncMock(side_effect=_never_receive)
         return mock_req
 
     @pytest.mark.asyncio
@@ -289,7 +336,7 @@ class TestRouterCDPSeparation:
         origin_req_len = req_info.req_len
         origin_req_data = req_info.req_data
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             # Must use _request_manager so metaserver (handle_metaserver) finds req_info
             cdp_router = SeparateCDPRouter(
                 req_info, CoordinatorConfig(),
@@ -306,17 +353,15 @@ class TestRouterCDPSeparation:
             # Should be a streaming response
             assert "text/event-stream" in response.headers.get("content-type")
             
-            # req_data_from_metaserver captures P request (forward_request in metaserver flow)
-            req_data = mock_async_client.req_data_from_metaserver
-            assert req_data["stream"] is False  # P request uses stream=False for KV cache fill
-            assert req_data["max_tokens"] == 1  # P request uses max_tokens=1
-            # kv_transfer_params from P/metaserver flow
-            kv_transfer_params = req_data["kv_transfer_params"]
-            assert kv_transfer_params["request_id"] == mock_async_client.req_headers_from_router["X-Request-Id"]
+            # req_data_from_metaserver may be P request (after metaserver handler's post); use D request for URL
+            req_data_p = mock_async_client.req_data_from_metaserver
+            assert req_data_p["stream"] is False  # P request uses stream=False for KV cache fill
+            assert req_data_p["max_tokens"] == 1  # P request uses max_tokens=1
+            # D request: metaserver URL points to this Worker's metaserver
+            kv_transfer_params = mock_async_client.req_data_d_request["kv_transfer_params"]
             assert kv_transfer_params["do_remote_decode"] is False
             assert kv_transfer_params["do_remote_prefill"] is True
-            assert kv_transfer_params["remote_host"] == CoordinatorConfig().http_config.coordinator_api_host
-            assert kv_transfer_params["remote_port"] == str(CoordinatorConfig().http_config.coordinator_api_mgmt_port)
+            assert kv_transfer_params["metaserver"] == "http://127.0.0.1:12000/v1/metaserver"
 
             # Request info should not be modified by metaserver
             assert req_info.req_id == origin_req_id
@@ -330,6 +375,47 @@ class TestRouterCDPSeparation:
             assert req_info.status[ReqState.PREFILL_END] >= req_info.status[ReqState.P_ALLOCATED]
             assert req_info.status[ReqState.FIRST_TOKEN_FINISH] >= req_info.status[ReqState.PREFILL_END]
             assert req_info.status[ReqState.DECODE_END] >= req_info.status[ReqState.FIRST_TOKEN_FINISH]
+
+    @pytest.mark.asyncio
+    async def test_cdp_stream_recompute_after_partial_output_continues(
+        self, client, monkeypatch: MonkeyPatch, setup_cdp_separation
+    ):
+        """Decode signals recomputed after partial stream; second flight completes (aligned with PD router)."""
+        mock_async_client = MockAsyncClientFirstStreamRecompute()
+
+        req_info = await create_mock_request_info()
+
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
+            cdp_router = SeparateCDPRouter(
+                req_info, CoordinatorConfig(),
+                scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+                request_manager=_request_manager
+            )
+            response = await cdp_router.handle_request()
+            chunks = []
+            async for chunk in response.body_iterator:
+                chunks.append(chunk)
+            chunk_str = b"".join(chunks).decode("utf-8", errors="replace")
+
+        assert req_info.state == ReqState.DECODE_END, chunk_str
+        assert mock_async_client.stream_count == 2
+        assert "data:" in chunk_str
+        assert "recompute after first chunk" not in chunk_str
+
+    @pytest.mark.asyncio
+    async def test_cdp_requires_worker_metaserver_port(self, setup_cdp_separation):
+        """CDP separate mode raises RuntimeError when worker_metaserver_port is not set."""
+        mock_config = CoordinatorConfig()
+        mock_config.worker_metaserver_port = None
+
+        req_info = await create_mock_request_info()
+        cdp_router = SeparateCDPRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=_request_manager,
+        )
+        with pytest.raises(RuntimeError, match="worker_metaserver_base_port > 0"):
+            await cdp_router.handle_request()
 
     @pytest.mark.asyncio
     async def test_engine_server_decode_4xx_status_code(self, client, monkeypatch: MonkeyPatch, setup_cdp_separation):
@@ -365,7 +451,7 @@ class TestRouterCDPSeparation:
             return True
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
         
             cdp_router = SeparateCDPRouter(
                 req_info, CoordinatorConfig(),
@@ -408,8 +494,8 @@ class TestRouterCDPSeparation:
             return True
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
 
-        with caplog.at_level(logging.WARNING, logger="motor.coordinator.router.base_router"):
-            with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with caplog.at_level(logging.WARNING, logger="motor.coordinator.router.strategies.base"):
+            with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
                 cdp_router = SeparateCDPRouter(
                     req_info, CoordinatorConfig(),
                     scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -447,7 +533,7 @@ class TestRouterCDPSeparation:
         ), stream_fail_times=1)
         req_info = await create_mock_request_info()
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparateCDPRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -485,7 +571,7 @@ class TestRouterCDPSeparation:
         
         req_info = await create_mock_request_info()
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
             cdp_router = SeparateCDPRouter(
                 req_info, CoordinatorConfig(),
                 scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
@@ -525,8 +611,8 @@ class TestRouterCDPSeparation:
 
         monkeypatch.setattr(BaseRouter, "_update_workload", mock_update_workload)
 
-        with caplog.at_level(logging.WARNING, logger="motor.coordinator.router.base_router"):
-            with patch("motor.coordinator.router.base_router.httpx.AsyncClient", return_value=mock_async_client):
+        with caplog.at_level(logging.WARNING, logger="motor.coordinator.router.strategies.base"):
+            with patch("motor.coordinator.router.strategies.base.httpx.AsyncClient", return_value=mock_async_client):
                 cdp_router = SeparateCDPRouter(
                     req_info,
                     CoordinatorConfig(),
@@ -564,7 +650,7 @@ class TestRouterCDPSeparation:
         monkeypatch.setattr(RequestInfo, "update_state", mock_update_state)
 
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=mock_async_client):
 
             with client.stream(
                 "POST",
@@ -630,7 +716,7 @@ class TestRouterCDPSeparation:
         # Mock PDHybridRouter response
         mock_response = "mock_message"
         with patch(
-            "motor.coordinator.router.router.PDHybridRouter.handle_request",
+            "motor.coordinator.router.dispatch.PDHybridRouter.handle_request",
             new_callable=AsyncMock,
             return_value=mock_response,
         ) as mock_handle_request:
@@ -655,7 +741,7 @@ class TestRouterCDPSeparation:
 
         # Mock SeparateCDPRouter response
         mock_response = "mock_message"
-        with patch("motor.coordinator.router.router.SeparateCDPRouter.handle_request",
+        with patch("motor.coordinator.router.dispatch.SeparateCDPRouter.handle_request",
                    return_value=mock_response) as mock_handle_request:
 
             response = await router.handle_request(

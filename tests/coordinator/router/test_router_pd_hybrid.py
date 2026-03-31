@@ -18,9 +18,15 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 import pytest
 
-from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
+from motor.config.coordinator import (
+    DeployMode,
+    CoordinatorConfig,
+    SchedulerConfig,
+    SchedulerType,
+    ExceptionConfig,
+)
 from motor.coordinator.domain.instance_manager import InstanceManager
-from motor.coordinator.router.pd_hybrid_router import PDHybridRouter
+from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from motor.common.resources.endpoint import Workload
 from motor.coordinator.domain import InstanceReadiness
@@ -28,7 +34,7 @@ from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
-import motor.coordinator.router.router as router
+import motor.coordinator.router.dispatch as router
 from motor.common.utils.logger import get_logger
 
 TracerManager()
@@ -46,6 +52,17 @@ async def handle_completions(request: Request):
     return await router.handle_request(
         request, _config, scheduler=_scheduler, request_manager=_request_manager
     )
+
+
+@pytest.fixture(autouse=True)
+def _use_single_node_deploy_for_test_app(monkeypatch):
+    """Default CoordinatorConfig is PD_SEPARATE, which maps to CDP router in _ROUTER_MAP."""
+    monkeypatch.setattr(
+        _config,
+        "scheduler_config",
+        SchedulerConfig(deploy_mode=DeployMode.SINGLE_NODE),
+    )
+
 
 @pytest.fixture
 def mock_forward_stream_request(monkeypatch):
@@ -124,9 +141,7 @@ class TestRouterPDHybrid:
         mock_scheduler_config = MagicMock()
         mock_scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
         mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
-        mock_exception_config = MagicMock()
-        mock_exception_config.retry_delay = 0.0001
-        mock_exception_config.max_retry = 5
+        mock_exception_config = ExceptionConfig(max_retry=5, retry_delay=0.0001)
         mock_http_config = MagicMock()
         mock_http_config.coordinator_api_host = "127.0.0.1"
         mock_http_config.coordinator_api_mgmt_port = 1025
@@ -137,7 +152,7 @@ class TestRouterPDHybrid:
         mock_config.http_config = mock_http_config
 
         monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
-        
+
     
     @pytest.mark.asyncio
     async def test_pd_hybrid_request_forwarding(self, monkeypatch: MonkeyPatch, setup_pd_hybrid, mock_forward_stream_request):
@@ -265,3 +280,47 @@ class TestRouterPDHybrid:
         assert response.status_code == status.HTTP_200_OK
         # Should be a streaming response
         assert "text/event-stream" in response.headers.get("content-type")
+
+    @pytest.mark.asyncio
+    async def test_pd_hybrid_nonstream_adapts_text_completion_for_chat_entry(
+        self, monkeypatch: MonkeyPatch, setup_pd_hybrid
+    ):
+        """Engine may return Completion JSON while client called /v1/chat/completions."""
+        body = {
+            "object": "text_completion",
+            "id": "cmpl-adapt-test",
+            "choices": [{"index": 0, "text": "hello", "finish_reason": "stop"}],
+        }
+
+        async def mock_forward(self, req_data, client, timeout):
+            resp = MagicMock()
+            resp.json = MagicMock(return_value=body)
+            return resp
+
+        monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
+
+        req_info = RequestInfo(
+            req_id="rid-p1-hybrid",
+            req_data={
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+            },
+            req_len=99,
+            api="v1/chat/completions",
+            entry_api="v1/chat/completions",
+        )
+        hybrid_router = PDHybridRouter(
+            req_info,
+            CoordinatorConfig(),
+            scheduler=Scheduler(
+                instance_provider=InstanceManager(CoordinatorConfig()),
+                config=CoordinatorConfig(),
+            ),
+            request_manager=RequestManager(_config),
+        )
+        response = await hybrid_router.handle_request()
+        assert response.status_code == status.HTTP_200_OK
+        payload = json.loads(response.body.decode())
+        assert payload["object"] == "chat.completion"
+        assert payload["choices"][0]["message"]["content"] == "hello"

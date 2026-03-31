@@ -17,23 +17,63 @@ from fastapi.testclient import TestClient
 import pytest
 import httpx
 
-from motor.config.coordinator import DeployMode, CoordinatorConfig, SchedulerType
+from motor.config.coordinator import (
+    DeployMode,
+    CoordinatorConfig,
+    SchedulerType,
+    ExceptionConfig,
+    TracerConfig,
+    RateLimitConfig,
+)
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.domain import InstanceReadiness, ScheduledResource
 from motor.coordinator.models.request import RequestInfo
-from motor.coordinator.router.base_router import BaseRouter
-from motor.coordinator.router.separate_pd_router import SeparatePDRouter
+from motor.coordinator.router.strategies.base import BaseRouter
+from motor.coordinator.router.strategies.pd_separate import SeparatePDRouter
+import motor.coordinator.router.recompute as recompute_common
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
 from tests.coordinator.router.mock_openai_request import MockStreamResponse, create_mock_request_info
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.domain.request_manager import RequestManager
-import motor.coordinator.router.router as router
+import motor.coordinator.router.dispatch as router
+
+
+def _make_pd_separation_test_coordinator_config():
+    """Same shape as ``setup_pd_separation`` fixture: CPCD + exception/http/rate_limit mocks.
+
+    Module-level ``_config`` must match router deploy_mode used by ``setup_pd_separation`` so
+    ``TestClient`` hits ``SeparatePDRouter`` instead of a real default (e.g. CDP).
+    """
+    mock_scheduler_config = MagicMock()
+    mock_scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
+    mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
+    mock_exception_config = ExceptionConfig(
+        max_retry=5,
+        retry_delay=0.0001,
+    )
+    mock_http_config = MagicMock()
+    mock_http_config.coordinator_api_host = "127.0.0.1"
+    mock_http_config.coordinator_api_mgmt_port = 1025
+    mock_rate_limit_config = RateLimitConfig()
+    mock_config = MagicMock()
+    mock_config.scheduler_config = mock_scheduler_config
+    mock_config.exception_config = mock_exception_config
+    mock_config.http_config = mock_http_config
+    mock_config.rate_limit_config = mock_rate_limit_config
+    # Real tracer config: MagicMock endpoint is truthy and enables OTLP + breaks sampling rate compares.
+    mock_config.tracer_config = TracerConfig()
+    return mock_config
+
+
+_PD_SEPARATION_CONFIG = _make_pd_separation_test_coordinator_config()
 
 app = FastAPI()
-_config = CoordinatorConfig()
-_scheduler = Scheduler(instance_provider=InstanceManager(_config), config=_config)
-_request_manager = RequestManager(_config)
+_config = _PD_SEPARATION_CONFIG
+_scheduler = Scheduler(
+    instance_provider=InstanceManager(_PD_SEPARATION_CONFIG), config=_PD_SEPARATION_CONFIG
+)
+_request_manager = RequestManager(_PD_SEPARATION_CONFIG)
 
 
 @app.post("/v1/chat/completions")
@@ -50,6 +90,7 @@ class MockAsyncClient:
         self.fail_times = fail_times
         self.fail_count = 0
         self._post_fail_count = 0
+        self._decode_nonstream_post_count = 0
 
         self.base_url = "test-base-url"
         self.timeout = 1
@@ -80,6 +121,56 @@ class MockAsyncClient:
             resp.aclose = AsyncMock(return_value=None)
             resp.json = MagicMock(return_value={})
             return resp
+        jd = json or {}
+        if (
+            jd.get("return_token_ids")
+            and jd.get("stream") is False
+            and jd.get("max_tokens", 0) > 1
+        ):
+            self._decode_nonstream_post_count += 1
+            dc = self._decode_nonstream_post_count
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.raise_for_status = MagicMock()
+            resp.aclose = AsyncMock(return_value=None)
+            if self.recomputed and dc == 1:
+                base = 7000
+                resp.json = MagicMock(
+                    return_value={
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": ",1,2",
+                                },
+                                "stop_reason": "recomputed",
+                                "token_ids": [base + 2, base + 3],
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 2,
+                            "completion_tokens": 2,
+                            "total_tokens": 4,
+                        },
+                        "prompt_token_ids": [base, base + 1],
+                    }
+                )
+                return resp
+            content = (
+                ",1,2,3,4,5,6,7,8,9"
+                if self.recomputed
+                else ",1,2,3,4,5,6,7,8,9,10"
+            )
+            resp.json = MagicMock(
+                return_value={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": content}}
+                    ],
+                    "usage": {"completion_tokens": 10},
+                }
+            )
+            return resp
         resp = MagicMock()
         resp.status_code = 200
         resp.raise_for_status = MagicMock()
@@ -100,6 +191,13 @@ class MockAsyncClient:
             
         # Return an async context manager
         return MockStreamResponse(json or {}, self.recomputed)
+
+
+def _http_client_pool_returning(client):
+    """Router uses HTTPClientPool().get_client(), not httpx.AsyncClient() directly."""
+    pool = MagicMock()
+    pool.get_client = AsyncMock(return_value=client)
+    return pool
 
 
 class TestRouterPDSeparation:
@@ -171,39 +269,38 @@ class TestRouterPDSeparation:
         monkeypatch.setattr(Scheduler, "select_instance_and_endpoint", mock_select_instance_and_endpoint)
         monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
 
-        # Mock CoordinatorConfig to return CPCD_SEPARATE deploy mode
-        mock_scheduler_config = MagicMock()
-        mock_scheduler_config.deploy_mode = DeployMode.CPCD_SEPARATE
-        mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
-        mock_exception_config = MagicMock()
-        mock_exception_config.retry_delay = 0.0001
-        mock_exception_config.max_retry = 5
-        mock_http_config = MagicMock()
-        mock_http_config.coordinator_api_host = "127.0.0.1"
-        mock_http_config.coordinator_api_mgmt_port = 1025
-
-        mock_config = MagicMock()
-        mock_config.scheduler_config = mock_scheduler_config
-        mock_config.exception_config = mock_exception_config
-        mock_config.http_config = mock_http_config
-
-        monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
+        # ``CoordinatorConfig()`` in tests must resolve to the same mock as module ``_config``.
+        monkeypatch.setattr(
+            CoordinatorConfig, "__new__", lambda cls: _PD_SEPARATION_CONFIG
+        )
     
     @pytest.fixture
     def setup_forward_request(self, monkeypatch: MonkeyPatch):
-        # Mock the HTTP forwarding functions
+        # Prefill: return kv JSON. Decode: delegate to BaseRouter.forward_request (real POST via pool).
         async def mock_forward_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
-            # Return a mock response for P request
-            mock_response = Mock()
-            mock_response.json.return_value = {
-                "kv_transfer_params": {
-                    "do_remote_decode": True,
-                    "remote_engine_id": "test-engine",
-                    "remote_host": "127.0.0.1",
-                    "remote_port": "8001"
+            kv = req_data.get("kv_transfer_params") or {}
+            is_prefill = (
+                req_data.get("stream") is False
+                and req_data.get("max_tokens") == 1
+                and req_data.get("min_tokens") == 1
+                and kv.get("do_remote_decode") is True
+                and kv.get("do_remote_prefill") is False
+            )
+            if is_prefill:
+                mock_response = Mock()
+                mock_response.raise_for_status = Mock()
+                mock_response.aclose = AsyncMock(return_value=None)
+                mock_response.json.return_value = {
+                    "kv_transfer_params": {
+                        "do_remote_decode": True,
+                        "remote_engine_id": "test-engine",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": "8001",
+                    }
                 }
-            }
-            return mock_response
+                return mock_response
+            return await BaseRouter.forward_request(self, req_data, client, timeout)
+
         monkeypatch.setattr(SeparatePDRouter, "forward_request", mock_forward_request)
 
     @pytest.mark.asyncio
@@ -298,6 +395,173 @@ class TestRouterPDSeparation:
         assert generated_decode_request["stream"] == stream
         assert generated_decode_request["max_tokens"] == max_tokens
         assert KV_TRANSFER_KEY in generated_decode_request
+        assert generated_decode_request["return_token_ids"] is True
+
+    @pytest.mark.asyncio
+    async def test_gen_d_request_return_token_ids_false_when_recompute_disabled(
+        self, monkeypatch: MonkeyPatch, setup_pd_separation
+    ):
+        KV_TRANSFER_KEY = "kv_transfer_params"
+        max_tokens = 100
+        stream = True
+        req_info = await create_mock_request_info(max_tokens=max_tokens, stream=stream)
+        cfg = CoordinatorConfig()
+        prev_recompute = cfg.exception_config.recompute_enabled
+        try:
+            cfg.exception_config.recompute_enabled = False
+
+            generated_decode_request = {}
+
+            async def mock_forward_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+                mock_response = Mock()
+                mock_response.json.return_value = {
+                    KV_TRANSFER_KEY: {
+                        "do_remote_decode": True,
+                        "remote_engine_id": "test-engine",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": "8001",
+                    }
+                }
+                return mock_response
+
+            async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+                nonlocal generated_decode_request
+                generated_decode_request = req_data
+                yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
+
+            monkeypatch.setattr(SeparatePDRouter, "forward_request", mock_forward_request)
+            monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
+
+            pd_router = SeparatePDRouter(
+                req_info,
+                cfg,
+                scheduler=Scheduler(instance_provider=InstanceManager(cfg), config=cfg),
+                request_manager=RequestManager(cfg),
+            )
+            stream_resp = await pd_router.handle_request()
+            async for _ in stream_resp.body_iterator:
+                pass
+
+            assert generated_decode_request["return_token_ids"] is False
+        finally:
+            cfg.exception_config.recompute_enabled = prev_recompute
+
+    @pytest.mark.asyncio
+    async def test_gen_d_request_return_token_ids_true_when_client_requested_and_recompute_disabled(
+        self, monkeypatch: MonkeyPatch, setup_pd_separation
+    ):
+        """Client return_token_ids=true should reach engine even when recompute is off."""
+        KV_TRANSFER_KEY = "kv_transfer_params"
+        max_tokens = 100
+        stream = True
+        req_info = await create_mock_request_info(max_tokens=max_tokens, stream=stream)
+        req_info.req_data["_client_return_token_ids"] = True
+        cfg = CoordinatorConfig()
+        prev_recompute = cfg.exception_config.recompute_enabled
+        try:
+            cfg.exception_config.recompute_enabled = False
+
+            generated_decode_request = {}
+
+            async def mock_forward_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+                mock_response = Mock()
+                mock_response.json.return_value = {
+                    KV_TRANSFER_KEY: {
+                        "do_remote_decode": True,
+                        "remote_engine_id": "test-engine",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": "8001",
+                    }
+                }
+                return mock_response
+
+            async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+                nonlocal generated_decode_request
+                generated_decode_request = req_data
+                yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
+
+            monkeypatch.setattr(SeparatePDRouter, "forward_request", mock_forward_request)
+            monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
+
+            pd_router = SeparatePDRouter(
+                req_info,
+                cfg,
+                scheduler=Scheduler(instance_provider=InstanceManager(cfg), config=cfg),
+                request_manager=RequestManager(cfg),
+            )
+            stream_resp = await pd_router.handle_request()
+            async for _ in stream_resp.body_iterator:
+                pass
+
+            assert generated_decode_request["return_token_ids"] is True
+        finally:
+            cfg.exception_config.recompute_enabled = prev_recompute
+
+    @pytest.mark.asyncio
+    async def test_prepare_retry_request_uses_token_ids_from_kv_transfer(self, setup_pd_separation):
+        """vLLM recompute (vllm-ascend #7450): use all_token_ids / prompt_token_ids, not string concat."""
+        req_info = await create_mock_request_info()
+        pd_router = SeparatePDRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=RequestManager(CoordinatorConfig()),
+        )
+        req_data = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 100,
+            "stream": True,
+        }
+        request_info = recompute_common.extract_request_info(req_data)
+        request_info["completion_tokens"] = 2
+        request_info["generated_token"] = "x"
+        request_info["recompute_kv_transfer"] = {
+            "all_token_ids": [10, 20, 30, 40],
+            "prompt_token_ids": [10, 20],
+        }
+        pd_router._recompute.retry_count = 0
+        recompute_common.prepare_retry_request(
+            req_data,
+            request_info,
+            new_retry_count=1,
+            req_id=pd_router.req_info.req_id,
+            logger=pd_router.logger,
+            req_info=pd_router.req_info,
+        )
+        pd_router._recompute.retry_count = 1
+        assert req_data["prompt"] == [10, 20, 30, 40]
+        assert "messages" not in req_data
+        assert req_data["max_tokens"] == 100 - (4 - 2) + 1  # origin - completion_tokens + fixed slack
+        assert "recompute_kv_transfer" not in request_info
+
+    @pytest.mark.asyncio
+    async def test_prepare_retry_request_missing_token_ids_raises(self, setup_pd_separation):
+        """Recompute without all_token_ids/prompt_token_ids in recompute_kv_transfer -> 502."""
+        req_info = await create_mock_request_info()
+        pd_router = SeparatePDRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=RequestManager(CoordinatorConfig()),
+        )
+        req_data = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 50,
+            "stream": True,
+        }
+        request_info = recompute_common.extract_request_info(req_data)
+        request_info["completion_tokens"] = 3
+        request_info["generated_token"] = " world"
+        request_info["recompute_kv_transfer"] = {}
+        pd_router._recompute.retry_count = 0
+        with pytest.raises(HTTPException) as exc_info:
+            recompute_common.prepare_retry_request(
+                req_data,
+                request_info,
+                new_retry_count=1,
+                req_id=pd_router.req_info.req_id,
+                logger=pd_router.logger,
+                req_info=pd_router.req_info,
+            )
+        assert exc_info.value.status_code == status.HTTP_502_BAD_GATEWAY
 
     @pytest.mark.asyncio
     async def test_engine_server_prefill_4xx_status_code(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
@@ -332,7 +596,10 @@ class TestRouterPDSeparation:
         mock_async_client.__aexit__ = AsyncMock(return_value=None)
         mock_async_client.post = AsyncMock(return_value=mock_response_fail)
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch(
+            "motor.coordinator.router.strategies.base.HTTPClientPool",
+            return_value=_http_client_pool_returning(mock_async_client),
+        ):
             
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
@@ -376,7 +643,10 @@ class TestRouterPDSeparation:
         mock_async_client.__aexit__ = AsyncMock(return_value=None)
         mock_async_client.post = AsyncMock(return_value=mock_response_fail)
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch(
+            "motor.coordinator.router.strategies.base.HTTPClientPool",
+            return_value=_http_client_pool_returning(mock_async_client),
+        ):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
                 "messages": [{"role": "user", "content": "Hello"}]
@@ -451,7 +721,10 @@ class TestRouterPDSeparation:
         
         monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)        
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch(
+            "motor.coordinator.router.strategies.base.HTTPClientPool",
+            return_value=_http_client_pool_returning(mock_async_client),
+        ):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -484,13 +757,16 @@ class TestRouterPDSeparation:
         mock_async_client.__aexit__ = AsyncMock(return_value=None)
         mock_async_client.post = AsyncMock(return_value=mock_response_fail)
         
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch(
+            "motor.coordinator.router.strategies.base.HTTPClientPool",
+            return_value=_http_client_pool_returning(mock_async_client),
+        ):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
                 "messages": [{"role": "user", "content": "Hello"}]
             })
             
-        assert error_message in response.text
+        assert error_message in response.text or "ConnectError" in response.text
         assert mock_async_client.post.await_count == CoordinatorConfig().exception_config.max_retry
 
     @pytest.mark.asyncio
@@ -507,7 +783,10 @@ class TestRouterPDSeparation:
         # Mock the HTTP stream forwarding function to return a 5XX error once
         mock_async_client = MockAsyncClient(recomputed=False, fail_times=CoordinatorConfig().exception_config.max_retry)
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch(
+            "motor.coordinator.router.strategies.base.HTTPClientPool",
+            return_value=_http_client_pool_returning(mock_async_client),
+        ):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
                 "messages": [{"role": "user", "content": "Hello"}]
@@ -537,7 +816,10 @@ class TestRouterPDSeparation:
         # Mock the HTTP stream forwarding function to return a 5XX error once
         mock_async_client = MockAsyncClient(recomputed=False, fail_times=1)
 
-        with patch('motor.coordinator.router.base_router.httpx.AsyncClient', return_value=mock_async_client):
+        with patch(
+            "motor.coordinator.router.strategies.base.HTTPClientPool",
+            return_value=_http_client_pool_returning(mock_async_client),
+        ):
             response = client.post("/v1/chat/completions", json={
                 "model": "test-model", 
                 "messages": [{"role": "user", "content": "Hello"}]
@@ -588,7 +870,7 @@ class TestRouterPDSeparation:
         mock_client = MockAsyncClient(recomputed=False)
         mock_pool = MagicMock()
         mock_pool.get_client = AsyncMock(return_value=mock_client)
-        with patch("motor.coordinator.router.base_router.HTTPClientPool", return_value=mock_pool):
+        with patch("motor.coordinator.router.strategies.base.HTTPClientPool", return_value=mock_pool):
             import json
             result = ""
             response = client.post("/v1/chat/completions", json={
@@ -628,9 +910,7 @@ class TestRouterPDSeparation:
         mock_client = MockAsyncClient()
         mock_pool = MagicMock()
         mock_pool.get_client = AsyncMock(return_value=mock_client)
-        with patch("motor.coordinator.router.base_router.HTTPClientPool", return_value=mock_pool):
-            import json
-            result = ""
+        with patch("motor.coordinator.router.strategies.base.HTTPClientPool", return_value=mock_pool):
             response = client.post("/v1/chat/completions", json={
                 "model": "qwen3",
                 "messages": [{"role": "user", "content": "Hello"}],
@@ -639,19 +919,13 @@ class TestRouterPDSeparation:
             })
             assert response.status_code == status.HTTP_200_OK
 
-            for chunk in response.iter_lines():
-                if not chunk:
-                    continue
-                try:
-                    chunk_json = json.loads(chunk)
-                    if "choices" in chunk_json and len(chunk_json["choices"]) > 0:
-                        message = chunk_json["choices"][0].get("message", {})
-                        if "content" in message:
-                            result += message["content"]
-                except json.JSONDecodeError:
-                    continue
+            body = response.json()
+            choices = body.get("choices") or []
+            assert len(choices) > 0
+            result = (choices[0].get("message") or {}).get("content", "")
 
-            assert result == ",1,2,3,4,5,6,7,8,9,10"
+            # Single JSON body for non-stream; after one recompute, mock emits 9 tokens.
+            assert result == ",1,2,3,4,5,6,7,8,9"
 
     @pytest.mark.asyncio
     async def test_resource_release(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):

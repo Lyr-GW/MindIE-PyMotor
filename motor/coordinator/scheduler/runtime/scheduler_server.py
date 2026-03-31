@@ -40,6 +40,34 @@ from motor.coordinator.scheduler.runtime.zmq_protocol import (
 
 logger = get_logger(__name__)
 
+
+def _create_workload_shared_memory(shared_memory_mod, shm_name: str, shm_size: int):
+    """Create POSIX workload SharedMemory; recover from orphan segment (unclean exit / PID reuse).
+
+    ``mindie_workload_<pid>`` can remain after SIGKILL/OOM; a new process with the same PID then
+    hits FileExistsError on create=True. Unlink the stale name and recreate.
+    """
+    try:
+        return shared_memory_mod.SharedMemory(name=shm_name, create=True, size=shm_size)
+    except FileExistsError:
+        logger.warning(
+            "Workload SHM %s already exists (likely orphan from a prior run or PID reuse); "
+            "unlinking and recreating",
+            shm_name,
+        )
+        try:
+            stale = shared_memory_mod.SharedMemory(name=shm_name, create=False)
+        except FileNotFoundError:
+            return shared_memory_mod.SharedMemory(name=shm_name, create=True, size=shm_size)
+        try:
+            stale.close()
+            stale.unlink()
+        except Exception as e:
+            logger.error("Failed to unlink stale workload SHM %s: %s", shm_name, e)
+            raise
+        return shared_memory_mod.SharedMemory(name=shm_name, create=True, size=shm_size)
+
+
 # Hot-path scheduling log sampling: ~1% of requests to reduce I/O and CPU at high QPS
 _SCHEDULING_LOG_SAMPLE_RATE = 100
 
@@ -487,8 +515,8 @@ class AsyncSchedulerServer:
         max_entries = DEFAULT_WORKLOAD_SHM_MAX_ENTRIES
         shm_name = f"mindie_workload_{os.getpid()}"
         shm_size = total_size(max_entries)
-        self._workload_shm = shared_memory.SharedMemory(
-            name=shm_name, create=True, size=shm_size
+        self._workload_shm = _create_workload_shared_memory(
+            shared_memory, shm_name, shm_size
         )
         self._workload_writer = WorkloadSharedMemoryWriter(
             self._workload_shm,

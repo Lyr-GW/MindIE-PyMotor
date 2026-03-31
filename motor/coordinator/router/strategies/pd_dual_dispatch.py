@@ -21,7 +21,8 @@ from motor.common.resources.instance import PDRole
 from motor.common.utils.env import Env
 from motor.coordinator.domain import ScheduledResource
 from motor.coordinator.models.request import ReqState
-from motor.coordinator.router.base_router import BaseRouter
+import motor.coordinator.router.recompute as recompute_common
+from motor.coordinator.router.strategies.base import BaseRouter
 
 
 class SeparatePDDualDispatchRouter(BaseRouter):
@@ -73,9 +74,9 @@ class SeparatePDDualDispatchRouter(BaseRouter):
         Handles streaming requests for Dual Dispatch with retry logic and scope management.
         """
         self.logger.debug("Handling streaming Dual Dispatch request")
-        max_retry = self.config.exception_config.max_retry
+        tmax = self.config.exception_config.transport_retry_limit
 
-        for attempt in range(max_retry):
+        for attempt in range(tmax):
             try:
                 # 1. Allocate resources & Initialize contexts
                 async with self._dual_env_context() as (p_res, d_res, p_client, d_client):
@@ -96,7 +97,12 @@ class SeparatePDDualDispatchRouter(BaseRouter):
                             async for chunk in self.forward_stream_request(
                                     req_data, d_client, self.config.exception_config.first_token_timeout
                             ):
-                                yield chunk
+                                yield recompute_common.strip_stream_chunk_bytes_for_client(
+                                    chunk,
+                                    client_return_token_ids=self.req_info.req_data.get(
+                                        "_client_return_token_ids", False
+                                    ),
+                                )
 
                         self.req_info.update_state(ReqState.DECODE_END)
                         return
@@ -113,11 +119,11 @@ class SeparatePDDualDispatchRouter(BaseRouter):
             except Exception as e:
                 self.logger.error(
                     "Error in dual dispatch streaming (attempt %d/%d): %s",
-                    attempt + 1, max_retry, str(e), exc_info=True
+                    attempt + 1, tmax, str(e), exc_info=True
                 )
                 self.req_info.cancel_scope()
 
-                if self.first_chunk_sent or attempt == max_retry - 1:
+                if self.first_chunk_sent or attempt == tmax - 1:
                     self.req_info.update_state(ReqState.EXCEPTION)
                     yield self._generate_streaming_error_chunk(e)
                     return
@@ -131,9 +137,9 @@ class SeparatePDDualDispatchRouter(BaseRouter):
         Handles non-streaming requests for Dual Dispatch with retry logic.
         """
         self.logger.debug("Handling non-streaming Dual Dispatch request")
-        max_retries = self.config.exception_config.max_retry
+        tmax = self.config.exception_config.transport_retry_limit
 
-        for attempt in range(max_retries):
+        for attempt in range(tmax):
             try:
                 # 1. Allocate resources & Initialize contexts
                 async with self._dual_env_context() as (p_res, d_res, p_client, d_client):
@@ -156,7 +162,14 @@ class SeparatePDDualDispatchRouter(BaseRouter):
                                     req_data, d_client, self.config.exception_config.infer_timeout
                                 )
                         self.req_info.update_state(ReqState.DECODE_END)
-                        return JSONResponse(content=response.json())
+                        body = response.json()
+                        recompute_common.strip_nonstream_response_body_for_client(
+                            body,
+                            client_return_token_ids=self.req_info.req_data.get(
+                                "_client_return_token_ids", False
+                            ),
+                        )
+                        return JSONResponse(content=body)
                     finally:
                         p_task.cancel()
                         if self.req_info.is_cancelled:
@@ -169,11 +182,11 @@ class SeparatePDDualDispatchRouter(BaseRouter):
             except Exception as e:
                 self.logger.error(
                     "Error in dual dispatch decode (attempt %d/%d): %s",
-                    attempt + 1, max_retries, str(e)
+                    attempt + 1, tmax, str(e)
                 )
                 self.req_info.cancel_scope()
 
-                if attempt < max_retries - 1:
+                if attempt < tmax - 1:
                     wait_time = self.config.exception_config.retry_delay * (2 ** attempt)
                     self.logger.info("Retrying non-streaming request in %.2f seconds...", wait_time)
                     await asyncio.sleep(wait_time)
@@ -194,11 +207,6 @@ class SeparatePDDualDispatchRouter(BaseRouter):
         return req_data
 
     async def _gen_p_request(self, req_data) -> dict:
-        p_req_data = req_data.copy()
-        p_req_data["stream"] = False
-        p_req_data["max_tokens"] = 1
-
-        if "stream_options" in p_req_data:
-            del p_req_data["stream_options"]
-
-        return p_req_data
+        return self._apply_prefill_params(
+            req_data, kv_transfer_params=None, set_min_tokens=False
+        )

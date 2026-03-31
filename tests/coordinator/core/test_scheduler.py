@@ -18,7 +18,7 @@ from motor.coordinator.scheduler.scheduler import Scheduler, SchedulerType
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
 from motor.coordinator.domain.instance_manager import InstanceManager
-from motor.coordinator.router.workload_action_handler import calculate_demand_workload
+from motor.coordinator.domain.workload_calculator import calculate_demand_workload
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload, WorkloadAction

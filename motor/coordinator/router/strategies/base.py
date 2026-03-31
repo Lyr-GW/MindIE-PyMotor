@@ -14,7 +14,8 @@ import contextlib
 import logging
 import time
 from abc import ABC, abstractmethod
-from typing import Any, AsyncGenerator
+from dataclasses import dataclass
+from typing import Any, AsyncGenerator, Iterator
 
 import httpx
 from anyio import CancelScope
@@ -27,7 +28,11 @@ from motor.common.utils.http_client import HTTPClientPool
 from motor.common.utils.logger import get_logger
 from motor.common.utils.security_utils import filter_sensitive_headers, filter_sensitive_body
 from motor.config.coordinator import CoordinatorConfig
-from motor.coordinator.models.constants import REQUEST_ID_KEY, DEFAULT_REQUEST_ID
+from motor.coordinator.models.constants import (
+    DEFAULT_REQUEST_ID,
+    OpenAIField,
+    REQUEST_ID_KEY,
+)
 from motor.coordinator.models.response import ErrorResponse
 from motor.coordinator.domain import ScheduledResource
 from motor.coordinator.models.request import RequestInfo, ReqState
@@ -35,7 +40,9 @@ from motor.coordinator.domain import SchedulingFacade, UpdateWorkloadParams
 from motor.common.resources.instance import Instance
 from motor.common.resources.endpoint import Endpoint, Workload
 from motor.coordinator.domain.request_manager import RequestManager
-from motor.coordinator.router.workload_action_handler import WorkloadActionHandler
+import motor.coordinator.router.recompute as recompute_common
+from motor.coordinator.router.workload import WorkloadActionHandler
+from motor.coordinator.tracer.tracing import TracerManager
 
 logger = get_logger(__name__)
 
@@ -50,6 +57,15 @@ class RequestLoggerAdapter(logging.LoggerAdapter):
     def process(self, msg: str, kwargs: Any) -> tuple[str, Any]:
         req_id = self.extra.get(REQUEST_ID_KEY, DEFAULT_REQUEST_ID) if self.extra else DEFAULT_REQUEST_ID
         return f"[{req_id}] {msg}", kwargs
+
+
+@dataclass
+class RecomputeState:
+    """Per-request recompute counters and flags (PD/CDP routers)."""
+
+    retry_count: int = 0
+    wants_retry: bool = False
+    total_generated_token: str = ""
 
 
 class BaseRouter(ABC):
@@ -82,6 +98,26 @@ class BaseRouter(ABC):
         )
 
     @staticmethod
+    def build_error_response(e: Exception) -> ErrorResponse:
+        if isinstance(e, HTTPException):
+            return ErrorResponse(
+                code=e.status_code,
+                type=type(e).__name__,
+                message=e.detail,
+            )
+        if isinstance(e, httpx.HTTPStatusError):
+            return ErrorResponse(
+                code=e.response.status_code,
+                type=type(e).__name__,
+                message=str(e),
+            )
+        return ErrorResponse(
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            type=type(e).__name__,
+            message=str(e),
+        )
+
+    @staticmethod
     def _select_endpoint_from_instance(instance: Instance) -> Endpoint | None:
         if instance and instance.endpoints:
             for endpoints_dict in instance.endpoints.values():
@@ -93,25 +129,39 @@ class BaseRouter(ABC):
 
     @staticmethod
     def _generate_streaming_error_chunk(e: Exception) -> str:
-        if isinstance(e, HTTPException):
-            error_response = ErrorResponse(
-                code=e.status_code,
-                type=type(e).__name__,
-                message=e.detail,
-            )
-        elif isinstance(e, httpx.HTTPStatusError):
-            error_response = ErrorResponse(
-                code=e.response.status_code,
-                type=type(e).__name__,
-                message=str(e),
-            )
-        else:
-            error_response = ErrorResponse(
-                code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                type=type(e).__name__,
-                message=str(e),
-            )
+        error_response = BaseRouter.build_error_response(e)
         return f"data: {error_response.model_dump_json()}\n\n"
+
+    @staticmethod
+    def _apply_prefill_params(
+        req_data: dict,
+        *,
+        kv_transfer_params: dict | None = None,
+        set_min_tokens: bool = True,
+    ) -> dict:
+        p_req = req_data.copy()
+        if kv_transfer_params is not None:
+            p_req["kv_transfer_params"] = kv_transfer_params
+        p_req[OpenAIField.STREAM] = False
+        p_req[OpenAIField.MAX_TOKENS] = 1
+        if set_min_tokens:
+            p_req["min_tokens"] = 1
+        p_req.pop("stream_options", None)
+        return p_req
+
+    @contextlib.contextmanager
+    def _trace_span(self, span_name: str, is_stream: bool) -> Iterator[Any]:
+        trace_obj = self.req_info.trace_obj
+        with TracerManager().tracer.start_as_current_span(
+            span_name, context=trace_obj.parent_context
+        ) as span:
+            if is_stream:
+                trace_obj.set_time_start()
+            trace_obj.span = span
+            trace_obj.trace_headers = TracerManager().inject_trace_context()
+            trace_obj.set_trace_attribute("requestId", self.req_info.req_id)
+            trace_obj.set_trace_attribute("stream", is_stream)
+            yield span
 
     @abstractmethod
     async def handle_request(self) -> StreamingResponse | JSONResponse:
@@ -268,10 +318,11 @@ class BaseRouter(ABC):
             is_meta=self.is_meta
         )
         t0_forward = time.perf_counter()
+        engine_req = recompute_common.copy_req_data_for_engine(req_data)
         async with client.stream(
             "POST",
             f"/{self.req_info.api}",
-            json=req_data,
+            json=engine_req,
             headers=headers,
             timeout=timeout
         ) as response:
@@ -286,6 +337,7 @@ class BaseRouter(ABC):
                 await response.aread()
             response.raise_for_status()
             count_token = 0
+            pending = b""
             async for chunk in response.aiter_bytes():
                 if not self.first_chunk_sent and chunk:
                     self.first_chunk_sent = True
@@ -299,7 +351,23 @@ class BaseRouter(ABC):
                     self.req_info.update_state(ReqState.FIRST_TOKEN_FINISH)
                 else:
                     count_token += 1
-                yield chunk
+                pending += chunk
+                while True:
+                    split_idx = pending.find(b"\n\n")
+                    delim_len = 2
+                    split_idx_crlf = pending.find(b"\r\n\r\n")
+                    if split_idx_crlf != -1 and (split_idx == -1 or split_idx_crlf < split_idx):
+                        split_idx = split_idx_crlf
+                        delim_len = 4
+                    if split_idx == -1:
+                        break
+                    frame_end = split_idx + delim_len
+                    frame = pending[:frame_end]
+                    pending = pending[frame_end:]
+                    yield frame
+            if pending:
+                # Keep backward compatibility for non-SSE upstream responses.
+                yield pending
             trace_obj.set_count_token(count_token)
 
     async def forward_request(self,
@@ -324,8 +392,9 @@ class BaseRouter(ABC):
         trace_obj.set_trace_attribute("server.path", self.req_info.api, self.is_meta)
         headers.update(trace_obj.get_trace_headers_dict(self.is_meta))
 
+        engine_req = recompute_common.copy_req_data_for_engine(req_data)
         filtered_headers = filter_sensitive_headers(headers)
-        filtered_body = filter_sensitive_body(req_data)
+        filtered_body = filter_sensitive_body(engine_req)
         self.logger.debug("Forward request base_url: %s, api: %s, headers: %s, body: %s, timeout: %s",
                           client.base_url, self.req_info.api, filtered_headers, filtered_body, timeout)
 
@@ -335,7 +404,7 @@ class BaseRouter(ABC):
         )
         t0_forward = time.perf_counter()
         response = await client.post(f"/{self.req_info.api}",
-                                        json=req_data,
+                                        json=engine_req,
                                         headers=headers,
                                         timeout=timeout)
         trace_obj.add_trace_event(f"Post ok: {response.status_code}", is_meta=self.is_meta)
@@ -361,30 +430,48 @@ class BaseRouter(ABC):
     async def release_kv(self, resource: ScheduledResource):
         return await self._update_workload(resource, WorkloadAction.RELEASE_KV)
 
-
-
-    def _parse_scheduler_result(self, result, role: PDRole) -> tuple[Instance, Endpoint]:
-        """Return (Instance, Endpoint); accepts tuple or Instance (legacy)."""
-        if isinstance(result, (tuple, list)) and len(result) == 2:
-            ins, endpoint = result
-            if not isinstance(ins, Instance) or not isinstance(endpoint, Endpoint):
-                raise ValueError(
-                    f"Invalid result types: expected (Instance, Endpoint), "
-                    f"got ({type(ins).__name__}, {type(endpoint).__name__})"
-                )
-            return ins, endpoint
-
-        elif isinstance(result, Instance):
-            endpoint = self._select_endpoint_from_instance(result)
-            if not endpoint:
-                raise ValueError(f"No endpoint found for instance {result.id} (role: {role})")
-            return result, endpoint
-
-        else:
-            raise ValueError(
-                f"Unexpected scheduler result type: {type(result).__name__}, "
-                f"expected tuple[Instance, Endpoint] or Instance"
+    def _check_recompute_limit(self, retry_count: int, rmax: int) -> None:
+        if recompute_common.recompute_limit_reached(retry_count, rmax):
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Recompute retry limit exceeded (recompute_retry_exhausted); "
+                    "client may retry with backoff."
+                ),
             )
+
+    def _prepare_recompute_retry(
+        self,
+        req_data: dict,
+        request_info: dict,
+        retry_count: int,
+    ) -> int:
+        """Mutate ``req_data`` / ``req_info`` for the next recompute attempt.
+
+        Does not rotate ``req_info.req_id``; call
+        :meth:`_bump_req_id_after_recompute_workloads_released` after workload
+        release and request context exit so the manager still keys by the old id.
+        """
+        if not self.config.exception_config.recompute_enabled:
+            raise recompute_common.recompute_disabled_http_exception()
+        retry_count += 1
+        recompute_common.prepare_retry_request(
+            req_data,
+            request_info,
+            new_retry_count=retry_count,
+            req_id=self.req_info.req_id,
+            logger=self.logger,
+            req_info=self.req_info,
+        )
+        return retry_count
+
+    def _bump_req_id_after_recompute_workloads_released(self, retry_count: int) -> None:
+        """Rotate retry segment in ``req_info.req_id`` after workloads are released."""
+        recompute_common.bump_req_id_after_recompute_prepare(
+            self.req_info,
+            retry_count=retry_count,
+            logger=self.logger,
+        )
 
     async def _update_workload(self, resource: ScheduledResource, action: WorkloadAction):
         """Update the given resource's workload.

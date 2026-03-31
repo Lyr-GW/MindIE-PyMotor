@@ -144,9 +144,23 @@ class ExceptionConfig:
     """Exception handling configuration class"""
 
     max_retry: int = 5
+    #: When ``False``: no token-cache recompute (``prepare_retry_request`` / bump ``req_id``);
+    #: Decode forwards ``return_token_ids: false`` on PD/CDP so engines omit token-id fields.
+    recompute_enabled: bool = True
+    # Optional split: HTTP transport retries vs recompute rounds (default: both use max_retry).
+    transport_max_retry: Optional[int] = None
+    recompute_max_retry: Optional[int] = None
     retry_delay: float = 0.2
     first_token_timeout: int = 600  # 10 minutes
     infer_timeout: int = 3600  # 60 minutes
+
+    @property
+    def transport_retry_limit(self) -> int:
+        return self.transport_max_retry if self.transport_max_retry is not None else self.max_retry
+
+    @property
+    def recompute_retry_limit(self) -> int:
+        return self.recompute_max_retry if self.recompute_max_retry is not None else self.max_retry
 
 
 @dataclass
@@ -478,6 +492,14 @@ class CoordinatorConfig:
 
         # Validate exception configuration
         self._validate_positive_number(self.exception_config.max_retry, "max_retry", allow_zero=True)
+        if self.exception_config.transport_max_retry is not None:
+            self._validate_positive_number(
+                self.exception_config.transport_max_retry, "transport_max_retry", allow_zero=True
+            )
+        if self.exception_config.recompute_max_retry is not None:
+            self._validate_positive_number(
+                self.exception_config.recompute_max_retry, "recompute_max_retry", allow_zero=True
+            )
         self._validate_positive_number(self.exception_config.retry_delay, "retry_delay")
         self._validate_positive_number(self.exception_config.first_token_timeout, "first_token_timeout")
         self._validate_positive_number(self.exception_config.infer_timeout, "infer_timeout")
