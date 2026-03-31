@@ -110,6 +110,3 @@ venv.bak/
 
 # deployer
 deployer/output/*
-
-vllm
-sglang

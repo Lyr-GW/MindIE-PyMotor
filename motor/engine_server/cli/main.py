@@ -28,14 +28,12 @@ def main():
     config = config_factory.parse()
     logger.info(f"successfully parsed {endpoint_config.engine_type} engine configuration")
 
-    infer_endpoint: InferEndpoint = EndpointFactory().get_infer_endpoint(config)
     mgmt_endpoint: MgmtEndpoint = MgmtEndpoint(config)
+    infer_endpoint: InferEndpoint = EndpointFactory().get_infer_endpoint(config)
 
     mgmt_endpoint.run()
     infer_endpoint.run()
-    
-    # join the infer_endpoint process
-    infer_endpoint.join()
+    infer_endpoint.wait()
 
     logger.info("shutting down endpoints and child processes...")
     mgmt_endpoint.shutdown()

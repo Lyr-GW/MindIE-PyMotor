@@ -46,7 +46,7 @@ class InferEndpoint(Endpoint):
             name="infer_endpoint_process",
             daemon=False
         )
-        self._run_http_in_process = False
+        self._run_http_in_process = True
         self.engine_type = config.get_endpoint_config().engine_type
         self.init_request_handlers()
         self._register_routes()
@@ -72,6 +72,11 @@ class InferEndpoint(Endpoint):
     def join(self) -> None:
         self._server_process.join()
         logger.error(f"infer_endpoint process exited with code {self._server_process.exitcode}")
+
+    def wait(self) -> None:
+        """Block until infer server exits. No-op when HTTP runs in-process (run() already blocks)."""
+        if not getattr(self, "_run_http_in_process", True):
+            self.join()
 
     def shutdown(self):
         if self._server:
