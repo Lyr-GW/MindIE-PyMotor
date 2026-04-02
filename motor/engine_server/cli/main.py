@@ -10,8 +10,6 @@
 
 from motor.common.utils.logger import get_logger
 from motor.config.endpoint import EndpointConfig
-from motor.engine_server.core.infer_endpoint import InferEndpoint
-from motor.engine_server.core.mgmt_endpoint import MgmtEndpoint
 from motor.engine_server.factory.config_factory import ConfigFactory
 from motor.engine_server.factory.endpoint_factory import EndpointFactory
 from motor.engine_server.utils.prometheus import setup_multiprocess_prometheus
@@ -20,9 +18,13 @@ logger = get_logger(__name__)
 
 
 def main():
-    # Execute setup_multiprocess_prometheus before importing ServerCoreFactory to ensure
+    # Execute setup_multiprocess_prometheus before importing Endpoint to ensure
     # PROMETHEUS_MULTIPROC_DIR is detected when Prometheus low-level code creates ValueClass.
     setup_multiprocess_prometheus()
+
+    from motor.engine_server.core.infer_endpoint import InferEndpoint
+    from motor.engine_server.core.mgmt_endpoint import MgmtEndpoint
+
     endpoint_config = EndpointConfig.init_endpoint_config()
     config_factory = ConfigFactory(endpoint_config=endpoint_config)
     config = config_factory.parse()

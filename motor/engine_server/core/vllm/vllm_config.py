@@ -89,6 +89,8 @@ class VLLMConfig(IConfig):
         parser = make_arg_parser(parser)
         self.args = parser.parse_args()
 
+        logger.info(f"vLLM Engine args: {self.args}")
+
     def get_args(self) -> argparse.Namespace:
         return self.args
 

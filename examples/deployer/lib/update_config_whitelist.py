@@ -12,6 +12,23 @@ from collections.abc import Mapping, Sequence
 from lib.utils import logger
 
 UPDATE_CONFIG_WHITELIST = {
+    "motor_deployer_config": {
+        "tls_config": {
+            "north_tls_config": [
+                "enable_tls", 
+                "ca_file", 
+                "cert_file",
+                "key_file",
+                "passwd_file",
+                "crl_file",
+            ],
+        },
+    },
+    "north_config": [
+        "name",
+        "ip",
+        "port"
+    ],
     "motor_controller_config": {
         "logging_config": [
             "log_level",
@@ -84,6 +101,34 @@ def _collect_changed_paths(current_value, baseline_value, path=""):
                     next_path,
                 )
             )
+        return changed_paths
+
+    if baseline_value is None and isinstance(current_value, Mapping):
+        changed_paths = []
+        for key in sorted(current_value):
+            next_path = f"{path}.{key}" if path else str(key)
+            changed_paths.extend(_collect_changed_paths(current_value[key], None, next_path))
+        return changed_paths
+
+    if current_value is None and isinstance(baseline_value, Mapping):
+        changed_paths = []
+        for key in sorted(baseline_value):
+            next_path = f"{path}.{key}" if path else str(key)
+            changed_paths.extend(_collect_changed_paths(None, baseline_value[key], next_path))
+        return changed_paths
+
+    if baseline_value is None and _is_non_string_sequence(current_value):
+        changed_paths = []
+        for index, item in enumerate(current_value):
+            next_path = f"{path}[{index}]"
+            changed_paths.extend(_collect_changed_paths(item, None, next_path))
+        return changed_paths
+
+    if current_value is None and _is_non_string_sequence(baseline_value):
+        changed_paths = []
+        for index, item in enumerate(baseline_value):
+            next_path = f"{path}[{index}]"
+            changed_paths.extend(_collect_changed_paths(None, item, next_path))
         return changed_paths
 
     if _is_non_string_sequence(current_value) and _is_non_string_sequence(baseline_value):
