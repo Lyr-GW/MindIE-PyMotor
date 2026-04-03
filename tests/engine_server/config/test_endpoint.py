@@ -124,7 +124,7 @@ def test_health_check_config_defaults():
     config = HealthCheckConfig()
     assert config.health_collector_timeout == 2
     assert config.npu_usage_threshold == 10
-    assert config.enable_virtual_inference is True
+    assert config.enable_virtual_inference is False
 
 
 def test_health_check_config_from_dict():

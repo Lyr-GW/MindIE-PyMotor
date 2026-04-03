@@ -58,6 +58,7 @@ class SimInference:
         # add _max_failure_count to measure consecutive failure times
         self._failure_count = 0
         self._max_failure_count = 6
+        self.sim_sleep = 5
         
         # Condition variable to control aicore usage check execution
         self._aicore_check_condition = threading.Condition()
@@ -204,7 +205,8 @@ class SimInference:
             raise
     
     async def health_check_loop(self):
-        """Regular virtual inference loop, sends virtual requests every 10 seconds"""
+        """Regular virtual inference loop, sends virtual requests every 5 seconds"""
+        self.sim_sleep = 5
         while self._status == constants.NORMAL_STATUS:
             try:
                 with self._shared_data_lock:
@@ -241,6 +243,10 @@ class SimInference:
                     f"virtual request: {'successful' if sim_inference_success else 'failed'}"
                 )
 
+                if max_usage >= 80:
+                    self.sim_sleep = 20
+                    logger.debug("AICore usage is beyond 80%, Simulate Inference sleep longer time 20 seconds")
+
                 # Set abnormal status when AICore Usage below threshold and virtual inference failed
                 if max_usage < self.npu_usage_threshold and not sim_inference_success:
                     logger.warning(
@@ -263,7 +269,7 @@ class SimInference:
                 self.set_abnormal_status()
                 logger.warning("Status changed to ABNORMAL_STATUS due to health check failure")
             
-            await asyncio.sleep(5)
+            await asyncio.sleep(self.sim_sleep)
     
     def set_abnormal_status(self):
         """Set abnormal status (thread-safe)"""
