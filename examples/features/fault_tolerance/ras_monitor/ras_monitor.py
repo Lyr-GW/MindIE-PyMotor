@@ -220,8 +220,7 @@ def is_mindie_service_detected(namespace: str) -> bool:
         if not line or len(line) <= namespace_idx:
             continue
         if line[namespace_idx:].split()[0].strip() == namespace:
-            if ("controller" in line or "coordinator" in line or "mindie-server" in line):
-                return True
+            return True
     return False
 
 
