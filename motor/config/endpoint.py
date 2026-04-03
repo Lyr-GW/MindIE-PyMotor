@@ -93,7 +93,7 @@ class HealthCheckConfig:
     """Configuration for health check"""
     health_collector_timeout: int = 2
     npu_usage_threshold: int = 10
-    enable_virtual_inference: bool = True
+    enable_virtual_inference: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HealthCheckConfig":
