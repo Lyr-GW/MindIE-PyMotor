@@ -56,7 +56,6 @@ async def start_instance(request: Request):
     """ post instance and role info """
     try:
         payload = await request.json()
-        logger.info(f"payload: {payload}")
         start_msg = StartCmdMsg(**payload)
         engine_manager = EngineManager()
 
