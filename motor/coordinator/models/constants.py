@@ -60,3 +60,7 @@ class OpenAIField(StrEnum):
     DELTA = "delta"
     TEXT = "text"
     MESSAGE = "message"
+    TOOLS = "tools"
+    TOOLS_CALLS = "tool_calls"
+    FUNCTION = "function" 
+    ARGUMENTS = "arguments"

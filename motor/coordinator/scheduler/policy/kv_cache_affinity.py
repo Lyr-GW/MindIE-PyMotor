@@ -20,6 +20,7 @@ from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.api_client.conductor_api_client import ConductorApiClient, TENANT_ID
 from motor.common.utils.singleton import ThreadSafeSingleton
+from motor.coordinator.scheduler.policy.utils import preprocess_input
 
 
 logger = get_logger(__name__)
@@ -47,8 +48,10 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         """
         encoded_ids = []
         messages = req_info.req_data.get(OpenAIField.MESSAGES, None)
+        tools = req_info.req_data.get(OpenAIField.TOOLS, None)
+
         if messages is not None:
-            encoded_ids = TokenizerManager().apply_chat_template(messages)
+            encoded_ids = TokenizerManager().apply_chat_template(messages, tools)
         else:
             prompt = req_info.req_data.get(OpenAIField.PROMPT, None)
             if prompt is not None:
@@ -60,7 +63,7 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             logger.warning(f"tenant is none")
             return None
 
-        max_kv_gpu = 0
+        max_kv_matched = 0
         max_kv_dp = 0
         selected_instance = None
         selected_endpoint = None
@@ -70,11 +73,11 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             if instance_data is None:
                 continue
 
-            data_gpu = instance_data.get("GPU", 0)
-            if data_gpu < max_kv_gpu:
+            data_matched = instance_data.get("longest_matched", 0)
+            if data_matched < max_kv_matched:
                 continue
 
-            max_kv_gpu = data_gpu
+            max_kv_matched = data_matched
             selected_instance = instance
             selected_data_dp = instance_data.get("DP", {})
 
@@ -98,7 +101,7 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         if selected_endpoint is None:
             logger.warning(f"selected_endpoint is None")
             return None
-        logger.info(f"select_endpoint: {selected_instance.id}-{selected_endpoint.id}  max_kv_gpu:{max_kv_gpu}")
+        logger.info(f"select_endpoint: {selected_instance.id}-{selected_endpoint.id}  max_kv_matched:{max_kv_matched}")
         return (selected_instance, selected_endpoint)
 
     def _select_instance(self, _: PDRole = None) -> Instance | None:
@@ -142,19 +145,27 @@ class TokenizerManager(ThreadSafeSingleton):
         if model_path:
             os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'
             from transformers import AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
         logger.info(f"TokenizerManager init.(model_path:{model_path})")
 
-    def apply_chat_template(self, messages: str) -> list[int]:
+        self.openai_standard = os.environ.get("OPENAI_STANDARD", "STANDARD")
+
+    def apply_chat_template(self, messages: list, tools: list | None = None) -> list[int]:
         """
         When the inference API /v1/chat/completions is called, 
         this method is used for encoding.
         """
         if self.tokenizer is None:
             return []
-        result = self.tokenizer.apply_chat_template(messages)
-        return result
+
+        try:
+            if self.openai_standard != "STANDARD":
+                return self._apply_chat_template_with_preproces(messages, tools)
+        except Exception as e:
+            logger.warning(f"arguments exchange error: {e}")
+
+        return self.tokenizer.apply_chat_template(messages, return_dict=False)
 
     def encode(self, prompt: str) -> list[int]:
         """
@@ -165,3 +176,17 @@ class TokenizerManager(ThreadSafeSingleton):
             return []
         result = self.tokenizer.encode(prompt)
         return result
+
+    def _apply_chat_template_with_preproces(self, messages: list, tools: list | None = None) -> list[int]:
+        """
+        When the inference API /v1/chat/completions is called, 
+        this method is used for non standard model encoding.
+        """
+        messages_copy, tools_copy = preprocess_input(messages, tools)
+
+        prompt = self.tokenizer.apply_chat_template(
+            conversation=messages_copy,
+            tools=tools_copy,
+            tokenize=False,
+        )
+        return self.tokenizer.encode(prompt)
