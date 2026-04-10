@@ -172,7 +172,7 @@ class ConductorApiClient():
             "address": f"{prefill_kv_event_config.conductor_service}:{prefill_kv_event_config.http_server_port}"
         }
         try:
-            with SafeHTTPSClient(timeout=2, **client_args) as client:
+            with SafeHTTPSClient(timeout=0.2, **client_args) as client:
                 response = client.post("/query", query_data)
                 logger.info(f"query success! {response}")
                 return response

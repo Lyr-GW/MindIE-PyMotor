@@ -12,6 +12,7 @@ import lib.constant as C
 from lib.utils import generate_unique_id, load_yaml, write_yaml, logger, modify_log_mount
 from lib.generator import k8s_utils
 from lib.generator.k8s_utils import extract_resources, set_rbac_namespace, set_services_namespace
+from lib.generator.engine import set_engine_weight_mount
 
 
 def modify_coordinator_replicas(data, user_config):
@@ -78,6 +79,8 @@ def modify_coordinator_yaml(data, user_config):
     set_rbac_namespace(rbac_resources, namespace)
     modify_coordinator_deployment(deployment_data, user_config)
     set_services_namespace(service_list, namespace)
+    container = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC][C.CONTAINERS][0]
+    set_engine_weight_mount(deployment_data, container, deploy_config)
 
 
 def generate_yaml_coordinator(input_yaml, output_file, user_config):
