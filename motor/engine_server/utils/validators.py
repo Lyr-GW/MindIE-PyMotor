@@ -145,7 +145,7 @@ class MapValidator(Validator):
         if inclusive_keys is None:
             inclusive_keys = []
         for key in inclusive_keys:
-            self.register_checker(lambda x: key in self.value, "Key error for the value of dict type")
+            self.register_checker(lambda x, k=key: k in self.value, "Key error for the value of dict type")
 
 
 class RankSizeValidator(IntValidator):
