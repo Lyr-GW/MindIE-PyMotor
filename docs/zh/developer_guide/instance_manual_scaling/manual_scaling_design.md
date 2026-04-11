@@ -1,9 +1,11 @@
 # 手动扩缩容设计文档（MindIE PyMotor）
 
 ## 背景与目标
+
 本文用于说明 MindIE PyMotor 的手动扩缩容设计与约束。
 
 目标：
+
 - 以**集群内 ConfigMap（motor-config）中的 user_config** 作为扩缩容基线（当前已部署配置）。
 - 仅允许 `p_instances_num/d_instances_num` 在扩缩容场景中发生变更。
 - 通过 `python3 deploy.py --update_instance_num` 触发扩缩容。
@@ -12,11 +14,13 @@
 ## 设计概述
 
 ### 基线配置策略
+
 - **基线来源**：从集群中对应 namespace 的 ConfigMap `motor-config` 的 `user_config.json` 键读取，即当前环境已部署的配置。
 - 首次 `deploy` 时无基线，全量 apply 后 ConfigMap 由当前输入的 `user_config.json` 路径写入。
 - 扩缩容时，从 ConfigMap 取基线，与当前输入的 user_config 对比：若除实例数外有差异则拒绝执行；若仅实例数变化则执行，ConfigMap 使用当前输入的 user_config 文件路径刷新。
 
 ### 扩缩容计算与执行
+
 - 基线实例数取自集群 ConfigMap 中 user_config 的 `motor_deploy_config`。
 - 目标实例数取自当前输入的 `user_config.json` 的 `motor_deploy_config`。
 - 按**目标实例数**生成引擎 YAML（仅生成 0 ～ 目标-1 的 index）。
@@ -25,17 +29,20 @@
 - 已存在的 engine 实例（0 ～ 基线-1）不会被重新 apply，避免误重拉。
 
 ### ConfigMap 更新策略
+
 - 扩缩容时刷新 ConfigMap 使用当前输入的 user_config 文件路径（`--user_config_path`）：从 CM 取基线 → 校验仅实例数变更 → 用当前输入文件刷新 ConfigMap → 执行 engine apply/delete。
 
 ## 关键流程
 
 ### 1. 首次部署
+
 1. 读取当前输入的 `user_config.json`。
 2. 生成 controller/coordinator/engine 的 YAML。
 3. 执行全量 `kubectl apply`（含 create_motor_config_configmap，使用当前 user_config 文件路径）。
 4. 基线即集群内 ConfigMap 内容。
 
 #### 流程图
+
 ```mermaid
 flowchart TD
     A[开始] --> B[读取 user_config.json]
@@ -45,6 +52,7 @@ flowchart TD
 ```
 
 ### 2. 扩缩容（--update_instance_num）
+
 1. 从集群 ConfigMap 读取基线；若不存在则报错。
 2. 校验仅实例数变更，否则报错。
 3. 按目标实例数生成引擎 YAML。
@@ -52,6 +60,7 @@ flowchart TD
 5. 根据基线实例数与目标实例数差异执行扩缩容：扩容时对新增实例执行 apply；缩容时从 index 大到小依次删除实例及其在 output 下的对应 YAML 文件。
 
 #### 流程图
+
 ```mermaid
 flowchart TD
     A[开始] --> B[从 ConfigMap 取基线]
@@ -68,12 +77,14 @@ flowchart TD
 ```
 
 ## 约束与注意事项
+
 - 集群内需存在 ConfigMap `motor-config` 且含 `user_config.json` 才能进行扩缩容（即至少成功部署过一次）。
 - 扩缩容仅支持改动 `p_instances_num/d_instances_num`。
 - 扩缩容仅作用于 engine；controller/coordinator 不在扩缩容路径中更新。
 - 缩容从高 index 开始删除，且会删除 output 下对应 YAML 文件。
 
 ## 新增代码结构与职责
+
 - `get_baseline_config_from_configmap(job_id)`：从集群 ConfigMap 读取当前已部署 user_config。
 - `run_cmd_get_output`：执行命令并返回 stdout，用于 kubectl get configmap。
 - `validate_only_instance_changed`：除实例数外是否变更的校验。
@@ -83,6 +94,7 @@ flowchart TD
 ## 场景介绍
 
 ### 环境与前置
+
 - 准备可用的 `user_config.json`（含合法 `p_instances_num`、`d_instances_num` 等）。
 - 确保集群可访问，`kubectl` 已配置且对目标 namespace 有权限。
 

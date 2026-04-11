@@ -1,3 +1,5 @@
+# 
+
 ## 1. 使用 `generate_api_key.py` 生成和使用 API Key
 
 本目录下的 `generate_api_key.py` 是用于为 MindIE-pyMotor 生成 API Key 的工具脚本，脚本内部已经接入了 `motor.common.utils.key_encryption` 中的加密实现。
@@ -145,29 +147,29 @@ _builtin_algorithms = {
 
 1. **生成密钥**  
 
-```bash
-python examples/api_key/generate_api_key.py \
-  --key "sk-my-custom-key" \
-  --algorithm "MY_CUSTOM_ALGO"
-```
+    ```bash
+    python examples/api_key/generate_api_key.py \
+      --key "sk-my-custom-key" \
+      --algorithm "MY_CUSTOM_ALGO"
+    ```
 
-脚本会调用你实现的 `MyCustomKeyEncryption.encrypt_key`，输出对应的密文。
+    脚本会调用你实现的 `MyCustomKeyEncryption.encrypt_key`，输出对应的密文。
 
 2. **写入配置**  
 
-在配置中将 `encryption_algorithm` 设置为 `"MY_CUSTOM_ALGO"`，并把脚本输出的加密 Key 写入 `valid_keys`：
+    在配置中将 `encryption_algorithm` 设置为 `"MY_CUSTOM_ALGO"`，并把脚本输出的加密 Key 写入 `valid_keys`：
 
-```json
-{
-  "motor_coordinator_config": {
-    "api_key_config": {
-      "enable_api_key": true,
-      "valid_keys": ["<my_custom_encrypted_key>"],
-      "encryption_algorithm": "MY_CUSTOM_ALGO"
+    ```json
+    {
+      "motor_coordinator_config": {
+        "api_key_config": {
+          "enable_api_key": true,
+          "valid_keys": ["<my_custom_encrypted_key>"],
+          "encryption_algorithm": "MY_CUSTOM_ALGO"
+        }
+      }
     }
-  }
-}
-```
+    ```
 
 3. **客户端调用**  
 

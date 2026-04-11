@@ -1,18 +1,18 @@
-# MindIE-pyMotor
+# 快速入门
 
-## 1. 产品简介
+## 产品简介
 
-**MindIE pyMotor是面向通用大模型PD分离部署场景的推理服务化框架，通过开放、可扩展的推理服务化平台架构提供推理服务化能力，支持对接业界主流推理框架接口，满足大语言模型的高性能推理需求**。
+MindIE pyMotor是面向通用大模型PD分离部署场景的推理服务化框架，通过开放、可扩展的推理服务化平台架构提供推理服务化能力，支持对接业界主流推理框架接口，满足大语言模型的高性能推理需求。
 
-## 2. 关键特性
+## 关键特性
 
 | 特性       | 说明              |
 | ------------ | ----------------- |
-| **PD分离部署** | 模型推理的Prefill阶段和Decode阶段分别实例化部署在不同的机器资源上同时进行推理，提升推理性能，其特性介绍详情请参见[PD分离部署](https://www.hiascend.com/document/detail/zh/mindie/10RC3/mindieservice/servicedev/mindie_service0138.html)。 |
+| **PD分离部署** | 模型推理的Prefill阶段和Decode阶段分别实例化部署在不同的机器资源上同时进行推理，提升推理性能，其特性介绍详情请参见[PD分离部署](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/user_guide/service_deployment/pd_separation_service_deployment.md)。 |
 
-## 3. 快速开始
+## 快速开始
 
-### 3.1 环境准备
+### 环境准备
 
 本文档以Atlas 800I A2 推理服务器和Qwen3-8B模型为例，让开发者快速开始使用MindIE-pyMotor进行大模型PD分离部署和推理流程。
 
@@ -27,6 +27,7 @@
   ```
   
   **图1** 回显信息
+
   ![image](https://www.hiascend.com/doc_center/source/zh/mindie/22RC1/quickstart/figure/zh-cn_image_0000002474350016.png)
 
   **表1** Atlas A2 推理系列产品
@@ -74,7 +75,7 @@
 
 该镜像已具备模型运行所需的基础环境
 
-### 3.2 PD分离部署
+### PD分离部署
 
 > [!NOTE]部署方式说明
 > 当前默认采用 **CRD 方式**（基于 MindCluster 的 PD 分离 CRD 与 Operator）进行部署。该方式尚未完成 RAS 能力与池化能力的适配验证。若您需要 RAS（可靠性、可用性、可服务性）或 KV 池化能力，可在 `user_config.json` 的 `motor_deploy_config.deploy_mode` 中配置为 `multi_deployment`，切换为原有的多 YAML Deployment 方式。完整部署说明请参考 [PD 分离服务部署](./service_deployment/pd_disaggregation_deployment.md)。
@@ -194,8 +195,6 @@
      | prefill_parallel_config.world_size | int | ≥1 | 单个实例的总卡数，由于不同引擎的计算方式不同，建议显示指定 |
 
      | engine_config |dict | 推理引擎原生参数 | 参考对应推理引擎的说明，直接已json对象形式填写 |
-
-
 
    - 配置 k8s 的 namespace，配置 namespace 值为 `user_config.json` 中的 `job_id`。
 

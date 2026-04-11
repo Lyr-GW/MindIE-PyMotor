@@ -32,8 +32,10 @@ pyMotor开启日志持久化需修改user_config.json配置文件后，通过dep
   }
 }
 ```
+
 logging_config配置项可补充在`motor_controller_config`、`motor_coordinator_config`、`motor_nodemanger_config`三个配置项下。
 logging_config配置项说明：
+
 - `log_level`：日志级别，可选：`DEBUG`、`INFO`、`WARNING`、`ERROR`、`CRITICAL`，默认为`INFO`
 - `log_max_line_length`：日志行最大长度，默认为8192
 - `log_format`：日志格式，默认为`%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(processName)s]  %(message)s`

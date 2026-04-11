@@ -1,15 +1,14 @@
 # tracing能力部署
 
-## 1. 特性介绍
+## 特性介绍
 
 pyMotor tracing能力基于三方件`opentelemetry`能力，`opentelemetry`文档资料可参考[文档|OpenTelemetry](https://opentelemetry.io/zh/docs/)。
 
 通过修改env.json配置文件和user_config.json配置文件后即可通过deploy.py脚本完成服务部署。
 
-## 2. 部署流程
+## 部署流程
 
 pyMotor开启tracing能力需修改env.json配置文件和user_config.json配置文件后，通过deploy.py脚本即可完成服务部署，具体流程如下。
-
 
 ### 2.1 配置env.json
 
