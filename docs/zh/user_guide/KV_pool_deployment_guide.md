@@ -118,6 +118,7 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
 ```
 
 说明：`kv_cache_pool_config` 为 KV 池化全局配置项，具体参数说明如下：
+
 - `metadata_server`：元数据服务器模式，默认为 `P2PHANDSHAKE`（点对点握手模式）。
 - `protocol`：底层传输协议，默认为 `ascend`。
 - `device_name`：指定绑定的网卡名称，为空则自动选择。

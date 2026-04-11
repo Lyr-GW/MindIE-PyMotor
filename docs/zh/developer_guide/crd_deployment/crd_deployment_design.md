@@ -5,6 +5,7 @@
 本文用于说明 MindIE PyMotor 基于 InferServiceSet CRD 的部署方式设计与实现。
 
 目标：
+
 - 支持通过 **InferServiceSet CRD**（`mindcluster.huawei.com/v1`）统一拉起 controller、coordinator、prefill、decode 等角色对应的 pod。
 - 使用 `infer_service_init.yaml` 作为 init 模板，经 deploy.py 根据 `user_config.json` 实例化后输出可用的 `infer_service.yaml`。
 - 默认采用 InferServiceSet 方式部署；在 `user_config.json` 的 `motor_deploy_config.deploy_mode` 中配置为 `multi_deployment` 可切换回传统的多 yaml Deployment 方式。扩缩容与 CM 刷新时从集群 ConfigMap 读取当前部署方式。

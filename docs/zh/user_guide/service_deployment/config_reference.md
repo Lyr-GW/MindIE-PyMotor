@@ -33,12 +33,12 @@
 | single_d_instance_pod_num | int | 单个 D 实例对应的 Pod 数，≥1 |
 | p_pod_npu_num | int | 单个 P 实例 Pod 占用的 NPU 卡数，每个 Pod 最大 16 卡 |
 | d_pod_npu_num | int | 单个 D 实例 Pod 占用的 NPU 卡数，每个 Pod 最大 16 卡 |
-| image_name | string | 推理镜像名（需包含 MindIE-PyMotor 与 vLLM 等运行环境），与 [PD 分离服务部署](./pd_disaggregation_deployment.md#2-准备镜像) 中准备/加载的镜像名一致 |
+| image_name | string | 推理镜像名（需包含 MindIE-PyMotor 与 vLLM 等运行环境），与 [PD 分离服务部署](./pd_disaggregation_deployment.md#准备镜像) 中准备/加载的镜像名一致 |
 | job_id | string | 部署任务名，同时作为 K8s 命名空间使用，如 `mindie-motor` |
 | hardware_type | string | 硬件类型：`800I_A2` 或 `800I_A3` |
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 model_path 需与此挂载路径一致，如 `"/mnt/weight/"` |
 | deploy_mode | string | 部署方式。可选：`infer_service_set`（默认，基于 InferServiceSet CRD，生成单个 infer_service.yaml 由 CRD controller 拉起各 pod）、`multi_deployment`（传统方式，生成 controller、coordinator、engine_*、kv_pool 等多个独立 YAML 分别 apply）、`single_container`（单容器方式，P/D 合并运行）。不配置时默认为 `infer_service_set`。CRD 方式尚未完成 RAS 能力与池化能力的适配验证；若需 RAS（可靠性、可用性、可服务性）或 KV 池化能力，请设置为 `multi_deployment` |
-| tls_config | object | 可选；TLS 相关配置，含 infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config 四类，结构见 [PD 分离服务部署](./pd_disaggregation_deployment.md#46-tls_config可选) |
+| tls_config | object | 可选；TLS 相关配置，含 infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config 四类，结构见 [PD 分离服务部署](./pd_disaggregation_deployment.md#tls_config可选) |
 
 ---
 
@@ -91,7 +91,7 @@
 
 采用上述默认格式时，日志输出样例如下：
 
-```
+```txt
 2026-02-12 14:30:00  [INFO][motor.coordinator][main.py:42]  Service started.
 2026-02-12 14:30:01  [WARNING][motor.engine_server][service.py:128]  Retry connection to etcd.
 2026-02-12 14:30:02  [ERROR][motor.controller][controller_api.py:56]  Request failed: connection timeout.
@@ -275,7 +275,7 @@
 | valid_keys | array | 合法的 API Key 字符串列表。默认：`[]` |
 | encryption_algorithm | string | Key 校验使用的加密算法，如 `PBKDF2_SHA256`。默认：`PBKDF2_SHA256` |
 | header_name | string | 携带 API Key 的 HTTP 头名称。默认：`Authorization` |
-| key_prefix | string | 头中 Key 的前缀，如 `Bearer `。默认：`Bearer ` |
+| key_prefix | string | 头中 Key 的前缀，如`Bearer`。默认：`Bearer`|
 | skip_paths | array | 不校验 API Key 的路径列表（如 `/metrics`、`/liveness`、`/docs` 等），可自定义 |
 
 ### 3.8 rate_limit_config

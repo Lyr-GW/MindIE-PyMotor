@@ -1,21 +1,24 @@
 # docker-only部署多容器PD分离指南
 
-## 1. 特性介绍
+## 特性介绍
 
 本文档描述在**不使用 Kubernetes deployer**、仅用 **Docker 容器 + 宿主机挂载配置** 的方式部署多容器PyMotor PD分离推理的**端到端流程**。
 
-## 2. 部署流程
+## 部署流程
 
-### 2.1 准备user_config.json和env.json配置文件
+### 准备user_config.json和env.json配置文件
+
 可从如下路径获取[user_config.json](../../../../examples/infer_engines/vllm/user_config.json)和[env.json](../../../../examples/infer_engines/vllm/env.json)模板，本文主要介绍docker-only部署方式相关适配点，其他特性请参考[quick_start](../../user_guide/quick_start.md)。
 
 若不存在多个容器部署在相同节点的场景，无需适配。当coordinator或controller部署的节点与P/D实例所在节点为同一节点时，需要修改**user_config.json**配置文件中的默认端口：
+
 - **motor_coordinator_config.http_config.coordinator_api_infer_port**：coordinator推理端口（默认1025）。
 - **motor_coordinator_config.http_config.coordinator_api_mgmt_port**：coordinator管理端口（默认1026）。
 - **motor_controller_config.api_config.controller_api_port**：controller管理端口（默认1026）。
 - **motor_nodemanger_config.api_config.node_manager_port**：nodemanger管理端口（默认1026）。
 
 样例如下：
+
 ```json{
   "motor_controller_config": {
     ...
@@ -39,8 +42,10 @@
 }
 ```
 
-### 2.2 准备CONFIGMAP_PATH
+### 准备CONFIGMAP_PATH
+
 准备阶段需将配置文件、启动脚本拷贝到环境变量**CONFIGMAP_PATH**对应目录下，并通过set_env_docker.py加载环境变量。准备阶段脚本**prepare.sh**示例(**EXAMPLES_PATH**、**CONFIGMAP_PATH**、**USER_CONFIG_PATH**、**ENV_PATH**需修改为实际路径)：
+
 ```shell
 EXAMPLES_PATH="xxx" # 主机examples部署脚本路径
 CONFIGMAP_PATH="xxx" # 服务启动脚本路径，需挂载到容器内
@@ -80,12 +85,15 @@ python $EXAMPLES_PATH/deployer/startup/set_env_docker.py --configmap_path $CONFI
 ```
 
 执行方式：
-```
+
+```bash
 sh prepare.sh
 ```
 
 ### 2.3 docker启动服务
+
 准备启动脚本start_docker.sh，脚本示例(**CONFIGMAP_PATH**需修改为实际路径，**IMAGE_NAME**需修改为实际镜像名)：
+
 ```shell
 # 默认不开启特权容器，如需开启，将--privileged=false改为--privileged=true
 CONFIGMAP_PATH="xxx" # CONFIGMAP_PATH需与prepare.sh保持一致，且必须使用绝对路径
@@ -131,6 +139,7 @@ bash -c "source \$CONFIGMAP_PATH/boot.sh"
 ```
 
 环境变量说明：
+
 | 变量名 | 含义 | 取值 |
 | :--- | :--- | :--- |
 | CONFIGMAP_PATH | 启动脚本路径 | 与2.2小节保持一致，需挂载到容器中 |
@@ -149,6 +158,7 @@ bash -c "source \$CONFIGMAP_PATH/boot.sh"
 | KV_POOL_EVICTION_RATIO | mooncake_master进程逐出比例 | 若开启kv_pool，取值0~1；若不开启则设置为空 |
 
 启动服务示例（1P1D）：
+
 ```shell
 # 启动顺序，先coordinator/controller/kv_pool（可选），再P/D实例，相同实例的多个容器需一起拉起
 # 假定coordinator部署节点<IP0>，controller部署节点<IP1>，kv_pool（若有）部署节点<IP2>
