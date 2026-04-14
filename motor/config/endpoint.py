@@ -272,7 +272,6 @@ class EndpointConfig:
         self.engine_type = str(self.deploy_config.engine_type)
         if self.engine_type not in supported_engine:
             raise ValueError(f"engine type {self.engine_type} is not supported.")
-        self.update_engine_config()
 
     def update_engine_config(self):
         split_str = "*:"
