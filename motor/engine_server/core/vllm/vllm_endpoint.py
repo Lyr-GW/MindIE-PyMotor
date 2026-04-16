@@ -43,6 +43,13 @@ from motor.engine_server.core.vllm.vllm_openai_compat import (
 
 logger = get_logger(__name__)
 
+# argparse / EngineArgs field names (optional; getattr for older vLLM)
+ATTR_DEFAULT_CHAT_TEMPLATE_KWARGS = "default_chat_template_kwargs"
+ATTR_ENABLE_AUTO_TOOL_CHOICE = "enable_auto_tool_choice"
+ATTR_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE = "exclude_tools_when_tool_choice_none"
+ATTR_TOOL_CALL_PARSER = "tool_call_parser"
+ATTR_TRUST_REQUEST_CHAT_TEMPLATE = "trust_request_chat_template"
+
 
 @asynccontextmanager
 async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -53,6 +60,18 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "VLLM lifespan: app.extra[CONFIG_KEY] not set (init_request_handlers not called)."
         )
     args = config.get_args()
+    # vLLM ParserManager.get_tool_parser only loads a parser when both
+    # enable_auto_tool_choice and tool_call_parser are set; mirror common
+    # --tool-call-parser-only usage so model output is parsed into tool_calls.
+    if getattr(args, ATTR_TOOL_CALL_PARSER, None) and not getattr(
+        args, ATTR_ENABLE_AUTO_TOOL_CHOICE, False
+    ):
+        setattr(args, ATTR_ENABLE_AUTO_TOOL_CHOICE, True)
+        logger.info(
+            "tool_call_parser is set but enable_auto_tool_choice was false; "
+            "enabling enable_auto_tool_choice so chat completions parse tool calls."
+        )
+
     engine = VLLMEngine(config)
     engine_client = engine.launch()
     if engine_client is None:
@@ -121,13 +140,13 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 "request_logger": request_logger,
                 "chat_template": resolved_chat_template,
                 "chat_template_content_format": args.chat_template_content_format,
-                "trust_request_chat_template": getattr(args, "trust_request_chat_template", False),
-                "enable_auto_tools": getattr(args, "enable_auto_tool_choice", False),
-                "exclude_tools_when_tool_choice_none": getattr(
-                    args, "exclude_tools_when_tool_choice_none", False
+                ATTR_TRUST_REQUEST_CHAT_TEMPLATE: getattr(args, ATTR_TRUST_REQUEST_CHAT_TEMPLATE, False),
+                "enable_auto_tools": getattr(args, ATTR_ENABLE_AUTO_TOOL_CHOICE, False),
+                ATTR_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE: getattr(
+                    args, ATTR_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE, False
                 ),
-                "tool_parser": getattr(args, "tool_call_parser", None),
-                "default_chat_template_kwargs": getattr(args, "default_chat_template_kwargs", None),
+                "tool_parser": getattr(args, ATTR_TOOL_CALL_PARSER, None),
+                ATTR_DEFAULT_CHAT_TEMPLATE_KWARGS: getattr(args, ATTR_DEFAULT_CHAT_TEMPLATE_KWARGS, None),
                 "log_error_stack": getattr(args, "log_error_stack", False),
             }
             render_kw = kwargs_matching_signature(OpenAIServingRender.__init__, render_kw)
@@ -142,6 +161,19 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 chat_template=resolved_chat_template,
                 chat_template_content_format=args.chat_template_content_format,
                 openai_serving_render=openai_serving_render,
+                trust_request_chat_template=getattr(args, ATTR_TRUST_REQUEST_CHAT_TEMPLATE, False),
+                return_tokens_as_token_ids=getattr(args, "return_tokens_as_token_ids", False),
+                reasoning_parser=getattr(args, "reasoning_parser", ""),
+                enable_auto_tools=getattr(args, ATTR_ENABLE_AUTO_TOOL_CHOICE, False),
+                exclude_tools_when_tool_choice_none=getattr(
+                    args, ATTR_EXCLUDE_TOOLS_WHEN_TOOL_CHOICE_NONE, False
+                ),
+                tool_parser=getattr(args, ATTR_TOOL_CALL_PARSER, None),
+                enable_prompt_tokens_details=getattr(args, "enable_prompt_tokens_details", False),
+                enable_force_include_usage=getattr(args, "enable_force_include_usage", False),
+                enable_log_outputs=getattr(args, "enable_log_outputs", False),
+                enable_log_deltas=getattr(args, "enable_log_deltas", True),
+                default_chat_template_kwargs=getattr(args, ATTR_DEFAULT_CHAT_TEMPLATE_KWARGS, None),
             ) if "generate" in supported_tasks else None
 
             app.state.openai_serving_completion = OpenAIServingCompletion(

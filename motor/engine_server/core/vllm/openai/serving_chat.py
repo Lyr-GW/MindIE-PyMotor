@@ -48,11 +48,33 @@ class OpenAIServingChat:
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         openai_serving_render: Any | None = None,
+        trust_request_chat_template: bool = False,
+        return_tokens_as_token_ids: bool = False,
+        reasoning_parser: str = "",
+        enable_auto_tools: bool = False,
+        exclude_tools_when_tool_choice_none: bool = False,
+        tool_parser: str | None = None,
+        enable_prompt_tokens_details: bool = False,
+        enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        enable_log_deltas: bool = True,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         chat_kw: dict[str, Any] = {
             "request_logger": request_logger,
             "chat_template": chat_template,
             "chat_template_content_format": chat_template_content_format,
+            "trust_request_chat_template": trust_request_chat_template,
+            "return_tokens_as_token_ids": return_tokens_as_token_ids,
+            "reasoning_parser": reasoning_parser,
+            "enable_auto_tools": enable_auto_tools,
+            "exclude_tools_when_tool_choice_none": exclude_tools_when_tool_choice_none,
+            "tool_parser": tool_parser,
+            "enable_prompt_tokens_details": enable_prompt_tokens_details,
+            "enable_force_include_usage": enable_force_include_usage,
+            "enable_log_outputs": enable_log_outputs,
+            "enable_log_deltas": enable_log_deltas,
+            "default_chat_template_kwargs": default_chat_template_kwargs,
         }
         if openai_serving_render is not None:
             chat_kw["openai_serving_render"] = openai_serving_render
