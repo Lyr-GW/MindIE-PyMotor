@@ -215,14 +215,14 @@ class MockStreamResponse:
         self.request_data = request_data
         self.is_success = exc is None
         self.status_code = status.HTTP_200_OK
-        
-    async def aread(self):
         if isinstance(self.exc, httpx.HTTPStatusError):
             self.text = self.exc.response.text
         elif isinstance(self.exc, httpx.RequestError):
             self.text = str(self.exc)
-        return self.text
         
+    async def aread(self):
+        return self.text
+
     async def __aenter__(self):
         return self
 

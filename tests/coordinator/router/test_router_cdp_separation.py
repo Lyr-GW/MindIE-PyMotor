@@ -428,7 +428,7 @@ class TestRouterCDPSeparation:
         error_message = "Test Bad Request"
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
-            request=None,
+            request=MagicMock(),
             response=httpx.Response(status_code=status.HTTP_400_BAD_REQUEST, text=error_message)
         ), stream_fail_times=CoordinatorConfig().exception_config.max_retry )
         req_info = await create_mock_request_info()
@@ -482,7 +482,7 @@ class TestRouterCDPSeparation:
         max_retry = CoordinatorConfig().exception_config.max_retry
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
-            request=None,
+            request=MagicMock(),
             response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, text=error_message)
         ), stream_fail_times=max_retry)
         req_info = await create_mock_request_info()
@@ -528,7 +528,7 @@ class TestRouterCDPSeparation:
         error_message = "Test Internal Server Error"
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
-            request=None,
+            request=MagicMock(),
             response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
         ), stream_fail_times=1)
         req_info = await create_mock_request_info()
@@ -597,7 +597,7 @@ class TestRouterCDPSeparation:
         mock_async_client = MockAsyncClient(
             post_exc=httpx.HTTPStatusError(
                 message=error_message,
-                request=None,
+                request=MagicMock(),
                 response=httpx.Response(
                     status_code=status.HTTP_502_BAD_GATEWAY, text=error_message
                 ),

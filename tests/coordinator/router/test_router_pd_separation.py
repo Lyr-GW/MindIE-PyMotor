@@ -696,6 +696,7 @@ class TestRouterPDSeparation:
         # Create a mock response with 5XX status code
         mock_response_fail = MagicMock()
         mock_response_fail.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+        mock_response_fail.text = error_message
         mock_response_fail.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError(
             error_message, request=MagicMock(), response=mock_response_fail
         ))

@@ -333,9 +333,14 @@ class BaseRouter(ABC):
                     "Scheduling latency stage=forward_to_engine_connect elapsed_ms=%.2f api=%s",
                     elapsed_to_connect_ms, self.req_info.api
                 )
-            if not response.is_success:
-                await response.aread()
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                raise httpx.HTTPStatusError(
+                    message=e.response.text,
+                    request=e.request,
+                    response=e.response
+                )
             count_token = 0
             pending = b""
             async for chunk in response.aiter_bytes():
@@ -414,7 +419,14 @@ class BaseRouter(ABC):
                 "Scheduling latency stage=forward_to_engine elapsed_ms=%.2f api=%s",
                 elapsed_forward_ms, self.req_info.api
             )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise httpx.HTTPStatusError(
+                message=e.response.text,
+                request=e.request,
+                response=e.response
+            )
         await response.aclose()
         return response
 

@@ -287,7 +287,7 @@ class TestPDDualDispatchRouter:
         error_message = "Test Bad Request"
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
-            request=None,
+            request=MagicMock(),
             response=httpx.Response(status_code=status.HTTP_400_BAD_REQUEST, text=error_message)
         ), stream_fail_times=CoordinatorConfig().exception_config.max_retry)
         req_info = await create_mock_request_info()
@@ -345,7 +345,7 @@ class TestPDDualDispatchRouter:
         error_message = "Test Internal Server Error"
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
-            request=None,
+            request=MagicMock(),
             response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, text=error_message)
         ), stream_fail_times=CoordinatorConfig().exception_config.max_retry)
         req_info = await create_mock_request_info()
@@ -393,8 +393,8 @@ class TestPDDualDispatchRouter:
         error_message = "Test Internal Server Error"
         mock_async_client = MockAsyncClient(stream_exc=httpx.HTTPStatusError(
             message=error_message,
-            request=None,
-            response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            request=MagicMock(),
+            response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, text=error_message)
         ), stream_fail_times=1)
         req_info = await create_mock_request_info()
 
