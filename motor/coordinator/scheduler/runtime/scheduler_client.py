@@ -897,7 +897,7 @@ class AsyncSchedulerClient:
         if not all_endpoints:
             return None
         st = self._scheduler_type or "round_robin"
-        if st == "load_balance":
+        if st in ("load_balance", "kv_cache_affinity"):
             ep = LoadBalancePolicy.select_endpoint_from_instance(instance)
             if ep:
                 return (instance, ep)
