@@ -13,8 +13,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/startup`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 **请求参数**
 无
@@ -46,8 +46,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/liveness`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 **请求参数**
 无
@@ -81,8 +81,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/readiness`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 **请求参数**
 无
@@ -117,8 +117,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/metrics`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 **请求参数**
 无
@@ -170,8 +170,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/instance/metrics`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 **请求参数**
 无
@@ -250,8 +250,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/instances/refresh`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 请求头：
 
@@ -338,8 +338,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/v1/metaserver`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 请求头：
 
@@ -496,8 +496,8 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/`
 
   >[!NOTE]说明
   >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `http_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `http_config.coordinator_api_mgmt_port`（默认 `1026`）。
+  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
+  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
 
 **请求参数**
 无

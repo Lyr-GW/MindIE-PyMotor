@@ -12,8 +12,8 @@
 
 若不存在多个容器部署在相同节点的场景，无需适配。当coordinator或controller部署的节点与P/D实例所在节点为同一节点时，需要修改**user_config.json**配置文件中的默认端口：
 
-- **motor_coordinator_config.http_config.coordinator_api_infer_port**：coordinator推理端口（默认1025）。
-- **motor_coordinator_config.http_config.coordinator_api_mgmt_port**：coordinator管理端口（默认1026）。
+- **motor_coordinator_config.api_config.coordinator_api_infer_port**：coordinator推理端口（默认1025）。
+- **motor_coordinator_config.api_config.coordinator_api_mgmt_port**：coordinator管理端口（默认1026）。
 - **motor_controller_config.api_config.controller_api_port**：controller管理端口（默认1026）。
 - **motor_nodemanger_config.api_config.node_manager_port**：nodemanger管理端口（默认1026）。
 
@@ -28,16 +28,27 @@
   },
   "motor_coordinator_config": {
     ...
-    "http_config": {
+    "api_config": {
       "coordinator_api_infer_port": 1025,
       "coordinator_api_mgmt_port": 1026
     },
   },
-  "motor_nodemanger_config": {
-    "api_config": {
-      "node_manager_port": 3026
-    }
-  }
+  "motor_engine_prefill_config": {
+    ...
+    "motor_nodemanger_config": {
+      "api_config": {
+        "node_manager_port": 3026
+      }
+    },
+  },
+  "motor_engine_decode_config": {
+    ...
+    "motor_nodemanger_config": {
+      "api_config": {
+        "node_manager_port": 3026
+      }
+    },
+  },
   ...
 }
 ```

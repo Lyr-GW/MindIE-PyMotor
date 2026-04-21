@@ -4,8 +4,8 @@
 
 服务提供推理接口与管理接口，支持分离端口或合并端口模式：
 
-- 推理端口：`http_config.coordinator_api_infer_port`（默认 1025）
-- 管理端口：`http_config.coordinator_api_mgmt_port`（默认 1026）
+- 推理端口：`api_config.coordinator_api_infer_port`（默认 1025）
+- 管理端口：`api_config.coordinator_api_mgmt_port`（默认 1026）
 - 安全协议：`infer_tls_config.tls_enable` / `mgmt_tls_config.tls_enable` 为 `true` 时使用 `https`
 
 ## 认证与限流

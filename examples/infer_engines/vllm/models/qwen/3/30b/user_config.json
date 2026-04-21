@@ -1,0 +1,104 @@
+{
+  "version": "v2.0",
+  "motor_deploy_config": {
+    "p_instances_num": 1,
+    "d_instances_num": 1,
+    "single_p_instance_pod_num": 1,
+    "single_d_instance_pod_num": 1,
+    "p_pod_npu_num": 16,
+    "d_pod_npu_num": 16,
+    "image_name": "mindie-motor-vllm:dev-26.0.0.B112-800I-A3-py311-Ubuntu24.04-lts-aarch64",
+    "job_id": "mindie-lvgang",
+    "hardware_type": "800I_A3",
+    "weight_mount_path": "/mnt/weight/",
+    "deploy_mode": "multi_deployment"
+  },
+  "motor_controller_config": {
+  },
+  "motor_coordinator_config": {
+  },
+  "motor_engine_prefill_config": {
+    "engine_type": "vllm",
+    "motor_nodemanger_config": {},
+    "health_check_config": {
+      "enable_virtual_inference": false,
+      "npu_usage_threshold": 10
+    },
+    "model_config": {
+      "model_name": "qwen",
+      "model_path": "/mnt/share/weights/Qwen3-30B-A3B",
+      "npu_mem_utils": 0.93,
+      "parallel_config": {
+        "dp_size": 2,
+        "tp_size": 2,
+        "pp_size": 1,
+        "enable_ep": false,
+        "dp_rpc_port": 9000
+      }
+    },
+    "engine_config": {
+      "enforce-eager": true,
+      "max_model_len": 2048,
+      "enable-auto-tool-choice": true,
+      "tool-call-parser": "hermes",
+      "kv_transfer_config": {
+        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_producer",
+        "kv_parallel_size": 1,
+        "kv_port": "30001",
+        "engine_id": "0",
+        "kv_rank": 0,
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true
+        }
+      }
+    }
+  },
+  "motor_engine_decode_config": {
+    "motor_nodemanger_config": {},
+    "engine_type": "vllm",
+    "health_check_config": {
+      "enable_virtual_inference": false,
+      "npu_usage_threshold": 10
+    },
+    "model_config": {
+      "model_name": "qwen",
+      "model_path": "/mnt/share/weights/Qwen3-30B-A3B",
+      "npu_mem_utils": 0.9,
+      "parallel_config": {
+        "dp_size": 1,
+        "tp_size": 2,
+        "pp_size": 1,
+        "enable_ep": false,
+        "dp_rpc_port": 9000
+      }
+    },
+    "engine_config": {
+      "max_model_len": 2048,
+      "enable-auto-tool-choice": true,
+      "tool-call-parser": "hermes",
+      "kv_transfer_config": {
+        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_parallel_size": 1,
+        "kv_port": "30001",
+        "engine_id": "0",
+        "kv_rank": 0,
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+        "kv_connector_extra_config": {
+          "use_ascend_direct": true
+        }
+      }
+    }
+  },
+  "kv_cache_pool_config": {
+    "metadata_server": "P2PHANDSHAKE",
+    "protocol": "ascend",
+    "device_name": "",
+    "alloc_in_same_node": true,
+    "global_segment_size": "1GB"
+  }
+}

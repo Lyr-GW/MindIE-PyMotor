@@ -327,9 +327,9 @@ def main():
         user_config["motor_engine_prefill_config"]["model_config"]["model_name"]
     
     try:
-        coordinator_http_config = user_config["motor_coordinator_config"]["http_config"]
-        metric_port = coordinator_http_config["manage_port"]
-        infer_port = coordinator_http_config["predict_port"]
+        coordinator_api_config = user_config["motor_coordinator_config"]["api_config"]
+        metric_port = coordinator_api_config["coordinator_api_mgmt_port"]
+        infer_port = coordinator_api_config["coordinator_api_infer_port"]
     except Exception as e:
         metric_port = 1026
         infer_port = 1025

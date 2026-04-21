@@ -142,14 +142,14 @@ class TestRouterPDHybrid:
         mock_scheduler_config.deploy_mode = DeployMode.SINGLE_NODE
         mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
         mock_exception_config = ExceptionConfig(max_retry=5, retry_delay=0.0001)
-        mock_http_config = MagicMock()
-        mock_http_config.coordinator_api_host = "127.0.0.1"
-        mock_http_config.coordinator_api_mgmt_port = 1025
+        mock_api_config = MagicMock()
+        mock_api_config.coordinator_api_host = "127.0.0.1"
+        mock_api_config.coordinator_api_mgmt_port = 1025
 
         mock_config = MagicMock()
         mock_config.scheduler_config = mock_scheduler_config
         mock_config.exception_config = mock_exception_config
-        mock_config.api_config = mock_http_config
+        mock_config.api_config = mock_api_config
 
         monkeypatch.setattr(CoordinatorConfig, "__new__", lambda cls: mock_config)
 

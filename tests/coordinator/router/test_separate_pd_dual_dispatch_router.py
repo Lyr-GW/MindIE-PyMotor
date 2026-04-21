@@ -182,16 +182,16 @@ class TestPDDualDispatchRouter:
         mock_exception_config.max_retry = 5
         mock_exception_config.transport_retry_limit = 5
         mock_exception_config.recompute_retry_limit = 5
-        mock_http_config = MagicMock()
-        mock_http_config.coordinator_api_host = "127.0.0.1"
-        mock_http_config.coordinator_api_mgmt_port = 1025
+        mock_api_config = MagicMock()
+        mock_api_config.coordinator_api_host = "127.0.0.1"
+        mock_api_config.coordinator_api_mgmt_port = 1025
         mock_tls_config = MagicMock()
         mock_tls_config.enable_tls = False
 
         mock_config = MagicMock()
         mock_config.scheduler_config = mock_scheduler_config
         mock_config.exception_config = mock_exception_config
-        mock_config.api_config = mock_http_config
+        mock_config.api_config = mock_api_config
         mock_config.infer_tls_config = mock_tls_config
         mock_config.mgmt_tls_config = mock_tls_config
         # So _gen_d_request uses coordinator_api_mgmt_port; avoid MagicMock as parsed_url.port

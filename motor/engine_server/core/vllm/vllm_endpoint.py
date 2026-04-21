@@ -19,10 +19,12 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the respective licenses for more details.
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from vllm import envs
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -92,6 +94,7 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         app.state.health_checker = vllm_health_checker
         app.state.engine_client = engine_client
+        app.state.log_stats = not getattr(args, "disable_log_stats", False)
 
         supported_tasks = await engine_client.get_supported_tasks()
         resolved_chat_template = load_chat_template(args.chat_template)
@@ -191,7 +194,23 @@ async def _vllm_lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.error(f"InferEndpoint lifespan: Failed to create serving components: {e}")
             raise
 
-        yield
+        log_stats_task: asyncio.Task[None] | None = None
+        if app.state.log_stats:
+            ec = engine_client
+
+            async def _force_log_stats():
+                while True:
+                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                    await ec.do_log_stats()
+
+            log_stats_task = asyncio.create_task(_force_log_stats())
+
+        try:
+            yield
+        finally:
+            if log_stats_task is not None:
+                log_stats_task.cancel()
+
         engine.shutdown()
         logger.info("InferEndpoint lifespan: Engine_client cleanup completed")
     except Exception as e:
