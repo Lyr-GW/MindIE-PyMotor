@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Optional
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.controller.api_client.coordinator_api_client import CoordinatorApiClient
 from motor.config.controller import ControllerConfig
 

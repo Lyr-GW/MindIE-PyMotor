@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 import motor.coordinator.router.recompute as recompute_common
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from tests.coordinator.router.mock_openai_request import mock_nostream_response
 
 logger = get_logger(__name__)

@@ -12,7 +12,7 @@ import time
 from enum import Enum
 from pydantic import BaseModel, Field
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 HEARTBEAT_TIMEOUT = 5  # 5 seconds
 

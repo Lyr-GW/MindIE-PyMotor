@@ -23,7 +23,7 @@ from motor.config.controller import ControllerConfig
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import Observer, ObserverEvent
 from motor.controller.core.event_pusher import EventPusher
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.alarm.instance_exception_alarm import InstanceExceptionAlarm, InstanceExceptionReason
 from motor.common.alarm.coordinator_exception_alarm import CoordinatorExceptionAlarm, CoordinatorExceptionReason
 from motor.common.alarm.enums import Cleared

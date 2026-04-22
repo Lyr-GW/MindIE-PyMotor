@@ -29,9 +29,9 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 
 from motor.common.resources.http_msg_spec import InsEventMsg
-from motor.common.utils.cert_util import CertUtil
-from motor.common.utils.logger import get_logger
-from motor.common.utils.security_utils import sanitize_error_message, log_audit_event
+from motor.common.http.cert_util import CertUtil
+from motor.common.logger import get_logger
+from motor.common.http.security_utils import sanitize_error_message, log_audit_event
 from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
 from motor.coordinator.models.response import RequestResponse

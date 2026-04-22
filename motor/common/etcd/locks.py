@@ -13,7 +13,7 @@
 import uuid
 
 import motor.common.etcd.proto.rpc_pb2 as rpc__pb2
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 bytes_types = (bytes, bytearray)

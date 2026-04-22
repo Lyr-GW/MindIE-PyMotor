@@ -15,8 +15,8 @@ import time
 
 from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
-from motor.common.utils.http_client import SafeHTTPSClient
-from motor.common.utils.logger import get_logger
+from motor.common.http.http_client import SafeHTTPSClient
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.api_client.controller_api_client import ControllerApiClient

@@ -25,7 +25,7 @@
 import os
 import tempfile
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

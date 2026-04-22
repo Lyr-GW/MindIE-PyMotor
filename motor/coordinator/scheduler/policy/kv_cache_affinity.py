@@ -15,7 +15,7 @@ from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.config.coordinator import CoordinatorConfig
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.api_client.conductor_api_client import ConductorApiClient, TENANT_ID

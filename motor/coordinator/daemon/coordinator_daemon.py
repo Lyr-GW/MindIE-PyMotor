@@ -44,7 +44,7 @@ from motor.coordinator.process.mgmt_manager import MgmtProcessManager
 from motor.coordinator.process.scheduler_manager import SchedulerProcessManager
 from motor.coordinator.daemon.role_shm_holder import RoleShmHolder
 from motor.common.standby.standby_manager import StandbyManager
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

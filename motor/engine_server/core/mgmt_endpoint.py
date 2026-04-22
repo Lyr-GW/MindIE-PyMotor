@@ -20,8 +20,8 @@ from prometheus_client import CollectorRegistry, multiprocess, make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
 from starlette.routing import Mount
 
-from motor.common.utils.cert_util import CertUtil
-from motor.common.utils.logger import get_logger
+from motor.common.http.cert_util import CertUtil
+from motor.common.logger import get_logger
 from motor.engine_server.core.config import IConfig
 from motor.engine_server.core.endpoint import Endpoint
 from motor.engine_server.core.health_collector import HealthCollector

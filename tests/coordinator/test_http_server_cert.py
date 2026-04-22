@@ -24,14 +24,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from motor.config.coordinator import TLSConfig
-from motor.common.utils.cert_util import (
+from motor.common.http.cert_util import (
     CertUtil,
     CertValidationUtil,
     TLS_CERT,
     TLS_KEY,
     CA_CERTS,
 )
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -2,7 +2,7 @@
 
 ## 1. 使用 `generate_api_key.py` 生成和使用 API Key
 
-本目录下的 `generate_api_key.py` 是用于为 MindIE-pyMotor 生成 API Key 的工具脚本，脚本内部已经接入了 `motor.common.utils.key_encryption` 中的加密实现。
+本目录下的 `generate_api_key.py` 是用于为 MindIE-pyMotor 生成 API Key 的工具脚本，脚本内部已经接入了 `motor.common.http.key_encryption` 中的加密实现。
 
 ### 1.1 运行方式
 
@@ -21,7 +21,7 @@ python examples/api_key/generate_api_key.py \
   - 不传时脚本会自动生成形如 `sk-xxxxx` 的随机 Key，并在终端打印出来。  
 - **`--algorithm`**：加密算法名称，可选。  
   - 默认值：`PBKDF2_SHA256`。  
-  - 可选值列表来自 `motor.common.utils.key_encryption.get_supported_algorithms()`，当前内置为 `["PBKDF2_SHA256"]`。  
+  - 可选值列表来自 `motor.common.http.key_encryption.get_supported_algorithms()`，当前内置为 `["PBKDF2_SHA256"]`。  
 - **`--iterations`**：迭代次数，可选，仅在算法为 `PBKDF2_SHA256` 时生效。  
   - 默认值：`100000`，必须为正整数。  
   - 生成的密文中会包含该迭代次数（格式为 `salt:iterations:hash`），校验时会自动解析并使用同样的迭代次数。  
@@ -87,14 +87,14 @@ Authorization: Bearer sk-test123456789
 
 ## 2. 自定义 API Key 加密方式
 
-默认情况下，系统内置的算法为 `PBKDF2_SHA256`，实现位于 `motor/common/utils/key_encryption.py` 中的 `PBKDF2KeyEncryption`。如果你希望引入自己的加密方案（例如接入硬件安全模块或公司统一密码库），可以按以下步骤扩展。
+默认情况下，系统内置的算法为 `PBKDF2_SHA256`，实现位于 `motor/common/http/key_encryption.py` 中的 `PBKDF2KeyEncryption`。如果你希望引入自己的加密方案（例如接入硬件安全模块或公司统一密码库），可以按以下步骤扩展。
 
 ### 2.1 实现自定义加密类
 
-在合适的位置（推荐在 `motor/common/utils/key_encryption.py` 或单独模块中），实现一个继承自 `KeyEncryptionBase` 的类，例如：
+在合适的位置（推荐在 `motor/common/http/key_encryption.py` 或单独模块中），实现一个继承自 `KeyEncryptionBase` 的类，例如：
 
 ```python
-from motor.common.utils.key_encryption import KeyEncryptionBase
+from motor.common.http.key_encryption import KeyEncryptionBase
 
 
 class MyCustomKeyEncryption(KeyEncryptionBase):
@@ -127,7 +127,7 @@ class MyCustomKeyEncryption(KeyEncryptionBase):
 如果你要让配置和 `generate_api_key.py` 都识别你的算法，最简单的方式是在 `_builtin_algorithms` 中加入一项：
 
 ```python
-from motor.common.utils.key_encryption import (
+from motor.common.http.key_encryption import (
     PBKDF2KeyEncryption,
     KeyEncryptionBase,
 )

@@ -16,8 +16,8 @@ import uuid
 import importlib
 from typing import Optional
 import httpx
-from motor.common.utils.http_client import AsyncSafeHTTPSClient
-from motor.common.utils.logger import get_logger
+from motor.common.http.http_client import AsyncSafeHTTPSClient
+from motor.common.logger import get_logger
 from motor.engine_server.utils.aicore import get_aicore_usage
 from motor.engine_server.constants import constants
 logger = get_logger(__name__)

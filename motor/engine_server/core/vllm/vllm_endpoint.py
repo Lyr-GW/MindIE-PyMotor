@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import process_lora_modules
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.engine_server.core.infer_endpoint import InferEndpoint, CONFIG_KEY
 from motor.engine_server.core.vllm.vllm_engine import VLLMEngine
 from motor.engine_server.core.vllm.openai.serving_chat import OpenAIServingChat

@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
 from sglang.srt.entrypoints.openai.protocol import CompletionRequest
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.engine_server.core.infer_endpoint import InferEndpoint, CONFIG_KEY
 from motor.engine_server.core.sglang.sglang_engine import SGLangEngine
 from motor.engine_server.core.sglang.openai.serving_chat import OpenAIServingChat

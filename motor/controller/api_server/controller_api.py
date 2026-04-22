@@ -23,9 +23,9 @@ from fastapi import FastAPI, Request, HTTPException
 
 from motor.common.resources import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
 from motor.common.standby.standby_manager import StandbyManager, StandbyRole
-from motor.common.utils.cert_util import CertUtil
-from motor.common.utils.logger import get_logger, ApiAccessFilter
-from motor.common.utils.http_response import format_success_response, raise_internal_error
+from motor.common.http.cert_util import CertUtil
+from motor.common.logger import get_logger, ApiAccessFilter
+from motor.common.http.http_response import format_success_response, raise_internal_error
 from motor.common.alarm.record import Record
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client import NodeManagerApiClient

@@ -17,7 +17,7 @@ import threading
 from motor.common.resources.instance import PDRole
 from motor.common.resources.endpoint import Endpoint
 from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.env import Env
 from motor.config.node_manager import NodeManagerConfig
 

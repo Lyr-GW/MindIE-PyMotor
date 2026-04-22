@@ -17,7 +17,7 @@ from typing import Any
 
 from motor.common.resources.instance import PDRole
 from motor.common.resources.endpoint import Workload
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     MAGIC,
     HEADER_SIZE,

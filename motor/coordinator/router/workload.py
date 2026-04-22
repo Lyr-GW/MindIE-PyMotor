@@ -17,7 +17,7 @@ from typing import Tuple
 
 from motor.common.resources.endpoint import Workload, WorkloadAction
 from motor.common.resources.instance import PDRole
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.domain import ScheduledResource
 from motor.coordinator.domain.workload_calculator import calculate_demand_workload

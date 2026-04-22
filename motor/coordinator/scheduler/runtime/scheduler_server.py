@@ -24,7 +24,7 @@ import zmq.asyncio
 from motor.common.resources.endpoint import Endpoint, WorkloadAction, Workload
 from motor.common.resources.http_msg_spec import EventType
 from motor.common.resources.instance import PDRole, Instance
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain import UpdateWorkloadParams
 from motor.coordinator.models.constants import DEFAULT_REQUEST_ID, REQUEST_ID_KEY

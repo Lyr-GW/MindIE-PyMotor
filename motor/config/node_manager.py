@@ -19,7 +19,7 @@ from motor.common.resources.instance import ParallelConfig, PDRole
 from motor.config.tls_config import TLSConfig
 from motor.common.utils.env import Env
 from motor.common.utils.patch_check import safe_open
-from motor.common.utils.logger import get_logger, reconfigure_logging
+from motor.common.logger import get_logger, reconfigure_logging
 from motor.config.config_utils import (
     ConfigKey, save_config_to_json, _update_tls_config, MGMT_TLS_CONFIG,
 )

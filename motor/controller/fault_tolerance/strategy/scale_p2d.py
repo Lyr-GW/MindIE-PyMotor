@@ -10,7 +10,7 @@
 # See the Mulan PSL v2 for more details.
 import time
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.controller.fault_tolerance.strategy import StrategyBase
 
 logger = get_logger(__name__)

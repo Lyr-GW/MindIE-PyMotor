@@ -13,7 +13,7 @@ import base64
 
 from ccae_reporter.common.logging import Log
 from ccae_reporter.config import ConfigUtil
-from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.http.http_client import SafeHTTPSClient
 from .base_backend import BaseBackend
 
 

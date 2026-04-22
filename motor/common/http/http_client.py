@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,15 +13,15 @@ import hashlib
 import threading
 from enum import Enum
 from ssl import Purpose
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 import requests
 from requests import Response
 from requests.adapters import HTTPAdapter
 
-from motor.common.utils.cert_util import CertUtil
-from motor.common.utils.logger import get_logger
+from motor.common.http.cert_util import CertUtil
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.tls_config import TLSConfig
 
@@ -35,12 +34,14 @@ class ConnectionMode(Enum):
 
 
 class SafeHTTPSClient:
-    def __init__(self,
-                 address: str,
-                 protocol: str = 'http://',
-                 tls_config: Optional[TLSConfig] = None,
-                 mode: ConnectionMode = ConnectionMode.SHORT,
-                 timeout: float = 5):
+    def __init__(
+        self,
+        address: str,
+        protocol: str = 'http://',
+        tls_config: TLSConfig | None = None,
+        mode: ConnectionMode = ConnectionMode.SHORT,
+        timeout: float = 5
+    ):
 
         self.protocol = protocol
         self.timeout = timeout
@@ -124,11 +125,10 @@ class AsyncSafeHTTPSClient:
 
     @staticmethod
     def create_client(
-            address: str,
-            tls_config: Optional[TLSConfig] = None,
-            **client_kwargs
+        address: str,
+        tls_config: TLSConfig | None = None,
+        **client_kwargs
     ):
-
         verify = True
 
         if tls_config and tls_config.enable_tls:
@@ -143,9 +143,7 @@ class AsyncSafeHTTPSClient:
                 max_keepalive_connections=None,
             )
 
-        return httpx.AsyncClient(base_url=base_url,
-                                    verify=verify,
-                                    **client_kwargs)
+        return httpx.AsyncClient(base_url=base_url, verify=verify, **client_kwargs)
 
 
 class HTTPClientPool(ThreadSafeSingleton):
@@ -167,7 +165,7 @@ class HTTPClientPool(ThreadSafeSingleton):
         self,
         ip: str,
         port: str,
-        tls_config: Optional[TLSConfig] = None,
+        tls_config: TLSConfig | None = None,
         **client_kwargs
     ) -> httpx.AsyncClient:
         """Get or create HTTP client (thread-safe, double-checked locking)."""
@@ -200,7 +198,7 @@ class HTTPClientPool(ThreadSafeSingleton):
         await self._safe_aclose(old_client_to_close)
         return client
     
-    async def close_client(self, ip: str, port: str, tls_config: Optional[TLSConfig] = None) -> None:
+    async def close_client(self, ip: str, port: str, tls_config: TLSConfig | None = None) -> None:
         """Close and remove the client for the given endpoint (thread-safe)."""
         pool_key = self._get_pool_key(ip, port, tls_config)
         with self._lock:
@@ -218,7 +216,7 @@ class HTTPClientPool(ThreadSafeSingleton):
     async def warmup_clients(
         self,
         endpoints: list[tuple[str, str]],  # [(ip, port), ...]
-        tls_config: Optional[TLSConfig] = None,
+        tls_config: TLSConfig | None = None,
         **client_kwargs
     ) -> dict[str, bool]:
         """Warm up clients for the given endpoints (async batch create)."""
@@ -248,7 +246,7 @@ class HTTPClientPool(ThreadSafeSingleton):
     def get_pool_keys_for_endpoints(
         self,
         endpoints: list[tuple[str, str]],
-        tls_config: Optional[TLSConfig] = None,
+        tls_config: TLSConfig | None = None,
     ) -> set[str]:
         """Return pool_key set for given endpoints and TLS config (for cleanup)."""
         return {self._get_pool_key(ip, str(port), tls_config) for ip, port in endpoints}
@@ -274,7 +272,7 @@ class HTTPClientPool(ThreadSafeSingleton):
             await asyncio.gather(*cleanup_tasks, return_exceptions=True)
         return len(to_remove)
 
-    def _get_pool_key(self, ip: str, port: str, tls_config: Optional[TLSConfig] = None) -> str:
+    def _get_pool_key(self, ip: str, port: str, tls_config: TLSConfig | None = None) -> str:
         """Build pool key from ip, port and TLS config (with hash cache)."""
         tls_hash = ""
         if tls_config:
@@ -301,7 +299,7 @@ class HTTPClientPool(ThreadSafeSingleton):
         self,
         ip: str,
         port: str,
-        tls_config: Optional[TLSConfig],
+        tls_config: TLSConfig | None,
         pool_key: str,
         **client_kwargs
     ) -> None:

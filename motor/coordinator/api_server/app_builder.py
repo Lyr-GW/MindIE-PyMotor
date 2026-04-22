@@ -21,7 +21,7 @@ from typing import Any, Callable
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
 
 logger = get_logger(__name__)

@@ -19,8 +19,8 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ValidationError
 
 from motor.engine_server.core.config import IConfig
-from motor.common.utils.cert_util import CertUtil
-from motor.common.utils.logger import get_logger
+from motor.common.http.cert_util import CertUtil
+from motor.common.logger import get_logger
 from motor.engine_server.core.endpoint import Endpoint
 
 logger = get_logger(__name__)

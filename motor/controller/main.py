@@ -18,7 +18,7 @@ from typing import Any
 
 from motor.common.standby.standby_manager import StandbyManager
 from motor.common.utils.config_watcher import ConfigWatcher
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.controller import ControllerConfig
 from motor.controller.api_server import ControllerAPI
 from motor.controller.core import InstanceAssembler, InstanceManager, EventPusher

@@ -24,7 +24,7 @@ from motor.coordinator.process.base import BaseProcessManager
 from motor.coordinator.scheduler.runtime.scheduler_server import SchedulerServer
 from motor.config.coordinator import CoordinatorConfig, DEFAULT_SCHEDULER_PROCESS_CONFIG
 from motor.common.utils.config_watcher import ConfigWatcher
-from motor.common.utils.logger import get_logger, reconfigure_logging
+from motor.common.logger import get_logger, reconfigure_logging
 
 logger = get_logger(__name__)
 

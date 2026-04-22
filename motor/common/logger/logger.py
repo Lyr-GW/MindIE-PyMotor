@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -200,7 +198,7 @@ def _ensure_root_logger_configured(config: LoggingConfig, log_dir: str | None) -
                 root_logger.addHandler(rotate_handler)
             except Exception:
                 # If file logging fails, continue with console only
-                logging.error(f"Failed to configure log handler")
+                logging.error("Failed to configure log handler")
                 pass
 
 

@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from motor.common.resources.instance import Instance
 from motor.common.resources import PDRole
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.api_client.engine_server_api_client import EngineServerApiClient

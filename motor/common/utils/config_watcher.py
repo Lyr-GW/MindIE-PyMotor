@@ -18,7 +18,7 @@ from typing import Callable
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 
 logger = get_logger(__name__)

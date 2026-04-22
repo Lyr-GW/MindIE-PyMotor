@@ -49,7 +49,7 @@ project_root = Path(__file__).parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.append(str(project_root))
 
-from motor.common.utils.key_encryption import (
+from motor.common.http.key_encryption import (
     PBKDF2KeyEncryption,
     get_supported_algorithms,
     set_default_key_encryption_by_name,

@@ -2,7 +2,7 @@
 
 # Generate CA certificate script
 # Usage: ./gen_ca.sh <ca_path> [ca_password]
-# Example: ./gen_ca.sh /path/to/ca 1234qwer
+# Example: ./gen_ca.sh /path/to/ca/ 1234qwer
 
 set -e
 
@@ -10,7 +10,7 @@ set -e
 if [ -z "$1" ]; then
     echo "Error: Please provide CA certificate save path"
     echo "Usage: $0 <ca_path> [ca_password]"
-    echo "Example: $0 /path/to/ca 1234qwer"
+    echo "Example: $0 /path/to/ca/ 1234qwer"
     exit 1
 fi
 
@@ -18,10 +18,9 @@ ca_path=$1
 ca_pwd=${2:-1234qwer}
 
 # Create directory (if not exists)
-ca_dir=$(dirname "$ca_path")
-if [ ! -d "$ca_dir" ]; then
-    mkdir -p "$ca_dir"
-    chmod 700 "$ca_dir"
+if [ ! -d "$ca_path" ]; then
+    mkdir -p "$ca_path"
+    chmod 700 "$ca_path"
 fi
 
 ca_config_file="${ca_path}/ca.conf"

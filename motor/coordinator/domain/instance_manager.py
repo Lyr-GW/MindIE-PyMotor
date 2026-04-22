@@ -12,7 +12,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Mapping
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.resources.instance import Instance, PDRole, Workload, Endpoint
 from motor.common.resources.http_msg_spec import EventType
 from motor.config.coordinator import CoordinatorConfig, DeployMode

@@ -22,7 +22,7 @@ from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import InstanceManager
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

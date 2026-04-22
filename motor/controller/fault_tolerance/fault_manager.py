@@ -15,7 +15,7 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 from motor.config.controller import ControllerConfig
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.etcd.persistent_state import PersistentState
 from motor.common.resources import Instance, ReadOnlyInstance

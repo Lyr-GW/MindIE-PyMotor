@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 
 from motor.config.endpoint import EndpointConfig
 from motor.engine_server.core.config import IConfig
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.engine_server.constants import constants
 
 logger = get_logger(__name__)

@@ -35,7 +35,7 @@ from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
 import motor.coordinator.router.dispatch as router
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 TracerManager()
 

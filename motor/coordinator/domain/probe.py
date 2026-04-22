@@ -22,7 +22,7 @@ from enum import Enum
 from multiprocessing import shared_memory as shm_mod
 from typing import Protocol
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import (
     DeployMode,
     ROLE_HEARTBEAT_STALE_SEC,

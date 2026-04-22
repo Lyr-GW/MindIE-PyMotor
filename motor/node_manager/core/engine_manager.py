@@ -18,7 +18,7 @@ from typing import Optional
 from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.http_msg_spec import Ranktable, RegisterMsg, StartCmdMsg, ReregisterMsg
 from motor.common.utils.env import Env
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.api_client.controller_api_client import ControllerApiClient

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from motor.common.resources.endpoint import Workload
 from motor.common.resources.instance import PDRole
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

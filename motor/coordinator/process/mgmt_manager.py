@@ -21,7 +21,7 @@ from motor.coordinator.api_server.management_server import ManagementServer
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
 from motor.coordinator.process.base import BaseProcessManager
 from motor.common.utils.config_watcher import ConfigWatcher
-from motor.common.utils.logger import get_logger, reconfigure_logging
+from motor.common.logger import get_logger, reconfigure_logging
 
 logger = get_logger(__name__)
 

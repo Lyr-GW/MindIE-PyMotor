@@ -1,11 +1,18 @@
-# coding=utf-8
-# Copyright (c) 2025, HUAWEI CORPORATION.  All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+# MindIE is licensed under Mulan PSL v2.
+# You can use this software according to the terms and conditions of the Mulan PSL v2.
+# You may obtain a copy of Mulan PSL v2 at:
+#         http://license.coscl.org.cn/MulanPSL2
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+# See the Mulan PSL v2 for more details.
 
 import hashlib
 import hmac
 import secrets
 from abc import ABC, abstractmethod
-from typing import Iterable, Optional
+from typing import Iterable
 
 
 class KeyEncryptionBase(ABC):
@@ -53,7 +60,7 @@ class KeyEncryptionBase(ABC):
 class PBKDF2KeyEncryption(KeyEncryptionBase):
     """PBKDF2-based key encryption using salt and iterations"""
 
-    def __init__(self, salt: Optional[str] = None, iterations: Optional[int] = 100000):
+    def __init__(self, salt: str | None = None, iterations: int | None = 100000):
         """
         Initialize PBKDF2 encryption
 
@@ -75,7 +82,7 @@ class PBKDF2KeyEncryption(KeyEncryptionBase):
         return secrets.token_hex(16)
 
     @classmethod
-    def encrypt_key(cls, plain_key: str, salt: Optional[str] = None, iterations: Optional[int] = 100000) -> str:
+    def encrypt_key(cls, plain_key: str, salt: str | None = None, iterations: int | None = 100000) -> str:
         """
         Encrypt key using PBKDF2 with salt and iterations
 
@@ -99,15 +106,14 @@ class PBKDF2KeyEncryption(KeyEncryptionBase):
         salt_bytes = salt.encode('utf-8')
         key_bytes = plain_key.encode('utf-8')
         derived_key = hashlib.pbkdf2_hmac(
-            'sha256',  # Hash digest algorithm
-            key_bytes,  # Password to hash
-            salt_bytes,  # Salt
-            iterations,  # Iterations
-            dklen=32  # Key length (32 bytes for SHA256)
+            'sha256',
+            key_bytes,
+            salt_bytes,
+            iterations,
+            dklen=32
         )
         encrypted = derived_key.hex()
 
-        # Return salt:iterations:hash format for storage
         return f"{salt}:{iterations}:{encrypted}"
 
     @classmethod
@@ -119,7 +125,6 @@ class PBKDF2KeyEncryption(KeyEncryptionBase):
         Returns:
             Salt used for encryption
         """
-        # Parse stored format: salt:iterations:encrypted_hash
         parts = encrypted_key.split(':', 2)
         if len(parts) != 3:
             raise ValueError("Invalid encrypted key format")
@@ -142,17 +147,14 @@ class PBKDF2KeyEncryption(KeyEncryptionBase):
             return False
 
         try:
-            # Parse stored format: salt:iterations:encrypted_hash
             parts = encrypted_key.split(':', 2)
             if len(parts) != 3:
                 return False
 
             stored_salt, stored_iterations, stored_hash = parts
 
-            # Convert iterations back to integer
             iterations = int(stored_iterations)
 
-            # Recreate PBKDF2 with same parameters
             salt_bytes = stored_salt.encode('utf-8')
             key_bytes = plain_key.encode('utf-8')
             derived_key = hashlib.pbkdf2_hmac(
@@ -164,7 +166,6 @@ class PBKDF2KeyEncryption(KeyEncryptionBase):
             )
             computed_hash = derived_key.hex()
 
-            # Use constant-time comparison to prevent timing attacks
             return hmac.compare_digest(computed_hash, stored_hash)
 
         except Exception:
@@ -174,14 +175,12 @@ class PBKDF2KeyEncryption(KeyEncryptionBase):
         return "PBKDF2_SHA256"
 
 
-# Built-in algorithm mapping
 _builtin_algorithms = {
     "PBKDF2_SHA256": PBKDF2KeyEncryption,
 }
 
-# Dynamic encryption algorithm registry
 _encryption_registry: dict[str, type[KeyEncryptionBase]] = {}
-_default_encryption: Optional[KeyEncryptionBase] = None
+_default_encryption: KeyEncryptionBase | None = None
 
 
 def register_encryption_algorithm(name: str, algorithm_class: type[KeyEncryptionBase]) -> None:
@@ -206,7 +205,6 @@ def register_algorithm_from_config(algorithm_name: str) -> None:
         ValueError: If algorithm is not supported
     """
     if algorithm_name in _builtin_algorithms:
-        # Register built-in algorithm
         register_encryption_algorithm(algorithm_name, _builtin_algorithms[algorithm_name])
     else:
         raise ValueError(f"Unsupported encryption algorithm: {algorithm_name}. "
@@ -250,11 +248,9 @@ def set_default_key_encryption_by_name(name: str) -> None:
     Raises:
         ValueError: If algorithm is not supported
     """
-    # Register algorithm if not already registered
     if name not in _encryption_registry:
         register_algorithm_from_config(name)
 
-    # Get and set the algorithm
     encryption = get_encryption_algorithm(name)
     set_default_key_encryption(encryption)
 
@@ -262,7 +258,6 @@ def set_default_key_encryption_by_name(name: str) -> None:
 def get_default_key_encryption() -> KeyEncryptionBase:
     """Get the default key encryption instance"""
     if _default_encryption is None:
-        # Default to PBKDF2_SHA256
         set_default_key_encryption_by_name("PBKDF2_SHA256")
     return _default_encryption
 

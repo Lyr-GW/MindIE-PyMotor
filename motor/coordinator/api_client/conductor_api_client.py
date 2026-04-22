@@ -12,9 +12,9 @@
 
 from typing import Any
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.resources.instance import Instance, Endpoint, PDRole
-from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.http.http_client import SafeHTTPSClient
 from motor.config.coordinator import CoordinatorConfig
 
 
