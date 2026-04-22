@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi import HTTPException, status
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.coordinator.models.constants import OpenAIField
 
 # Coordinator-only keys: must not be forwarded to the inference engine JSON body.

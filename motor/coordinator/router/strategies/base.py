@@ -24,9 +24,9 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from motor.common.resources.endpoint import WorkloadAction
 from motor.common.resources.instance import PDRole
-from motor.common.utils.http_client import HTTPClientPool
-from motor.common.utils.logger import get_logger
-from motor.common.utils.security_utils import filter_sensitive_headers, filter_sensitive_body
+from motor.common.http.http_client import HTTPClientPool
+from motor.common.logger import get_logger
+from motor.common.http.security_utils import filter_sensitive_headers, filter_sensitive_body
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.models.constants import (
     DEFAULT_REQUEST_ID,

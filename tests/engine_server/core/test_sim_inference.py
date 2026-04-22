@@ -17,7 +17,7 @@ import time
 import pytest
 from motor.engine_server.core.sim_inference import SimInference
 from motor.engine_server.constants import constants
-from motor.common.utils.http_client import AsyncSafeHTTPSClient
+from motor.common.http.http_client import AsyncSafeHTTPSClient
 
 
 @pytest.fixture
@@ -87,7 +87,7 @@ def test_reset_abnormal_status(sim_inference):
 
 
 @pytest.mark.asyncio
-@mock.patch('motor.common.utils.http_client.AsyncSafeHTTPSClient.create_client')
+@mock.patch('motor.common.http.http_client.AsyncSafeHTTPSClient.create_client')
 async def test_send_virtual_request_async_success(mock_create_client, sim_inference):
     """Test successful virtual request sending"""
     # Mock client and response
@@ -123,7 +123,7 @@ async def test_send_virtual_request_async_success(mock_create_client, sim_infere
 
 
 @pytest.mark.asyncio
-@mock.patch('motor.common.utils.http_client.AsyncSafeHTTPSClient.create_client')
+@mock.patch('motor.common.http.http_client.AsyncSafeHTTPSClient.create_client')
 async def test_send_virtual_request_async_http_error(mock_create_client, sim_inference):
     """Test virtual request sending with HTTP error"""
     # Mock HTTP error
@@ -148,7 +148,7 @@ async def test_send_virtual_request_async_http_error(mock_create_client, sim_inf
 
 
 @pytest.mark.asyncio
-@mock.patch('motor.common.utils.http_client.AsyncSafeHTTPSClient.create_client')
+@mock.patch('motor.common.http.http_client.AsyncSafeHTTPSClient.create_client')
 async def test_send_virtual_request_async_request_error(mock_create_client, sim_inference):
     """Test virtual request sending with request error"""
     # Mock request error

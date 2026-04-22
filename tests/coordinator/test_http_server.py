@@ -31,7 +31,7 @@ from motor.coordinator.domain.request_manager import RequestManager
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
 from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.domain.instance_manager import InstanceManager
-from motor.common.utils.key_encryption import encrypt_api_key, set_default_key_encryption_by_name
+from motor.common.http.key_encryption import encrypt_api_key, set_default_key_encryption_by_name
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.middleware.fastapi_middleware import (
     SimpleRateLimitMiddleware,

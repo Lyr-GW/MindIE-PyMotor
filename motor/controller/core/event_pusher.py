@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 
 from motor.common.resources import Instance, ReadOnlyInstance, InsEventMsg, EventType
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client.coordinator_api_client import CoordinatorApiClient
 from motor.controller.core import Observer, ObserverEvent

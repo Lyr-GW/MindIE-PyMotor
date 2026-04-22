@@ -23,7 +23,7 @@ from motor.config.etcd import EtcdConfig
 from motor.config.tls_config import TLSConfig
 from motor.common.etcd.proto import rpc_pb2, rpc_pb2_grpc
 from motor.common.etcd import locks
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 
 T = TypeVar('T', bound=BaseModel)

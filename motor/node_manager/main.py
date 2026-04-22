@@ -17,7 +17,7 @@ import os
 import sys
 from typing import Optional
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.node_manager.api_server.node_manager_api import NodeManagerAPI
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.daemon import Daemon

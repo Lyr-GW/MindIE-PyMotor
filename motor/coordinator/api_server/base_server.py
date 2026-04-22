@@ -25,7 +25,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, status
 
-from motor.common.utils.logger import ApiAccessFilter, get_logger
+from motor.common.logger import ApiAccessFilter, get_logger
 from motor.config.coordinator import CoordinatorConfig
 
 logger = get_logger(__name__)

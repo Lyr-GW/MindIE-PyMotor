@@ -1,5 +1,3 @@
-#  #!/usr/bin/env python3
-#  -*- coding: utf-8 -*-
 #  Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 #  MindIE is licensed under Mulan PSL v2.
 #  You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -11,7 +9,19 @@
 #  See the Mulan PSL v2 for more details.
 
 __all__ = [
-    "CompressedRotatingFileHandler"
+    "CompressedRotatingFileHandler",
+    "get_logger",
+    "reconfigure_logging",
+    "ProcessNameFilter",
+    "MaxLengthFormatter",
+    "ApiAccessFilter",
 ]
 
 from .logger_handler import CompressedRotatingFileHandler
+from .logger import (
+    get_logger,
+    reconfigure_logging,
+    ProcessNameFilter,
+    MaxLengthFormatter,
+    ApiAccessFilter,
+)

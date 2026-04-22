@@ -9,7 +9,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.controller.fault_tolerance.strategy import StrategyBase
 
 

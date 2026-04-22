@@ -16,7 +16,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import requests
-from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.http.http_client import SafeHTTPSClient
 from motor.config.tls_config import TLSConfig
 
 

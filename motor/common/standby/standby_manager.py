@@ -15,7 +15,7 @@ import time
 from typing import Callable, Protocol
 from enum import Enum
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.etcd.etcd_client import EtcdClient
 from motor.config.standby import StandbyConfig
 from motor.common.utils.singleton import ThreadSafeSingleton

@@ -14,7 +14,7 @@ from typing import Any
 from collections.abc import Callable
 from kubernetes import client, config, watch
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.controller.fault_tolerance.k8s.k8s_client import K8sClient
 from motor.controller.fault_tolerance.k8s.cluster_fault_codes import NodeStatus, FaultInfo
 from motor.controller.fault_tolerance.k8s.configmap_parser import (

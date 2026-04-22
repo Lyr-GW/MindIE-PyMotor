@@ -15,7 +15,7 @@ import struct
 from multiprocessing import shared_memory
 
 from motor.common.resources.instance import PDRole
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     MAGIC,

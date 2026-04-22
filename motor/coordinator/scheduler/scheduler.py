@@ -15,7 +15,7 @@ from motor.common.resources.instance import Instance, PDRole
 from motor.common.resources.endpoint import Endpoint, WorkloadAction, Workload
 from motor.coordinator.domain import InstanceReadiness, UpdateWorkloadParams
 from motor.common.resources.http_msg_spec import EventType
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.coordinator.scheduler.policy.factory import SchedulingPolicyFactory
 from motor.coordinator.domain.workload_calculator import calculate_demand_workload

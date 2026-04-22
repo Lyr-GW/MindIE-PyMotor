@@ -9,8 +9,8 @@
 # See the Mulan PSL v2 for more details.
 
 from motor.engine_server.core.config import IConfig
-from motor.common.utils.http_client import AsyncSafeHTTPSClient
-from motor.common.utils.logger import get_logger
+from motor.common.http.http_client import AsyncSafeHTTPSClient
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

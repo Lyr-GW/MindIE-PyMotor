@@ -21,7 +21,7 @@ from ccae_reporter.common.logging import Log
 from ccae_reporter.config import ConfigUtil
 from ccae_reporter.reporters.kafka_client.kafka_produce import KafkaProducer
 
-from motor.common.utils.http_client import SafeHTTPSClient
+from motor.common.http.http_client import SafeHTTPSClient
 from motor.config.tls_config import TLSConfig
 
 

@@ -19,9 +19,9 @@ from enum import Enum
 from dataclasses import dataclass, field, asdict, is_dataclass
 from pathlib import Path
 
-from motor.common.utils.logger import reconfigure_logging, get_logger
+from motor.common.logger import reconfigure_logging, get_logger
 from motor.common.utils.env import Env
-from motor.common.utils.key_encryption import set_default_key_encryption_by_name
+from motor.common.http.key_encryption import set_default_key_encryption_by_name
 from motor.config.etcd import EtcdConfig
 from motor.config.log_config import LoggingConfig
 from motor.config.standby import StandbyConfig, LOCK_SLASH

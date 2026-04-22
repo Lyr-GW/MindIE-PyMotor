@@ -9,8 +9,8 @@
 # See the Mulan PSL v2 for more details.
 
 from motor.common.resources import RegisterMsg, ReregisterMsg, HeartbeatMsg
-from motor.common.utils.http_client import SafeHTTPSClient
-from motor.common.utils.logger import get_logger
+from motor.common.http.http_client import SafeHTTPSClient
+from motor.common.logger import get_logger
 from motor.config.controller import ControllerConfig
 from motor.config.node_manager import NodeManagerConfig
 

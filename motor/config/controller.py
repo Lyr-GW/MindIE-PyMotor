@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any
 from pathlib import Path
 
-from motor.common.utils.logger import get_logger, reconfigure_logging
+from motor.common.logger import get_logger, reconfigure_logging
 from motor.common.utils.env import Env
 from motor.config.etcd import EtcdConfig
 from motor.config.log_config import LoggingConfig

@@ -11,8 +11,8 @@
 
 from typing import Dict
 
-from motor.common.utils.http_client import SafeHTTPSClient
-from motor.common.utils.logger import get_logger
+from motor.common.http.http_client import SafeHTTPSClient
+from motor.common.logger import get_logger
 from motor.config.controller import ControllerConfig
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain.probe import is_master_from_role_shm

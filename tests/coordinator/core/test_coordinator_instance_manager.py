@@ -18,7 +18,7 @@ import httpx
 import pytest
 
 from motor.common.resources import Instance, PDRole, Workload, Endpoint, EventType
-from motor.common.utils.http_client import AsyncSafeHTTPSClient
+from motor.common.http.http_client import AsyncSafeHTTPSClient
 from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.domain.instance_manager import (
     InstanceManager, UpdateInstanceMode

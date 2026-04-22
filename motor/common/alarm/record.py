@@ -15,7 +15,7 @@ import os
 from pydantic import BaseModel, Field
 
 from motor.common.alarm.enums import Category, ClearCategory, Cleared, EventType, ServiceAffectedType, Severity
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 
 logger = get_logger(__name__)

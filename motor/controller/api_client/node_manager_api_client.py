@@ -11,8 +11,8 @@
 from typing import Any
 
 from motor.common.resources import NodeManagerInfo, StartCmdMsg
-from motor.common.utils.http_client import SafeHTTPSClient
-from motor.common.utils.logger import get_logger
+from motor.common.http.http_client import SafeHTTPSClient
+from motor.common.logger import get_logger
 from motor.config.controller import ControllerConfig
 
 logger = get_logger(__name__)

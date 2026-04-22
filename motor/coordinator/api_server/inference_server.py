@@ -24,8 +24,8 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 
 from motor.common.resources.instance import PDRole
-from motor.common.utils.logger import get_logger
-from motor.common.utils.key_encryption import verify_api_key_against_valid_keys
+from motor.common.logger import get_logger
+from motor.common.http.key_encryption import verify_api_key_against_valid_keys
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
 from motor.coordinator.api_server.base_server import BaseCoordinatorServer
 from motor.coordinator.middleware.fastapi_middleware import (
@@ -34,7 +34,7 @@ from motor.coordinator.middleware.fastapi_middleware import (
 )
 from motor.coordinator.scheduler.runtime import SchedulerConnectionManager
 from motor.coordinator.api_server.app_builder import AppBuilder
-from motor.common.utils.http_client import HTTPClientPool
+from motor.common.http.http_client import HTTPClientPool
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestType
 from motor.coordinator.domain import InstanceReadiness

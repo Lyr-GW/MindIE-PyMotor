@@ -15,7 +15,7 @@ import traceback
 
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.daemon.coordinator_daemon import CoordinatorDaemon
-from motor.common.utils.logger import get_logger, reconfigure_logging
+from motor.common.logger import get_logger, reconfigure_logging
 
 logger = get_logger(__name__)
 

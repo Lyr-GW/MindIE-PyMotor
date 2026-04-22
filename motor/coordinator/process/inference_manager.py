@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You may obtain a copy of Mulan PSL v2 at:
@@ -19,10 +18,10 @@ import uvloop
 import uvicorn
 from fastapi import FastAPI, Request
 
-from motor.common.utils.cert_util import CertUtil
+from motor.common.http.cert_util import CertUtil
 from motor.common.utils.config_watcher import ConfigWatcher
-from motor.common.utils.http_client import HTTPClientPool
-from motor.common.utils.logger import get_logger, reconfigure_logging
+from motor.common.http.http_client import HTTPClientPool
+from motor.common.logger import get_logger, reconfigure_logging
 from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.api_server.inference_server import InferenceServer
 from motor.coordinator.domain.request_manager import RequestManager
@@ -38,7 +37,7 @@ def run_inference_worker_proc(
     sock: socket.socket,
     config: CoordinatorConfig,
     worker_index: int,
-    **uvicorn_kwargs: Any
+    **uvicorn_kwargs: Any,
 ) -> None:
     """Entrypoint for individual Inference worker processes.
 
@@ -57,23 +56,27 @@ def run_inference_worker_proc(
     # Set process title
     set_process_title(name=str(worker_index))
 
-    logger.info(f"Inference worker process {worker_index} starting (PID: {os.getpid()})")
+    logger.info(
+        f"Inference worker process {worker_index} starting (PID: {os.getpid()})"
+    )
 
     # D direct Worker metaserver: set worker port when CDP/PD separate and worker_metaserver_base_port > 0.
     # Each inference worker (num_workers >= 1) uses this port to receive metaserver callbacks from D instances.
     mp_cfg = config.inference_workers_config
     base_port = mp_cfg.worker_metaserver_base_port
     deploy_mode = config.scheduler_config.deploy_mode
-    if (
-        base_port > 0
-        and deploy_mode in (DeployMode.CDP_SEPARATE, DeployMode.PD_SEPARATE, \
-                DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER)
+    if base_port > 0 and deploy_mode in (
+        DeployMode.CDP_SEPARATE,
+        DeployMode.PD_SEPARATE,
+        DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER,
     ):
         config.worker_index = worker_index
         config.worker_metaserver_port = base_port + worker_index
         logger.info(
             "Worker %s: metaserver port enabled: %s (base=%s)",
-            worker_index, config.worker_metaserver_port, base_port,
+            worker_index,
+            config.worker_metaserver_port,
+            base_port,
         )
 
     # Create RequestManager first, then InferenceServer (business plane only)
@@ -86,6 +89,7 @@ def run_inference_worker_proc(
     # In multi-process: Worker watches config file so hot-reload reaches this process
     if config.config_path and os.path.exists(config.config_path):
         try:
+
             def _worker_config_updated() -> None:
                 inference_server.update_config(config)
                 request_manager.update_config(config)
@@ -98,12 +102,14 @@ def run_inference_worker_proc(
             worker_config_watcher.start()
             logger.info(
                 "Worker %s: config watcher started for hot-reload: %s",
-                worker_index, config.config_path,
+                worker_index,
+                config.config_path,
             )
         except Exception as e:
             logger.warning(
                 "Worker %s: failed to start config watcher (hot-reload disabled): %s",
-                worker_index, e,
+                worker_index,
+                e,
             )
 
     # init TokenizerManager
@@ -118,24 +124,26 @@ def run_inference_worker_proc(
     )
     inference_server.apply_timeout_to_config(config_kwargs)
 
-    # Add SSL configuration if needed
-    if config.infer_tls_config.enable_tls:
-        ssl_context = CertUtil.create_ssl_context(tls_config=config.infer_tls_config)
-        if ssl_context:
-            config_kwargs["ssl"] = ssl_context
-
     # Create uvicorn config
     uvicorn_config = uvicorn.Config(**config_kwargs)
     uvicorn_config.load()
+
+    # Add SSL configuration if needed (must be set after Config creation)
+    if config.infer_tls_config.enable_tls:
+        ssl_context = CertUtil.create_ssl_context(tls_config=config.infer_tls_config)
+        if ssl_context:
+            uvicorn_config.ssl = ssl_context
 
     # Create and run server(s)
     server = uvicorn.Server(uvicorn_config)
     metaserver_server = None
     if getattr(config, "worker_metaserver_port", None) is not None:
-        #minimal metaserver app (only POST /v1/metaserver) on dedicated port
+        # minimal metaserver app (only POST /v1/metaserver) on dedicated port
         metaserver_app = FastAPI(title="Inference Worker Metaserver")
         metaserver_app.state.request_manager = request_manager
-        host_metaserver = config.api_config.coordinator_api_host  # so D (e.g. same pod) can reach this Worker
+        host_metaserver = (
+            config.api_config.coordinator_api_host
+        )  # so D (e.g. same pod) can reach this Worker
         port_metaserver = config.worker_metaserver_port
 
         @metaserver_app.post("/v1/metaserver")
@@ -154,7 +162,9 @@ def run_inference_worker_proc(
         metaserver_server = uvicorn.Server(metaserver_uvicorn_config)
         logger.info(
             "Worker %s: metaserver listening on %s:%s (Scheme 3)",
-            worker_index, host_metaserver, port_metaserver,
+            worker_index,
+            host_metaserver,
+            port_metaserver,
         )
 
     async def _run_servers():
@@ -173,9 +183,13 @@ def run_inference_worker_proc(
         # Each process will handle requests independently with its own engine clients
         uvloop.run(_run_servers())
     except KeyboardInterrupt:
-        logger.info(f"Inference worker process {worker_index} received interrupt signal")
+        logger.info(
+            f"Inference worker process {worker_index} received interrupt signal"
+        )
     except Exception as e:
-        logger.error(f"Inference worker process {worker_index} error: {e}", exc_info=True)
+        logger.error(
+            f"Inference worker process {worker_index} error: {e}", exc_info=True
+        )
         raise
     finally:
         # Stop config watcher if started
@@ -183,7 +197,11 @@ def run_inference_worker_proc(
             try:
                 worker_config_watcher.stop()
             except Exception as e:
-                logger.warning("Ignored error stopping config watcher in worker %s: %s", worker_index, e)
+                logger.warning(
+                    "Ignored error stopping config watcher in worker %s: %s",
+                    worker_index,
+                    e,
+                )
         # Disconnect SchedulerClient so ZMQ connections are closed cleanly
         if inference_server is not None:
             conn = getattr(inference_server, "_scheduler_connection", None)
@@ -193,7 +211,8 @@ def run_inference_worker_proc(
                 except Exception as e:
                     logger.warning(
                         "Ignored error disconnecting scheduler client in worker %s: %s",
-                        worker_index, e
+                        worker_index,
+                        e,
                     )
 
         # Close HTTP client pool connections
@@ -205,16 +224,23 @@ def run_inference_worker_proc(
             except Exception as loop_error:
                 logger.warning(
                     "Failed to close HTTP client pool in worker %s: %s",
-                    worker_index, loop_error, exc_info=True
+                    worker_index,
+                    loop_error,
+                    exc_info=True,
                 )
         except Exception as e:
-            logger.warning(f"Failed to close HTTP client pool in worker {worker_index}: {e}", exc_info=True)
+            logger.warning(
+                f"Failed to close HTTP client pool in worker {worker_index}: {e}",
+                exc_info=True,
+            )
 
         if sock:
             try:
                 sock.close()
             except Exception as e:
-                logger.warning("Ignored error closing socket in worker %s: %s", worker_index, e)
+                logger.warning(
+                    "Ignored error closing socket in worker %s: %s", worker_index, e
+                )
         logger.info(f"Inference worker process {worker_index} stopped")
 
 
@@ -251,7 +277,9 @@ class InferenceProcessManager(BaseProcessManager):
             # Wait for any process to terminate (loop until all sentinels are consumed)
             while sentinel_to_proc:
                 # Wait for any process to terminate
-                ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
+                ready_sentinels: list[Any] = connection.wait(
+                    sentinel_to_proc, timeout=5
+                )
 
                 # Process any terminated processes
                 for sentinel in ready_sentinels:
@@ -263,12 +291,18 @@ class InferenceProcessManager(BaseProcessManager):
                             f"died with exit code {proc.exitcode}"
                         )
                     else:
-                        logger.info(f"Process {proc.name} (PID: {proc.pid}) exited normally")
+                        logger.info(
+                            f"Process {proc.name} (PID: {proc.pid}) exited normally"
+                        )
 
         except KeyboardInterrupt:
-            logger.info("Received KeyboardInterrupt, shutting down Inference API servers...")
+            logger.info(
+                "Received KeyboardInterrupt, shutting down Inference API servers..."
+            )
         except Exception as e:
-            logger.exception("Exception occurred while running Inference API servers: %s", e)
+            logger.exception(
+                "Exception occurred while running Inference API servers: %s", e
+            )
             raise
         finally:
             logger.info("Terminating remaining processes...")
@@ -289,15 +323,30 @@ class InferenceProcessManager(BaseProcessManager):
         dead_indices = [i for i, p in enumerate(self._processes) if not p.is_alive()]
         if not dead_indices:
             return True
-        logger.warning("Restarting %s dead worker(s) at index(es) %s", self.process_name, dead_indices)
+        logger.warning(
+            "Restarting %s dead worker(s) at index(es) %s",
+            self.process_name,
+            dead_indices,
+        )
         for i in dead_indices:
             try:
                 proc = self._create_process(i)
                 proc.start()
                 self._processes[i] = proc
-                logger.info("Started %s process %s (PID: %s) replacing dead worker", self.process_name, i, proc.pid)
+                logger.info(
+                    "Started %s process %s (PID: %s) replacing dead worker",
+                    self.process_name,
+                    i,
+                    proc.pid,
+                )
             except Exception as e:
-                logger.error("Failed to restart %s worker %s: %s", self.process_name, i, e, exc_info=True)
+                logger.error(
+                    "Failed to restart %s worker %s: %s",
+                    self.process_name,
+                    i,
+                    e,
+                    exc_info=True,
+                )
         return self.is_running()
 
     def _create_process(self, index: int) -> BaseProcess:

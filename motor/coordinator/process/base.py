@@ -18,7 +18,7 @@ import weakref
 from abc import ABC, abstractmethod
 from multiprocessing.process import BaseProcess
 from typing import Any, Protocol, runtime_checkable
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
 
 

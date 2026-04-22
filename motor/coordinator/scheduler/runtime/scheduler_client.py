@@ -28,7 +28,7 @@ from motor.coordinator.scheduler.runtime.zmq_protocol import (
     pack_send_frames, unpack_recv_payload,
     ZMQMessageSerializer,
 )
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import DeployMode
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy

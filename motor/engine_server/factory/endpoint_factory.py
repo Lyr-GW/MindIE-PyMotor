@@ -20,7 +20,7 @@
 import importlib
 from typing import Any
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.engine_server.core.config import IConfig
 
 logger = get_logger(__name__)

@@ -39,13 +39,13 @@ from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
 from motor.coordinator.router.strategies.pd_separate import SeparatePDRouter
 from motor.coordinator.router.strategies.cdp_separate import SeparateCDPRouter
 from motor.coordinator.router.strategies.pd_dual_dispatch import SeparatePDDualDispatchRouter
-from motor.common.utils.security_utils import (
+from motor.common.http.security_utils import (
     sanitize_error_message,
     filter_sensitive_headers,
     filter_sensitive_body,
     validate_and_sanitize_path,
 )
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

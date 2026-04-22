@@ -11,7 +11,7 @@
 """ ConfigMap Parser - parses ConfigMap configuration data """
 import json
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.controller.fault_tolerance.k8s.cluster_fault_codes import (
     FaultType,
     FaultInfo,

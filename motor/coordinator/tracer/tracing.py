@@ -31,7 +31,7 @@ from opentelemetry.trace.status import Status, StatusCode
 from opentelemetry.util import types
 
 from motor.common.utils.singleton import ThreadSafeSingleton
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
 
 logger = get_logger(__name__)

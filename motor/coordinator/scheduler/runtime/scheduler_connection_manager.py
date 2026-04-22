@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig, DEFAULT_SCHEDULER_PROCESS_CONFIG
 from motor.coordinator.scheduler.runtime.scheduler_client import (
     AsyncSchedulerClient as SchedulerClient,

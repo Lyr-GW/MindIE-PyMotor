@@ -18,10 +18,10 @@ from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import Response
 import uvicorn
 
-from motor.common.utils.cert_util import CertUtil
+from motor.common.http.cert_util import CertUtil
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.heartbeat_manager import HeartbeatManager
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.resources.http_msg_spec import StartCmdMsg
 from motor.node_manager.core.engine_manager import EngineManager
 from motor.node_manager.core.daemon import Daemon

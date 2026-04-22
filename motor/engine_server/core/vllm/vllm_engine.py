@@ -16,7 +16,7 @@ from vllm.entrypoints.utils import cli_env_setup
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.engine_server.core.config import IConfig
 from motor.engine_server.core.engine import Engine
 

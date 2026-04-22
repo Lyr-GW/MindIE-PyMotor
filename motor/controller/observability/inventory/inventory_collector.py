@@ -15,7 +15,7 @@ import time
 from enum import Enum
 
 from motor.common.resources.instance import Instance, PDRole
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.controller.core import InstanceManager
 

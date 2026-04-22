@@ -15,6 +15,85 @@ echo "Current node role: ROLE=$ROLE"
 
 set_common_env
 
+apply_openssl_gen_cert() {
+    local ca_path=$1
+    local base_cert_path=$2
+    local cert_names=$3
+    local gen_cert_script=$4
+    local ca_password=${5:-1234qwer}
+    local cert_password=${6:-5678asdf}
+
+    if [ ! -f "$gen_cert_script" ]; then
+        echo "Error: Certificate generation script not found: $gen_cert_script"
+        return 1
+    fi
+
+    if [ -z "$cert_names" ]; then
+        echo "Error: cert_names parameter is required"
+        echo "Usage: apply_openssl_gen_cert <ca_path> <base_cert_path> <cert_names> <gen_cert_script> [ca_password] [cert_password]"
+        echo "Example: apply_openssl_gen_cert /path/to/ca /path/to/security \"infer mgmt etcd clusterd\" /path/to/openssl_gen_cert.sh"
+        return 1
+    fi
+
+    for cert_name in $cert_names; do
+        local cert_path="${base_cert_path}/${cert_name}"
+        echo "Generating certificate for: $cert_name"
+        echo "Certificate path: $cert_path"
+
+        mkdir -p "$cert_path"
+
+        cat > "${cert_path}/key_pwd.txt" <<- EOF
+		${cert_password}
+		EOF
+
+        cp "$ca_path/ca.pem" "$ca_path/ca.key.pem" "$cert_path"
+
+        bash "$gen_cert_script" "$ca_path" "$cert_path" "$ca_password" "$cert_password"
+
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to generate certificate for $cert_name"
+            return 1
+        fi
+
+        echo "Certificate generated successfully for: $cert_name"
+        echo "---"
+    done
+
+    echo "All certificates generated successfully!"
+}
+
+setup_tls_certificates() {
+    CA_PATH="${CA_PATH:-/mnt/cert_scripts/ca}"
+    BASE_CERT_PATH="${BASE_CERT_PATH:-/usr/local/Ascend/pyMotor/conf/security}"
+    CERT_NAMES="${CERT_NAMES:-infer mgmt}"
+    GEN_CERT_SCRIPT="${GEN_CERT_SCRIPT:-/mnt/cert_scripts/openssl_gen_cert.sh}"
+
+    if [ ! -f "$GEN_CERT_SCRIPT" ]; then
+        echo "Error: Certificate generation script not found: $GEN_CERT_SCRIPT"
+        echo "Please copy openssl_gen_cert.sh to the specified path or set GEN_CERT_SCRIPT environment variable"
+        return 1
+    fi
+    
+    if [ ! -f "$CA_PATH/ca.pem" ] || [ ! -f "$CA_PATH/ca.key.pem" ]; then
+        echo "Error: CA certificate not found at $CA_PATH"
+        echo "Please generate CA certificate first:"
+        echo "  bash /mnt/cert_scripts/openssl_gen_ca.sh /mnt/cert_scripts/ca/"
+        echo "Or set CA_PATH environment variable to the correct CA certificate path"
+        return 1
+    fi
+    
+    echo "TLS is enabled, generating certificates..."
+    echo "CA_PATH: $CA_PATH"
+    echo "BASE_CERT_PATH: $BASE_CERT_PATH"
+    echo "CERT_NAMES: $CERT_NAMES"
+    echo "GEN_CERT_SCRIPT: $GEN_CERT_SCRIPT"
+    apply_openssl_gen_cert "$CA_PATH" "$BASE_CERT_PATH" "$CERT_NAMES" "$GEN_CERT_SCRIPT"
+}
+
+if [ -n "$ENABLE_GEN_CERT" ] && [ "$ENABLE_GEN_CERT" = "true" ]; then
+    setup_tls_certificates
+fi
+
 setup_motor_log_path() {
     if [ -n "$MOTOR_LOG_ROOT_PATH" ] && [ -n "$MODEL_NAME" ] && [ -n "$SERVICE_ID" ]; then
         chmod 750 "$MOTOR_LOG_ROOT_PATH"
@@ -134,7 +213,6 @@ gen_kv_pool_config() {
 }
 
 set_mf_store_env() {
-    #  convert ASCEND_MF_STORE_URL to IP
     if [ -n "$ASCEND_MF_STORE_URL" ]; then
         if [[ "$ASCEND_MF_STORE_URL" =~ ^(tcp://)?([^:/]+)(:([0-9]+))?$ ]]; then
             PROTO="${BASH_REMATCH[1]}"

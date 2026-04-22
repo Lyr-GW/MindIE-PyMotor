@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,12 +12,12 @@
 
 import os
 import re
-from typing import Any
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import HTTPException, Request, status
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -177,4 +175,3 @@ def validate_file_security(file_path: str) -> None:
         file_mode = file_stat.st_mode
         if file_mode & 0o022:
             logger.warning(f"Configuration file has insecure permissions: {oct(file_mode)}")
-

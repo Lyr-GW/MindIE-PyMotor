@@ -20,8 +20,8 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
-from motor.common.utils.logger import get_logger
-from motor.common.utils.security_utils import validate_file_security
+from motor.common.logger import get_logger
+from motor.common.http.security_utils import validate_file_security
 
 from .rate_limiter import SimpleRateLimiter
 

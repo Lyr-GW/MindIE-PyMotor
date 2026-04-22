@@ -8,7 +8,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.config.endpoint import EndpointConfig
 from motor.engine_server.factory.config_factory import ConfigFactory
 from motor.engine_server.factory.endpoint_factory import EndpointFactory

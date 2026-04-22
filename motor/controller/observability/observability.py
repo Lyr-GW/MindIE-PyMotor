@@ -10,7 +10,7 @@
 # See the Mulan PSL v2 for more details.
 
 from motor.common.alarm.record import Record
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
 from motor.controller.observability.alarm.alarm_store import AlarmStore

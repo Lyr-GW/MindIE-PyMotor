@@ -15,7 +15,7 @@ from typing import List
 from motor.common.alarm.record import Record
 from motor.common.alarm.instance_exception_alarm import INSTANCE_EXCEPTION_ALARM_ID
 from motor.common.alarm.coordinator_exception_alarm import COORDINATOR_EXCEPTION_ALARM_ID
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.alarm.enums import Cleared
 

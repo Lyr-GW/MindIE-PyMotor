@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -16,15 +14,13 @@ import ssl
 import stat
 from datetime import timezone
 from ssl import Purpose, create_default_context
-from typing import Dict, Optional
 
 from OpenSSL import crypto
 from cryptography import x509 as crypt_x509
 from cryptography.x509.oid import ExtensionOID
 
-from motor.common.utils.common_util import clear_passwd
-from motor.common.utils.logger import get_logger
-from motor.common.utils.password_decryptor import PasswordDecryptor
+from motor.common.http.password_utils import clear_passwd, PasswordDecryptor
+from motor.common.logger import get_logger
 from motor.config.tls_config import TLSConfig
 
 CryptoX509 = crypto.X509
@@ -128,7 +124,7 @@ def has_expired(cert: CryptoX509) -> bool:
 def validate_server_certs(server_cert: CryptoX509) -> bool:
     """Validate server certificate integrity and security"""
     try:
-        # 1. Check if certificate version is X509v3
+        # 1. Check if certificate certificate version is X509v3
         if server_cert.get_version() != 2:
             logger.error("The cert does not use X509v3")
             return False
@@ -213,19 +209,19 @@ def _check_directory_permissions(cur_path: str) -> None:
         raise RuntimeError("The permission of ssl directory should be 700")
 
 
-def _check_invalid_ssl_filesize(ssl_options: Dict[str, str]) -> None:
+def _check_invalid_ssl_filesize(ssl_options: dict[str, str]) -> None:
     """Check SSL file size"""
     def check_size(path: str):
         size = os.path.getsize(path)
         if size > max_size:
-            raise RuntimeError(f"SSL file should not exceed 10MB!")
+            raise RuntimeError("SSL file should not exceed 10MB!")
 
     max_size = 10 * 1024 * 1024  # Maximum file size is 10MB
     for ssl_key in SSL_MUST_KEYS:
         check_size(ssl_options[ssl_key])
 
 
-def _check_invalid_ssl_path(ssl_options: Dict[str, str], required_keys: Optional[list] = None) -> None:
+def _check_invalid_ssl_path(ssl_options: dict[str, str], required_keys: list | None = None) -> None:
     """Check SSL path validity"""
     def check_single(key: str, path: str):
         if not os.path.exists(path):
@@ -677,7 +673,6 @@ class CertUtil:
                 'TLS_CHACHA20_POLY1305_SHA256',
                 'TLS_AES_128_CCM_SHA256'
             ]
-            
 
             if hasattr(context, 'set_ciphersuites'):
                 try:
@@ -695,7 +690,7 @@ class CertUtil:
             raise
 
     @classmethod
-    def construct_cert_context(cls, config: Dict[str, str]) -> Optional[object]:
+    def construct_cert_context(cls, config: dict[str, str]) -> object | None:
         """
         Construct certificate context - strict certificate validation
         
@@ -762,7 +757,7 @@ class CertUtil:
 
     @classmethod
     def create_ssl_context(cls, tls_config: TLSConfig,
-                           purpose: Purpose = Purpose.SERVER_AUTH) -> Optional[ssl.SSLContext]:
+                           purpose: Purpose = Purpose.SERVER_AUTH) -> ssl.SSLContext | None:
         """
         Create SSL context - using strict validation
 
@@ -809,7 +804,7 @@ class CertUtil:
                         cert_file, key_file, password_bytes, ca_file
                 ):
                     clear_passwd(password_bytes)
-                    logger.error(f"Certificate and key validation failed")
+                    logger.error("Certificate and key validation failed")
                     return None
 
             # Load certificate chain
@@ -829,7 +824,7 @@ class CertUtil:
             context.load_verify_locations(cafile=ca_file)
 
             if crl_file and not CertValidationUtil.validate_ca_crl(ca_file, crl_file):
-                logger.error(f"CRL validation failed")
+                logger.error("CRL validation failed")
                 return None
 
             logger.debug("SSL context created successfully")
@@ -846,7 +841,7 @@ class CertUtil:
         key_file: str,
         ca_file: str = "",
         password_file: str = ""
-    ) -> Optional[object]:
+    ) -> object | None:
         """
         Create SSL context without requiring client certificate verification
         

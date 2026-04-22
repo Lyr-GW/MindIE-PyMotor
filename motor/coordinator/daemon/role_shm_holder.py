@@ -17,7 +17,7 @@ from multiprocessing import shared_memory
 from typing import Any
 
 from motor.config.coordinator import ROLE_SHM_MASTER, ROLE_SHM_SIZE
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 

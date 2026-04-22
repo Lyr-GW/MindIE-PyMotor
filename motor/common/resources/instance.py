@@ -15,7 +15,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Optional
 from pydantic import BaseModel, Field
-from motor.common.utils.logger import get_logger
+from motor.common.logger import get_logger
 from motor.common.resources.endpoint import Endpoint, EndpointStatus, Workload
 from motor.common.alarm.server_exception_event import ServerExceptionEvent, ServerExceptionReason
 

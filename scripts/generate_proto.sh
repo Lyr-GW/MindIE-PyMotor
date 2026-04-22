@@ -33,14 +33,14 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 # Check if grpcio-tools is installed
-if ! python3 -c "import grpc_tools.protoc" 2>/dev/null; then
+if ! python -c "import grpc_tools.protoc" 2>/dev/null; then
     echo "Error: grpcio-tools is not installed."
     echo "Please install it with: pip install grpcio-tools>=1.40.0"
     exit 1
 fi
 
-# Find all .proto files
-PROTO_FILES=$(find . -name "*.proto" -type f)
+# Find all .proto files (excluding venv and other common virtual environment directories)
+PROTO_FILES=$(find . -type d \( -name "venv" -o -name ".venv" -o -name "env" -o -name ".env" -o -name "__pycache__" -o -name "node_modules" \) -prune -o -name "*.proto" -type f -print)
 
 if [ -z "$PROTO_FILES" ]; then
     echo "No .proto files found."
@@ -60,7 +60,7 @@ for proto_file in $PROTO_FILES; do
     # Generate _pb2.py and _pb2_grpc.py files
     # Change to proto directory for protoc execution (protoc requires proto_path to match file location)
     cd "$proto_dir"
-    python3 -m grpc_tools.protoc \
+    python -m grpc_tools.protoc \
         --proto_path="." \
         --python_out="." \
         --grpc_python_out="." \
