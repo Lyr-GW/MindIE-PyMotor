@@ -133,8 +133,8 @@ class SingleContainerNodemanagerConfig:
         p_tp_size = prefill_parallel_config[TP]
         p_pp_size = prefill_parallel_config[PP]
         d_dp_size = decode_parallel_config[DP]
-        d_tp_size = decode_parallel_config[PP]
-        d_pp_size = decode_parallel_config[TP]
+        d_tp_size = decode_parallel_config[TP]
+        d_pp_size = decode_parallel_config[PP]
 
         index = int(Env.index)
         if Env.role == 'prefill':

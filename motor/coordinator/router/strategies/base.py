@@ -505,7 +505,9 @@ class BaseRouter(ABC):
             workload_action=action,
             workload_change=workload_change,
         )
-        return await self._scheduler.update_workload(params)
+        # Release RPC must finish even if the request/stream task is cancelled (e.g. client disconnect).
+        with CancelScope(shield=True):
+            return await self._scheduler.update_workload(params)
     
 
     def _log_request_details(self):
