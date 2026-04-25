@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Callable
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import ValidationError
 
 from motor.engine_server.core.config import IConfig
@@ -99,6 +100,49 @@ class InferEndpoint(Endpoint):
                 status_code=HTTPStatus.BAD_REQUEST.value, detail=detail
             ) from e
 
+    def _register_profile_routes_if_enabled(self) -> None:
+        """Mirror vLLM profile API: POST /start_profile, /stop_profile when profiler is configured."""
+        args = self.config.get_args()
+        if args is None:
+            return
+        profiler_config = getattr(args, "profiler_config", None)
+        profiler = (
+            getattr(profiler_config, "profiler", None) if profiler_config is not None else None
+        )
+        if profiler is None:
+            return
+        logger.warning(
+            "Profiler with mode '%s' is enabled on the infer API server. "
+            "This should ONLY be used for local development!",
+            profiler,
+        )
+
+        @self.app.post("/start_profile")
+        async def start_profile(raw_request: Request):
+            logger.info("Starting profiler...")
+            engine_client = getattr(raw_request.app.state, "engine_client", None)
+            if engine_client is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+                    detail="Profiling is not supported for this engine.",
+                )
+            await engine_client.start_profile()
+            logger.info("Profiler started.")
+            return Response(status_code=200)
+
+        @self.app.post("/stop_profile")
+        async def stop_profile(raw_request: Request):
+            logger.info("Stopping profiler...")
+            engine_client = getattr(raw_request.app.state, "engine_client", None)
+            if engine_client is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.NOT_IMPLEMENTED.value,
+                    detail="Profiling is not supported for this engine.",
+                )
+            await engine_client.stop_profile()
+            logger.info("Profiler stopped.")
+            return Response(status_code=200)
+
     def _register_routes(self):
         @self.app.post("/v1/chat/completions")
         async def create_chat_completion(raw_request: Request):
@@ -128,6 +172,8 @@ class InferEndpoint(Endpoint):
         async def health(raw_request: Request):
             is_healthy = await self.app.state.health_checker()
             return is_healthy
+
+        self._register_profile_routes_if_enabled()
 
     def _run_server(self):
         config_kwargs = {
