@@ -26,22 +26,31 @@ from typing import Any
 
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat as VllmOpenAIServingChat
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest, ChatCompletionResponse
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 
-from motor.engine_server.core.vllm.vllm_openai_compat import kwargs_matching_signature
+from motor.engine_server.core.vllm.vllm_openai_compat import (
+    get_openai_base_model_path_and_serving_models_types,
+    get_openai_chat_and_completion_request_types,
+    get_openai_chat_and_completion_response_types,
+    get_openai_error_response_type,
+    get_vllm_openai_serving_chat_class,
+    kwargs_matching_signature,
+)
+
+_, OpenAIServingModels = get_openai_base_model_path_and_serving_models_types()
+ChatCompletionRequest, _ = get_openai_chat_and_completion_request_types()
+ChatCompletionResponse, _ = get_openai_chat_and_completion_response_types()
+ErrorResponse = get_openai_error_response_type()
+VllmOpenAIServingChat = get_vllm_openai_serving_chat_class()
 
 
 class OpenAIServingChat:
     def __init__(
         self,
         engine_client: EngineClient,
-        models: OpenAIServingModels,
+        models: Any,
         response_role: str,
         *,
         request_logger: RequestLogger | None,
@@ -86,7 +95,7 @@ class OpenAIServingChat:
             **chat_kw,
         )
 
-    async def handle_request(self, request: ChatCompletionRequest, raw_request: Request):
+    async def handle_request(self, request: Any, raw_request: Request):
         try:
             generator = await self._vllm_serving_chat.create_chat_completion(
                 request, raw_request

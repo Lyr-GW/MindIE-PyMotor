@@ -27,10 +27,6 @@ from fastapi import FastAPI
 from vllm import envs
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import process_lora_modules
 
 from motor.common.logger import get_logger
@@ -39,11 +35,16 @@ from motor.engine_server.core.vllm.vllm_engine import VLLMEngine
 from motor.engine_server.core.vllm.openai.serving_chat import OpenAIServingChat
 from motor.engine_server.core.vllm.openai.serving_completion import OpenAIServingCompletion
 from motor.engine_server.core.vllm.vllm_openai_compat import (
+    get_openai_base_model_path_and_serving_models_types,
+    get_openai_chat_and_completion_request_types,
     kwargs_matching_signature,
     vllm_openai_chat_needs_render,
 )
 
 logger = get_logger(__name__)
+
+ChatCompletionRequest, CompletionRequest = get_openai_chat_and_completion_request_types()
+BaseModelPath, OpenAIServingModels = get_openai_base_model_path_and_serving_models_types()
 
 # argparse / EngineArgs field names (optional; getattr for older vLLM)
 ATTR_DEFAULT_CHAT_TEMPLATE_KWARGS = "default_chat_template_kwargs"

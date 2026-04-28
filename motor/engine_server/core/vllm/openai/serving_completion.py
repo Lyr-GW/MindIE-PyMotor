@@ -24,21 +24,30 @@ from typing import Any
 
 from fastapi import Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion as VllmOpenAIServingCompletion
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest, CompletionResponse
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 
-from motor.engine_server.core.vllm.vllm_openai_compat import kwargs_matching_signature
+from motor.engine_server.core.vllm.vllm_openai_compat import (
+    get_openai_base_model_path_and_serving_models_types,
+    get_openai_chat_and_completion_request_types,
+    get_openai_chat_and_completion_response_types,
+    get_openai_error_response_type,
+    get_vllm_openai_serving_completion_class,
+    kwargs_matching_signature,
+)
+
+_, OpenAIServingModels = get_openai_base_model_path_and_serving_models_types()
+_, CompletionRequest = get_openai_chat_and_completion_request_types()
+_, CompletionResponse = get_openai_chat_and_completion_response_types()
+ErrorResponse = get_openai_error_response_type()
+VllmOpenAIServingCompletion = get_vllm_openai_serving_completion_class()
 
 
 class OpenAIServingCompletion:
     def __init__(
         self,
         engine_client: EngineClient,
-        models: OpenAIServingModels,
+        models: Any,
         *,
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
@@ -61,7 +70,7 @@ class OpenAIServingCompletion:
             **comp_kw,
         )
 
-    async def handle_request(self, request: CompletionRequest, raw_request: Request):
+    async def handle_request(self, request: Any, raw_request: Request):
         try:
             generator = await self._vllm_serving_completion.create_completion(
                 request, raw_request
