@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -16,9 +14,9 @@ from unittest.mock import patch, MagicMock, AsyncMock
 from fastapi.testclient import TestClient
 import asyncio
 import httpx
+import json
 import logging
 import pytest
-import json
 
 from motor.config.coordinator import DeployMode, CoordinatorConfig, ExceptionConfig, SchedulerType
 from motor.coordinator.domain.instance_manager import InstanceManager
@@ -764,57 +762,43 @@ class TestRouterCDPSeparation:
         3) RequestInfo is updated with prompt_tokens_details
         """
         
-        # Mock response with prompt_tokens_details
         prompt_tokens_details = {
             "cached_tokens": 10
         }
 
         req_info = await create_mock_request_info()
+        req_info.update_prompt_tokens_details(prompt_tokens_details)
+
+        async def mock_forward_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.aclose = AsyncMock(return_value=None)
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "test response"}}],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "completion_tokens": 1,
+                    "total_tokens": 16
+                }
+            }
+            return mock_response
+
+        monkeypatch.setattr(SeparateCDPRouter, "forward_request", mock_forward_request)
+
+        cdp_router = SeparateCDPRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=_request_manager
+        )
         
-        # Create a custom mock that returns complete response with usage field        
-        async def mock_post_with_prompt_tokens_details(self, url, json=None, headers=None, **kwargs):
-            # Create a complete response with usage field
-            self.req_data_from_metaserver = json
-            request = httpx.Request("POST", url, headers=headers or {}, json=json)
-            req_info_1 = await _request_manager.get_req_info(req_info.req_id)
-            req_info_1.update_prompt_tokens_details(prompt_tokens_details)
-            
-            # Return response with complete structure including usage and prompt_tokens_details
-            return httpx.Response(
-                status_code=status.HTTP_200_OK,
-                json={
-                    "choices": [{"delta": {"content": "prefill response"}, "index": 0}],
-                    "id": "chatcmpl-prefill-123",
-                    "usage": {
-                        "prompt_tokens": 15,
-                        "completion_tokens": 1,
-                        "total_tokens": 16
-                    }
-                },
-                request=request
-            )
+        req_info.req_data["stream"] = False
+        response = await cdp_router.handle_request()
         
-        # Patch the post method to include prompt_tokens_details
-        monkeypatch.setattr(MockAsyncClient, "post", mock_post_with_prompt_tokens_details)
+        response_json = response.body.decode() if hasattr(response.body, 'decode') else response.body
+        response_data = json.loads(response_json)
         
-        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=MockAsyncClient()):
-            cdp_router = SeparateCDPRouter(
-                req_info, CoordinatorConfig(),
-                scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
-                request_manager=_request_manager
-            )
-            
-            # Test non-streaming response
-            req_info.req_data["stream"] = False
-            response = await cdp_router.handle_request()
-            
-            # Verify response contains prompt_tokens_details
-            response_json = response.body.decode() if hasattr(response.body, 'decode') else response.body
-            response_data = json.loads(response_json)
-            
-            assert "usage" in response_data
-            assert "prompt_tokens_details" in response_data["usage"]
-            assert response_data["usage"]["prompt_tokens_details"] == prompt_tokens_details
-            
-            # Verify req_info was updated with prompt_tokens_details
-            assert req_info.prompt_tokens_details == prompt_tokens_details
+        assert "usage" in response_data
+        assert "prompt_tokens_details" in response_data["usage"]
+        assert response_data["usage"]["prompt_tokens_details"] == prompt_tokens_details
+        
+        assert req_info.prompt_tokens_details == prompt_tokens_details

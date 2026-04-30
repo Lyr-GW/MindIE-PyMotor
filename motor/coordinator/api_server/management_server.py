@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -15,11 +14,8 @@ Provides readiness, liveness, metrics, instances/refresh.
 Does not create or start inference Workers; those are started by CoordinatorDaemon via InferenceProcessManager.
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
-import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -38,7 +34,6 @@ from motor.coordinator.models.response import RequestResponse
 from motor.coordinator.api_server.base_server import BaseCoordinatorServer
 from motor.coordinator.scheduler.runtime import SchedulerConnectionManager
 from motor.coordinator.api_server.app_builder import AppBuilder
-from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.domain.instance_manager import InstanceManager, TYPE_MGMT
 from motor.coordinator.domain.probe import (
     DaemonLivenessProvider,
@@ -68,6 +63,7 @@ def _build_ok_response(message: str) -> dict[str, str]:
 
 def _build_readiness_response(message: str, ready: bool) -> dict[str, Any]:
     return {"status": "ok", "message": message, "ready": ready}
+
 
 INSTANCE_REFRESH = "instance_refresh"
 INSTANCE_REFRESH_URL = "/instances/refresh"

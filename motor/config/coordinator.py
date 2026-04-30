@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -79,18 +77,6 @@ def _default_rate_limit_skip_paths() -> list[str]:
         "/docs", "/redoc", "/openapi.json",
         "/favicon.ico", "/startup"
     ]
-
-
-def _default_tls_items() -> dict[str, str]:
-    return {
-        "ca_cert": "",
-        "tls_cert": "",
-        "tls_key": "",
-        "tls_passwd": "",
-        "tls_crl": "",
-        "kmcKsfMaster": "",
-        "kmcKsfStandby": ""
-    }
 
 
 class DeployMode(Enum):
