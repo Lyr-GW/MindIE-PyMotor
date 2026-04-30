@@ -4,19 +4,19 @@
 
 ### PD分离介绍
 
-**PD 分离**（Prefill & Decode 分离）将大语言模型推理的预填充（Prefill）与解码（Decode）两个阶段拆分到不同实例上运行，适用于对时延和吞吐要求较高的场景。通过 PD 分离可提高 NPU 利用率，减轻 Prefill 与 Decode 分时复用带来的相互干扰，在相同时延下提升整体吞吐。
+**PD分离**（Prefill&Decode分离）将大语言模型推理的预填充（Prefill）与解码（Decode）两个阶段拆分到不同实例上运行，适用于对时延和吞吐要求较高的场景。通过PD分离可提高NPU利用率，减轻Prefill与Decode分时复用带来的相互干扰，在相同时延下提升整体吞吐。
 
 两个推理阶段的含义如下：
 
-- **Prefill 阶段**：对输入 prompt 执行一次完整前向传播，生成初始隐藏状态（Hidden States），**计算密集型**；每个新输入序列都需执行一次 Prefill。
-- **Decode 阶段**：基于 Prefill 结果逐步生成后续 token，每步仅计算最新 token 的激活与 attention，单步计算量较小，但需反复执行直至生成结束，**访存密集型**（以 KV Cache 等内存访问为主）。
+- **Prefill阶段**：对输入prompt执行一次完整前向传播，生成初始隐藏状态（Hidden States），**计算密集型**；每个新输入序列都需执行一次Prefill。
+- **Decode阶段**：基于Prefill结果逐步生成后续 token，每步仅计算最新 token 的激活与 attention，单步计算量较小，但需反复执行直至生成结束，**访存密集型**（以 KV Cache 等内存访问为主）。
 
-本仓库采用**多机 PD 分离**部署方案：通过 K8s Service 为 Coordinator 暴露推理入口，使用多个 Deployment 分别部署 Controller（单 Pod）、Coordinator（单 Pod）以及 Server（P 实例与 D 实例各若干 Pod）。Controller 负责集群与实例管理，Coordinator 接收用户请求并调度至 P/D 实例，由 P 实例与 D 实例协同完成一次完整推理。
+本仓库采用**多机PD分离**部署方案：通过K8s Service为Coordinator暴露推理入口，使用多个Deployment分别部署Controller（单Pod）、Coordinator（单Pod）以及Server（P实例与 D实例各若干Pod）。Controller负责集群与实例管理，Coordinator接收用户请求并调度至P/D实例，由P实例与D实例协同完成一次完整推理。
 
 **PD 分离的主要优势**
 
-- **资源利用更优**：Prefill 为计算密集型、Decode 为访存密集型，特性不同，分离部署可更充分利用 NPU 的计算与带宽资源。
-- **吞吐能力提升**：Prefill 处理新请求的同时，Decode 可持续处理已有请求的解码，整体处理能力更高。
+- **资源利用更优**：Prefill为计算密集型、Decode为访存密集型，特性不同，分离部署可更充分利用NPU的计算与带宽资源。
+- **吞吐能力提升**：Prefill处理新请求的同时，Decode可持续处理已有请求的解码，整体处理能力更高。
 - **时延更可控**：两阶段分离可减少排队与等待，尤其在高并发场景下有助于降低时延。
 
 ### 部署入口与流程
@@ -25,22 +25,22 @@
 
 1. `user_config.json`：部署与业务的总配置（实例数、镜像、模型、并行策略、TLS、Controller/Coordinator 等）。
 2. `env.json`：各组件环境变量（如 CANN、HCCL、OMP 等），由 `deploy.py` 注入到 `boot.sh`。
-3. 部署脚本 `deploy.py`：读取上述配置，生成 K8s YAML、更新 `boot.sh`、创建 ConfigMap 并执行 `kubectl apply`。
+3. 部署脚本 `deploy.py`：读取上述配置，生成K8s YAML、更新 `boot.sh`、创建 ConfigMap 并执行 `kubectl apply`。
 
-**部署方式**：当前默认采用 **CRD 方式**（基于 MindCluster 的 infer-operator）进行部署。该方式尚未完成 RAS 能力与池化能力的适配验证。若您需要 RAS（可靠性、可用性、可服务性）或 KV 池化能力，可在 `user_config.json` 的 `motor_deploy_config.deploy_mode` 中配置为 `multi_deployment`，切换为原有的**多 YAML Deployment 方式**（由 `deploy.py` 生成并 apply 多个 Deployment YAML），该方式已支持 RAS 与池化相关能力。
+**部署方式**：当前默认采用 **CRD 方式**（基于MindCluster的infer-operator）进行部署。该方式尚未完成RAS能力与池化能力的适配验证。若您需要RAS（可靠性、可用性、可服务性）或KV池化能力，可在`user_config.json`的`motor_deploy_config.deploy_mode` 中配置为 `multi_deployment`，切换为原有的**多 YAML Deployment 方式**（由 `deploy.py` 生成并apply多个Deployment YAML），该方式已支持RAS与池化相关能力。
 
 ### 限制与约束
 
-- Atlas 800I A2 推理服务器与 Atlas 800I A3 超节点服务器支持此特性。
-- P 节点与 D 节点仅支持相同型号的机型。
-- NPU 网口互联。
-- 模型支持范围同 vllm-ascend。
+- Atlas 800I A2推理服务器与Atlas 800I A3超节点服务器支持此特性。
+- P节点与D节点仅支持相同型号的机型。
+- NPU网口互联。
+- 模型支持范围同vllm-ascend。
 
 ### 硬件环境
 
-PD 分离部署支持的硬件环境如下所示。
+PD分离部署支持的硬件环境如下所示。
 
-**表 1**  PD 分离部署支持的硬件列表
+**表 1**  PD分离部署支持的硬件列表
 
 | 类型   | 型号                       | 内存     |
 |--------|----------------------------|----------|
@@ -49,24 +49,24 @@ PD 分离部署支持的硬件环境如下所示。
 
 >[!NOTE]说明
 >
->- 集群必须具备参数面互联：即服务器 NPU 卡对应的端口处在同一个 VLAN，可以通过 RoCE 互通。
->- 为保障业务稳定运行，用户应严格控制自建 Pod 的权限，避免高权限 Pod 修改 MindIE 内部参数而导致异常。
+>- 集群必须具备参数面互联：即服务器NPU卡对应的端口处在同一个VLAN，可以通过RoCE互通。
+>- 为保障业务稳定运行，用户应严格控制自建Pod的权限，避免高权限Pod修改MindIE内部参数而导致异常。
 
 ## 准备镜像
 
-在部署 PD 分离服务前，需要在各计算节点上准备好可用的推理镜像。推荐优先使用经过验证的预制镜像；若仅获取到基础（裸）镜像，则需要在镜像中自行安装 vLLM、vllm-ascend 以及本仓库 MindIE-PyMotor，并重新制作镜像。
+在部署PD分离服务前，需要在各计算节点上准备好可用的推理镜像。推荐优先使用经过验证的预制镜像；若仅获取到基础（裸）镜像，则需要在镜像中自行安装vLLM、vllm-ascend以及本仓库MindIE-PyMotor，并重新制作镜像。
 
 >[!NOTE]说明
->无论是使用预制镜像还是自制镜像，所有参与部署的 K8s 节点（包括运行 Controller、Coordinator、P 实例和 D 实例的工作节点）都必须能够本地加载该镜像，否则 Pod 可能因镜像不可用而处于 `ImagePullBackOff` 或 `ErrImagePull` 状态。
+>无论是使用预制镜像还是自制镜像，所有参与部署的K8s节点（包括运行Controller、Coordinator、P实例和D实例的工作节点）都必须能够本地加载该镜像，否则Pod可能因镜像不可用而处于`ImagePullBackOff`或`ErrImagePull`状态。
 
 ### 使用推荐预制镜像
 
-通常建议使用官方或已在生产环境验证过的推理镜像（[镜像获取地址]()），此类镜像中已预安装：
+通常建议使用官方或已在生产环境验证过的推理镜像（[镜像获取地址](https://www.hiascend.com/developer/ascendhub)），此类镜像中已预安装：
 
-- vLLM 及其 Ascend 适配组件（如 vllm-ascend 等）。
-- MindIE-PyMotor 及其运行所需的基础依赖。
+- vLLM及其Ascend适配组件（如vllm-ascend等）。
+- MindIE-PyMotor及其运行所需的基础依赖。
 
-对于生产环境无法直接访问镜像仓库、需要通过离线包（`.tar` 文件）导入的场景，可在各节点按容器运行时类型选择对应的加载方式。（tar获取地址同[镜像获取地址]()）
+对于生产环境无法直接访问镜像仓库、需要通过离线包（`.tar` 文件）导入的场景，可在各节点按容器运行时类型选择对应的加载方式。（tar获取地址同[镜像获取地址](https://www.hiascend.com/developer/ascendhub)）
 
 **表 2**  不同运行时的镜像加载示例
 
@@ -77,15 +77,15 @@ PD 分离部署支持的硬件环境如下所示。
 | containerd（使用 `nerdctl`） | `nerdctl -n k8s.io load -i mindie-motor-vllm-dev.tar` |
 
 > [!NOTE]说明
-> 导入完成后可通过 `docker images`、`ctr -n k8s.io images list` 或 `nerdctl -n k8s.io images` 等命令确认镜像是否导入成功，镜像名与 `image_name` 中配置需保持完全一致。
+> 导入完成后可通过`docker images`、`ctr -n k8s.io images list`或`nerdctl -n k8s.io images`等命令确认镜像是否导入成功，镜像名与`image_name`中配置需保持完全一致。
 
 ### 基于裸镜像构建自定义镜像
 
-若仅获得一个基础（裸）镜像（仅包含操作系统、CANN 及 Python 等，未预装 vLLM、vllm-ascend 和 MindIE-PyMotor），需在其中完成 vLLM/vllm-ascend 及本仓的安装后，将容器提交为镜像供部署使用。基础镜像选择、vLLM 与 vllm-ascend 的安装及版本兼容要求等，建议参考 [环境准备](../environment_preparation.md) 文档。
+若仅获得一个基础（裸）镜像（仅包含操作系统、CANN及Python等，未预装vLLM、vllm-ascend和MindIE-PyMotor），需在其中完成vLLM/vllm-ascend及本仓的安装后，将容器提交为镜像供部署使用。基础镜像选择、vLLM与vllm-ascend的安装及版本兼容要求等。
 
 #### 在容器内安装并编译 MindIE-PyMotor
 
-在已安装好 vLLM、vllm-ascend 的基础镜像上启动容器，将本仓库（MindIE-PyMotor）源码放入容器内（例如 `/home/PyMotor`），在源码根目录下依次执行：先使用 `requirements.txt` 安装依赖，再执行 `bash build.sh` 编译生成 wheel 包，最后安装本仓。
+在已安装好vLLM、vllm-ascend的基础镜像上启动容器，将本仓库（MindIE-PyMotor）源码放入容器内（例如`/home/PyMotor`），在源码根目录下依次执行：先使用`requirements.txt`安装依赖，再执行`bash build.sh`编译生成wheel包，最后安装本仓。
 
 ```bash
 cd /home/PyMotor
@@ -540,7 +540,7 @@ prefill / decode 子字段：
 
 ### 前置条件
 
-- 已完成 [环境准备]()：K8s、MindCluster、NPU 驱动、镜像、权重路径等。
+- 已安装Kubernetes、MindCluster、NPU驱动和固件和镜像和权重路径的配置。
 - 已创建与 `job_id` 同名的命名空间，例如：
 
   ```bash
@@ -672,7 +672,7 @@ kubectl exec -it <pod_name> -n <job_id> -- bash
 
 ## 发送推理请求
 
-服务就绪后，可通过发送推理请求测试服务是否拉起正常，以 `/v1/chat/completions` 接口为例(更多api接口可参考[api接口介绍]())。推理入口为 Coordinator 对外暴露的端口（默认 31015）。请将 `<IP>` 替换为实际访问地址（如 Coordinator Service 的 NodePort/LoadBalancer 或宿主机 IP）。若已开启 TLS（见 4.6），请使用 `https` 并配置客户端证书。
+服务就绪后，可通过发送推理请求测试服务是否拉起正常，以 `/v1/chat/completions` 接口为例（更多API接口可参考[业务接口](../../api_reference/service_interface.md)。推理入口为 Coordinator 对外暴露的端口（默认 31015）。请将`<IP>`替换为实际访问地址（如 Coordinator Service 的 NodePort/LoadBalancer 或宿主机IP）。若已开启TLS，请参见[tls_config（可选）](#tls_config可选)使用`https`并配置客户端证书。
 
 ```bash
 curl -X POST http://<IP>:31015/v1/chat/completions \
@@ -712,5 +712,5 @@ bash delete.sh <命名空间>
 - **镜像与权重**：确保 `image_name` 在集群内可正常拉取；`weight_mount_path` 在宿主机上存在。
 - **部署失败**：若部署失败，可先按第 8 节卸载集群，排查并修改配置后重新部署。
 - **加载权重超时**：当前依赖`vllm v0.13.0`版本，该版本权重加载超时时间不能通过环境变量或者配置修改，导致加载权重超过10分钟会报`timeout`，并不影响程序运行，`vllm v0.14.0`版本会修复这个问题。
-- **实例重调度约束**：*实例重调度*能力依赖mindcluster，如果P/D实例有多个POD，直接删除其中一个POD，不会进入mindcluster的故障处理流程，所以不会触发*实例重调度*
+- **实例重调度约束**：实例重调度能力依赖mindcluster，如果P/D实例有多个POD，直接删除其中一个POD，不会进入mindcluster的故障处理流程，所以不会触发实例重调度。
 - **Prefix Cache特性（默认开启）对性能测试的影响**：Prefix Cache用于在多条请求存在相同prompt前缀时，复用已计算好的KV Cache，从而提升服务的推理性能。若期望获取推理服务的基线性能数据（非前缀缓存加速），应在配置中关闭Prefix Cache特性，可在user_config.json配置文件的"engine_config"中增加 "no-enable-prefix-caching": true（vLLM推理引擎） 或 "disable_radix_cache": true （SGLang推理引擎）字段。

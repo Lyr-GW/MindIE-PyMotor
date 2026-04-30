@@ -1,18 +1,18 @@
 # 日志配置
 
-## 1. 特性介绍
+## 特性介绍
 
 pyMotor 日志能力基于三方件`logging`能力增强。
 
 通过修改user_config.json配置文件后即可通过deploy.py脚本完成服务部署，业务运行均会保留日志。日志持久化磁盘为可选配置项，默认为非持久化磁盘。
 
-## 2. 配置指导
+## 配置指导
 
 pyMotor开启日志持久化需修改user_config.json配置文件后，通过deploy.py脚本即可完成服务部署，具体流程如下。
 
-### 2.1 配置user_config.json
+### 配置user_config.json
 
-以[pyMotor快速开始](../../../README.md)中实例uesr_config.json为参考基线，开启日志持久化的配置片段如下：
+以[PyMotor快速开始](../user_guide/quick_start.md)中实例user_config.json为参考基线，开启日志持久化的配置片段如下：
 
 ```json
 {
@@ -23,7 +23,7 @@ pyMotor开启日志持久化需修改user_config.json配置文件后，通过dep
       "log_format": "%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d][proc:%(processName)s]  %(message)s",
       "log_date_format": "%Y-%m-%d %H:%M:%S",
       "host_log_dir": "/root/ascend/log/motor",
-      "log_rotation_size": 20,
+      "log_rotation_size": 10,
       "log_rotation_count": 10,
       "log_compress": false,
       "log_compress_level": 6,
@@ -49,9 +49,9 @@ logging_config配置项说明：
 
 当log_max_total_size和log_rotation_count同时配置时，达到任意一个条件时进行日志轮转和日志删除。
 
-### 2.2 部署服务
+### 部署服务
 
-在 `examples/deployer` 目录下通过 deploy.py 脚本部署服务。支持指定配置目录或单独指定配置文件：
+在 `examples/deployer` 目录下通过deploy.py脚本部署服务。支持指定配置目录或单独指定配置文件：
 
 ```bash
 cd examples/deployer

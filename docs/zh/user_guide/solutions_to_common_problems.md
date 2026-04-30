@@ -28,21 +28,21 @@
   ```
 
 - 网络相关pod出现异常（READY：0/1）：  
-  如果pod状态出现异常，例如：某个calico的pod持续显示为ready 0/1。可以查看集群中所有节点（包括master和worker节点）的网卡名称。如果所有节点具有相同名称的网卡，如enp189s0f0，则在master节点执行kubectl edit ds -n kube-system calico-node命令，修改如下加粗的网卡名（如果现场网卡做了bond，则填写bond名，如bond4）：
+  如果pod状态出现异常，例如：某个calico的pod持续显示为ready 0/1。可以查看集群中所有节点（包括master和worker节点）的网卡名称。如果所有节点具有相同名称的网卡，如enp189s0f0，则在master节点执行kubectl edit ds -n kube-system calico-node命令，修改如下网卡名（如果现场网卡做了bond，则填写bond名，如bond4）：
   
   ```yaml
   - name: IP_AUTODETECTION_METHOD
     value: interface=enp189s0f0
   ```
 
-  如集群中所有节点的带内管理平面网卡名不全相同，例如一部分节点为enp189s0f0，另一部分节点为enp125s0f0，则修改如下加粗的网卡名：
+  如集群中所有节点的带内管理平面网卡名不全相同，例如一部分节点为enp189s0f0，另一部分节点为enp125s0f0，则修改如下网卡名：
   
   ```yaml
   - name: IP_AUTODETECTION_METHOD   
     value: interface=enp189s0f0,enp125s0f0
   ```
 
-如果上述方法均无法解决问题，可在master节点执行kubectl describe pod -n [pod命名空间] [pod名称]以及kubectl log -n [pod命名空间] [pod名称]查看对应pod的信息和日志，分析具体原因并解决。
+如果上述方法均无法解决问题，可在master节点执行kubectl describe pod -n [pod命名空间] [pod名称]以及kubectl logs -n [pod命名空间] [pod名称]查看对应pod的信息和日志，分析具体原因并解决。
 
 ## 部署服务时，发现日志报错 Get ACL JitCompile default value failed
 

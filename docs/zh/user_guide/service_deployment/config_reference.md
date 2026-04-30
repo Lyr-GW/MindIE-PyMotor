@@ -21,7 +21,7 @@
   "hardware_type": "800I_A3",
   "weight_mount_path": "/mnt/weight/",
   "deploy_mode": "infer_service_set",
-  "tls_config": { ... },
+  "tls_config": { ... }
 }
 ```
 
@@ -38,7 +38,7 @@
 | hardware_type | string | 硬件类型：`800I_A2` 或 `800I_A3` |
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 model_path 需与此挂载路径一致，如 `"/mnt/weight/"` |
 | deploy_mode | string | 部署方式。可选：`infer_service_set`（默认，基于 InferServiceSet CRD，生成单个 infer_service.yaml 由 CRD controller 拉起各 pod）、`multi_deployment`（传统方式，生成 controller、coordinator、engine_*、kv_pool 等多个独立 YAML 分别 apply）、`single_container`（单容器方式，P/D 合并运行）。不配置时默认为 `infer_service_set`。CRD 方式尚未完成 RAS 能力与池化能力的适配验证；若需 RAS（可靠性、可用性、可服务性）或 KV 池化能力，请设置为 `multi_deployment` |
-| tls_config | object | 可选；TLS 相关配置，含 infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config 四类，结构见 [PD 分离服务部署](./pd_disaggregation_deployment.md#tls_config可选) |
+| tls_config | object | 可选；TLS相关配置，含infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config四类，结构见[PD 分离服务部署](./pd_disaggregation_deployment.md#tls_config可选) |
 
 ---
 
@@ -141,7 +141,7 @@
 | enable_fault_tolerance | bool | 是否启用故障自愈（高级 RAS）。可选：`true` / `false`。默认：`false` |
 | strategy_center_check_internal | int | 策略中心轮询间隔（秒）。默认：`1` |
 | enable_scale_p2d | bool | 是否启用 P2D 弹性扩缩容。可选：`true` / `false`。默认：`false` |
-| enable_lingqu_network_recover | bool | 是否启用令区网络故障恢复。可选：`true` / `false`。默认：`false` |
+| enable_lingqu_network_recover | bool | 是否启用灵衢网络故障恢复。可选：`true` / `false`。默认：`false` |
 
 ### 2.7 standby_config
 
@@ -237,8 +237,8 @@
 
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
-| deploy_mode | string | 部署模式。可选：`pd_separate`（P/D 分离，默认CDP模式）、`cdp_separate（CDP部署方式）`、`cpcd_separate（CPCD部署方式）` 等。默认：`pd_separate` |
-| scheduler_type | string | 调度类型。可选：`load_balance`（负载均衡）、`round_robin`（轮询）。默认：`load_balance` |
+| deploy_mode | string | 部署模式。<ul><li>pd_separate：PD分离部署方式；</li><li>cdp_separate：CDP部署方式；</li><li>cpcd_separate：CPCD部署方式。</li></ul>默认值：`pd_separate` |
+| scheduler_type | string | 调度类型。<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询。</li></ul>默认值：`load_balance` |
 
 ### 3.5 infer_tls_config / mgmt_tls_config / etcd_tls_config
 
@@ -400,7 +400,6 @@
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
 | pod_ip | string | Pod IP（由环境或部署注入）。默认：`127.0.0.1`（或 Env.pod_ip） |
-| host_ip | string | 宿主机 IP（由环境或部署注入）。默认：`127.0.0.1`（或 Env.pod_ip） |
 | node_manager_port | int | NodeManager 端口。默认：`1026` |
 | controller_api_dns | string | Controller API 域名或 IP，多由部署或环境注入。默认：`127.0.0.1` |
 | controller_api_port | int | Controller API 端口。默认：`1026` |
