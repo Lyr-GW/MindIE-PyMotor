@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,9 +12,9 @@ from pytest import MonkeyPatch
 from fastapi import FastAPI, status, Request, HTTPException
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from fastapi.testclient import TestClient
+import json
 import pytest
 import httpx
-import json
 
 from motor.config.coordinator import (
     DeployMode,
@@ -935,7 +933,6 @@ class TestRouterPDSeparation:
         mock_pool = MagicMock()
         mock_pool.get_client = AsyncMock(return_value=mock_client)
         with patch("motor.coordinator.router.strategies.base.HTTPClientPool", return_value=mock_pool):
-            import json
             result = ""
             response = client.post("/v1/chat/completions", json={
                 "model": "qwen3",
@@ -1004,35 +1001,45 @@ class TestRouterPDSeparation:
         3) RequestInfo is updated with prompt_tokens_details
         """
         
-        # Mock response with prompt_tokens_details
         prompt_tokens_details = {
             "cached_tokens": 10
         }
         
-        # Create a custom mock that returns complete response with usage field
-        async def mock_post_with_prompt_tokens_details(self, path, json=None, headers=None, timeout=None):
-            # Create a complete response with usage field
-            if self._post_fail_count < self.fail_times:
-                self._post_fail_count += 1
-                resp = MagicMock()
-                resp.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-                resp.raise_for_status = MagicMock(
-                    side_effect=httpx.HTTPStatusError(
-                        "Simulated post error",
-                        request=MagicMock(),
-                        response=httpx.Response(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR),
-                    )
-                )
-                resp.aclose = AsyncMock(return_value=None)
-                resp.json = MagicMock(return_value={})
-                return resp
-            
-            # Return successful response with prompt_tokens_details
-            resp = MagicMock()
-            resp.status_code = 200
-            resp.raise_for_status = MagicMock()
-            resp.aclose = AsyncMock(return_value=None)
-            resp.json = MagicMock(return_value={
+        req_info = await create_mock_request_info()
+
+        async def mock_forward_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+            kv = req_data.get("kv_transfer_params") or {}
+            is_prefill = (
+                req_data.get("stream") is False
+                and req_data.get("max_tokens") == 1
+                and req_data.get("min_tokens") == 1
+                and kv.get("do_remote_decode") is True
+                and kv.get("do_remote_prefill") is False
+            )
+            if is_prefill:
+                mock_response = MagicMock()
+                mock_response.raise_for_status = MagicMock()
+                mock_response.aclose = AsyncMock(return_value=None)
+                mock_response.json.return_value = {
+                    "kv_transfer_params": {
+                        "do_remote_decode": True,
+                        "remote_engine_id": "test-engine",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": "8001",
+                    },
+                    "usage": {
+                        "prompt_tokens": 15,
+                        "completion_tokens": 1,
+                        "total_tokens": 16,
+                        "prompt_tokens_details": prompt_tokens_details
+                    }
+                }
+                return mock_response
+
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.aclose = AsyncMock(return_value=None)
+            mock_response.json.return_value = {
                 "choices": [{"message": {"content": "test response"}}],
                 "usage": {
                     "prompt_tokens": 15,
@@ -1040,49 +1047,25 @@ class TestRouterPDSeparation:
                     "total_tokens": 16,
                     "prompt_tokens_details": prompt_tokens_details
                 }
-            })
-            return resp
-        
-        req_info = await create_mock_request_info()
-        
-        # Patch the post method to include prompt_tokens_details
-        monkeypatch.setattr(MockAsyncClient, "post", mock_post_with_prompt_tokens_details)
-        
-        # Mock forward_stream_request to simulate decode response
-        async def mock_forward_stream_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
-            # Yield a simple response for D request
-            yield b'{"choices": [{"delta": {"content": "Hello"}}]}'
-            # Yield usage chunk with prompt_tokens_details
-            usage_chunk = {
-                "choices": [],
-                "usage": {
-                    "prompt_tokens": 15,
-                    "completion_tokens": 1,
-                    "total_tokens": 16
-                }
             }
-            yield f"data: {json.dumps(usage_chunk)}".encode()
+            return mock_response
+
+        monkeypatch.setattr(SeparatePDRouter, "forward_request", mock_forward_request)
+
+        pd_router = SeparatePDRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=_request_manager
+        )
         
-        monkeypatch.setattr(SeparatePDRouter, "forward_stream_request", mock_forward_stream_request)
+        req_info.req_data["stream"] = False
+        response = await pd_router.handle_request()
         
-        with patch('motor.coordinator.router.strategies.base.httpx.AsyncClient', return_value=MockAsyncClient()):
-            pd_router = SeparatePDRouter(
-                req_info, CoordinatorConfig(),
-                scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
-                request_manager=_request_manager
-            )
-            
-            # Test non-streaming response
-            req_info.req_data["stream"] = False
-            response = await pd_router.handle_request()
-            
-            # Verify response contains prompt_tokens_details
-            response_json = response.body.decode() if hasattr(response.body, 'decode') else response.body
-            response_data = json.loads(response_json)
-            
-            assert "usage" in response_data
-            assert "prompt_tokens_details" in response_data["usage"]
-            assert response_data["usage"]["prompt_tokens_details"] == prompt_tokens_details
-            
-            # Verify req_info was updated with prompt_tokens_details
-            assert req_info.prompt_tokens_details == prompt_tokens_details
+        response_json = response.body.decode() if hasattr(response.body, 'decode') else response.body
+        response_data = json.loads(response_json)
+        
+        assert "usage" in response_data
+        assert "prompt_tokens_details" in response_data["usage"]
+        assert response_data["usage"]["prompt_tokens_details"] == prompt_tokens_details
+        
+        assert req_info.prompt_tokens_details == prompt_tokens_details

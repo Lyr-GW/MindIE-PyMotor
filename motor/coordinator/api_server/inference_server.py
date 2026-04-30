@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -12,8 +11,6 @@
 """
 Inference plane: Worker subprocess only; provides /v1/completions, /v1/chat/completions, /v1/models, etc.
 """
-
-from __future__ import annotations
 
 import asyncio
 import json
@@ -273,7 +270,6 @@ class InferenceServer(BaseCoordinatorServer):
                 error_status_code=rlc.error_status_code,
                 enabled=rlc.enable_rate_limit,
             )
-
 
     def _get_scheduler_client(self):
         """Return SchedulerClient used for scheduling (select_and_allocate, get_available_instances, etc.)."""

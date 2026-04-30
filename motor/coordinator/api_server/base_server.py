@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,7 +13,6 @@ Base class for Mgmt and Infer HTTP servers. Provides common config init, hot-rel
 uvicorn config, and timeout handler.
 """
 
-from __future__ import annotations
 
 import asyncio
 import logging
@@ -23,14 +21,13 @@ from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 
 from motor.common.logger import ApiAccessFilter, get_logger
 from motor.config.coordinator import CoordinatorConfig
 
 logger = get_logger(__name__)
 
-# Uvicorn config keys and timeout
 _UVICORN_GRACEFUL_SHUTDOWN = 30
 
 
