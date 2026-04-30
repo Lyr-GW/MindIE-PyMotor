@@ -6,7 +6,7 @@
 
 ### 核心能力
 
-MindIE PyMotor 主要提供以下两个方面的能力：
+MindIE PyMotor主要提供以下两个方面的能力：
 
 1. **PD分离的请求调度**：主要将外部的客户请求分发到负载最低的 Prefill/Decode 实例上，起到**负载均衡**的作用。
 2. **RAS（Reliability, Availability and Serviceability）**：增强 PD 分离服务的**可靠性、可用性和可服务性**。
@@ -17,7 +17,7 @@ MindIE PyMotor 主要提供以下两个方面的能力：
 
 MindIE PyMotor 及其周边组件的交互架构图如下所示：
 
-**图1 MindIE Motor架构图**
+**图1 MindIE PyMotor架构图**
 
 ![架构图](./imgs/MindIE_PyMotor_Architecture.jpg)
 
@@ -57,7 +57,7 @@ MindIE PyMotor核心组件定义如下：
 
 ### 4. EngineServer
 
-节点推理服务入口，提供统一的RESTful EndPoints，包括OpenAI接口、Metrics等。北向对接Coordinator和Controller，南向对接vLLM/SGLang/MindIE框架。（当前版本仅支持vLLM)
+节点推理服务入口，提供统一的RESTful EndPoints，包括OpenAI接口、Metrics等。北向对接Coordinator和Controller，南向对接vLLM/SGLang/MindIE框架。（当前版本仅支持vLLM）
 
 ### 5. NodeManager
 

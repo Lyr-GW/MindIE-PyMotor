@@ -20,7 +20,7 @@
 
 ## 操作步骤
 
-### 1. 首次部署
+### 首次部署
 
 在 `examples/deployer` 目录下执行全量部署：
 
@@ -38,7 +38,7 @@ python3 deploy.py --user_config_path ../infer_engines/vllm/user_config.json --en
 - 集群中会创建/更新 ConfigMap `motor-config`（内容来自当前输入的 `user_config.json`），作为后续扩缩容与刷新的基线。
 - `output/deployment/` 下会生成各服务 YAML。
 
-### 2. 扩缩容
+### 扩缩容
 
 1. 修改 `user_config.json` 中的实例数：
    - `p_instances_num`

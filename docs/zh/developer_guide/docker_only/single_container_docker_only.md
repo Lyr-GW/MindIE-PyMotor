@@ -1,12 +1,12 @@
 # docker-only部署单容器PD分离指南
 
-## 1. 特性介绍
+## 特性介绍
 
 本文档描述在**不使用 Kubernetes deployer**、仅用 **Docker 容器 + 宿主机挂载配置** 的方式部署单容器PyMotor PD分离推理的**端到端流程**。
 
-## 2. 部署流程
+## 部署流程
 
-### 2.1 准备user_config.json和env.json配置文件
+### 准备user_config.json和env.json配置文件
 
 可从如下路径获取[user_config.json](../../../../examples/infer_engines/vllm/user_config.json)和[env.json](../../../../examples/infer_engines/vllm/env.json)模板，本文主要介绍docker-only部署方式相关适配点，其他特性请参考[quick_start](../../user_guide/quick_start.md)。
 
@@ -21,7 +21,8 @@
 
 样例如下：
 
-```json{
+```json
+{
   "motor_deploy_config": {
     ...
     "deploy_mode": "single_container"
@@ -62,7 +63,7 @@
 }
 ```
 
-### 2.2 准备CONFIGMAP_PATH
+### 准备CONFIGMAP_PATH
 
 准备阶段需将配置文件、启动脚本拷贝到环境变量**CONFIGMAP_PATH**对应目录下，并通过set_env_docker.py加载环境变量。准备阶段脚本**prepare.sh**示例(**EXAMPLES_PATH**、**CONFIGMAP_PATH**、**USER_CONFIG_PATH**、**ENV_PATH**需修改为实际路径)：
 
@@ -110,7 +111,7 @@ python $EXAMPLES_PATH/deployer/startup/set_env_docker.py --configmap_path $CONFI
 sh prepare.sh
 ```
 
-### 2.3 docker启动服务
+### Docker启动服务
 
 准备启动脚本start_docker.sh，脚本示例(**CONFIGMAP_PATH**需修改为实际路径，**IMAGE_NAME**需修改为实际镜像名)：
 
@@ -161,7 +162,7 @@ bash -c "export POD_IP=\$(grep \$(hostname) /etc/hosts | cut -f1) && source \$CO
 | ASCEND_VISIBLE_DEVICES | 可见卡 | 指定挂载卡，如"0,1,2,3"，默认自动检测主机昇腾卡 |
 | ENDPOINT_PORT_RANGE | endpoint端口映射区间 | 非host网络部署设置endpoint端口映射，起始端口默认值10000，先P后D，每dp端口偏移2，分别对应推理端口和管理端口 |
 | KV_PORT_RANGE | kv_port映射端口区间 | 非host网络部署设置kv_port映射端口，起始端口user-config.json中motor_engine_prefill_config下kv_port值，先P后D，每实例端口偏移1 |
-| KVP_MASTER_SERVICE | mooncake_master部署域名 | 若开启kv_pool，设置为任意非空字符串,如kvp_master，boot.sh会自动适配为容器ip；若不开启则设置为空 |
+| KVP_MASTER_SERVICE | mooncake_master部署域名 | 若开启kv_pool，设置为任意非空字符串，如kvp_master，boot.sh会自动适配为容器ip；若不开启则设置为空 |
 | KV_POOL_PORT | mooncake_master部署端口 | 若开启kv_pool，设置任意有效端口，如50088；若不开启则设置为空 |
 | KV_POOL_EVICTION_HIGH_WATERMARK_RATIO | mooncake_master进程高水位比例 | 若开启kv_pool，取值0~1；若不开启则设置为空 |
 | KV_POOL_EVICTION_RATIO | mooncake_master进程逐出比例 | 若开启kv_pool，取值0~1；若不开启则设置为空 |

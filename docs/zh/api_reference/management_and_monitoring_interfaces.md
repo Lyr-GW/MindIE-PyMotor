@@ -231,7 +231,7 @@ curl -X GET "http://{CoordinatorIP}:{管理端口}/instance/metrics"
 | <instance_id> | object | 顶层键为实例ID，值为该实例的指标列表。 |
 | <instance_id>[].name | string | 指标名称。 |
 | <instance_id>[].help | string | 指标说明。 |
-| <instance_id>[].type | string | 指标类型,包括以下几种：<ul><li>counter</li><li>gauge</li><li>histogram</li><li>summary</li></ul>histogramh和summary类型会包含 `*_bucket`、`*_count`、`*_sum` 等label项。 |
+| <instance_id>[].type | string | 指标类型，包括以下几种：<ul><li>counter</li><li>gauge</li><li>histogram</li><li>summary</li></ul>histogram和summary类型会包含 `*_bucket`、`*_count`、`*_sum` 等label项。 |
 | <instance_id>[].label | array | 标签数组，元素为 Prometheus 标签字符串。 |
 | <instance_id>[].value | array | 与label一一对应的数值数组。 |
 
@@ -267,6 +267,9 @@ URL：`http(s)://{CoordinatorIP}:{管理端口}/instances/refresh`
 
 **使用样例**
 
+>[!NOTE]说明
+>请求体必须为JSON格式，且大小不得超过10MB。
+
 ```bash
 curl -X POST "http://{CoordinatorIP}:{管理端口}/instances/refresh" \
   -H "Content-Type: application/json" \
@@ -295,9 +298,6 @@ curl -X POST "http://{CoordinatorIP}:{管理端口}/instances/refresh" \
 
 **响应示例**
 
->[!NOTE]说明
->请求体必须为JSON格式，且大小不得超过10MB。
-
 ```JSON
 {
   "request_id": "refresh_request",
@@ -322,164 +322,6 @@ curl -X POST "http://{CoordinatorIP}:{管理端口}/instances/refresh" \
 | data.timestamp | string | 事件时间。 |
 | data.event_type | string | 事件类型，与请求`event`对应。 |
 | data.instance_count | integer | 实例数量。 |
-
----
-
-## MetaServer 转发接口
-
-**接口功能**
-
-仅在PD/CDP分离部署场景使用，用于D节点将请求转发至P节点。
-
-**接口格式**
-
-请求类型：**POST**
-URL：`http(s)://{CoordinatorIP}:{管理端口}/v1/metaserver`
-
-  >[!NOTE]说明
-  >
-  > - `{CoordinatorIP}`：Coordinator 服务部署机器的 IP 或域名，取值来自配置 `api_config.coordinator_api_host`（默认 `127.0.0.1`），参考 `deployer/user_config.json` 取值或实际运行时节点IP。
-  > - `{管理端口}`：配置项 `api_config.coordinator_api_mgmt_port`（默认 `1026`）。
-
-请求头：
-
-- 必选：`Content-Type: application/json`
-- 可选：无
-
-**请求参数**
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `model` | string | 必选；模型名称，透传至目标节点。 |
-| `messages` | array | 与 `prompt` 二选一；Chat输入。 |
-| `prompt` | string | 与 `messages` 二选一；Completion 输入。 |
-| `stream` | boolean | 可选；是否流式返回，透传至目标节点。 |
-| `kv_transfer_params` | object | 必选；转发控制参数。 |
-| `kv_transfer_params.request_id` | string | 必选；请求标识，用于跨节点跟踪与关联。 |
-| `kv_transfer_params.do_remote_decode` | boolean | 可选；是否在目标节点执行 Decode。 |
-| `kv_transfer_params.do_remote_prefill` | boolean | 可选；是否在目标节点执行 Prefill。 |
-| `kv_transfer_params.remote_engine_id` | string | 必选；目标节点引擎 ID。 |
-| `kv_transfer_params.remote_host` | string | 必选；目标节点地址（IP 或域名）。 |
-| `kv_transfer_params.remote_port` | string | 必选；目标节点端口。 |
-
-**使用样例**
-
-- CDP分离场景，D节点触发P节点Prefill：
-  
-  ```json
-  curl -X POST "http://{CoordinatorIP}:{管理端口}/v1/metaserver" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "qwen3",
-    "messages": [
-      { "role": "user", "content": "Hello!" }
-    ],
-    "stream": false,
-    "kv_transfer_params": {
-      "request_id": "req-id",
-      "do_remote_decode": false,
-      "do_remote_prefill": true,
-      "remote_engine_id": "engine-p-0",
-      "remote_host": "10.0.0.12",
-      "remote_port": "1000"
-    }
-  }'
-  ```
-
-- PD分离场景，P节点触发D节点Decode：
-
-  ```json
-  curl -X POST "http://{CoordinatorIP}:{管理端口}/v1/metaserver" \
-    -H "Content-Type: application/json" \
-    -d '{
-      "model": "qwen3",
-      "messages": [
-        { "role": "user", "content": "Hello!" }
-      ],
-      "stream": false,
-      "kv_transfer_params": {
-        "request_id": "req-id",
-        "do_remote_decode": true,
-        "do_remote_prefill": false,
-        "remote_engine_id": "engine-d-0",
-        "remote_host": "10.0.0.21",
-        "remote_port": "1001"
-      }
-    }'
-  ```
-
-**响应示例**
-
-- CDP分离场景，透传P节点响应内容：
-
-  ```JSON
-  {
-    "id": "chatcmpl-xxx12",
-    "object": "chat.completion",
-    "created": 1738828800,
-    "model": "qwen3",
-    "choices": [
-      {
-        "index": 0,
-        "message": {
-          "role": "assistant",
-          "content": "Hello! How can I help you?"
-        },
-        "finish_reason": "stop"
-      }
-    ],
-    "usage": {
-      "prompt_tokens": 6,
-      "completion_tokens": 7,
-      "total_tokens": 13
-    }
-  }
-  ```
-
-- PD分离场景，透传D节点响应内容：
-
-  ```JSON
-  {
-    "id": "chatcmpl-xxx",
-    "object": "chat.completion",
-    "created": 1738828800,
-    "model": "qwen3",
-    "choices": [
-      {
-        "index": 0,
-        "message": {
-          "role": "assistant",
-          "content": "Hello! How can I help you?"
-        },
-        "finish_reason": "stop"
-      }
-    ],
-    "usage": {
-      "prompt_tokens": 8,
-      "completion_tokens": 9,
-      "total_tokens": 17
-    }
-  }
-  ```
-
-**输出说明**
-该示例为非流式 `chat.completion`的输出说明：
-
-| 参数 | 类型 | 说明 |
-| --- | --- | --- |
-| `id` | string | 响应 ID。 |
-| `object` | string | 响应对象类型，示例为 `chat.completion`。 |
-| `created` | integer | 响应创建时间（Unix 时间戳）。 |
-| `model` | string | 实际使用的模型名称。 |
-| `choices` | array | 生成结果列表。 |
-| `choices[].index` | integer | 结果序号。 |
-| `choices[].message.role` | string | 角色，示例为 `assistant`。 |
-| `choices[].message.content` | string | 生成内容。 |
-| `choices[].finish_reason` | string | 结束原因，如 `stop`、`length` 等。 |
-| `usage` | object | Token 统计信息。 |
-| `usage.prompt_tokens` | integer | 输入 Token 数量。 |
-| `usage.completion_tokens` | integer | 输出 Token 数量。 |
-| `usage.total_tokens` | integer | 总 Token 数量。 |
 
 ---
 
@@ -522,13 +364,13 @@ curl -X GET "http://{CoordinatorIP}:{管理端口}/"
       "/readiness",
       "/metrics",
       "/instance/metrics",
-      "/instances/refresh",
-      "/v1/metaserver"
+      "/instances/refresh"
     ],
     "inference": [
       "/v1/models",
       "/v1/chat/completions",
-      "/v1/completions"
+      "/v1/completions",
+      "/v1/metaserver"
     ]
   },
   "timestamp": "2026-01-29T12:00:00+00:00"
