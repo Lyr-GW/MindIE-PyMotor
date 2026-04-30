@@ -54,19 +54,19 @@ PD 分离部署支持的硬件环境如下所示。
 
 ## 准备镜像
 
-在部署 PD 分离服务前，需要在各计算节点上准备好可用的推理镜像。推荐优先使用经过验证的预制镜像；若仅获取到基础（裸）镜像，则需要在镜像中自行安装 vLLM、vllm-ascend 以及本仓库 MindIE-PyMotor，并重新制作镜像。
+在部署PD分离服务前，需要在各计算节点上准备好可用的推理镜像。推荐优先使用经过验证的预制镜像；若仅获取到基础（裸）镜像，则需要在镜像中自行安装vLLM、vllm-ascend以及本仓库MindIE-PyMotor，并重新制作镜像。
 
 >[!NOTE]说明
->无论是使用预制镜像还是自制镜像，所有参与部署的 K8s 节点（包括运行 Controller、Coordinator、P 实例和 D 实例的工作节点）都必须能够本地加载该镜像，否则 Pod 可能因镜像不可用而处于 `ImagePullBackOff` 或 `ErrImagePull` 状态。
+>无论是使用预制镜像还是自制镜像，所有参与部署的K8s节点（包括运行 Controller、Coordinator、P实例和D实例的工作节点）都必须能够本地加载该镜像，否则Pod可能因镜像不可用而处于`ImagePullBackOff`或`ErrImagePull`状态。
 
 ### 使用推荐预制镜像
 
-通常建议使用官方或已在生产环境验证过的推理镜像（[镜像获取地址]()），此类镜像中已预安装：
+通常建议使用官方或已在生产环境验证过的推理镜像（[镜像获取地址](https://www.hiascend.com/developer/ascendhub)），此类镜像中已预安装：
 
-- vLLM 及其 Ascend 适配组件（如 vllm-ascend 等）。
-- MindIE-PyMotor 及其运行所需的基础依赖。
+- vLLM及其Ascend适配组件（如vllm-ascend等）。
+- MindIE-PyMotor及其运行所需的基础依赖。
 
-对于生产环境无法直接访问镜像仓库、需要通过离线包（`.tar` 文件）导入的场景，可在各节点按容器运行时类型选择对应的加载方式。（tar获取地址同[镜像获取地址]()）
+对于生产环境无法直接访问镜像仓库、需要通过离线包（`.tar` 文件）导入的场景，可在各节点按容器运行时类型选择对应的加载方式。（tar获取地址同[镜像获取地址](https://www.hiascend.com/developer/ascendhub)）
 
 **表 2**  不同运行时的镜像加载示例
 
@@ -77,15 +77,15 @@ PD 分离部署支持的硬件环境如下所示。
 | containerd（使用 `nerdctl`） | `nerdctl -n k8s.io load -i mindie-motor-vllm-dev.tar` |
 
 > [!NOTE]说明
-> 导入完成后可通过 `docker images`、`ctr -n k8s.io images list` 或 `nerdctl -n k8s.io images` 等命令确认镜像是否导入成功，镜像名与 `image_name` 中配置需保持完全一致。
+> 导入完成后可通过`docker images`、`ctr -n k8s.io images list`或`nerdctl -n k8s.io images`等命令确认镜像是否导入成功，镜像名与`image_name`中配置需保持完全一致。
 
 ### 基于裸镜像构建自定义镜像
 
-若仅获得一个基础（裸）镜像（仅包含操作系统、CANN 及 Python 等，未预装 vLLM、vllm-ascend 和 MindIE-PyMotor），需在其中完成 vLLM/vllm-ascend 及本仓的安装后，将容器提交为镜像供部署使用。基础镜像选择、vLLM 与 vllm-ascend 的安装及版本兼容要求等，建议参考 [环境准备](../environment_preparation.md) 文档。
+若仅获得一个基础（裸）镜像（仅包含操作系统、CANN及Python等，未预装vLLM、vllm-ascend和MindIE-PyMotor），需在其中完成vLLM/vllm-ascend及本仓的安装后，将容器提交为镜像供部署使用。基础镜像选择、vLLM与vllm-ascend的安装及版本兼容要求等。
 
 #### 在容器内安装并编译 MindIE-PyMotor
 
-在已安装好 vLLM、vllm-ascend 的基础镜像上启动容器，将本仓库（MindIE-PyMotor）源码放入容器内（例如 `/home/PyMotor`），在源码根目录下依次执行：先使用 `requirements.txt` 安装依赖，再执行 `bash build.sh` 编译生成 wheel 包，最后安装本仓。
+在已安装好vLLM、vllm-ascend的基础镜像上启动容器，将本仓库（MindIE-PyMotor）源码放入容器内（例如 `/home/PyMotor`），在源码根目录下依次执行：先使用 `requirements.txt` 安装依赖，再执行 `bash build.sh` 编译生成wheel包，最后安装本仓。
 
 ```bash
 cd /home/PyMotor
@@ -540,7 +540,7 @@ prefill / decode 子字段：
 
 ### 前置条件
 
-- 已完成 [环境准备]()：K8s、MindCluster、NPU 驱动、镜像、权重路径等。
+- 已安装Kubernetes、MindCluster、NPU驱动和固件和镜像和权重路径的配置。
 - 已创建与 `job_id` 同名的命名空间，例如：
 
   ```bash
@@ -672,7 +672,7 @@ kubectl exec -it <pod_name> -n <job_id> -- bash
 
 ## 发送推理请求
 
-服务就绪后，可通过发送推理请求测试服务是否拉起正常，以 `/v1/chat/completions` 接口为例(更多api接口可参考[api接口介绍]())。推理入口为 Coordinator 对外暴露的端口（默认 31015）。请将 `<IP>` 替换为实际访问地址（如 Coordinator Service 的 NodePort/LoadBalancer 或宿主机 IP）。若已开启 TLS（见 4.6），请使用 `https` 并配置客户端证书。
+服务就绪后，可通过发送推理请求测试服务是否拉起正常，以 `/v1/chat/completions` 接口为例（更多API接口可参考[业务接口](../../api_reference/service_interface.md)。推理入口为 Coordinator 对外暴露的端口（默认 31015）。请将 `<IP>` 替换为实际访问地址（如 Coordinator Service 的 NodePort/LoadBalancer 或宿主机 IP）。若已开启 TLS（见 4.6），请使用 `https` 并配置客户端证书。
 
 ```bash
 curl -X POST http://<IP>:31015/v1/chat/completions \

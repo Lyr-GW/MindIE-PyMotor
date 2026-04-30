@@ -1,17 +1,17 @@
 # KV池化能力部署
 
-## 1. 特性介绍
+## 特性介绍
 
 pyMotor KV池化能力基于vllm-ascend本身池化能力，能力介绍和环境依赖可参考[vllm-ascend池化文档](https://docs.vllm.ai/projects/ascend/zh-cn/main/user_guide/feature_guide/kv_pool.html)。
 
 通过修改user_config.json配置文件后即可通过deploy.py脚本完成服务部署。
 
-## 2. 部署流程
+## 部署流程
 
 pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过deploy.py脚本即可完成服务部署，具体流程如下。
 > 注意：开启池化能力前请参考[pyMotor快速开始](../../../README.md)，确保环境能正常完成基础的服务部署。
 
-### 2.1 应用补丁
+### 应用补丁
 
 > **【重要提示】**
 > **仅当 `vllm-ascend` 版本早于 `v0.17.0rc2`（不含 `v0.17.0rc2`）时才需要打此补丁。**
@@ -19,9 +19,9 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
 
 由于vllm代码的layerwise KV-cache传输叠加KV池化存在推理bug，需要应用vllm_multi_connector.patch补丁，具体操作步骤可参考[pyMotor应用补丁](../../../patch/README.md)。
 
-### 2.2 配置user_config.json
+### 配置user_config.json
 
-同[vllm-ascend池化文档](https://docs.vllm.ai/projects/ascend/zh-cn/main/user_guide/feature_guide/kv_pool.html)中kv-transfer-config配置，在user_config.json配置文件中只需要调整P/D实例 `kv_transfer_config` 内的配置以及 `kv_cache_pool_config` 配置。其他配置内容与不开启池化时保持一致即可。以[pyMotor快速开始](../../../README.md)中实例uesr_config.json为参考基线，适配打开KV池化后的配置文件示例如下（省略了其他无关的配置项）：
+同[vllm-ascend池化文档](https://docs.vllm.ai/projects/ascend/zh-cn/main/user_guide/feature_guide/kv_pool.html)中kv-transfer-config配置，在user_config.json配置文件中只需要调整P/D实例 `kv_transfer_config` 内的配置以及 `kv_cache_pool_config` 配置。其他配置内容与不开启池化时保持一致即可。以[PyMotor快速开始](../user_guide/quick_start.md)中实例user_config.json为参考基线，适配打开KV池化后的配置文件示例如下（省略了其他无关的配置项）：
 
 ```json
 {
@@ -54,7 +54,7 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
             {
               "kv_connector": "MooncakeLayerwiseConnector",
               "kv_role": "kv_producer",
-              "kv_port": "20001",
+              "kv_port": "30001",
               "kv_connector_extra_config": {
                   "send_type": "PUT"
               }
@@ -88,7 +88,7 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
             {
               "kv_connector": "MooncakeLayerwiseConnector",
               "kv_role": "kv_consumer",
-              "kv_port": "20002",
+              "kv_port": "30001",
               "kv_connector_extra_config": {
                   "send_type": "PUT"
               }
@@ -126,7 +126,7 @@ pyMotor开启KV池化能力只需修改user_config.json配置文件后，通过d
 - `eviction_high_watermark_ratio` 与 `eviction_ratio`：用于 `mooncake_master` 进程启动参数，分别代表池化空间高水位驱逐线与单次驱逐比例。
 - `port`：（可选）用于配置 KV Pool 的服务端口；若未配置，`deploy.py` 会按默认值 `50088` 进行补充和适配。
 
-### 2.3 部署服务
+### 部署服务
 
 在 `examples/deployer` 目录下通过 deploy.py 脚本部署服务。支持指定配置目录或单独指定配置文件：
 

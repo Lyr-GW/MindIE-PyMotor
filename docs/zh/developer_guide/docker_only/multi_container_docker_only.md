@@ -19,7 +19,8 @@
 
 样例如下：
 
-```json{
+```json
+{
   "motor_controller_config": {
     ...
     "api_config": {
@@ -101,7 +102,7 @@ python $EXAMPLES_PATH/deployer/startup/set_env_docker.py --configmap_path $CONFI
 sh prepare.sh
 ```
 
-### 2.3 docker启动服务
+### Docker启动服务
 
 准备启动脚本start_docker.sh，脚本示例(**CONFIGMAP_PATH**需修改为实际路径，**IMAGE_NAME**需修改为实际镜像名)：
 

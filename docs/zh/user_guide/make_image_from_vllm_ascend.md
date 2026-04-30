@@ -2,7 +2,7 @@
 
 ## 获取vLLM-Ascend发布的镜像版本
 
-获取方法打开[RED HAT](https://quay.io/repository/ascend/vllm-ascend?tab=tags)点击需要下载的版本。
+获取方法：打开[RED HAT](https://quay.io/repository/ascend/vllm-ascend?tab=tags)，点击需要下载的版本。
 以v0.13.0版本为例，下载命令为：
 
 ```bash
@@ -10,7 +10,7 @@ docker pull quay.io/ascend/vllm-ascend:v0.13.0
 ```
 
 >[!NOTE]说明
->为提高下载速度，可将quay.io替换为quay.nju.edu.cn。
+>为提高下载速度，可将`quay.io`替换为`quay.nju.edu.cn`。
 
 ## 在镜像中安装PyMotor
 
@@ -34,14 +34,17 @@ docker pull quay.io/ascend/vllm-ascend:v0.13.0
     ```
 
 4. 执行以下命令制作镜像。
-apt-get update && apt-get install pciutils -y
+    
+    ```bash
+    apt-get update && apt-get install pciutils -y
 
-cd /mnt/MindIE-pyMotor
+    cd /mnt/MindIE-PyMotor
+    ```
 
     ```bash
     docker exec -it docker-vllm-ascend bash
 
-    cd /mnt/MindIE-pyMotor
+    cd /mnt/MindIE-PyMotor
 
     pip install -r requirements.txt
 
