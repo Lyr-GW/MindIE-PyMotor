@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,6 +12,7 @@ from pytest import MonkeyPatch
 from fastapi import FastAPI, status, Request, HTTPException
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from fastapi.testclient import TestClient
+import json
 import pytest
 import httpx
 
@@ -934,7 +933,6 @@ class TestRouterPDSeparation:
         mock_pool = MagicMock()
         mock_pool.get_client = AsyncMock(return_value=mock_client)
         with patch("motor.coordinator.router.strategies.base.HTTPClientPool", return_value=mock_pool):
-            import json
             result = ""
             response = client.post("/v1/chat/completions", json={
                 "model": "qwen3",
@@ -993,3 +991,81 @@ class TestRouterPDSeparation:
     @pytest.mark.asyncio
     async def test_resource_release(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
         pass
+
+    @pytest.mark.asyncio
+    async def test_prompt_tokens_details_propagation(self, client, monkeypatch: MonkeyPatch, setup_pd_separation):
+        """Test case: prompt_tokens_details from P role is properly propagated to D role response
+        Expected behavior:
+        1) P role returns usage with prompt_tokens_details
+        2) D role includes prompt_tokens_details in final response
+        3) RequestInfo is updated with prompt_tokens_details
+        """
+        
+        prompt_tokens_details = {
+            "cached_tokens": 10
+        }
+        
+        req_info = await create_mock_request_info()
+
+        async def mock_forward_request(self, req_data: dict, client: httpx.AsyncClient, timeout):
+            kv = req_data.get("kv_transfer_params") or {}
+            is_prefill = (
+                req_data.get("stream") is False
+                and req_data.get("max_tokens") == 1
+                and req_data.get("min_tokens") == 1
+                and kv.get("do_remote_decode") is True
+                and kv.get("do_remote_prefill") is False
+            )
+            if is_prefill:
+                mock_response = MagicMock()
+                mock_response.raise_for_status = MagicMock()
+                mock_response.aclose = AsyncMock(return_value=None)
+                mock_response.json.return_value = {
+                    "kv_transfer_params": {
+                        "do_remote_decode": True,
+                        "remote_engine_id": "test-engine",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": "8001",
+                    },
+                    "usage": {
+                        "prompt_tokens": 15,
+                        "completion_tokens": 1,
+                        "total_tokens": 16,
+                        "prompt_tokens_details": prompt_tokens_details
+                    }
+                }
+                return mock_response
+
+            mock_response = MagicMock()
+            mock_response.raise_for_status = MagicMock()
+            mock_response.aclose = AsyncMock(return_value=None)
+            mock_response.json.return_value = {
+                "choices": [{"message": {"content": "test response"}}],
+                "usage": {
+                    "prompt_tokens": 15,
+                    "completion_tokens": 1,
+                    "total_tokens": 16,
+                    "prompt_tokens_details": prompt_tokens_details
+                }
+            }
+            return mock_response
+
+        monkeypatch.setattr(SeparatePDRouter, "forward_request", mock_forward_request)
+
+        pd_router = SeparatePDRouter(
+            req_info, CoordinatorConfig(),
+            scheduler=Scheduler(instance_provider=InstanceManager(CoordinatorConfig()), config=CoordinatorConfig()),
+            request_manager=_request_manager
+        )
+        
+        req_info.req_data["stream"] = False
+        response = await pd_router.handle_request()
+        
+        response_json = response.body.decode() if hasattr(response.body, 'decode') else response.body
+        response_data = json.loads(response_json)
+        
+        assert "usage" in response_data
+        assert "prompt_tokens_details" in response_data["usage"]
+        assert response_data["usage"]["prompt_tokens_details"] == prompt_tokens_details
+        
+        assert req_info.prompt_tokens_details == prompt_tokens_details
