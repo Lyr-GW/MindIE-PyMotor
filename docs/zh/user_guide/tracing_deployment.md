@@ -12,7 +12,7 @@ pyMotor开启tracing能力需修改env.json配置文件和user_config.json配置
 
 ### 配置env.json
 
-以[PyMotor快速开始](../user_guide/quick_start.md)中实例env.json为参考基线，适配打开tracing能力后的配置文件示例如下：
+以[pyMotor快速开始](./quick_start.md)中实例env.json为参考基线，适配打开tracing能力后的配置文件示例如下：
 
 ```json
 {

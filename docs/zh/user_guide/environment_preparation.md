@@ -18,7 +18,7 @@
 
 集群容器化部署依赖Kubernetes和MindCluster，具体部署场景请参考[表1 依赖列表](#table9819144513712)，Kubernetes组件详细介绍请参见[Kubernetes安装工具](https://kubernetes.io/zh-cn/docs/reference/setup-tools/)；MindCluster组件详细介绍请参见《MindCluster  集群调度用户指南》的“简介 \> [组件介绍](https://www.hiascend.com/document/detail/zh/mindcluster/730/clustersched/dlug/mxdlug_003.html)”章节。
 
-**表 2**  依赖列表<a name="table9819144513712"></a> 
+**表 2**  依赖列表<a name="table9819144513712"></a>
 
 |依赖包|软件说明|管理节点是否安装|计算节点是否安装|
 |--|--|--|--|
@@ -58,7 +58,7 @@
 
 1. 参考[阿里Kubernetes镜像官网](https://developer.aliyun.com/mirror/kubernetes?spm=a2c6h.13651102.0.0.560a1b11OvDRt7)首页进行安装Kubernetes的kubectl、kubeadm和kubelet工具。
      <br>参照阿里Kubernetes镜像官网中的“配置方法”，直接在服务器命令行中执行安装代码，可以修改安装代码以指定安装版本（例如：yum install -y **kubelet-1.23.0-00** **kubeadm-1.23.0-00** **kubectl-1.23.0-00**），以openEuler系统为例，整体安装命令示例如下。
-      
+
       ```bash
       cat <<EOF > /etc/yum.repos.d/kubernetes.repo
       [kubernetes]
@@ -107,7 +107,7 @@
     >```
     
 3. 执行以下命令清空系统网络代理环境变量。Kubernetes核心组件（kubeadm/kubelet）需直接访问API Server等服务，网络代理会拦截或篡改这类请求，可能导致Kubernetes服务不可用。
-    
+
     ```bash
     export -n http_proxy
     export -n https_proxy
@@ -120,8 +120,8 @@
     kubeadm init
     ```
 
-    **图 3**  Kubernetes集群初始化成功<a name="fig17764145015239"></a>  
-    
+    **图 3**  Kubernetes集群初始化成功<a name="fig17764145015239"></a>
+
     ![](../imgs/k8sinitializd_successfully_.png)
 
     然后执行[图3 Kubernetes集群初始化成功](#fig17764145015239)中的内容，如下所示：
@@ -144,7 +144,7 @@
 
 6. （可选）如出现coredns开头的服务出现非running状态，需要在k8s集群中加入网络协议框架服务，推荐使用calico框架（如果pod状态无问题可忽略本步骤）。
     1. 执行以下命令获取calico相关镜像（如果出现网络不通的问题，请重新设置网络代理环境变量）
-    
+
         ```bash
         docker pull calico/kube-controllers:v3.23.5
         docker pull calico/cni:v3.23.5
@@ -153,20 +153,20 @@
 
         >[!NOTE]说明
         >Kubernetes与calico的版本存在配套关系，请自行查询配套版本并下载使用。
-   
+
     2. 执行以下命令下载calico的yaml文件（此步骤执行完毕后需取消网络代理设置）。
 
         ```bash
         curl -k -O https://docs.projectcalico.org/v3.23/manifests/calico.yaml
         ```
-    
+
     3. 执行vim calico.yaml命令修改文件，找到"CALICO_IPV4POOL_IPIP"字段（在约4444行左右），在下方添加如下内容
-        
+
         ```bash
         - name: IP_AUTODETECTION_METHOD
         value: "interface=enp.*"
         ```
-    
+
         >[!NOTE]说明
         >该内容通过正则匹配的方式查找网卡，部分环境网卡名称存在差异，部署calico前推荐通过ifconfig查找所有服务器对应ip所在的网卡名称。如：预加入集群的部分环境存在将ip配置在虚拟网卡的情况，如下例子中网卡名称为virbr0，和其他服务器不一致，calico.yaml文件的配置需要涵盖所有节点的网卡名称，此时可以将该字段配置为"interface=enp.*|virbr0"
         >
@@ -181,7 +181,7 @@
         ![](../imgs/edit_calico.png)
     
     4. 启动calico
-        
+
         ```bash
         kubectl apply -f calico.yaml
         ```
@@ -264,7 +264,7 @@ kubeadm reset
 
     如节点主机名和集群中其他节点名称冲突，修改/etc/hostname文件更改节点的主机名。
 
-4. 在管理节点上使用以下命令kubectl get nodes -A查看节点信息，如[图6 新增节点](#fig1471911375514)所示，localhost.localdomain即为新增节点。
+4. 在管理节点上使用以下命令kubectl get nodes -A查看节点信息，如[图7 新增节点](#fig1471911375514)所示，localhost.localdomain即为新增节点。
 
     **图 6**  新增节点<a name="fig1471911375514"></a>  
     
@@ -277,14 +277,14 @@ kubeadm reset
     kubectl label nodes localhost.localdomain accelerator=huawei-Ascend910
     ```
 
-6. 在管理节点上使用以下命令查看为新增节点打上的"accelerator=huawei-Ascend910"标签，如[图7 accelerator=huawei-Ascend910标签](#fig4827123110205)所示，有"accelerator=huawei-Ascend910"则表示成功。
+6. 在管理节点上使用以下命令查看为新增节点打上的"accelerator=huawei-Ascend910"标签，如[图8 accelerator=huawei-Ascend910标签](#fig4827123110205)所示，有"accelerator=huawei-Ascend910"则表示成功。
 
     ```bash
     kubectl get nodes --show-labels
     ```
 
-    **图 7**  accelerator=huawei-Ascend910标签<a name="fig4827123110205"></a>  
-    
+    **图 8**  accelerator=huawei-Ascend910标签<a name="fig4827123110205"></a>
+
     ![](../imgs/tag910.png)
 
 ### MindCluster组件安装

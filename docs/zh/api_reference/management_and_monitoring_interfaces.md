@@ -131,7 +131,7 @@ curl -X GET "http://{CoordinatorIP}:{管理端口}/metrics"
 
 **响应示例**
 
-```Plain Text
+```text
 # HELP python_gc_objects_collected_total Objects collected during gc
 # TYPE python_gc_objects_collected_total counter
 python_gc_objects_collected_total{generation="0"} 136662.0

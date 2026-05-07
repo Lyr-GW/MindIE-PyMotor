@@ -38,7 +38,7 @@
   如集群中所有节点的带内管理平面网卡名不全相同，例如一部分节点为enp189s0f0，另一部分节点为enp125s0f0，则修改如下网卡名：
   
   ```yaml
-  - name: IP_AUTODETECTION_METHOD   
+  - name: IP_AUTODETECTION_METHOD
     value: interface=enp189s0f0,enp125s0f0
   ```
 
@@ -110,7 +110,7 @@ HCCL链接失败，查看P或者D节点的日志，出现如下报错：
 Linux seccomp 在拦截创建线程/进程相关的 syscall（如 `clone3`）。当使用 `seccompProfile.type: RuntimeDefault` 时，部分容器运行时的默认策略未放行 `clone3`，导致 glibc/pthread 创建线程失败。
 
 **解决方案**
-本仓库部署模板默认使用 `seccompProfile.type: Unconfined`，可避免该问题。若需更高安全等级或使用 RuntimeDefault，请参考[Pod 权限说明](../../../examples/features/pod_permission_guide/README.md)。
+本仓库部署模板默认使用 `seccompProfile.type: Unconfined`，可避免该问题。若需更高安全等级或使用 RuntimeDefault，请参考 [Pod 权限说明](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/examples/features/pod_permission_guide/README.md)。
 
 ## 执行 `show_log.sh` 后无日志或在终端立即报错退出
 
