@@ -1,0 +1,74 @@
+{
+  "name": "MindIE-PyMotor Dev Container",
+  "image": "swr.cn-north-4.myhuaweicloud.com/inference/ascend_mindie_ubuntu_x86:20260305_ubuntu24_3.0.0_cann8.5.1_torch2.9.0_py311",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace/MindIE-PyMotor,type=bind,consistency=cached",
+  "workspaceFolder": "/workspace/MindIE-PyMotor",
+  "remoteUser": "root",
+  "containerEnv": {
+    "PYTHONUNBUFFERED": "1",
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "TORCH_DEVICE_BACKEND_AUTOLOAD": "0",
+    "MAX_COMPILE_CORE_NUM": "2"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "eamodio.gitlens",
+        "mechatroner.rainbow-csv",
+        "editorconfig.editorconfig",
+        "streetsidesoftware.code-spell-checker",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml",
+        "ms-vscode.cpptools",
+        "ms-vscode.cpptools-extension-pack",
+        "twxs.cmake",
+        "ms-vscode.cmake-tools"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.linting.enabled": true,
+        "python.linting.pylintEnabled": false,
+        "python.linting.flake8Enabled": false,
+        "python.formatting.provider": "none",
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        },
+        "[cpp]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "ms-vscode.cpptools"
+        },
+        "[c]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "ms-vscode.cpptools"
+        },
+        "C_Cpp.intelliSenseEngine": "default",
+        "editor.formatOnSave": true,
+        "files.eol": "\n",
+        "files.trimTrailingWhitespace": true,
+        "files.insertFinalNewline": true,
+        "ruff.lint.enable": true,
+        "ruff.format.enable": true
+      }
+    }
+  },
+  "forwardPorts": [
+    8000,
+    8080,
+    1025,
+    1026
+  ],
+  "postCreateCommand": "apt-get update && apt-get install -y dos2unix && find /workspace/MindIE-PyMotor -name '*.sh' -exec dos2unix {} \\; && pip install --no-cache-dir -r /workspace/MindIE-PyMotor/requirements.txt && echo 'source /usr/local/Ascend/ascend-toolkit/set_env.sh' >> /root/.bashrc && source /usr/local/Ascend/ascend-toolkit/set_env.sh && pip install -e /workspace/MindIE-PyMotor",
+  "mounts": [
+    "source=MindIE-PyMotor-pip-cache,target=/root/.cache/pip,type=volume",
+    "source=${localEnv:USERPROFILE}/.ssh,target=/root/.ssh,type=bind,consistency=cached,readonly"
+  ],
+  "postStartCommand": ""
+}
