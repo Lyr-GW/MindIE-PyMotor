@@ -34,11 +34,12 @@ from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.router.strategies.base import BaseRouter
-from motor.common.resources.instance import PDRole
 from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
 from motor.coordinator.router.strategies.pd_separate import SeparatePDRouter
 from motor.coordinator.router.strategies.cdp_separate import SeparateCDPRouter
-from motor.coordinator.router.strategies.pd_dual_dispatch import SeparatePDDualDispatchRouter
+from motor.coordinator.router.strategies.pd_dual_dispatch import (
+    SeparatePDDualDispatchRouter,
+)
 from motor.common.http.security_utils import (
     sanitize_error_message,
     filter_sensitive_headers,
@@ -49,7 +50,7 @@ from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
 
-_ROUTER_MAP: dict[DeployMode, type['BaseRouter']] = {
+_ROUTER_MAP: dict[DeployMode, type["BaseRouter"]] = {
     DeployMode.CDP_SEPARATE: SeparateCDPRouter,
     DeployMode.PD_SEPARATE: SeparateCDPRouter,
     DeployMode.CPCD_SEPARATE: SeparatePDRouter,
@@ -133,18 +134,21 @@ async def handle_request(
     req_info = await __create_request_info(raw_request, request_manager)
 
     if TracerManager().contains_trace_headers(raw_request.headers):
-        req_info.trace_obj.parent_context = TracerManager().extract_trace_context(raw_request.headers)
+        req_info.trace_obj.parent_context = TracerManager().extract_trace_context(
+            raw_request.headers
+        )
 
     if scheduler is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Scheduler (SchedulingFacade) is required and must be injected by the server"
+            detail="Scheduler (SchedulingFacade) is required and must be injected by the server",
         )
 
     config_mode = config.scheduler_config.deploy_mode
     readiness = await scheduler.has_required_instances()
     if (
-        config_mode in (
+        config_mode
+        in (
             DeployMode.PD_SEPARATE,
             DeployMode.CDP_SEPARATE,
             DeployMode.CPCD_SEPARATE,
@@ -160,24 +164,25 @@ async def handle_request(
     if not router_impl_class:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unknown deploy mode: {deploy_mode}"
+            detail=f"Unknown deploy mode: {deploy_mode}",
         )
 
     router_impl = router_impl_class(
-        req_info, config, scheduler=scheduler,
-        request_manager=request_manager
+        req_info, config, scheduler=scheduler, request_manager=request_manager
     )
 
     try:
         return await router_impl.handle_request()
     except Exception as e:
-        logger.error(f"Error occurred in proxy server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
+        logger.error(
+            f"Error occurred in proxy server endpoint: {req_info.api}, error: {str(e)}",
+            exc_info=True,
+        )
         if isinstance(e, HTTPException):
             raise e
         safe_error_msg = sanitize_error_message(str(e))
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=safe_error_msg
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=safe_error_msg
         ) from e
 
 
@@ -201,34 +206,43 @@ async def handle_metaserver_request(
     Raises:
         HTTPException: If request body is empty or request fail
     """
-    req_info = await __create_request_info(raw_request, request_manager, metaserver_request=True)
+    req_info = await __create_request_info(
+        raw_request, request_manager, metaserver_request=True
+    )
 
     deploy_mode = config.scheduler_config.deploy_mode
-    if not deploy_mode or deploy_mode not in [DeployMode.CDP_SEPARATE, DeployMode.PD_SEPARATE, \
-            DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER]:
+    if not deploy_mode or deploy_mode not in [
+        DeployMode.CDP_SEPARATE,
+        DeployMode.PD_SEPARATE,
+        DeployMode.PD_DISAGGREGATION_SINGLE_CONTAINER,
+    ]:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Unsupport deploy mode: {deploy_mode}"
+            detail=f"Unsupported deploy mode: {deploy_mode}",
         )
 
     if scheduler is None:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Scheduler (SchedulingFacade) is required and must be injected by the server"
+            detail="Scheduler (SchedulingFacade) is required and must be injected by the server",
         )
     try:
         return await SeparateCDPRouter(
-            req_info=req_info, config=config, scheduler=scheduler,
-            request_manager=request_manager
+            req_info=req_info,
+            config=config,
+            scheduler=scheduler,
+            request_manager=request_manager,
         ).handle_metaserver_request()
     except Exception as e:
-        logger.error(f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}", exc_info=True)
+        logger.error(
+            f"Error occurred in meta server endpoint: {req_info.api}, error: {str(e)}",
+            exc_info=True,
+        )
         if isinstance(e, HTTPException):
             raise e
         safe_error_msg = sanitize_error_message(str(e))
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=safe_error_msg
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=safe_error_msg
         ) from e
 
 
@@ -240,8 +254,7 @@ async def __create_request_info(
     request_body = await raw_request.body()
     if not request_body:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty request body"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Empty request body"
         )
 
     try:
@@ -249,14 +262,12 @@ async def __create_request_info(
     except Exception as e:
         logger.warning("JSON parse failed: %s", e)
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid JSON format"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON format"
         ) from e
 
     if not request_json:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty request json"
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Empty request json"
         )
     filtered_headers = filter_sensitive_headers(raw_request.headers)
     filtered_body = filter_sensitive_body(request_json)
@@ -269,7 +280,9 @@ async def __create_request_info(
     api = validate_and_sanitize_path(raw_request.url.path)
 
     req_data = request_json.copy()
-    req_data["_client_return_token_ids"] = bool(request_json.get("return_token_ids", False))
+    req_data["_client_return_token_ids"] = bool(
+        request_json.get("return_token_ids", False)
+    )
 
     return RequestInfo(
         req_id=req_id,

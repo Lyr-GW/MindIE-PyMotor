@@ -87,7 +87,7 @@ URL：`http(s)://{CoordinatorIP}:{推理端口}/v1/chat/completions`
 
 - 流式响应样例：
 
-  ```Plain Text
+  ```text
   data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1765856304,"model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
 
   data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1765856304,"model":"qwen3","choices":[{"index":0,"delta":{"content":"Hey there! "},"finish_reason":null}]}
@@ -219,7 +219,7 @@ URL：`http(s)://{CoordinatorIP}:{推理端口}/v1/completions`
 
 - 流式响应样例：
 
-  ```Plain Text
+  ```text
   data: {"id":"cmpl-xxx-0","object":"text_completion","created":1765856304,"model":"qwen3","choices":[{"index":0,"text":"Hey there! ","finish_reason":null}]}
 
   data: {"id":"cmpl-xxx-0","object":"text_completion","created":1765856304,"model":"qwen3","choices":[{"index":0,"text":"Lovely to hear from you—","finish_reason":null}]}

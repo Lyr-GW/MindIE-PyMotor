@@ -1,112 +1,100 @@
-# 手动扩缩容设计文档（MindIE PyMotor）
+# 实例级手动扩缩容设计说明（MindIE PyMotor）
 
-## 背景与目标
+本文档描述 **`examples/deployer/deploy.py` 在传入 `--update_instance_num` 时的行为**，以及与集群 ConfigMap、YAML 产物的对应关系。表述均来自仓库内上述脚本及其依赖模块的实现，不包含脚本未实现的保证。
 
-本文用于说明 MindIE PyMotor 的手动扩缩容设计与约束。
+## 1. 入口与前置校验
 
-目标：
+- **入口**：`deploy.py` 的 `main()` 在解析到 `--update_instance_num` 时调用 `handle_update_instance_num(user_config)`，随后 `return`，不会走全量 `deploy_services()`。
+- **通用前置**：在分支判断之前，`main()` 会执行 `validate_instance_nums(user_config)`（`lib/generator/engine.py`）。`motor_deploy_config` 中的 `p_instances_num`、`d_instances_num` 校验链条为：
+    - 字段缺失：内部调用的 `obtain_engine_instance_total`（`lib/utils.py`）抛 `KeyError`，文案 `p_instances_num is required in motor_deploy_config` / `d_instances_num is required ...`。
+    - 非整数：`obtain_engine_instance_total` 在 `int(...)` 失败时抛 `ValueError`，文案 `p_instances_num and d_instances_num must be integers`。
+    - 越界：`validate_instance_nums` 自身抛 `ValueError`，要求 `> INSTANCE_NUM_ZERO`（0）且 `<= INSTANCE_NUM_MAX`（16），常量定义在 `lib/constant.py`，文案形如 `p_instances_num must be greater than 0` / `must not exceed 16`。
 
-- 以**集群内 ConfigMap（motor-config）中的 user_config** 作为扩缩容基线（当前已部署配置）。
-- 仅允许 `p_instances_num/d_instances_num` 在扩缩容场景中发生变更。
-- 通过 `python3 deploy.py --update_instance_num` 触发扩缩容。
-- 扩缩容仅作用于 engine；已拉起的 controller/coordinator 及已有 engine 实例不会被重新 apply。
+## 2. 基线：集群 ConfigMap `motor-config`
 
-## 设计概述
+- **读取**：`handle_update_instance_num` 调用 `get_baseline_config_from_configmap(deploy_config["job_id"])`（`lib/generator/k8s_utils.py`）。
+- **命令**：`kubectl get configmap motor-config -n <job_id> -o json`（`MOTOR_CONFIG_CONFIGMAP_NAME` 为 `motor-config`，`job_id` 来自当前输入 `user_config` 的 `motor_deploy_config.job_id`，用作 namespace）。
+- **解析**：从返回 JSON 的 `data["user_config.json"]` 取出字符串，再 `json.loads` 为 dict；若命令失败、JSON 非法、缺 `data` 或缺 `user_config.json` 键，函数返回 `None`。
+- **缺失时**：若基线为 `None`，抛出 `FileNotFoundError`：`ConfigMap motor-config not found. Please deploy once before scaling.`
 
-### 基线配置策略
+## 3. 仅允许修改实例数：`validate_only_instance_changed`
 
-- **基线来源**：从集群中对应 namespace 的 ConfigMap `motor-config` 的 `user_config.json` 键读取，即当前环境已部署的配置。
-- 首次 `deploy` 时无基线，全量 apply 后 ConfigMap 由当前输入的 `user_config.json` 路径写入。
-- 扩缩容时，从 ConfigMap 取基线，与当前输入的 user_config 对比：若除实例数外有差异则拒绝执行；若仅实例数变化则执行，ConfigMap 使用当前输入的 user_config 文件路径刷新。
+- **实现**：`lib/config_validator.py` 的 `validate_only_instance_changed(current_config, baseline_config)`。
+- **逻辑**：对两份配置各做一次深拷贝，并从 `motor_deploy_config` 中移除 `p_instances_num` 与 `d_instances_num` 后比较整份 dict；若不等则抛出 `ValueError`：`user_config changes detected beyond instance numbers. Only p_instances_num/d_instances_num can be modified for scaling.`
 
-### 扩缩容计算与执行
+## 4. 部署模式以集群基线为准
 
-- 基线实例数取自集群 ConfigMap 中 user_config 的 `motor_deploy_config`。
-- 目标实例数取自当前输入的 `user_config.json` 的 `motor_deploy_config`。
-- 按**目标实例数**生成引擎 YAML（仅生成 0 ～ 目标-1 的 index）。
-- **扩容**：对新增 index 的 YAML 执行 `kubectl apply -f`，路径来自本次生成的 `g_generate_yaml_list`。
-- **缩容**：从 **index 大往小** 依次对多余 index 执行 `kubectl delete -f`，删除成功后从 output 目录删除对应 YAML 文件。
-- 已存在的 engine 实例（0 ～ 基线-1）不会被重新 apply，避免误重拉。
+- **取值**：`deploy_mode_arg = baseline_deploy.get("deploy_mode", DEPLOY_MODE_INFER_SERVICE_SET)`（`lib/constant.py`：`DEPLOY_MODE_INFER_SERVICE_SET` 为 `"infer_service_set"`）。
+- **校验**：`validate_deploy_mode_value(deploy_mode_arg)` 要求该值属于 `VALID_DEPLOY_MODES`：`infer_service_set`、`multi_deployment`、`single_container`；非法则 `ValueError`，文案含 `Baseline config has invalid deploy_mode`。
 
-### ConfigMap 更新策略
+后续 YAML 生成与 `kubectl` 行为按 `deploy_mode_arg` 分支（见下节）。**注意**：扩缩容分支里读取的是基线里的 `deploy_mode`，不是仅凭当前本地 `user_config` 决定。
 
-- 扩缩容时刷新 ConfigMap 使用当前输入的 user_config 文件路径（`--user_config_path`）：从 CM 取基线 → 校验仅实例数变更 → 用当前输入文件刷新 ConfigMap → 执行 engine apply/delete。
+## 5. 刷新 ConfigMap 与 `kubectl` 总入口
 
-## 关键流程
+- **统一行为**：`handle_update_instance_num` 末尾调用 `exec_all_kubectl_multi(deploy_config, baseline_config, deploy_mode_arg)`（`lib/generator/k8s_utils.py`）。
+- **ConfigMap**：`exec_all_kubectl_multi` **首先**调用 `create_motor_config_configmap(job_id)`：用当前进程内已设置的 `g_user_config_path`（由 `main()` 中 `set_user_config_path(user_config_path)` 设置，对应本次命令行解析出的 `user_config.json` 路径）与 `startup/`、`probe/` 等文件组装 `kubectl create configmap motor-config ... --from-file=user_config.json=<路径> -n <job_id>`，经 `apply_configmap` 以 client dry-run 管道到 `kubectl apply`。
+- **因此**：每次成功的扩缩容执行都会用**本次输入的** `user_config.json` 文件内容更新集群中的 `motor-config`（与是否走 engine 逐文件扩缩无关）。
 
-### 1. 首次部署
+## 6. 两种部署模式下的扩缩容行为
 
-1. 读取当前输入的 `user_config.json`。
-2. 生成 controller/coordinator/engine 的 YAML。
-3. 执行全量 `kubectl apply`（含 create_motor_config_configmap，使用当前 user_config 文件路径）。
-4. 基线即集群内 ConfigMap 内容。
+### 6.1 `infer_service_set`
 
-#### 流程图
+- **YAML 路径**：`get_deploy_paths()` 将 InferServiceSet 输出定为 `os.path.join(OUTPUT_ROOT_PATH, "infer_service.yaml")`，其中 `OUTPUT_ROOT_PATH` 为 `./output_yamls`（`lib/constant.py`），路径相对于在 `examples/deployer` 下执行脚本时的当前工作目录。
+- **若 `./output_yamls/infer_service.yaml` 已存在**：调用 `update_infer_service_replicas_only(infer_output, deploy_config)`（`lib/generator/infer_service.py`）：加载该 YAML，定位 `kind: InferServiceSet` 文档，将角色名为 `prefill` / `decode` 的 role 的顶层 `replicas` 分别设为当前 `deploy_config` 的 `p_instances_num`、`d_instances_num`（由 `obtain_engine_instance_total` 读出），写回同一文件，并把该路径追加到 `g_generate_yaml_list`。
+- **若不存在**：先 `init_service_domain_name(paths, deploy_config)` 初始化服务域名；再校验模板文件 `infer_service_input_yaml`（即 `./yaml_template/infer_service_template.yaml`）是否存在，**不存在则抛 `FileNotFoundError`：`InferServiceSet template yaml not found: <path>.`**；通过后调用 `init_infer_service_domain_name(infer_input, deploy_config)` 与 `generate_yaml_infer_service_set(infer_input, infer_output, user_config)` 全量生成该文件并加入 `g_generate_yaml_list`（与首次生成 InferServiceSet 流程一致）。
+- **`kubectl`**：`exec_all_kubectl_multi` 在 `baseline_config is not None` 且 `deploy_mode_arg == infer_service_set` 时，对 `g_generate_yaml_list` 中**每一个**文件执行 `kubectl apply -f <file> -n <job_id>`。扩缩容场景下列表通常仅含 `infer_service.yaml` 一项。
+
+### 6.2 `multi_deployment`（及非 `infer_service_set` 时进入的 else 分支）
+
+- **YAML 生成**：调用 `generate_yaml_engine(engine_input_yaml, engine_output_yaml, user_config)`（`lib/generator/engine.py`）。`engine_output_yaml` 为 `os.path.join(OUTPUT_ROOT_PATH, g_engine_base_name)`，对每个 `p_index in range(p_total)`、`d_index in range(d_total)` 写出 `{engine_output_yaml}_p{index}.yaml` / `_d{index}.yaml`，并全部追加到 `g_generate_yaml_list`。`g_engine_base_name` 由 `update_engine_base_name` 按引擎类型设置（如 vLLM 为 `vllm`，见 `SERVER_BASE_NAME_MAP` 等）。
+- **`kubectl`**：`exec_all_kubectl_multi` 在存在 `baseline_config` 且模式非 `infer_service_set` 时，调用 `elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, OUTPUT_ROOT_PATH)`（实现位于 **`lib/generator/k8s_utils.py`**，与 `engine.py` 中同名函数逻辑一致，实际执行以 `k8s_utils` 为准）。
+- **缩容**：对 P 或 D，若目标实例数 `<` 基线，从 `index = base-1` 递减到 `total`，对文件 `{OUTPUT_ROOT_PATH}/{g_engine_base_name}_{p|d}{index}.yaml` 执行 `kubectl delete -f`；若文件仍存在则 `os.remove`。
+- **扩容**：若目标 `>` 基线，对 `index in range(base, total)` 的上述路径执行 `kubectl apply -f`。
+- **顺序**：先 `scale_engine_by_type(..., NODE_TYPE_P)`，再 `scale_engine_by_type(..., NODE_TYPE_D)`。
+
+**说明**：`handle_update_instance_num` 在 `deploy_mode` 非 `infer_service_set` 时**不会**对 controller/coordinator 等调用 `generate_yaml_*`；仅生成 engine 多文件并由 `elastic_distributed_engine_deploy` 做增量 apply/delete。与全量部署路径不同。
+
+## 7. 与 `--update_config` 的差异（便于对照）
+
+- **`handle_update_config`**（`--update_config`）：同样读取 `motor-config` 基线；若当前 `p_instances_num`/`d_instances_num` 与基线不一致，抛出 `ValueError`，提示使用 `--update_instance_num` 做实例扩缩；否则校验 `deploy_mode` 一致及白名单字段，再 `create_motor_config_configmap`，**不**执行 `elastic_distributed_engine_deploy` 或 InferServiceSet 的 apply 列表扩缩。
+- **基线缺失文案**：`--update_config` 下为 `ConfigMap motor-config not found or has no user_config in cluster. Please deploy once before updating configmap.`
+
+## 8. 关键符号与辅助函数（源码位置）
+
+| 名称 | 文件 |
+|------|------|
+| `handle_update_instance_num` | `examples/deployer/deploy.py` |
+| `get_baseline_config_from_configmap`、`run_cmd_get_output`、`exec_all_kubectl_multi`、`create_motor_config_configmap`、`elastic_distributed_engine_deploy`、`scale_engine_by_type` | `examples/deployer/lib/generator/k8s_utils.py` |
+| `validate_only_instance_changed`、`strip_instance_nums`、`validate_deploy_mode_value` | `examples/deployer/lib/config_validator.py` |
+| `generate_yaml_engine`、`validate_instance_nums`、`update_engine_base_name` | `examples/deployer/lib/generator/engine.py` |
+| `generate_yaml_infer_service_set`、`update_infer_service_replicas_only` | `examples/deployer/lib/generator/infer_service.py` |
+| `obtain_engine_instance_total` | `examples/deployer/lib/utils.py` |
+| `MOTOR_CONFIG_CONFIGMAP_NAME`、`OUTPUT_ROOT_PATH`、`INSTANCE_NUM_MAX` 等 | `examples/deployer/lib/constant.py` |
+
+## 9. 流程图（与代码分支一致）
+
+### 9.1 `--update_instance_num` 主流程
 
 ```mermaid
 flowchart TD
-    A[开始] --> B[读取 user_config.json]
-    B --> C[生成 controller/coordinator/engine YAML]
-    C --> D[全量 kubectl apply 含 ConfigMap]
-    D --> E[结束]
-```
-
-### 2. 扩缩容（--update_instance_num）
-
-1. 从集群 ConfigMap 读取基线；若不存在则报错。
-2. 校验仅实例数变更，否则报错。
-3. 按目标实例数生成引擎 YAML。
-4. 用当前输入 user_config 文件刷新 ConfigMap。
-5. 根据基线实例数与目标实例数差异执行扩缩容：扩容时对新增实例执行 apply；缩容时从 index 大到小依次删除实例及其在 output 下的对应 YAML 文件。
-
-#### 流程图
-
-```mermaid
-flowchart TD
-    A[开始] --> B[从 ConfigMap 取基线]
-    B --> D{仅实例数变化?}
-    D -->|否| E[报错并退出]
-    D -->|是| F[按目标实例数生成引擎 YAML]
-    F --> G[用输入文件刷新 ConfigMap]
-    G --> H{目标与基线比较}
-    H -->|目标>基线| I[扩容: apply 新增实例]
-    H -->|目标<基线| J[缩容: 从高 index 起删除实例及 YAML]
-    H -->|目标=基线| K[结束]
-    I --> K
+    A[main: validate_instance_nums] --> B[handle_update_instance_num]
+    B --> C[get_baseline_config_from_configmap]
+    C -->|None| E[FileNotFoundError: motor-config not found]
+    C -->|dict| D[validate_only_instance_changed]
+    D -->|失败| F[ValueError: beyond instance numbers]
+    D -->|通过| G[deploy_mode 来自基线 + validate_deploy_mode_value]
+    G --> H{deploy_mode == infer_service_set?}
+    H -->|是| I[更新或生成 infer_service.yaml]
+    H -->|否| J[generate_yaml_engine]
+    I --> K[exec_all_kubectl_multi]
     J --> K
+    K --> L[create_motor_config_configmap 后 apply 或 elastic_distributed_engine_deploy]
 ```
 
-## 约束与注意事项
+## 10. 约束小结（均可在上述函数中逐项核对）
 
-- 集群内需存在 ConfigMap `motor-config` 且含 `user_config.json` 才能进行扩缩容（即至少成功部署过一次）。
-- 扩缩容仅支持改动 `p_instances_num/d_instances_num`。
-- 扩缩容仅作用于 engine；controller/coordinator 不在扩缩容路径中更新。
-- 缩容从高 index 开始删除，且会删除 output 下对应 YAML 文件。
-
-## 新增代码结构与职责
-
-- `get_baseline_config_from_configmap(job_id)`：从集群 ConfigMap 读取当前已部署 user_config。
-- `run_cmd_get_output`：执行命令并返回 stdout，用于 kubectl get configmap。
-- `validate_only_instance_changed`：除实例数外是否变更的校验。
-- `elastic_distributed_engine_deploy` / `scale_engine_by_type`：按类型执行 apply/delete 及缩容时删除 YAML 文件。
-- `handle_update_instance_num`：扩缩容入口；从 CM 取基线、校验、刷新 CM、执行扩缩容。
-
-## 场景介绍
-
-### 环境与前置
-
-- 准备可用的 `user_config.json`（含合法 `p_instances_num`、`d_instances_num` 等）。
-- 确保集群可访问，`kubectl` 已配置且对目标 namespace 有权限。
-
-### 应用场景
-
-| 场景 | 步骤 | 预期 |
-|------|------|------|
-| 首次部署 | 执行 `python3 deploy.py` | 成功；生成 `output/deployment/` 下 YAML；集群中 ConfigMap motor-config 存在。 |
-| 扩容 | 将 `user_config.json` 中 P 或 D 实例数调大，执行 `python3 deploy.py --update_instance_num` | 成功；仅新增 index 的 engine 被 apply；已有 engine 未重拉；ConfigMap 更新为当前输入；`output/deployment/` 下新增对应 YAML；新增实例的pod增加。 |
-| 缩容 | 将 P 或 D 实例数调小，执行 `python3 deploy.py --update_instance_num` | 成功；从高 index 起对应 engine 被 delete；`output/deployment/` 下对应 YAML 文件被删除；同时 ConfigMap motor-config 中内容被刷新；被删除实例的pod减少。 |
-| 无基线时扩缩容 | 未部署过或删掉对应 namespace 的 motor-config 后执行 `python3 deploy.py --update_instance_num` | 报错：ConfigMap motor-config not found。 |
-| 扩缩容时改其他配置 | 在修改实例数同时修改其他字段（如镜像等），执行 `python3 deploy.py --update_instance_num` | 报错：user_config changes detected beyond instance numbers。 |
-| 实例数不合法（≤0 或 >16） | 将 `p_instances_num` 或 `d_instances_num` 设为 ≤0 或 >16，执行 `python3 deploy.py` 或 `python3 deploy.py --update_instance_num` | 报错：对应字段 must be greater than 0 或 must not exceed 16。 |
-| 扩容后新实例参与处理请求 | 完成扩容后，以一定并发量持续发送推理请求（并发量需足以让负载均衡将部分请求调度到新实例） | 通过监控或日志可确认新拉起的实例也在处理请求，流量被多实例分担。 |
-| 扩缩容过程中服务可用 | 执行 `python3 deploy.py --update_instance_num`（扩容或缩容），curl推理请求 | 请求可以被正常处理 |
+1. 扩缩容前集群中需已有含 `user_config.json` 的 `motor-config`（否则 `get_baseline_config_from_configmap` 返回 `None` 并报错）。
+2. 除 `motor_deploy_config.p_instances_num` / `d_instances_num` 外，整份 `user_config` 与基线须一致（`validate_only_instance_changed`）。
+3. 实例数合法范围由 `validate_instance_nums` 与常量 `INSTANCE_NUM_ZERO`/`INSTANCE_NUM_MAX` 定义。
+4. 每次 `exec_all_kubectl_multi` 都会刷新 `motor-config` 为当前命令使用的 `user_config.json` 文件内容。
+5. 多 Deployment 模式下 engine 产物与扩缩容操作文件位于 **`./output_yamls/`** 下，文件名形如 `{engine_base_name}_p0.yaml`；InferServiceSet 模式下主要产物为 **`./output_yamls/infer_service.yaml`**。
