@@ -15,6 +15,16 @@ spec:
       labels:
         app: mindie-motor-coordinator
     spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - mindie-motor-coordinator
+              topologyKey: kubernetes.io/hostname
       terminationGracePeriodSeconds: 0
       automountServiceAccountToken: false
       securityContext:
