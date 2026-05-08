@@ -12,16 +12,14 @@
 """Tests for KvCacheAffinity"""
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
-import sys
-import os
+from unittest.mock import Mock, patch
+import json
+import pytest
+from copy import deepcopy
 
 from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy, TokenizerManager
-from motor.common.resources.instance import Instance, PDRole
-from motor.common.resources.endpoint import Endpoint
-from motor.coordinator.models.request import RequestInfo
-from motor.coordinator.api_client.conductor_api_client import ConductorApiClient, TENANT_ID
-from motor.config.coordinator import CoordinatorConfig
+from motor.coordinator.api_client.conductor_api_client import  TENANT_ID
+from motor.coordinator.scheduler.policy.utils import preprocess_input, exchange_arguments, exchange_tool_content, exchange_tools
 
 
 class TestKvCacheAffinityPolicy(unittest.TestCase):
@@ -368,3 +366,361 @@ class TestTokenizerManagerInitialize(unittest.TestCase):
         
         # Verify that the instances are the same.
         self.assertIs(instance1, instance2)
+
+
+class TestExchangeArguments:
+    """Test exchange_arguments function"""
+    
+    def test_valid_tool_call_arguments_string(self):
+        """Test: Valid tool call parameter string converted to JSON object"""
+        message = {
+            "tool_calls": [
+                {
+                    "function": {
+                        "arguments": '{"city": "Beijing", "temperature": 25}'
+                    }
+                }
+            ]
+        }
+        exchange_arguments(message)
+        
+        assert isinstance(message["tool_calls"][0]["function"]["arguments"], dict)
+        assert message["tool_calls"][0]["function"]["arguments"]["city"] == "Beijing"
+        assert message["tool_calls"][0]["function"]["arguments"]["temperature"] == 25
+    
+    def test_no_tool_calls_key(self):
+        """Test: message not have tool_calls key"""
+        message = {"role": "user", "content": "Hello"}
+        original = deepcopy(message)
+        exchange_arguments(message)
+        assert message == original
+    
+    def test_tool_calls_missing_function(self):
+        """Test: tool_calls not have function key"""
+        message = {
+            "tool_calls": [
+                {"id": "call_123", "type": "function"}
+            ]
+        }
+        original = deepcopy(message)
+        exchange_arguments(message)
+        assert message == original
+    
+    def test_arguments_already_dict(self):
+        """Test: arguments is dict"""
+        message = {
+            "tool_calls": [
+                {
+                    "function": {
+                        "arguments": {"city": "Shanghai"}
+                    }
+                }
+            ]
+        }
+        original = deepcopy(message)
+        exchange_arguments(message)
+        assert message["tool_calls"][0]["function"]["arguments"] == {"city": "Shanghai"}
+    
+    def test_invalid_json_string(self):
+        """Test: invalid json string"""
+        message = {
+            "tool_calls": [
+                {
+                    "function": {
+                        "arguments": '{"city": "Beijing", invalid json}'
+                    }
+                }
+            ]
+        }
+        with pytest.raises(json.JSONDecodeError):
+            exchange_arguments(message)
+    
+    def test_multiple_tool_calls(self):
+        """Test: multiple tool calls"""
+        message = {
+            "tool_calls": [
+                {"function": {"arguments": '{"tool": "tool1", "value": 1}'}},
+                {"function": {"arguments": '{"tool": "tool2", "value": 2}'}}
+            ]
+        }
+        exchange_arguments(message)
+        
+        for i, tool in enumerate(message["tool_calls"]):
+            assert isinstance(tool["function"]["arguments"], dict)
+            assert tool["function"]["arguments"]["tool"] == f"tool{i+1}"
+            assert tool["function"]["arguments"]["value"] == i+1
+
+
+class TestExchangeToolContent:
+    """Test exchange_tool_content function"""
+    
+    def test_tool_role_with_string_content(self):
+        """Test: role is tool, content is str"""
+        message = {
+            "role": "tool",
+            "content": "Tool execution result"
+        }
+        exchange_tool_content(message)
+        
+        expected = "{'type': 'text', 'text': 'Tool execution result'}"
+        assert message["content"] == expected
+    
+    def test_tool_role_with_dict_content(self):
+        """Test: role is tool, content is dict"""
+        message = {
+            "role": "tool",
+            "content": {"type": "image", "data": "base64data"}
+        }
+        original = deepcopy(message)
+        exchange_tool_content(message)
+        assert message["content"] == original["content"]
+    
+    def test_no_role_key(self):
+        """Test: message not haverolekey"""
+        message = {"content": "Some content"}
+        original = deepcopy(message)
+        exchange_tool_content(message)
+        assert message == original
+    
+    def test_role_not_tool(self):
+        """Test: role is not tool"""
+        message = {
+            "role": "user",
+            "content": "User message"
+        }
+        original = deepcopy(message)
+        exchange_tool_content(message)
+        assert message == original
+    
+    def test_no_content_key(self):
+        """Test: message not havecontentkey"""
+        message = {"role": "tool", "tool_call_id": "call_123"}
+        original = deepcopy(message)
+        exchange_tool_content(message)
+        assert message == original
+    
+    def test_empty_string_content(self):
+        """Test: content is "" """
+        message = {
+            "role": "tool",
+            "content": ""
+        }
+        exchange_tool_content(message)
+        expected = "{'type': 'text', 'text': ''}"
+        assert message["content"] == expected
+
+
+class TestExchangeTools:
+    """Test exchange_tools function"""
+    
+    def test_sort_tool_fields_by_priority(self):
+        """Test: Sort tool fields by priority"""
+        tool = {
+            "function": {
+                "parameters": {"type": "object"},
+                "description": "Test tool description",
+                "name": "test_tool"
+            }
+        }
+        exchange_tools(tool)
+        
+        function_keys = list(tool["function"].keys())
+        assert function_keys == ["name", "description", "parameters"]
+    
+    def test_partial_fields(self):
+        """Test: Only some fields"""
+        tool = {
+            "function": {
+                "parameters": {"type": "object"},
+                "name": "partial_tool"
+            }
+        }
+        exchange_tools(tool)
+        
+        function_keys = list(tool["function"].keys())
+        assert function_keys == ["name", "parameters"]
+    
+    def test_no_function_key(self):
+        """Test: tool not have function key"""
+        tool = {"type": "custom", "id": "tool_123"}
+        original = deepcopy(tool)
+        exchange_tools(tool)
+        assert tool == original
+    
+    def test_unknown_fields(self):
+        """Test: Case with unknown fields"""
+        tool = {
+            "function": {
+                "name": "test",
+                "custom_field": "value",
+                "description": "desc",
+                "another_field": 123
+            }
+        }
+        exchange_tools(tool)
+        
+        function_keys = list(tool["function"].keys())
+
+        assert function_keys[0] == "name"
+        assert function_keys[1] == "description"
+    
+    def test_all_priority_fields(self):
+        """Test: Includes all priority fields"""
+        tool = {
+            "function": {
+                "extra": "extra_value",
+                "name": "test",
+                "description": "desc",
+                "parameters": {"type": "object"}
+            }
+        }
+        exchange_tools(tool)
+        
+        function_keys = list(tool["function"].keys())
+        assert function_keys[:3] == ["name", "description", "parameters"]
+
+
+class TestPreprocessInput:
+    """Test preprocess_input function"""
+    
+    def test_basic_message_processing(self):
+        """Test: basic message processing"""
+        messages = [
+            {"role": "user", "content": "What's the weather?"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "arguments": '{"city": "Beijing"}'
+                        }
+                    }
+                ]
+            },
+            {
+                "role": "tool",
+                "content": "Weather data"
+            }
+        ]
+        
+        processed_messages, processed_tools = preprocess_input(messages)
+        
+        # test tool_calls arguments exchange
+        assert isinstance(processed_messages[1]["tool_calls"][0]["function"]["arguments"], dict)
+        # test tool role content exchange
+        assert processed_messages[2]["content"] == "{'type': 'text', 'text': 'Weather data'}"
+        assert processed_tools is None
+    
+    def test_with_tools(self):
+        "Test: List of included tools"
+        messages = [{"role": "user", "content": "Call a tool"}]
+        tools = [
+            {
+                "function": {
+                    "parameters": {"type": "object"},
+                    "description": "Test tool",
+                    "name": "test_tool"
+                }
+            }
+        ]
+        
+        processed_messages, processed_tools = preprocess_input(messages, tools)
+        
+        assert processed_tools is not None
+        assert list(processed_tools[0]["function"].keys()) == ["name", "description", "parameters"]
+    
+    def test_deep_copy_messages(self):
+        """Test: Original message will not be modified"""
+        original_messages = [
+            {"role": "user", "content": "Hello"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"arguments": '{"key": "value"}'}}
+                ]
+            }
+        ]
+        
+        processed_messages, _ = preprocess_input(original_messages)
+        
+        assert isinstance(original_messages[1]["tool_calls"][0]["function"]["arguments"], str)
+        assert isinstance(processed_messages[1]["tool_calls"][0]["function"]["arguments"], dict)
+    
+    def test_deep_copy_tools(self):
+        """Test: The original tool list will not be modified"""
+        original_tools = [
+            {
+                "function": {
+                    "parameters": {"type": "object"},
+                    "description": "desc",
+                    "name": "tool"
+                }
+            }
+        ]
+        
+        _, processed_tools = preprocess_input([{"role": "user", "content": "hi"}], original_tools)
+        
+        original_keys = list(original_tools[0]["function"].keys())
+        assert original_keys == ["parameters", "description", "name"]
+        
+        processed_keys = list(processed_tools[0]["function"].keys())
+        assert processed_keys == ["name", "description", "parameters"]
+    
+    def test_empty_messages(self):
+        """Test: Empty message list"""
+        messages = []
+        processed_messages, processed_tools = preprocess_input(messages)
+        
+        assert processed_messages == []
+        assert processed_tools is None
+    
+    def test_none_tools(self):
+        """Test: tools is None"""
+        messages = [{"role": "user", "content": "test"}]
+        processed_messages, processed_tools = preprocess_input(messages, None)
+        
+        assert processed_messages == messages
+        assert processed_tools is None
+    
+    def test_empty_tools_list(self):
+        """Test: Empty tools list"""
+        messages = [{"role": "user", "content": "test"}]
+        processed_messages, processed_tools = preprocess_input(messages, [])
+        
+        assert processed_messages == messages
+        assert processed_tools == None
+    
+    def test_complex_scenario(self):
+        """Test: Complex Scenario - Multiple messages and multiple tools"""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant"},
+            {"role": "user", "content": "Get weather and time"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"function": {"arguments": '{"city": "Beijing"}'}},
+                    {"function": {"arguments": '{"timezone": "UTC"}'}}
+                ]
+            },
+            {"role": "tool", "content": "Weather: 25°C"},
+            {"role": "tool", "content": "Time: 14:00"}
+        ]
+        
+        tools = [
+            {"function": {"parameters": {}, "description": "Weather tool", "name": "get_weather"}},
+            {"function": {"parameters": {}, "description": "Time tool", "name": "get_time"}}
+        ]
+        
+        processed_messages, processed_tools = preprocess_input(messages, tools)
+        
+        # test message processe
+        for tool_call in processed_messages[2]["tool_calls"]:
+            assert isinstance(tool_call["function"]["arguments"], dict)
+        
+        for msg in processed_messages[3:]:
+            if msg["role"] == "tool":
+                assert "type" in msg["content"] and "text" in msg["content"]
+        
+        # test tool processe
+        for tool in processed_tools:
+            assert list(tool["function"].keys())[0] == "name"
