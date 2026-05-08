@@ -50,6 +50,16 @@ spec:
         app: mindie-motor-controller
         deploy-name: mindie-motor-controller
     spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - mindie-motor-controller
+              topologyKey: kubernetes.io/hostname
       serviceAccountName: mindie-motor-controller
       terminationGracePeriodSeconds: 0
       securityContext:
