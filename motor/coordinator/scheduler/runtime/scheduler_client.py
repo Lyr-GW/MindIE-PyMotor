@@ -12,6 +12,7 @@
 """Async Scheduler client (zmq.asyncio, works with AsyncSchedulerServer)."""
 
 import asyncio
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass
@@ -37,6 +38,17 @@ from motor.coordinator.domain.workload_calculator import calculate_demand_worklo
 from motor.coordinator.models.request import RequestInfo
 
 logger = get_logger(__name__)
+
+# Sampling ratio for tie-break debug logs (~1%)
+_TIE_BREAK_LOG_SAMPLE_RATE = 100
+_SCHEDULER_TYPE_ROUND_ROBIN = "round_robin"
+_SELECTION_MODE_SCHEDULER_SELECT = "scheduler_select"
+_SELECTION_MODE_WORKER_SELECT = "worker_select"
+_SELECTION_MODE_GRAY = "gray"
+
+
+def _should_log_tie_break_sample(req_id: str) -> bool:
+    return bool(req_id) and hash(req_id) % _TIE_BREAK_LOG_SAMPLE_RATE == 0
 
 # Callback signature: receives active endpoint list [(ip, port), ...], returns None
 OnInstanceRefreshedCallback = Callable[[list[tuple[str, str]]], Awaitable[None]]
@@ -461,6 +473,9 @@ class SchedulerClientConfig:
     tls_config: Any | None = None
     deploy_mode: Any | None = None
     on_instance_refreshed: OnInstanceRefreshedCallback | None = None
+    selection_mode: str = "scheduler_select"
+    scheduler_select_ratio: int = 0
+    scheduler_select_salt: str = ""
 
 
 class AsyncSchedulerClient:
@@ -483,10 +498,15 @@ class AsyncSchedulerClient:
         self._cache = _SchedulerInstanceCache()
         self._instance_rr_counters: dict[PDRole, int] = {}
         self._endpoint_rr_counters: dict[int, int] = {}
+        self._lb_instance_tie_counters: dict[PDRole, int] = {}
+        self._lb_endpoint_tie_counters: dict[int, int] = {}
         self._scheduler_type: str = config.scheduler_type or "round_robin"
         self._workload_reader = None
         self._last_instance_version: int | None = None
         self._on_instance_refreshed = config.on_instance_refreshed
+        self._selection_mode = (config.selection_mode or "scheduler_select").lower()
+        self._scheduler_select_ratio = max(0, min(100, int(config.scheduler_select_ratio or 0)))
+        self._scheduler_select_salt = config.scheduler_select_salt or ""
 
         instance_pub = (config.instance_pub_address or "").strip()
         self._push_subscriber = _InstancePushSubscriber(
@@ -496,6 +516,13 @@ class AsyncSchedulerClient:
     @property
     def connected(self) -> bool:
         return self._transport.connected
+    
+    @staticmethod
+    def _stable_pick_by_req_id(req_id: str, size: int) -> int:
+        if size <= 0:
+            return 0
+        digest = hashlib.blake2b(req_id.encode("utf-8"), digest_size=8).digest()
+        return int.from_bytes(digest, "little") % size
 
     async def connect(self) -> bool:
         success = await self._transport.connect()
@@ -604,6 +631,40 @@ class AsyncSchedulerClient:
                                     )
                 else:
                     self._last_instance_version = current_version
+
+        mode = self._resolve_selection_mode(req_info.req_id)
+        if _should_log_tie_break_sample(req_info.req_id):
+            logger.info(
+                "select_and_allocate mode configured=%s effective=%s req_id=%s role=%s",
+                self._selection_mode,
+                mode,
+                req_info.req_id,
+                role_str,
+            )
+        if mode == "scheduler_select":
+            scheduler_result, should_fallback = await self._select_and_allocate_via_scheduler(
+                role,
+                role_str,
+                req_info,
+            )
+            if scheduler_result is not None:
+                return scheduler_result
+            if should_fallback:
+                logger.warning(
+                    "Scheduler select+allocate unavailable, fallback to worker_select: req_id=%s role=%s",
+                    req_info.req_id,
+                    role_str,
+                )
+                if _should_log_tie_break_sample(req_info.req_id):
+                    logger.info(
+                        "select_and_allocate fallback req_id=%s role=%s from=scheduler_select to=worker_select",
+                        req_info.req_id,
+                        role_str,
+                    )
+            elif self._selection_mode == "scheduler_select":
+                # Hard scheduler mode: keep failure semantics when server path fails for reasons
+                # other than protocol incompatibility.
+                return None
 
         selected = await self.select_instance_and_endpoint(req_info, role)
         if not selected:
@@ -831,6 +892,88 @@ class AsyncSchedulerClient:
         elif response:
             logger.error(f"Failed to refresh instances: {response.error}")
 
+    async def _select_and_allocate_via_scheduler(
+        self,
+        role: PDRole,
+        role_str: str,
+        req_info: RequestInfo,
+    ) -> tuple[tuple[Instance, Endpoint, Workload] | None, bool]:
+        request_id = str(uuid.uuid4())
+        request = SchedulerRequest(
+            request_type=SchedulerRequestType.SELECT_AND_ALLOCATE,
+            request_id=request_id,
+            data={
+                "role": role_str,
+                "req_id": req_info.req_id,
+                "req_len": req_info.req_len,
+            },
+        )
+        response = await self._transport.send_request(request)
+        if not response:
+            return (None, False)
+        if response.response_type != SchedulerResponseType.SUCCESS:
+            error = response.error or ""
+            if "Unknown request type" in error:
+                return (None, True)
+            logger.error(
+                "SELECT_AND_ALLOCATE failed: role=%s req_id=%s error=%s",
+                role_str, req_info.req_id, error
+            )
+            return (None, False)
+        data = response.data or {}
+        instance_data = data.get("instance")
+        endpoint_data = data.get("endpoint")
+        if not instance_data or not endpoint_data:
+            return (None, False)
+        out_instance = _instance_from_dict(instance_data)
+        out_endpoint = _endpoint_from_dict(endpoint_data)
+        if not out_instance or not out_endpoint:
+            return (None, False)
+        workload_data = data.get("allocated_workload")
+        effective_st = self._scheduler_type or _SCHEDULER_TYPE_ROUND_ROBIN
+        is_rr = effective_st == _SCHEDULER_TYPE_ROUND_ROBIN
+        if workload_data:
+            try:
+                workload = Workload.model_validate(workload_data)
+            except Exception:
+                workload = (
+                    Workload()
+                    if is_rr
+                    else calculate_demand_workload(role, req_info.req_len)
+                )
+        else:
+            workload = (
+                Workload()
+                if is_rr
+                else calculate_demand_workload(role, req_info.req_len)
+            )
+        logger.debug(
+            "select_and_allocate success via scheduler role=%s instance_id=%s endpoint_id=%s",
+            role_str, out_instance.id, out_endpoint.id
+        )
+        return ((out_instance, out_endpoint, workload), False)
+
+    def _resolve_selection_mode(self, req_id: str) -> str:
+        if self._selection_mode == _SELECTION_MODE_SCHEDULER_SELECT:
+            return _SELECTION_MODE_SCHEDULER_SELECT
+        if self._selection_mode == _SELECTION_MODE_WORKER_SELECT:
+            return _SELECTION_MODE_WORKER_SELECT
+        if self._selection_mode != _SELECTION_MODE_GRAY:
+            return _SELECTION_MODE_WORKER_SELECT
+        if self._scheduler_select_ratio <= 0:
+            return _SELECTION_MODE_WORKER_SELECT
+        if self._scheduler_select_ratio >= 100:
+            return _SELECTION_MODE_SCHEDULER_SELECT
+        bucket = self._stable_pick_by_req_id(
+            f"{self._scheduler_select_salt}:{req_id or ''}",
+            100,
+        )
+        return (
+            _SELECTION_MODE_SCHEDULER_SELECT 
+            if bucket < self._scheduler_select_ratio 
+            else _SELECTION_MODE_WORKER_SELECT
+        )
+
     async def _on_instance_change_notify(self, version: int | None) -> None:
         """Called when SUB receives instance-change from Scheduler; dedup by version, then refresh cache."""
         if version is not None and self._last_instance_version is not None and version == self._last_instance_version:
@@ -854,9 +997,11 @@ class AsyncSchedulerClient:
         st = self._scheduler_type or "round_robin"
         selected_instance = None
         if st == "load_balance":
-            selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+            selected_instance = self._select_instance_and_endpoint_by_load_balance(
+                instances, role, req_info
+            )
             if selected_instance is not None:
-                return self._select_endpoint_for_instance(selected_instance)
+                return self._select_endpoint_for_instance(selected_instance, req_info=req_info)
             logger.warning("load_balance failed, falling back to round-robin")
         elif st == "kv_cache_affinity":
             if role is PDRole.ROLE_P:
@@ -864,14 +1009,18 @@ class AsyncSchedulerClient:
                 if selected is not None:
                     return selected
                 logger.warning("kv_cache_affinity failed, falling back to load_balance")
-                selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+                selected_instance = self._select_instance_and_endpoint_by_load_balance(
+                    instances, role, req_info
+                )
                 if selected_instance is not None:
-                    return self._select_endpoint_for_instance(selected_instance)
+                    return self._select_endpoint_for_instance(selected_instance, req_info=req_info)
                 logger.warning("load_balance also failed, falling back to round-robin")
             else:
-                selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+                selected_instance = self._select_instance_and_endpoint_by_load_balance(
+                    instances, role, req_info
+                )
             if selected_instance is not None:
-                return self._select_endpoint_for_instance(selected_instance)
+                return self._select_endpoint_for_instance(selected_instance, req_info=req_info)
             logger.warning("kv_cache_affinity failed, falling back to round-robin")
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
@@ -886,10 +1035,10 @@ class AsyncSchedulerClient:
         self._instance_rr_counters[role] = next_counter - start_offset
         if not selected_instance:
             return None
-        return self._select_endpoint_for_instance(selected_instance)
+        return self._select_endpoint_for_instance(selected_instance, req_info=req_info)
 
     def _select_endpoint_for_instance(
-        self, instance: Instance
+        self, instance: Instance, req_info: RequestInfo | None = None
     ) -> tuple[Instance, Endpoint] | None:
         if not instance:
             return None
@@ -898,7 +1047,53 @@ class AsyncSchedulerClient:
             return None
         st = self._scheduler_type or "round_robin"
         if st in ("load_balance", "kv_cache_affinity"):
-            ep = LoadBalancePolicy.select_endpoint_from_instance(instance)
+            endpoint_count = len(all_endpoints)
+            req_id = (getattr(req_info, "req_id", "") if req_info is not None else "") or ""
+            ep = None
+            if req_id:
+                min_score = float("inf")
+                candidates: list[Endpoint] = []
+                for endpoint in all_endpoints:
+                    try:
+                        score = endpoint.workload.calculate_workload_score(role=instance.role)
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to calculate workload score for endpoint %s: %s",
+                            endpoint.id, e
+                        )
+                        continue
+                    if score < min_score:
+                        min_score = score
+                        candidates = [endpoint]
+                    elif abs(score - min_score) <= 1e-9:
+                        candidates.append(endpoint)
+                if candidates:
+                    if len(candidates) == 1:
+                        pick = 0
+                        ep = candidates[0]
+                    else:
+                        pick = self._stable_pick_by_req_id(
+                            f"{req_id}:ep:{instance.id}", len(candidates)
+                        )
+                        ep = candidates[pick]
+                    if _should_log_tie_break_sample(req_id):
+                        logger.debug(
+                            "LB endpoint tie-break req_id=%s instance_id=%s candidates=%d pick=%d endpoint_id=%s",
+                            req_id, instance.id, len(candidates), pick, ep.id,
+                        )
+            if ep is None:
+                tie_counter = self._lb_endpoint_tie_counters.get(instance.id, 0)
+                # Offset by client index so different workers avoid the same first endpoint
+                # when they concurrently land on the same instance.
+                start_index = (
+                    (self._client_index + tie_counter) % endpoint_count
+                    if endpoint_count else 0
+                )
+                ep = LoadBalancePolicy.select_endpoint_from_instance(
+                    instance,
+                    start_index=start_index,
+                )
+                self._lb_endpoint_tie_counters[instance.id] = tie_counter + 1
             if ep:
                 return (instance, ep)
             return (instance, all_endpoints[0])
@@ -915,11 +1110,46 @@ class AsyncSchedulerClient:
             logger.warning("Failed to initialize instance cache: %s", e, exc_info=True)
 
     def _select_instance_and_endpoint_by_load_balance(
-        self, instances: list[Instance], role: PDRole
+        self, instances: list[Instance], role: PDRole, req_info: RequestInfo | None = None
     ) -> Instance | None:
         n = len(instances)
-        start_index = (n * self._client_index) // self._client_count if n else 0
+        req_id = (getattr(req_info, "req_id", "") if req_info is not None else "") or ""
+        if req_id and n:
+            min_score = float("inf")
+            candidates: list[Instance] = []
+            for instance in instances:
+                try:
+                    score = instance.gathered_workload.calculate_workload_score(role=instance.role)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to calculate workload score for instance %s: %s",
+                        instance.id, e
+                    )
+                    continue
+                if score < min_score:
+                    min_score = score
+                    candidates = [instance]
+                elif abs(score - min_score) <= 1e-9:
+                    candidates.append(instance)
+            if candidates:
+                if len(candidates) == 1:
+                    pick = 0
+                    selected = candidates[0]
+                else:
+                    pick = self._stable_pick_by_req_id(f"{req_id}:ins", len(candidates))
+                    selected = candidates[pick]
+                if _should_log_tie_break_sample(req_id):
+                    logger.debug(
+                        "LB instance tie-break req_id=%s role=%s candidates=%d pick=%d instance_id=%s",
+                        req_id, role, len(candidates), pick, selected.id,
+                    )
+                return selected
+
+        base_index = (n * self._client_index) // self._client_count if n else 0
+        tie_counter = self._lb_instance_tie_counters.get(role, 0)
+        start_index = (base_index + tie_counter) % n if n else 0
         selected_instance = LoadBalancePolicy.select_instance_from_list(
             instances, role, start_index=start_index
         )
+        self._lb_instance_tie_counters[role] = tie_counter + 1
         return selected_instance

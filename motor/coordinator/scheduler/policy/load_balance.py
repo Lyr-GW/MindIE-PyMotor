@@ -86,12 +86,16 @@ class LoadBalancePolicy(BaseSchedulingPolicy):
         return selected_instance
 
     @staticmethod
-    def select_endpoint_from_instance(instance: Instance) -> Endpoint | None:
+    def select_endpoint_from_instance(
+        instance: Instance,
+        start_index: int = 0,
+    ) -> Endpoint | None:
         """
         Select one endpoint with minimum workload from instance (shared by Policy and Client).
 
         Args:
             instance: Instance to select endpoint from
+            start_index: Traversal start offset for tie-break rotation
 
         Returns:
             Selected Endpoint, or None if none available
@@ -107,6 +111,22 @@ class LoadBalancePolicy(BaseSchedulingPolicy):
 
         min_workload = float('inf')
         selected_endpoint = None
+
+        if start_index != 0:
+            n = len(all_endpoints)
+            for i in range(n):
+                idx = (start_index + i) % n
+                endpoint = all_endpoints[idx]
+                try:
+                    workload_score = endpoint.workload.calculate_workload_score(role=instance.role)
+                    if workload_score < min_workload:
+                        min_workload = workload_score
+                        selected_endpoint = endpoint
+                except Exception as e:
+                    logger.warning("Failed to calculate workload score for endpoint %s: %s", endpoint.id, e)
+                    continue
+            return selected_endpoint
+
         for endpoint in all_endpoints:
             try:
                 workload_score = endpoint.workload.calculate_workload_score(role=instance.role)

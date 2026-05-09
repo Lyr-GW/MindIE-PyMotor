@@ -259,8 +259,7 @@ class BaseRouter(ABC):
                 )
 
                 elapsed_prepare_ms = (time.perf_counter() - t0_prepare) * 1000
-                if _should_log_scheduling_sample(self.req_info.req_id):
-                    self.logger.info(
+                self.logger.debug(
                         "Scheduling role=%s allocated instance_id=%s endpoint_id=%s "
                         "job=%s endpoint=%s:%s total_ms=%.2f",
                         role, ins.id, endpoint.id, ins.job_name,

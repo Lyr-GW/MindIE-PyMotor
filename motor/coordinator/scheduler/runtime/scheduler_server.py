@@ -28,6 +28,7 @@ from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain import UpdateWorkloadParams
 from motor.coordinator.models.constants import DEFAULT_REQUEST_ID, REQUEST_ID_KEY
+from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.scheduler.runtime.workload_shm import WorkloadSharedMemoryWriter
@@ -159,6 +160,7 @@ class _SchedulerRequestDispatcher:
             SchedulerRequestType.GET_AVAILABLE_INSTANCES.value: self._handle_get_available_instances,
             SchedulerRequestType.REFRESH_INSTANCES.value: self._handle_refresh_instances,
             SchedulerRequestType.ALLOCATE_ONLY.value: self._handle_allocate_only,
+            SchedulerRequestType.SELECT_AND_ALLOCATE.value: self._handle_select_and_allocate,
         }
         handler = handlers.get(request.request_type)
         if handler:
@@ -347,6 +349,58 @@ class _SchedulerRequestDispatcher:
             response_type=SchedulerResponseType.SUCCESS,
             request_id=request.request_id,
             data={_KEY_INSTANCE: instance_data, _KEY_ENDPOINT: endpoint_data},
+        )
+
+    async def _handle_select_and_allocate(self, request: SchedulerRequest) -> SchedulerResponse:
+        """Scheduler selects and allocates atomically in one request."""
+        t0 = time.time()
+        role_str = request.data.get("role")
+        req_id = request.data.get("req_id", "")
+        req_len = request.data.get("req_len", 0)
+        role = PDRole(role_str) if role_str in ("prefill", "decode", "both") else PDRole.ROLE_U
+        try:
+            req_len_int = int(req_len)
+        except (TypeError, ValueError):
+            return SchedulerResponse(
+                response_type=SchedulerResponseType.ERROR,
+                request_id=request.request_id,
+                error=f"Invalid req_len: {req_len}",
+            )
+        req_info = RequestInfo(
+            req_id=req_id or request.request_id,
+            req_data={},
+            req_len=req_len_int,
+            api="",
+        )
+        result = await self._scheduler.select_and_allocate(role, req_info)
+        if result is None:
+            return SchedulerResponse(
+                response_type=SchedulerResponseType.SUCCESS,
+                request_id=request.request_id,
+                data={
+                    _KEY_INSTANCE: None,
+                    _KEY_ENDPOINT: None,
+                    "allocated_workload": None,
+                },
+            )
+        instance, endpoint, allocate_workload = result
+        if self._workload_writer:
+            await self._workload_writer.write_single_entry(instance.id, endpoint.id)
+        instance_data = _serialize_instance_minimal(instance)
+        endpoint_data = _serialize_endpoint_minimal(endpoint)
+        if _should_log_scheduling_sample(req_id or request.request_id):
+            logger.info(
+                "SELECT_AND_ALLOCATE req_id=%s ins=%s ep=%s elapsed_ms=%.2f",
+                req_id, instance.id, endpoint.id, (time.time() - t0) * 1000.0,
+            )
+        return SchedulerResponse(
+            response_type=SchedulerResponseType.SUCCESS,
+            request_id=request.request_id,
+            data={
+                _KEY_INSTANCE: instance_data,
+                _KEY_ENDPOINT: endpoint_data,
+                "allocated_workload": allocate_workload.model_dump(mode="json"),
+            },
         )
 
 # ==================== Transport (ROUTER frontend) ====================

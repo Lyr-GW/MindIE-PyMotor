@@ -80,6 +80,9 @@ class SchedulerConnectionManager:
             tls_config=coordinator_config.infer_tls_config,
             deploy_mode=coordinator_config.scheduler_config.deploy_mode,
             on_instance_refreshed=on_instance_refreshed,
+            selection_mode=coordinator_config.scheduler_config.selection_mode.value,
+            scheduler_select_ratio=coordinator_config.scheduler_config.scheduler_select_ratio,
+            scheduler_select_salt=coordinator_config.scheduler_config.scheduler_select_salt,
         )
         client = SchedulerClient(client_config)
         return cls(client=client, client_config=scheduler_config)

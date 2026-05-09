@@ -126,10 +126,28 @@ class SchedulerType(Enum):
             return None
 
 
+class SchedulerSelectionMode(Enum):
+    WORKER_SELECT = "worker_select"
+    SCHEDULER_SELECT = "scheduler_select"
+    GRAY = "gray"
+
+    @classmethod
+    def from_string(cls, value: str) -> Optional['SchedulerSelectionMode']:
+        """Convert string to SchedulerSelectionMode enum."""
+        try:
+            return cls[value.upper()]
+        except (KeyError, AttributeError):
+            logger.warning(f"Invalid scheduler selection mode: {value}")
+            return None
+
+
 @dataclass
 class SchedulerConfig:
     deploy_mode: DeployMode = field(default=DeployMode.PD_SEPARATE)
     scheduler_type: SchedulerType = field(default=SchedulerType.LOAD_BALANCE)
+    selection_mode: SchedulerSelectionMode = field(default=SchedulerSelectionMode.SCHEDULER_SELECT)
+    scheduler_select_ratio: int = 0
+    scheduler_select_salt: str = ""
 
 
 @dataclass
@@ -385,7 +403,8 @@ class CoordinatorConfig:
 
             scheduler_handlers = {
                 'deploy_mode': lambda obj, key, value: set_enum_field(obj, key, value, DeployMode),
-                'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType)
+                'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType),
+                'selection_mode': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerSelectionMode),
             }
 
             # Enrich AIGW fields from user_config if present
@@ -536,6 +555,11 @@ class CoordinatorConfig:
         # Validate Prometheus metrics configuration
         self._validate_positive_number(self.prometheus_metrics_config.reuse_time, "reuse_time")
 
+        # Validate scheduler selection configuration
+        ratio = self.scheduler_config.scheduler_select_ratio
+        if not (0 <= ratio <= 100):
+            self._errors.append("scheduler_select_ratio must be in range 0-100")
+
         # Validate standby configuration
         self._validate_positive_number(self.standby_config.master_standby_check_interval,
                                        "master_standby_check_interval")
@@ -625,6 +649,11 @@ class CoordinatorConfig:
                 scheduler_config['deploy_mode'] = scheduler_config['deploy_mode'].value
             if 'scheduler_type' in scheduler_config and isinstance(scheduler_config['scheduler_type'], SchedulerType):
                 scheduler_config['scheduler_type'] = scheduler_config['scheduler_type'].value
+            if (
+                'selection_mode' in scheduler_config
+                and isinstance(scheduler_config['selection_mode'], SchedulerSelectionMode)
+            ):
+                scheduler_config['selection_mode'] = scheduler_config['selection_mode'].value
         # Convert sets to lists for JSON serialization
         if 'api_key_config' in config_dict:
             api_key_config = config_dict['api_key_config']
@@ -687,7 +716,9 @@ class CoordinatorConfig:
             "\n"
             "  Scheduler Configuration:\n"
             f"    ├─ Deploy Mode:               {self.scheduler_config.deploy_mode.value}\n"
-            f"    └─ Scheduler Type:            {self.scheduler_config.scheduler_type.value}\n"
+            f"    ├─ Scheduler Type:            {self.scheduler_config.scheduler_type.value}\n"
+            f"    ├─ Selection Mode:            {self.scheduler_config.selection_mode.value}\n"
+            f"    └─ Scheduler Select Ratio:    {self.scheduler_config.scheduler_select_ratio}%\n"
             "\n"
             "  Multiprocess (Inference Workers):\n"
             f"    ├─ Num Workers:               {self.inference_workers_config.num_workers}\n"

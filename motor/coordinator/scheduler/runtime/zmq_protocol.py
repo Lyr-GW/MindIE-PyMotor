@@ -31,6 +31,7 @@ class SchedulerRequestType(str, Enum):
     read-only queries; no IS_AVAILABLE/GET_ALL_INSTANCES.
     """
     ALLOCATE_ONLY = "allocate_only"  # Worker selects locally; Scheduler only allocates workload
+    SELECT_AND_ALLOCATE = "select_and_allocate"  # Scheduler selects and allocates atomically
     UPDATE_WORKLOAD = "update_workload"
     GET_AVAILABLE_INSTANCES = "get_available_instances"  # Worker fetches instance list and workload shm name
     REFRESH_INSTANCES = "refresh_instances"

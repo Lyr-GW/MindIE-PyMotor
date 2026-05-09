@@ -134,6 +134,8 @@ def test_default_config_initialization():
     assert config.exception_config.first_token_timeout == 600
     assert config.scheduler_config.deploy_mode.value == "pd_separate"
     assert config.scheduler_config.scheduler_type.value == "load_balance"
+    assert config.scheduler_config.selection_mode.value == "scheduler_select"
+    assert config.scheduler_config.scheduler_select_ratio == 0
     assert config.timeout_config.request_timeout == 30
     assert config.api_key_config.enable_api_key is False
     assert config.rate_limit_config.enable_rate_limit is False
@@ -152,7 +154,9 @@ def test_from_json_success(temp_json_file):
             "max_retry": 10
         },
         "scheduler_config": {
-            "deploy_mode": "single_node"
+            "deploy_mode": "single_node",
+            "selection_mode": "scheduler_select",
+            "scheduler_select_ratio": 20,
         },
         "api_key_config": {
             "enable_api_key": True,
@@ -176,6 +180,8 @@ def test_from_json_success(temp_json_file):
     assert config.logging_config.log_max_line_length == 4096
     assert config.exception_config.max_retry == 10
     assert config.scheduler_config.deploy_mode.value == "single_node"
+    assert config.scheduler_config.selection_mode.value == "scheduler_select"
+    assert config.scheduler_config.scheduler_select_ratio == 20
     assert config.api_key_config.enable_api_key is True
     assert config.rate_limit_config.enable_rate_limit is True
     assert config.config_path == temp_json_file
@@ -228,6 +234,8 @@ def test_config_validation_success():
     ("master_standby_check_interval", -1, "master_standby_check_interval must be greater than 0"),
     ("etcd_port", 0, "etcd_port must be in range 1-65535"),
     ("etcd_timeout", 0, "etcd_timeout must be greater than 0"),
+    ("scheduler_select_ratio", -1, "scheduler_select_ratio must be in range 0-100"),
+    ("scheduler_select_ratio", 101, "scheduler_select_ratio must be in range 0-100"),
 ])
 def test_config_validation_errors(param, value, expected_error):
     """Test various configuration validation errors"""
@@ -249,6 +257,8 @@ def test_config_validation_errors(param, value, expected_error):
             setattr(config.standby_config, param, value)
         elif param in ["etcd_port", "etcd_timeout"]:
             setattr(config.etcd_config, param, value)
+        elif param in ["scheduler_select_ratio"]:
+            setattr(config.scheduler_config, param, value)
         config.validate_config()
 
 
@@ -287,6 +297,7 @@ def test_to_dict():
     # Check enum serialization
     assert config_dict['scheduler_config']['deploy_mode'] == 'pd_separate'
     assert config_dict['scheduler_config']['scheduler_type'] == 'load_balance'
+    assert config_dict['scheduler_config']['selection_mode'] == 'scheduler_select'
 
 
 def test_save_to_json(temp_json_file):
