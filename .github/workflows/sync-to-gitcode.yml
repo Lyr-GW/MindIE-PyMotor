@@ -1,0 +1,31 @@
+name: Sync to Gitcode
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+    description: '手动触发同步到 Gitcode'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Gitcode (LinWei100)
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          git remote add gitcode https://oauth2:${GITCODE_TOKEN}@gitcode.com/LinWei100/MindIE-PyMotor.git
+
+          # 推送当前分支
+          git push gitcode "refs/heads/${GITHUB_REF_NAME}:refs/heads/${GITHUB_REF_NAME}" --force-with-lease
+
+          # 推送所有 tags
+          git push gitcode --tags --force
+
+          echo "✅ 已同步 ${GITHUB_REF_NAME} → gitcode.com/LinWei100/MindIE-PyMotor"
