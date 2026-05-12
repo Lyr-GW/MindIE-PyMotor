@@ -33,7 +33,10 @@ from motor.config.coordinator import DeployMode
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
 from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
-from motor.coordinator.router.workload_action_handler import calculate_demand_workload
+from motor.coordinator.scheduler.policy.function_call_affinity import (
+    FunctionCallAffinityPolicy,
+)
+from motor.coordinator.domain.workload_calculator import calculate_demand_workload
 from motor.coordinator.models.request import RequestInfo
 
 logger = get_logger(__name__)
@@ -873,6 +876,25 @@ class AsyncSchedulerClient:
             if selected_instance is not None:
                 return self._select_endpoint_for_instance(selected_instance)
             logger.warning("kv_cache_affinity failed, falling back to round-robin")
+        elif st == "function_call_affinity":
+            if role is PDRole.ROLE_P:
+                selected = FunctionCallAffinityPolicy.select_endpoint_from_list(
+                    instances, req_info
+                )
+                if selected is not None:
+                    return selected
+                logger.warning(
+                    "function_call_affinity failed, falling back to load_balance"
+                )
+                selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+                if selected_instance is not None:
+                    return self._select_endpoint_for_instance(selected_instance)
+                logger.warning("load_balance also failed, falling back to round-robin")
+            else:
+                selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
+            if selected_instance is not None:
+                return self._select_endpoint_for_instance(selected_instance)
+            logger.warning("function_call_affinity failed, falling back to round-robin")
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
@@ -897,7 +919,7 @@ class AsyncSchedulerClient:
         if not all_endpoints:
             return None
         st = self._scheduler_type or "round_robin"
-        if st == "load_balance":
+        if st in ("load_balance", "kv_cache_affinity", "function_call_affinity"):
             ep = LoadBalancePolicy.select_endpoint_from_instance(instance)
             if ep:
                 return (instance, ep)
