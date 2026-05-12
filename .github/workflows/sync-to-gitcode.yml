@@ -22,6 +22,9 @@ jobs:
         run: |
           git remote add gitcode https://oauth2:${GITCODE_TOKEN}@gitcode.com/LinWei100/MindIE-PyMotor.git
 
+          # 先 fetch 建立 tracking refs（解决 --force-with-lease 的 stale info 问题）
+          git fetch gitcode 2>/dev/null || true
+
           # 推送当前分支
           git push gitcode "refs/heads/${GITHUB_REF_NAME}:refs/heads/${GITHUB_REF_NAME}" --force-with-lease
 
