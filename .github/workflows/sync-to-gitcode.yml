@@ -38,6 +38,39 @@ jobs:
           git config user.email "sync-bot@cursor-agent.local"
           git config user.name "GitCode Sync Bot"
 
+      # Detect "GitHub-only" feature branches: those whose unique commits
+      # (origin/master..HEAD) modify any path in GITCODE_STRIP_PATHS. Such
+      # branches are by definition not interesting on Gitcode (they tweak
+      # the GitHub Actions sync infrastructure itself), so we skip the
+      # entire sync. Rationale: the alternative (rebase onto Ascend/master)
+      # would always conflict with these paths, and filter-repo'ing them out
+      # would once again rewrite ancestor hashes. A clean skip keeps the
+      # invariant "feature branches mirrored to Gitcode share a base hash
+      # with Ascend/master".
+      - name: Decide sync action for feature branch
+        if: github.ref_name != 'master'
+        id: decide
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          OLD_BASE=$(git merge-base origin/master "${BRANCH}")
+
+          BAD_FILES=()
+          while IFS= read -r p; do
+            [ -z "${p// }" ] && continue
+            if git diff --name-only "${OLD_BASE}" "${BRANCH}" -- "$p" 2>/dev/null | grep -q .; then
+              BAD_FILES+=("$p")
+            fi
+          done <<< "$GITCODE_STRIP_PATHS"
+
+          if [ ${#BAD_FILES[@]} -gt 0 ]; then
+            echo "::notice::Feature branch ${BRANCH} modifies GitHub-only path(s): ${BAD_FILES[*]}. Skipping Gitcode sync (these changes belong to GitHub Actions only)."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            echo "OLD_BASE=${OLD_BASE}" >> "${GITHUB_OUTPUT}"
+          fi
+
       # Replay the feature branch onto Ascend/master so that the resulting
       # branch shares its base hash with the upstream business master. Without
       # this step a Gitcode PR (LinWei100:branch → Ascend:master) cannot find
@@ -45,14 +78,14 @@ jobs:
       # hash on LinWei100/master, making it diverge from Ascend/master in
       # hashes despite identical trees.
       #
-      # Skipped for `master` itself, which keeps mirroring the GitHub master
-      # via filter-repo (see the dedicated step below).
+      # Skipped for `master` itself (handled by the dedicated mirror step
+      # below) and for GitHub-only feature branches (decided above).
       - name: Rebase feature branch onto Ascend/master
-        if: github.ref_name != 'master'
-        id: rebase
+        if: github.ref_name != 'master' && steps.decide.outputs.skip == 'false'
         run: |
           set -euo pipefail
           BRANCH="${GITHUB_REF_NAME}"
+          OLD_BASE="${{ steps.decide.outputs.OLD_BASE }}"
 
           git remote add ascend https://gitcode.com/Ascend/MindIE-PyMotor.git
           if ! git fetch --no-tags ascend master; then
@@ -62,15 +95,6 @@ jobs:
 
           git checkout -B "${BRANCH}"
 
-          # Find the commits unique to the branch versus GitHub master, then
-          # replay them on top of Ascend/master. Using merge-base explicitly
-          # is more robust than passing origin/master directly: it handles
-          # branches that were last rebased on an older master tip.
-          OLD_BASE=$(git merge-base origin/master "${BRANCH}")
-          if [ -z "${OLD_BASE}" ]; then
-            echo "::error::Cannot find merge-base of ${BRANCH} and origin/master."
-            exit 1
-          fi
           NEW_BASE=$(git rev-parse ascend/master)
           echo "OLD_BASE (merge-base with origin/master): ${OLD_BASE}"
           echo "NEW_BASE (Ascend/master HEAD):            ${NEW_BASE}"
@@ -78,35 +102,12 @@ jobs:
           git log --oneline "${OLD_BASE}..${BRANCH}" || true
 
           if ! git rebase --onto ascend/master "${OLD_BASE}" "${BRANCH}"; then
-            echo "::error::Rebase of ${BRANCH} onto ascend/master failed (likely conflict with upstream business commits). Resolve locally and re-push."
+            echo "::error::Rebase of ${BRANCH} onto ascend/master failed (conflict with upstream business commits). Resolve locally and re-push."
             git rebase --abort || true
             exit 1
           fi
 
           echo "✅ Rebased ${BRANCH} onto ascend/master (${NEW_BASE})."
-
-      # If a feature branch happened to modify any GitHub-only path, refuse
-      # to sync (instead of silently rewriting hashes via filter-repo, which
-      # would defeat the whole point of having a stable rebased base).
-      - name: Guard - feature branch must not touch GitHub-only paths
-        if: github.ref_name != 'master'
-        run: |
-          set -euo pipefail
-          BAD_FILES=()
-          while IFS= read -r p; do
-            [ -z "${p// }" ] && continue
-            if git diff --name-only ascend/master HEAD -- "$p" 2>/dev/null | grep -q .; then
-              BAD_FILES+=("$p")
-            fi
-          done <<< "$GITCODE_STRIP_PATHS"
-
-          if [ ${#BAD_FILES[@]} -gt 0 ]; then
-            echo "::error::Feature branch touches GitHub-only path(s): ${BAD_FILES[*]}"
-            echo "::error::Move those changes to a master-only PR (e.g. cursor/gitcode-sync-*)."
-            exit 1
-          fi
-
-          echo "✅ No GitHub-only paths touched by feature branch; safe to push as-is."
 
       # Master keeps the existing filter-repo behaviour: strip GitHub-only
       # paths from the mirrored master so Gitcode reviewers don't see them.
@@ -146,6 +147,7 @@ jobs:
           echo "Filtered ${PATH_COUNT} path(s) from ${BRANCH} history."
 
       - name: Push branch to Gitcode
+        if: github.ref_name == 'master' || steps.decide.outputs.skip == 'false'
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
@@ -168,3 +170,8 @@ jobs:
           git push gitcode --tags --force || true
 
           echo "✅ Synced ${BRANCH} → gitcode.com/LinWei100/MindIE-PyMotor"
+
+      - name: Sync skipped (GitHub-only feature branch)
+        if: github.ref_name != 'master' && steps.decide.outputs.skip == 'true'
+        run: |
+          echo "::notice::Feature branch ${GITHUB_REF_NAME} modifies GitHub-only paths; intentionally not pushed to Gitcode."
