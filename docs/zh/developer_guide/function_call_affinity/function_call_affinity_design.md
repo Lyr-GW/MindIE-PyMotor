@@ -3,6 +3,8 @@
 > 适用代码范围：`motor/coordinator/scheduler/policy/function_call_affinity.py`、
 > `motor/coordinator/scheduler/policy/factory.py`、`motor/config/coordinator.py`、
 > `motor/coordinator/scheduler/runtime/scheduler_client.py`。
+>
+> **关联文档**：本文档描述 **L1 sticky 层**；与之协同的 **L2 token-level KV-cache 亲和**（function-call tokenize 修复，让 affinity 端 token 序列与 vLLM 推理端字节对齐）见 [KV-Cache 亲和性 Function-Call Tokenize 修复](../kv_cache_affinity/tools_aware_tokenize_design.md)。
 
 ---
 

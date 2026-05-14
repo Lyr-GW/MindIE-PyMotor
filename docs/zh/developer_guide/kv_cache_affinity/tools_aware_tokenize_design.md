@@ -2,6 +2,8 @@
 
 > 适用代码范围：`motor/coordinator/scheduler/policy/kv_cache_affinity.py`、
 > `tests/coordinator/scheduler/test_kv_cache_affinity.py`。
+>
+> **关联文档**：本文档描述 **L2 token-level KV-cache 亲和层**（accurate-path）；与之协同的 **L1 tools 指纹 sticky 层**（fast-path / heuristic）见 [Function Call 亲和性调度详细设计](../function_call_affinity/function_call_affinity_design.md)。
 
 ---
 
@@ -150,7 +152,28 @@ kv_affinity tokenize ok: msgs=%d tools=%d encoded_ids=%d
 
 ## 5. 与上层调度器协作
 
-`KvCacheAffinityPolicy.select_endpoint_from_list` 是被 `AsyncSchedulerClient` 在 `scheduler_type=kv_cache_affinity` 时为 P 角色调用的入口。其失败兜底链：
+回顾"三层架构"：
+
+```text
+L1 sticky (heuristic, fast-path)
+    ↓ miss
+L2 KV-cache affinity (token-level, accurate)   ← 本次修复
+    ↓ miss
+L3 LoadBalance
+```
+
+| 层 | 文件 | 角色 |
+| --- | --- | --- |
+| L1 | `motor/coordinator/scheduler/policy/function_call_affinity.py` | tools 指纹 sticky；conductor/tokenizer 不可用时仍可粘 |
+| **L2** | `motor/coordinator/scheduler/policy/kv_cache_affinity.py` | **本次修复**：tools 进入 token 序列，conductor `longest_matched` 真实化 |
+| L3 | `motor/coordinator/scheduler/policy/load_balance.py` | 兜底 |
+
+修复前：L2 漏 tools → conductor 误判 → L1 sticky 写回的也是错的实例选择 → 错误固化。
+修复后：L2 输出与 vLLM 一致的 token 序列 → conductor 给出真实分布 → L1 sticky 写回正确选择 → **反馈环健康**。
+
+`KvCacheAffinityPolicy.select_endpoint_from_list` 既可被 `AsyncSchedulerClient` 在 `scheduler_type=kv_cache_affinity` 时直接为 P 角色调用，也可被 `FunctionCallAffinityPolicy` 在 sticky miss 时调用（L1→L2）。两条入口共用同一份 tokenize 链路，因此都受益于本次修复。
+
+失败兜底链：
 
 ```mermaid
 flowchart LR
