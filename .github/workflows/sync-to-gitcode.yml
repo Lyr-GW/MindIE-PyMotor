@@ -6,28 +6,91 @@ on:
       - '**'
   workflow_dispatch: {}
 
+# GitHub-Actions-only files that have no meaning on Gitcode. Their commits
+# would only clutter the Gitcode-side PR diff (and confuse reviewers who
+# don't run GitHub Actions). We strip them from the branch history just
+# before pushing, then force-push the rewritten history to Gitcode.
+#
+# IMPORTANT: every change to one of these files MUST be done on a separate
+# PR; mixing them into a feature PR's branch is fine because they are
+# filtered out, but Gitcode will see an empty diff for those commits.
+env:
+  GITCODE_STRIP_PATHS: |
+    .github/workflows/sync-to-gitcode.yml
+    .github/workflows/pull-from-upstream.yml
+    scripts/sync-helpers.sh
+
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Push to Gitcode (LinWei100)
+      - name: Install git-filter-repo
+        run: |
+          python3 -m pip install --quiet git-filter-repo
+          git filter-repo --version
+
+      - name: Strip GitHub-only paths from current branch history
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          # Make sure HEAD points at the branch we want to mirror.
+          git checkout -B "${BRANCH}"
+
+          # Build --path args from $GITCODE_STRIP_PATHS. Trailing newlines
+          # and empty lines are tolerated.
+          PATH_ARGS=()
+          PATH_COUNT=0
+          while IFS= read -r p; do
+            [ -z "${p// }" ] && continue
+            PATH_ARGS+=(--path "$p")
+            PATH_COUNT=$((PATH_COUNT + 1))
+          done <<< "$GITCODE_STRIP_PATHS"
+
+          if [ "${PATH_COUNT}" -eq 0 ]; then
+            echo "::notice::No paths to strip; skipping filter-repo."
+            exit 0
+          fi
+          echo "Will strip ${PATH_COUNT} path(s) from ${BRANCH} history."
+
+          # --invert-paths is a global toggle that turns the path list into
+          # an exclusion list. --refs limits the rewrite to the current
+          # branch so other refs (e.g. master) on the runner clone aren't
+          # touched. --prune-empty=auto drops commits that become empty
+          # after filtering (e.g. a commit that only touched sync-to-
+          # gitcode.yml) so Gitcode-side reviewers don't see empty diffs.
+          # --force is required because checkout@v4 leaves a non-fresh
+          # clone (with origin remote, etc.).
+          git filter-repo \
+            "${PATH_ARGS[@]}" \
+            --invert-paths \
+            --refs "${BRANCH}" \
+            --prune-empty=auto \
+            --force
+
+          echo "Filtered ${PATH_COUNT} path(s) from ${BRANCH} history."
+
+      - name: Push filtered branch to Gitcode
         env:
           GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
         run: |
-          git remote add gitcode https://oauth2:${GITCODE_TOKEN}@gitcode.com/LinWei100/MindIE-PyMotor.git
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
 
-          # 先 fetch 建立 tracking refs（解决 --force-with-lease 的 stale info 问题）
+          # filter-repo deliberately removes the 'origin' remote to prevent
+          # accidental pushes back to GitHub. Add only the gitcode remote.
+          git remote add gitcode "https://oauth2:${GITCODE_TOKEN}@gitcode.com/LinWei100/MindIE-PyMotor.git"
           git fetch gitcode 2>/dev/null || true
 
-          # 推送当前分支
-          git push gitcode "refs/heads/${GITHUB_REF_NAME}:refs/heads/${GITHUB_REF_NAME}" --force-with-lease
+          # The rewritten history is intentionally divergent from whatever
+          # Gitcode currently holds (commit hashes change). Use plain
+          # --force; --force-with-lease cannot be used because we have no
+          # tracking ref to compare against on the rewritten side.
+          git push gitcode "HEAD:refs/heads/${BRANCH}" --force
+          git push gitcode --tags --force || true
 
-          # 推送所有 tags
-          git push gitcode --tags --force
-
-          echo "✅ 已同步 ${GITHUB_REF_NAME} → gitcode.com/LinWei100/MindIE-PyMotor"
+          echo "✅ Synced filtered ${BRANCH} → gitcode.com/LinWei100/MindIE-PyMotor"
