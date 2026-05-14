@@ -19,6 +19,13 @@ env:
     .github/workflows/pull-from-upstream.yml
     scripts/sync-helpers.sh
 
+  # Identity used when rewriting commit author/committer of feature branches
+  # mirrored to Gitcode. Defaults match the Ascend-side history of LinWei100
+  # so Gitcode displays the correct user. Override either field via repo
+  # secrets `GITCODE_AUTHOR_NAME` / `GITCODE_AUTHOR_EMAIL` if needed.
+  GITCODE_AUTHOR_NAME: ${{ secrets.GITCODE_AUTHOR_NAME != '' && secrets.GITCODE_AUTHOR_NAME || 'LinWei100' }}
+  GITCODE_AUTHOR_EMAIL: ${{ secrets.GITCODE_AUTHOR_EMAIL != '' && secrets.GITCODE_AUTHOR_EMAIL || 'linwei100@huawei.com' }}
+
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -33,10 +40,13 @@ jobs:
           python3 -m pip install --quiet git-filter-repo
           git filter-repo --version
 
-      - name: Configure git identity (for rebase commits)
+      - name: Configure git identity (for rebase + amend on feature branches)
         run: |
-          git config user.email "sync-bot@cursor-agent.local"
-          git config user.name "GitCode Sync Bot"
+          # Used as committer for rebased commits AND as the new author when we
+          # `git commit --amend --reset-author` each replayed commit below, so
+          # Gitcode shows LinWei100 as both author and committer.
+          git config user.name "${GITCODE_AUTHOR_NAME}"
+          git config user.email "${GITCODE_AUTHOR_EMAIL}"
 
       # Detect "GitHub-only" feature branches: those whose unique commits
       # (origin/master..HEAD) modify any path in GITCODE_STRIP_PATHS. Such
@@ -101,13 +111,20 @@ jobs:
           echo "Commits to replay:"
           git log --oneline "${OLD_BASE}..${BRANCH}" || true
 
-          if ! git rebase --onto ascend/master "${OLD_BASE}" "${BRANCH}"; then
+          # `--exec 'git commit --amend --no-edit --reset-author'` runs after
+          # each picked commit is replayed, rewriting both author AND committer
+          # to the current git identity (= GITCODE_AUTHOR_NAME / EMAIL set
+          # earlier). That way Gitcode displays a stable LinWei100 identity on
+          # every mirrored commit instead of "Cursor Agent" / random GitHub
+          # account info.
+          if ! git rebase --onto ascend/master "${OLD_BASE}" "${BRANCH}" \
+               --exec 'git commit --amend --no-edit --reset-author'; then
             echo "::error::Rebase of ${BRANCH} onto ascend/master failed (conflict with upstream business commits). Resolve locally and re-push."
             git rebase --abort || true
             exit 1
           fi
 
-          echo "✅ Rebased ${BRANCH} onto ascend/master (${NEW_BASE})."
+          echo "✅ Rebased ${BRANCH} onto ascend/master (${NEW_BASE}) and rewrote author/committer to ${GITCODE_AUTHOR_NAME} <${GITCODE_AUTHOR_EMAIL}>."
 
       # Master keeps the existing filter-repo behaviour: strip GitHub-only
       # paths from the mirrored master so Gitcode reviewers don't see them.
