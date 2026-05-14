@@ -44,15 +44,18 @@ jobs:
           # Build --path args from $GITCODE_STRIP_PATHS. Trailing newlines
           # and empty lines are tolerated.
           PATH_ARGS=()
+          PATH_COUNT=0
           while IFS= read -r p; do
             [ -z "${p// }" ] && continue
             PATH_ARGS+=(--path "$p")
+            PATH_COUNT=$((PATH_COUNT + 1))
           done <<< "$GITCODE_STRIP_PATHS"
 
-          if [ ${#PATH_ARGS[@]} -eq 0 ]; then
+          if [ "${PATH_COUNT}" -eq 0 ]; then
             echo "::notice::No paths to strip; skipping filter-repo."
             exit 0
           fi
+          echo "Will strip ${PATH_COUNT} path(s) from ${BRANCH} history."
 
           # --invert-paths is a global toggle that turns the path list into
           # an exclusion list. --refs limits the rewrite to the current
@@ -69,7 +72,7 @@ jobs:
             --prune-empty=auto \
             --force
 
-          echo "Filtered ${#PATH_ARGS[@]} path(s) from ${BRANCH} history."
+          echo "Filtered ${PATH_COUNT} path(s) from ${BRANCH} history."
 
       - name: Push filtered branch to Gitcode
         env:
