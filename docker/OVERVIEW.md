@@ -27,7 +27,7 @@ Provides one‑click PD-separated deployment, flexibly adapts to multiple infere
 
 Tags follow the format:
 
-```
+```text
 <PyMotorVersion>-<ProductSeries>-<PythonVersion>-<OperatingSystem>-<Architecture>
 ```
 
@@ -54,7 +54,6 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 ```
 
 ### Build Parameters
-
 
 | Parameter | Description | Required | Reference | Example Value |
 |---|---|---|---|---|

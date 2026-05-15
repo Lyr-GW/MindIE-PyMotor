@@ -27,7 +27,7 @@
 
 Tag 遵循以下格式：
 
-```
+```text
 <PyMotor版本>-<产品系列>-<python版本>-<操作系统>-<架构类型>
 ```
 
@@ -51,9 +51,7 @@ swr.cn-south-1.myhuaweicloud.com/
 
 ```text
 swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
-```
-
-
+``` 
 
 ### 构建参数
 
@@ -251,6 +249,7 @@ obsutil cp ${out_path} obs://mindie/artifact/gitcode/MindIE-PyMotor/docker-image
 ### 运行 MindIE-PyMotor 容器
 
 ### 如何二次开发
+
 ```bash
 # 以 MindIE-PyMotor 镜像为基础镜像，叠加用户软件
 FROM quay.io/ascend/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
