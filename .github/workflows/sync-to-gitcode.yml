@@ -18,6 +18,7 @@ env:
     .github/workflows/sync-to-gitcode.yml
     .github/workflows/pull-from-upstream.yml
     scripts/sync-helpers.sh
+    .cursor/
 
   # Identity used when rewriting commit author/committer of feature branches
   # mirrored to Gitcode. Defaults match the Ascend-side history of LinWei100
