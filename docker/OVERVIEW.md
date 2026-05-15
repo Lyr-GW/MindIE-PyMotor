@@ -59,7 +59,7 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 | Parameter | Description | Required | Reference | Example Value |
 |---|---|---|---|---|
 | SYSTEM | Server OS and version | Yes | Script parameter `$1` | Ubuntu24.04 / openEuler24.03 |
-| DEVICE | Atlas device model | Yes | Script parameter `$2` | 310p / 910b / A3 |
+| DEVICE | Atlas device model | Yes | Script parameter `$2` | 310 / 910 / A3 |
 | ARCH | System architecture | Yes | Script parameter `$3` | x86_64 / aarch64 |
 | PYMOTOR_VERSION | MindIE-PyMotor version number | Yes | Script parameter `$4` | 0.1.0 |
 | PYMOTOR_BRANCH | PyMotor code branch | Yes | Script parameter `$5` | master |
@@ -267,14 +267,14 @@ RUN apt update -y && \
 
 | Chip Series | Product Example | Architecture |
 |---|---|---|
-| Atlas 910B | Atlas 800T A2, Atlas 900 A2 PoD | ARM64 / x86_64 |
+| Atlas 910 | Atlas 800T A2, Atlas 900 A2 PoD | ARM64 / x86_64 |
 | Atlas A3 | Atlas 800T A3 | ARM64 / x86_64 |
-| Atlas 310P | Atlas 300I Pro, Atlas 300V Pro | ARM64 / x86_64 |
+| Atlas 310 | Atlas 300I Pro, Atlas 300V Pro | ARM64 / x86_64 |
 
 ---
 
 ## License
 
-See the [license information of PyMotor](https://www.hiascend.com/cn/developer/software/mindie) included in these images.
+See the [license information of PyMotor](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md) included in these images.
 
 As with all container images, pre‑installed software packages (Python, system libraries, etc.) may be subject to their own licenses.

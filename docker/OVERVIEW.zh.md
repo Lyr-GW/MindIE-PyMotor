@@ -275,6 +275,6 @@ RUN apt update -y && \
 
 ## 许可证
 
-查看这些镜像中包含的 PyMotor 的[许可证信息](https://www.hiascend.com/cn/developer/software/mindie)。
+查看这些镜像中包含的 PyMotor 的[许可证信息](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md)。
 
 与所有容器镜像一样，预装软件包（Python、系统库等）可能受其自身许可证约束。
