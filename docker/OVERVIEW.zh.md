@@ -187,6 +187,20 @@ RUN apt update -y && \
 
 ---
 
+## 镜像版本说明
+| 镜像版本 | 说明 | 备注 |
+| - | - | - |
+| 3.0.0 | MindIE 3.0.0 Release版本 | 2026/5/6：首次发布 |
+| 3.0.0b2 | MindIE 3.0.0 Beta2版本 |  2026/4/21：首次发布，MindIE Atlas 300IDUO硬件支持动态加载、卸载Lora，支持逐Tensor加载，支持Qwen3-VL 8B/30B-A3B模型 |
+| 2.3.1 | MindIE 2.3.1 补丁版本 | 2026/4/16：首次发布，解决DSv3.1 w8a8c8测试BFCL-multiturn精度劣化、请求嵌套层限制10层等问题|
+| 2.3.0 | MindIE 2.3.0 商用版本 | 2026/1/18：首次发布|
+| 2.2.RC1 | MindIE 2.2 候选版本 | 2025/12/31：ras-restart脚本优化；2025/11/21：首次发布|
+| 2.2.T32 | DeepSeek-V3.2性能优化 | 2025/12/05：性能优化，仅供DSv3.2尝鲜，不建议运行其他模型。指导文档 https://www.hiascend.com/forum/thread-0278200283718182227-1-1.html|
+| 2.1.RC2 | MindIE 2.1 补丁版本 | 2025/9/21：首次发布|
+| 2.1.RC1 | MindIE 2.1 候选版本 | 2025/8/15：transformers版本默认升级至4.51.0 |
+| 2.0.RC2 | MindIE 2.0 候选版本 |  |
+| 1.0.0 | MindIE 1.0 正式版本 | |
+
 ## 许可证
 
 查看这些镜像中包含的 Motor 的[许可证信息](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md)。

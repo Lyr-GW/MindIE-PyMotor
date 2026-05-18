@@ -188,6 +188,21 @@ RUN apt update -y && \
 
 ---
 
+## Image Version Notes
+
+| Image Version | Description | Notes |
+| - | - | - |
+| 3.0.0 | MindIE 3.0.0 Release | 2026/5/6: Initial release |
+| 3.0.0b2 | MindIE 3.0.0 Beta2 | 2026/4/21: Initial release; MindIE Atlas 300I DUO hardware supports dynamic LoRA load/unload, per-tensor loading, and Qwen3-VL 8B/30B-A3B models |
+| 2.3.1 | MindIE 2.3.1 patch release | 2026/4/16: Initial release; fixes DSv3.1 w8a8c8 BFCL-multiturn accuracy degradation, request nesting layer limit of 10 layers, and related issues |
+| 2.3.0 | MindIE 2.3.0 commercial release | 2026/1/18: Initial release |
+| 2.2.RC1 | MindIE 2.2 release candidate | 2025/12/31: ras-restart script optimization; 2025/11/21: Initial release |
+| 2.2.T32 | DeepSeek-V3.2 performance optimization | 2025/12/05: Performance optimization; for DSv3.2 trial only, not recommended for other models. Guide: https://www.hiascend.com/forum/thread-0278200283718182227-1-1.html |
+| 2.1.RC2 | MindIE 2.1 patch release | 2025/9/21: Initial release |
+| 2.1.RC1 | MindIE 2.1 release candidate | 2025/8/15: Default transformers version upgraded to 4.51.0 |
+| 2.0.RC2 | MindIE 2.0 release candidate |  |
+| 1.0.0 | MindIE 1.0 official release |  |
+
 ## License
 
 See the [license information of Motor](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md) included in these images.
