@@ -42,4 +42,12 @@ RUN set -eux; \
     pip install --no-cache-dir --force-reinstall dist/ccae_reporter-*.whl; \
     rm -rf build/ dist/ ccae_reporter.egg-info/
 
+RUN set -eux; \
+    mkdir -p /tmp/motor; \
+    mv /opt/MindIE-PyMotor/examples /tmp/motor/; \
+    ls -l /tmp/motor/examples; \
+    rm -rf /tmp/motor/examples/features/fault_tolerance/ras_monitor; \
+    ls -l /tmp/motor/examples/features/fault_tolerance; \
+    find /tmp -mindepth 1 -maxdepth 1 ! -name "motor" -exec rm -rf {} +
+
 WORKDIR /workspace
