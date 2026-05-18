@@ -1,21 +1,21 @@
-# MindIE-PyMotor 
+# MindIE-Motor 
 
 > [English](./OVERVIEW.md) | 中文
 
 ## 快速参考
 
-- MindIE-PyMotor 由 [MindIE community](https://www.hiascend.com/cn/developer/software/mindie) 维护
+- MindIE-Motor 由 [MindIE community](https://www.hiascend.com/cn/developer/software/mindie) 维护
 
 - 从哪里获取帮助
 
     - [MindIE 镜像仓库](https://www.hiascend.com/developer/ascendhub/detail/af85b724a7e5469ebd7ea13c3439d48f)
-    - [MindIE-PyMotor 文档](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/docs/zh/index.md)
+    - [MindIE-Motor 文档](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/docs/zh/index.md)
     - [昇腾开发者社区](https://www.hiascend.com/developer)
     - [问题反馈](https://gitcode.com/Ascend/MindIE-PyMotor/issues)
 
 ---
 
-## MindIE-PyMotor
+## MindIE-Motor
 
 提供一键式 PD 分离部署，基于云原生插件化架构灵活适配多种推理引擎（vLLM、SGLang），结合高性能调度与负载均衡能力，构建高可用、可扩展的大规模推理服务。
 
@@ -27,13 +27,13 @@
 
 Tag 遵循以下格式：
 
-```text
-<PyMotor版本>-<产品系列>-<python版本>-<操作系统>-<架构类型>
+```
+<Motor版本>-<产品系列>-<python版本>-<操作系统>-<架构类型>
 ```
 
 | 字段 | 示例值 | 说明 |
 |---|---|---|
-| `PyMotor版本` | `3.0.0` | PyMotor 版本号 |
+| `Motor版本` | `3.0.0` | Motor 版本号 |
 | `产品系列` | `800I-A2`、`800I-A3`、`300I-Duo` | 目标昇腾产品系列 |
 | `操作系统` | `ubuntu22.04`、`openeuler24.03` | 基础操作系统 |
 | `python版本` | `py3.10`、`py3.11`、`py3.12` | Python 版本 |
@@ -41,7 +41,7 @@ Tag 遵循以下格式：
 
 ### 镜像仓库地址
 
-MindIE-PyMotor 镜像托管在华为云 SWR 镜像仓库：
+MindIE-Motor 镜像托管在华为云 SWR 镜像仓库：
 
 ```text
 swr.cn-south-1.myhuaweicloud.com/
@@ -51,7 +51,9 @@ swr.cn-south-1.myhuaweicloud.com/
 
 ```text
 swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
-``` 
+```
+
+
 
 ### 构建参数
 
@@ -80,7 +82,7 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 
 ---
 
-### 构建 MindIE-PyMotor 镜像
+### 构建 MindIE-Motor 镜像
 
 镜像直接基于本地仓库源码构建：`docker/Dockerfile` 会负责安装 Python 依赖、调用
 `build.sh` 编译 wheel 包，并把它安装到基础镜像中。
@@ -160,10 +162,9 @@ echo "构建完成，镜像 tag: ${IMAGE_TAG}"
     cd dist && pip install motor*.whl --force-reinstall
     ```
 
-### 运行 MindIE-PyMotor 容器
+### 运行 MindIE-Motor 容器
 
 ### 如何二次开发
-
 ```bash
 # 以 MindIE-PyMotor 镜像为基础镜像，叠加用户软件
 FROM quay.io/ascend/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
@@ -188,6 +189,6 @@ RUN apt update -y && \
 
 ## 许可证
 
-查看这些镜像中包含的 PyMotor 的[许可证信息](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md)。
+查看这些镜像中包含的 Motor 的[许可证信息](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md)。
 
 与所有容器镜像一样，预装软件包（Python、系统库等）可能受其自身许可证约束。

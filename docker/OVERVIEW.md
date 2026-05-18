@@ -1,21 +1,21 @@
-# MindIE-PyMotor 
+# MindIE-Motor 
 
-> [English](./OVERVIEW.md) | 中文
+> English | [中文](./OVERVIEW.zh.md)
 
 ## Quick Reference
 
-- MindIE-PyMotor is maintained by the [MindIE community](https://www.hiascend.com/cn/developer/software/mindie)
+- MindIE-Motor is maintained by the [MindIE community](https://www.hiascend.com/cn/developer/software/mindie)
 
 - Where to get help
 
     - [MindIE Image Registry](https://www.hiascend.com/developer/ascendhub/detail/af85b724a7e5469ebd7ea13c3439d48f)
-    - [MindIE-PyMotor Documentation](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/docs/zh/index.md)
+    - [MindIE-Motor Documentation](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/docs/zh/index.md)
     - [Atlas Developer Community](https://www.hiascend.com/developer)
     - [Report an Issue](https://gitcode.com/Ascend/MindIE-PyMotor/issues)
 
 ---
 
-## MindIE-PyMotor
+## MindIE-Motor
 
 Provides one‑click PD-separated deployment, flexibly adapts to multiple inference engines (vLLM, SGLang) through a cloud‑native plug‑in architecture, and combines high‑performance scheduling with load balancing capabilities to build highly available, scalable large‑scale inference services.
 
@@ -28,12 +28,12 @@ Provides one‑click PD-separated deployment, flexibly adapts to multiple infere
 Tags follow the format:
 
 ```text
-<PyMotorVersion>-<ProductSeries>-<PythonVersion>-<OperatingSystem>-<Architecture>
+<MotorVersion>-<ProductSeries>-<PythonVersion>-<OperatingSystem>-<Architecture>
 ```
 
 | Field | Example Value | Description |
 |---|---|---|
-| `PyMotorVersion` | `3.0.0` | PyMotor version number |
+| `MotorVersion` | `3.0.0` | Motor version number |
 | `ProductSeries` | `800I-A2`, `800I-A3`, `300I-Duo` | Target Atlas product series |
 | `OperatingSystem` | `ubuntu22.04`, `openeuler24.03` | Base operating system |
 | `PythonVersion` | `py3.10`, `py3.11`, `py3.12` | Python version |
@@ -41,7 +41,7 @@ Tags follow the format:
 
 ### Image Registry Address
 
-MindIE-PyMotor images are hosted on Huawei Cloud SWR:
+MindIE-Motor images are hosted on Huawei Cloud SWR:
 
 ```text
 swr.cn-south-1.myhuaweicloud.com/
@@ -80,7 +80,7 @@ sensible defaults). Override them on the command line as needed.
 
 ---
 
-### Build MindIE-PyMotor Image
+### Build MindIE-Motor Image
 
 The image is built directly from the local repository: `docker/Dockerfile`
 takes care of installing Python dependencies, compiling the wheel via
@@ -162,7 +162,7 @@ What the build does, in order:
     cd dist && pip install motor*.whl --force-reinstall
     ```
 
-### Run MindIE-PyMotor Container
+### Run MindIE-Motor Container
 
 ### How to Extend
 
@@ -190,6 +190,6 @@ RUN apt update -y && \
 
 ## License
 
-See the [license information of PyMotor](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md) included in these images.
+See the [license information of Motor](https://gitcode.com/Ascend/MindIE-PyMotor/blob/master/LICENSE.md) included in these images.
 
 As with all container images, pre‑installed software packages (Python, system libraries, etc.) may be subject to their own licenses.
