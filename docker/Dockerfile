@@ -35,4 +35,11 @@ RUN set -eux; \
     pip install --no-cache-dir --force-reinstall dist/motor*.whl; \
     rm -rf build/ motor.egg-info/ dist/
 
+RUN set -eux; \
+    cd examples/features/observability; \
+    pip install --no-cache-dir -r requirements.txt; \
+    bash build.sh; \
+    pip install --no-cache-dir --force-reinstall dist/ccae_reporter-*.whl; \
+    rm -rf build/ dist/ ccae_reporter.egg-info/
+
 WORKDIR /workspace

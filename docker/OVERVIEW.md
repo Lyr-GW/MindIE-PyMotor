@@ -162,6 +162,17 @@ What the build does, in order:
     cd dist && pip install motor*.whl --force-reinstall
     ```
 
+4. Then build and install the `ccae_reporter` helper from
+   `examples/features/observability/`, which lets the image integrate with
+   the CCAE cluster autonomous engine:
+
+    ```bash
+    cd examples/features/observability
+    pip install -r requirements.txt
+    bash build.sh
+    pip install --force-reinstall dist/ccae_reporter-*.whl
+    ```
+
 ### Run MindIE-Motor Container
 
 ### How to Extend

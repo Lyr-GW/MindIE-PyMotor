@@ -162,6 +162,16 @@ echo "构建完成，镜像 tag: ${IMAGE_TAG}"
     cd dist && pip install motor*.whl --force-reinstall
     ```
 
+4. 接着编译并安装 `examples/features/observability/` 下的 `ccae_reporter` 组件，
+   使镜像具备对接 CCAE 集群自智引擎的能力：
+
+    ```bash
+    cd examples/features/observability
+    pip install -r requirements.txt
+    bash build.sh
+    pip install --force-reinstall dist/ccae_reporter-*.whl
+    ```
+
 ### 运行 MindIE-Motor 容器
 
 ### 如何二次开发
