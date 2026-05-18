@@ -55,20 +55,17 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 
 ### 构建参数
 
-| 参数 | 说明 | 必填 | 参考来源 | 示例值 |
-|------|------|------|----------|--------|
-| SYSTEM | 服务器操作系统及版本 | 是 | 脚本参数 `$1` | Ubuntu24.04 / openEuler24.03 |
-| DEVICE | 昇腾设备型号 | 是 | 脚本参数 `$2` | 310p / 910b / A3 |
-| ARCH | 系统架构 | 是 | 脚本参数 `$3` | x86_64 / aarch64 |
-| PYMOTOR_VERSION | MindIE-PyMotor 版本号 | 是 | 脚本参数 `$4` | 0.1.0 |
-| PYMOTOR_BRANCH | PyMotor 代码分支 | 是 | 脚本参数 `$5` | master |
-| VLLM_ASCEND_VERSION | vllm-ascend 基础镜像版本/分支 | 是 | 脚本参数 `$6` | v0.13.0 / main / v0.14.0rc1 / releases-v0.13.0 |
-| IMAGE_VERSION | 最终构建镜像的版本标识 | 是 | 脚本参数 `$7` | v1.0.0 |
-| AK | 华为云 OBS Access Key | 是 | 脚本参数 `$8` | 实际 AK 字符串 |
-| SK | 华为云 OBS Secret Key | 是 | 脚本参数 `$9` | 实际 SK 字符串 |
-| PYMOTOR_DIR | PyMotor 编译结果的具体日期目录（可选，默认使用最新） | 否 | 脚本参数 `${10}` | 20260114.1 |
-| WORKSPACE | CI 工作空间根路径 | 是 | 环境变量 | /opt/workspace |
-| BUILDNUMBER | CI 构建编号 | 是 | 环境变量 | 100 |
+构建脚本通过环境变量读取以下参数，全部为可选项（均带有默认值），按需在命令行
+覆盖即可。
+
+| 变量 | 说明 | 是否必填 | 默认值 | 示例值 |
+|------|------|----------|--------|--------|
+| SYSTEM | 服务器操作系统及版本 | 否 | `Ubuntu24.04` | Ubuntu24.04 / openEuler24.03 |
+| DEVICE | 昇腾设备型号 | 否 | `910b` | 310p / 910b / A3 |
+| ARCH | 系统架构 | 否 | `$(uname -m)` | x86_64 / aarch64 |
+| PYMOTOR_VERSION | MindIE-PyMotor 版本号 | 否 | `0.1.0` | 0.1.0 |
+| VLLM_ASCEND_VERSION | vllm-ascend 基础镜像版本/分支 | 否 | `main` | v0.13.0 / main / v0.14.0rc1 / releases-v0.13.0 |
+| IMAGE_VERSION | 最终构建镜像的版本标识 | 否 | `${PYMOTOR_VERSION}` | v1.0.0 |
 
 ---
 
@@ -85,166 +82,83 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 
 ### 构建 MindIE-PyMotor 镜像
 
+镜像直接基于本地仓库源码构建：`docker/Dockerfile` 会负责安装 Python 依赖、调用
+`build.sh` 编译 wheel 包，并把它安装到基础镜像中。
+
+仓库已经提供好封装脚本 `docker/build_image.sh`，在 **仓库根目录** 直接执行即可：
+
+```bash
+# 默认参数：Ubuntu24.04 / 910b / vllm-ascend tag "main"
+bash docker/build_image.sh
+
+# 通过环境变量覆盖默认值
+SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
+    bash docker/build_image.sh
+```
+
+脚本内容如下，供参考：
+
 ```sh
 #!/bin/bash
-current_date=$(date -d "now" +"%Y%m%d")
-SYSTEM=$1 #Ubuntu24.04/openEuler24.03
-DEVICE=$2 #310p/910b/A3
-ARCH=$3 #x86_64/aarch64
-PYMOTOR_VERSION=$4 #0.1.0
-PYMOTOR_BRANCH=$5 #master
-VLLM_ASCEND_VERSION=$6 #v0.13.0/main/v0.14.0rc1/releases-v0.13.0
-IMAGE_VERSION=$7
-AK=$8
-SK=$9
-PYMOTOR_DIR=${10}
-SYSTEM_LOWER=$(echo "${SYSTEM}" | sed 's/[0-9.]//g' | tr '[:upper:]' '[:lower:]')
-case $DEVICE in
-  "310p")
-    IMAGES_TAG=mindie-motor-vllm:${IMAGE_VERSION}-300I-Duo-py3.11-${SYSTEM}-lts-${ARCH}
-        case $SYSTEM in
-            Ubuntu24.04)
-                IMAGES_BASE_TAG=${VLLM_ASCEND_VERSION}-310p
-                ;;
-            openEuler24.03)
-                IMAGES_BASE_TAG=${VLLM_ASCEND_VERSION}-310p-openeuler
-                ;;
-            *)
-                echo "不支持的服务器操作系统"
-                ;;
-        esac
-    ;;
-  "910b")
-    IMAGES_TAG=mindie-motor-vllm:${IMAGE_VERSION}-800I-A2-py3.11-${SYSTEM}-lts-${ARCH}
-        case $SYSTEM in
-            Ubuntu24.04)
-                IMAGES_BASE_TAG=${VLLM_ASCEND_VERSION}
-                ;;
-            openEuler24.03)
-                IMAGES_BASE_TAG=${VLLM_ASCEND_VERSION}-openeuler
-                ;;
-            *)
-                echo "不支持的服务器操作系统"
-                ;;
-        esac
-    ;;
-  "A3")
-    IMAGES_TAG=mindie-motor-vllm:${IMAGE_VERSION}-800I-A3-py3.11-${SYSTEM}-lts-${ARCH}
-        case $SYSTEM in
-            Ubuntu24.04)
-                IMAGES_BASE_TAG=${VLLM_ASCEND_VERSION}-a3
-                ;;
-            openEuler24.03)
-                IMAGES_BASE_TAG=${VLLM_ASCEND_VERSION}-a3-openeuler
-                ;;
-            *)
-                echo "不支持的服务器操作系统"
-                ;;
-        esac
-    ;;
-  *)
-    echo "Unsupported architecture: $DEVICE"
-    exit 1
-    ;;
-esac
-################################################prepare version information#############################################################################
-out_path=${WORKSPACE}/CI/docker_pymotor_image/MindIE_Motor_vLLM_version.txt
-touch ${out_path}
-echo "****************************************VLLM_ASCEND BASE IMAGE*************************************************" >${out_path}
-echo "quay.nju.edu.cn/ascend/vllm-ascend:${VLLM_ASCEND_VERSION}" >> ${out_path}
-echo "quay.nju.edu.cn/ascend/vllm-ascend:${VLLM_ASCEND_VERSION}-a3" >> ${out_path}
-echo "quay.nju.edu.cn/ascend/vllm-ascend:${VLLM_ASCEND_VERSION}-openeuler" >> ${out_path}
-echo "quay.nju.edu.cn/ascend/vllm-ascend:${VLLM_ASCEND_VERSION}-a3-openeuler" >> ${out_path}
-function start_clean_server() {
-    set +e
-    serverjs_path=${WORKSPACE}/CI/docker_pymotor_image/server.js
-    if [[ ! -f $serverjs_path ]]; then
-      echo "File $file_path does not exist, exit"
-      exit 1
-    else
-      pid=$(ps -ef | grep -v grep | grep "node.*/opt/.*/workspace/.*/CI/.*/server.js" | awk '{print $2}')
-      if [[ -n "$pid" ]]; then
-        kill -9 "$pid"
-      fi
-      nohup node ${serverjs_path} > server.log 2>&1 &
-      echo "server.js started"
-    fi
-    ps -ef | grep server.js
-}
-function clean_server() {
-    set +e
-    pid=$(ps -ef | grep -v grep | grep "node.*/opt/.*/workspace/.*/CI/.*/server.js" | awk '{print $2}')
-    if [[ -n "$pid" ]]; then
-      kill -9 "$pid"
-    fi
-    ps -ef | grep server.js
-}
-function remove_containers_images() {
-    set +e
-    ps_output=$(docker ps -a -q -f status=exited)
-    if [ ${#ps_output} -gt 0 ]; then
-      docker rm ${ps_output}
-    else
-      echo "no exited container"
-    fi
-    images_output=$(docker images | grep "<none>")
-    if [ ${#images_output} -gt 0 ]; then
-      docker images | grep "<none>" | awk '{print $3}' | xargs docker rmi -f
-    else
-      echo "no exited images"
-    fi
-}
-function prepare_pymotor() {
-    pymotor_local_path_base="obs://mindie/artifact/gitcode/MindIE-PyMotor/${PYMOTOR_BRANCH}/daily"
-    obsutil config -i=${AK} -k=${SK} -e=obs.cn-north-4.myhuaweicloud.com
-    pymotor_directories=$(obsutil ls "$pymotor_local_path_base" -d -limit=2000 | grep -Eo "${current_date}\.[^/]+/" | sed 's/\///' | sort -Vr | uniq)
-    if [ -z "${PYMOTOR_DIR}" ]; then
-        echo "Querying today's latest compilation by default"
-        pymotor_dir=$(echo "$pymotor_directories" | awk 'NR==1{print $1}')
-    else
-        echo -e "\033[33m[ACTION]\033[0m Using compilation results for specific date ${PYMOTOR_DIR}"
-        pymotor_dir=${PYMOTOR_DIR}
-    fi
-    
-    set +e
-    echo "**************************************MindIE-pyMotor***************************************************" >>${out_path}
-    mkdir -p ${WORKSPACE}/MindIE-pyMotor
-    cd ${WORKSPACE}/MindIE-pyMotor
-    obsutil cp ${pymotor_local_path_base}/${pymotor_dir} . -r -f
-    for file in "${WORKSPACE}/MindIE-pyMotor"/$pymotor_dir/*; do
-        [ -e "$file" ] || continue
-        file_name=$(basename ${file})
-        echo "https://mindie.obs.cn-north-4.myhuaweicloud.com/artifact/gitcode/MindIE-PyMotor/${PYMOTOR_BRANCH}/daily/$pymotor_dir/${file_name}" >> ${out_path}
-    done
-    ls -alR ${WORKSPACE}/MindIE-pyMotor
-    mv ${WORKSPACE}/MindIE-pyMotor/$pymotor_dir/* ${WORKSPACE}/CI/docker_pymotor_image/
-    json_file=${WORKSPACE}/CI/docker_pymotor_image/MindIE-pyMotor.json
-    jq -r 'to_entries | map("\(.key): \(.value)") | .[]' "$json_file" >> ${out_path}
-    ls -lR ${WORKSPACE}/CI/docker_pymotor_image
-}
-################################################prepare dockerfile#############################################################################
-echo "**************prepare dockerfile********************"
-cd ${WORKSPACE}/CI/docker_pymotor_image 
-sed -i "s/IMAGES_BASE_TAG/${IMAGES_BASE_TAG}/g" Dockerfile.${SYSTEM_LOWER}
+# 基于本地源码构建 MindIE-PyMotor 镜像。
+# 在仓库根目录执行：
+#   bash docker/build_image.sh
+# 通过环境变量覆盖默认值，例如：
+#   SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
+#       bash docker/build_image.sh
+set -euo pipefail
 
-################################################make image#############################################################################
-remove_containers_images
-prepare_pymotor
-cd ${WORKSPACE}/CI/docker_pymotor_image 
-start_clean_server
-docker build --network=host -t ${IMAGES_TAG}  -f Dockerfile.${SYSTEM_LOWER}  .
-docker images
-clean_server
-remove_containers_images
-################################################package and upload#############################################################################
-echo "******************package and upload,please wait***************************************"
-docker save ${IMAGES_TAG} | pigz -c > ${IMAGES_TAG}.tar.gz
-docker rmi ${IMAGES_TAG} quay.nju.edu.cn/ascend/vllm-ascend:${IMAGES_BASE_TAG}
-obsutil config -i=${AK} -k=${SK} -e=obs.cn-north-4.myhuaweicloud.com 
-obsutil cp ${IMAGES_TAG}.tar.gz obs://mindie/artifact/gitcode/MindIE-PyMotor/docker-images/${PYMOTOR_BRANCH}/${BUILDNUMBER}/ -f -r  
-obsutil cp ${out_path} obs://mindie/artifact/gitcode/MindIE-PyMotor/docker-images/${PYMOTOR_BRANCH}/${BUILDNUMBER}/ -f -r  
-   
+SYSTEM=${SYSTEM:-Ubuntu24.04}                       # Ubuntu24.04 / openEuler24.03
+DEVICE=${DEVICE:-910b}                              # 310p / 910b / A3
+ARCH=${ARCH:-$(uname -m)}                           # x86_64 / aarch64
+PYMOTOR_VERSION=${PYMOTOR_VERSION:-0.1.0}           # MindIE-PyMotor 版本号
+VLLM_ASCEND_VERSION=${VLLM_ASCEND_VERSION:-main}    # vllm-ascend 基础镜像 tag 前缀
+IMAGE_VERSION=${IMAGE_VERSION:-${PYMOTOR_VERSION}}  # 产物镜像的版本标识
+
+case "${DEVICE}" in
+    310p) PRODUCT=300I-Duo ;;
+    910b) PRODUCT=800I-A2 ;;
+    A3)   PRODUCT=800I-A3 ;;
+    *) echo "不支持的 DEVICE: ${DEVICE}" >&2; exit 1 ;;
+esac
+
+case "${SYSTEM}_${DEVICE}" in
+    Ubuntu24.04_310p)    BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-310p ;;
+    openEuler24.03_310p) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-310p-openeuler ;;
+    Ubuntu24.04_910b)    BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION} ;;
+    openEuler24.03_910b) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-openeuler ;;
+    Ubuntu24.04_A3)      BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3 ;;
+    openEuler24.03_A3)   BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3-openeuler ;;
+    *) echo "不支持的 SYSTEM/DEVICE 组合: ${SYSTEM}/${DEVICE}" >&2; exit 1 ;;
+esac
+
+IMAGE_TAG="mindie-pymotor:${IMAGE_VERSION}-${PRODUCT}-py3.11-${SYSTEM}-${ARCH}"
+
+PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+cd "${PROJECT_ROOT}"
+
+echo "正在基于 quay.nju.edu.cn/ascend/vllm-ascend:${BASE_IMAGE_TAG} 构建 ${IMAGE_TAG} ..."
+docker build \
+    --network=host \
+    --build-arg "BASE_IMAGE_TAG=${BASE_IMAGE_TAG}" \
+    -t "${IMAGE_TAG}" \
+    -f docker/Dockerfile \
+    .
+
+echo "构建完成，镜像 tag: ${IMAGE_TAG}"
 ```
+
+构建过程依次完成：
+
+1. 拉取基础镜像 `quay.nju.edu.cn/ascend/vllm-ascend:${BASE_IMAGE_TAG}`。
+2. 把当前源码复制到镜像内的 `/opt/MindIE-PyMotor`。
+3. 在镜像中执行：
+
+    ```bash
+    pip install -r requirements.txt
+    bash build.sh
+    cd dist && pip install motor*.whl --force-reinstall
+    ```
 
 ### 运行 MindIE-PyMotor 容器
 
