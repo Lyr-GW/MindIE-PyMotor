@@ -61,7 +61,7 @@ sensible defaults). Override them on the command line as needed.
 | Variable | Description | Required | Default | Example Value |
 |---|---|---|---|---|
 | SYSTEM | Server OS and version | No | `Ubuntu24.04` | Ubuntu24.04 / openEuler24.03 |
-| DEVICE | Atlas device model | No | `910b` | 310p / 910b / A3 |
+| DEVICE | Atlas device model | No | `910` | 310 / 910 / A3 |
 | ARCH | System architecture | No | `$(uname -m)` | x86_64 / aarch64 |
 | PYMOTOR_VERSION | MindIE-PyMotor version number | No | `0.1.0` | 0.1.0 |
 | VLLM_ASCEND_VERSION | vllm-ascend base image version/branch | No | `main` | v0.13.0 / main / v0.14.0rc1 / releases-v0.13.0 |
