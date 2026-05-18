@@ -27,7 +27,7 @@
 
 Tag 遵循以下格式：
 
-```
+```text
 <Motor版本>-<产品系列>-<python版本>-<操作系统>-<架构类型>
 ```
 
@@ -52,8 +52,6 @@ swr.cn-south-1.myhuaweicloud.com/
 ```text
 swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
 ```
-
-
 
 ### 构建参数
 
@@ -175,6 +173,7 @@ echo "构建完成，镜像 tag: ${IMAGE_TAG}"
 ### 运行 MindIE-Motor 容器
 
 ### 如何二次开发
+
 ```bash
 # 以 MindIE-PyMotor 镜像为基础镜像，叠加用户软件
 FROM quay.io/ascend/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
@@ -198,6 +197,7 @@ RUN apt update -y && \
 ---
 
 ## 镜像版本说明
+
 | 镜像版本 | 说明 | 备注 |
 | - | - | - |
 | 3.0.0 | MindIE 3.0.0 Release版本 | 2026/5/6：首次发布 |
