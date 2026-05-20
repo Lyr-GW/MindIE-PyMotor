@@ -22,6 +22,7 @@ from motor.common.resources.instance import PDRole
 from motor.coordinator.api_client.conductor_api_client import TENANT_ID
 from motor.coordinator.scheduler.policy.function_call_affinity import (
     FunctionCallAffinityPolicy,
+    KvAffinityCircuitBreaker,
     ToolsAffinityCache,
     compute_tools_fingerprint,
     extract_tools,
@@ -529,6 +530,123 @@ class TestSchedulerClientFunctionCallAffinityRouting(unittest.TestCase):
             self.assertEqual(result, (instance, ep))
             mock_lb.assert_called_once()
             mock_pick.assert_called_once_with(instance)
+
+
+# -----------------------------------------------------------------------------
+# KvAffinityCircuitBreaker
+# -----------------------------------------------------------------------------
+
+
+class TestKvAffinityCircuitBreaker(unittest.TestCase):
+    def test_starts_closed(self) -> None:
+        breaker = KvAffinityCircuitBreaker(failure_threshold=3, cooldown_seconds=60.0)
+        self.assertTrue(breaker.allow_request())
+        self.assertFalse(breaker.is_open)
+
+    def test_opens_after_threshold_failures(self) -> None:
+        breaker = KvAffinityCircuitBreaker(failure_threshold=3, cooldown_seconds=60.0)
+        for _ in range(3):
+            breaker.record_failure()
+        # Closed -> open transition
+        self.assertTrue(breaker.is_open)
+        self.assertFalse(breaker.allow_request())
+
+    def test_success_resets_failures(self) -> None:
+        breaker = KvAffinityCircuitBreaker(failure_threshold=3, cooldown_seconds=60.0)
+        breaker.record_failure()
+        breaker.record_failure()
+        breaker.record_success()
+        for _ in range(2):
+            breaker.record_failure()
+        # Still under threshold after success reset, so breaker stays closed.
+        self.assertFalse(breaker.is_open)
+
+    def test_half_open_probe_after_cooldown(self) -> None:
+        breaker = KvAffinityCircuitBreaker(failure_threshold=2, cooldown_seconds=0.05)
+        breaker.record_failure()
+        breaker.record_failure()
+        self.assertFalse(breaker.allow_request())
+        time.sleep(0.07)
+        # First call after cooldown is the probe (allowed exactly once)
+        self.assertTrue(breaker.allow_request())
+
+    def test_probe_failure_extends_cooldown(self) -> None:
+        breaker = KvAffinityCircuitBreaker(failure_threshold=1, cooldown_seconds=0.05)
+        breaker.record_failure()
+        time.sleep(0.07)
+        # Probe allowed; we still consider it a failure.
+        self.assertTrue(breaker.allow_request())
+        breaker.record_failure()
+        # Cooldown should be re-armed; immediate next call is denied.
+        self.assertFalse(breaker.allow_request())
+
+    def test_invalid_args_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            KvAffinityCircuitBreaker(failure_threshold=0)
+        with self.assertRaises(ValueError):
+            KvAffinityCircuitBreaker(cooldown_seconds=0)
+
+
+class TestFunctionCallAffinityWithBreaker(unittest.TestCase):
+    """Verify the breaker is integrated into the policy's selection path."""
+
+    def setUp(self) -> None:
+        self.provider = Mock()
+
+    @patch(
+        "motor.coordinator.scheduler.policy.function_call_affinity.LoadBalancePolicy"
+    )
+    @patch(
+        "motor.coordinator.scheduler.policy.function_call_affinity"
+        ".KvCacheAffinityPolicy.select_endpoint_from_list"
+    )
+    def test_breaker_skips_kv_when_open(self, mock_kv, mock_lb) -> None:
+        """When the breaker is open the policy must not invoke KV path."""
+        breaker = KvAffinityCircuitBreaker(failure_threshold=2, cooldown_seconds=60.0)
+        policy = FunctionCallAffinityPolicy(self.provider, kv_breaker=breaker)
+        instance_a = _make_instance(1, [10])
+        # KV always returns None to drive the breaker open.
+        mock_kv.return_value = None
+        mock_lb.select_instance_from_list.return_value = instance_a
+        mock_lb.select_endpoint_from_instance.return_value = (
+            instance_a.endpoints["pod-0"][10]
+        )
+
+        # Use a distinct fingerprint per call so the sticky cache never short-
+        # circuits before the KV path runs.
+        for n in range(3):
+            req_info = Mock()
+            req_info.req_data = {"tools": [{"function": {"name": f"f{n}"}}]}
+            policy.select_endpoint_from_list_with_cache([instance_a], req_info)
+
+        # First 2 calls hit KV (and fail). On the 3rd, breaker is open -> KV
+        # skipped, request served by load-balance instead.
+        self.assertEqual(mock_kv.call_count, 2)
+
+    @patch(
+        "motor.coordinator.scheduler.policy.function_call_affinity.LoadBalancePolicy"
+    )
+    @patch(
+        "motor.coordinator.scheduler.policy.function_call_affinity"
+        ".KvCacheAffinityPolicy.select_endpoint_from_list"
+    )
+    def test_breaker_closes_on_kv_success(self, mock_kv, mock_lb) -> None:
+        breaker = KvAffinityCircuitBreaker(failure_threshold=2, cooldown_seconds=60.0)
+        policy = FunctionCallAffinityPolicy(self.provider, kv_breaker=breaker)
+        instance_a = _make_instance(1, [10])
+        ep = instance_a.endpoints["pod-0"][10]
+        mock_lb.select_instance_from_list.return_value = instance_a
+        mock_lb.select_endpoint_from_instance.return_value = ep
+
+        # 1 failure, then success
+        mock_kv.side_effect = [None, (instance_a, ep)]
+        for n in range(2):
+            req_info = Mock()
+            req_info.req_data = {"tools": [{"function": {"name": f"f{n}"}}]}
+            policy.select_endpoint_from_list_with_cache([instance_a], req_info)
+        # KV was called twice; success reset the breaker so it stays closed.
+        self.assertFalse(breaker.is_open)
+        self.assertEqual(mock_kv.call_count, 2)
 
 
 if __name__ == "__main__":

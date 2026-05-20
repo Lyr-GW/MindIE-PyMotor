@@ -57,6 +57,14 @@ logger = get_logger(__name__)
 _DEFAULT_CACHE_SIZE: int = 1024
 _DEFAULT_TTL_SECONDS: float = 600.0  # 10 minutes
 
+# KV-cache-unavailable circuit breaker: after this many consecutive empty
+# responses from the conductor, we skip the conductor RPC entirely for
+# ``_KV_COOLDOWN_SECONDS`` and rely on sticky+load-balance routing. After the
+# cooldown we make a single probe attempt; if it still returns empty, the
+# cooldown is extended.
+_KV_FAILURE_THRESHOLD: int = 3
+_KV_COOLDOWN_SECONDS: float = 30.0
+
 
 # -----------------------------------------------------------------------------
 # Helpers
@@ -218,6 +226,84 @@ class ToolsAffinityCache:
 
 
 # -----------------------------------------------------------------------------
+# KV-affinity circuit breaker
+# -----------------------------------------------------------------------------
+
+
+class KvAffinityCircuitBreaker:
+    """Tracks consecutive empty conductor responses to short-circuit RPC calls.
+
+    The breaker has three logical states:
+
+    * ``closed`` (default) - every selection tries
+      :meth:`KvCacheAffinityPolicy.select_endpoint_from_list`.
+    * ``open`` - reached when ``failure_threshold`` consecutive empties are
+      observed; the breaker suppresses the conductor RPC for
+      ``cooldown_seconds`` and the policy falls straight through to sticky +
+      load-balance.
+    * ``half-open`` - automatically entered when ``cooldown_seconds`` elapses;
+      the next selection performs one probe RPC. A successful probe resets the
+      breaker, a failure restarts the cooldown clock.
+
+    A failure on the very first call also opens the breaker conservatively
+    enough that the *second* call is the one that decides whether to probe; we
+    do not want to ping the conductor on every request when it's clearly down.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = _KV_FAILURE_THRESHOLD,
+        cooldown_seconds: float = _KV_COOLDOWN_SECONDS,
+    ) -> None:
+        if failure_threshold <= 0:
+            raise ValueError("failure_threshold must be positive")
+        if cooldown_seconds <= 0:
+            raise ValueError("cooldown_seconds must be positive")
+        self._failure_threshold = failure_threshold
+        self._cooldown = cooldown_seconds
+        self._lock = threading.RLock()
+        self._consecutive_failures = 0
+        self._open_until: Optional[float] = None  # monotonic deadline or None
+
+    def allow_request(self) -> bool:
+        """Return True when the caller should attempt the conductor RPC."""
+        with self._lock:
+            if self._open_until is None:
+                return True
+            if time.monotonic() >= self._open_until:
+                # Half-open: allow exactly one probe; the result will reset or
+                # extend the cooldown via record_success / record_failure.
+                self._open_until = None
+                return True
+            return False
+
+    def record_success(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._open_until = None
+
+    def record_failure(self) -> None:
+        with self._lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._failure_threshold:
+                self._open_until = time.monotonic() + self._cooldown
+
+    @property
+    def is_open(self) -> bool:
+        with self._lock:
+            if self._open_until is None:
+                return False
+            if time.monotonic() >= self._open_until:
+                return False
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._consecutive_failures = 0
+            self._open_until = None
+
+
+# -----------------------------------------------------------------------------
 # Policy
 # -----------------------------------------------------------------------------
 
@@ -226,6 +312,7 @@ class ToolsAffinityCache:
 # cache by default, so multiple policy instances do not bleed state into each
 # other unless callers opt in by using the static helper.
 _GLOBAL_AFFINITY_CACHE = ToolsAffinityCache()
+_GLOBAL_KV_BREAKER = KvAffinityCircuitBreaker()
 
 
 class FunctionCallAffinityPolicy(BaseSchedulingPolicy):
@@ -243,10 +330,14 @@ class FunctionCallAffinityPolicy(BaseSchedulingPolicy):
         self,
         instance_provider: InstanceProvider,
         affinity_cache: Optional[ToolsAffinityCache] = None,
+        kv_breaker: Optional[KvAffinityCircuitBreaker] = None,
     ) -> None:
         super().__init__(instance_provider=instance_provider)
         self._instance_provider = instance_provider
         self.affinity_cache: ToolsAffinityCache = affinity_cache or ToolsAffinityCache()
+        self.kv_breaker: KvAffinityCircuitBreaker = (
+            kv_breaker or KvAffinityCircuitBreaker()
+        )
         logger.info("FunctionCallAffinityPolicy started.")
 
     # ------------------------------------------------------------------ static
@@ -260,12 +351,13 @@ class FunctionCallAffinityPolicy(BaseSchedulingPolicy):
         Uses the module-level cache so that successive calls (potentially from
         different policy invocations on the same process) share state.
         """
-        return _select(instances, req_info, _GLOBAL_AFFINITY_CACHE)
+        return _select(instances, req_info, _GLOBAL_AFFINITY_CACHE, _GLOBAL_KV_BREAKER)
 
     @staticmethod
     def reset_global_cache_for_testing() -> None:
         """Clear the process-wide cache. Intended for unit tests only."""
         _GLOBAL_AFFINITY_CACHE.clear()
+        _GLOBAL_KV_BREAKER.reset()
 
     # ----------------------------------------------------------------- instance
 
@@ -273,7 +365,7 @@ class FunctionCallAffinityPolicy(BaseSchedulingPolicy):
         self, instances: list[Instance], req_info: RequestInfo
     ) -> Optional[tuple[Instance, Endpoint]]:
         """Instance-bound variant that uses ``self.affinity_cache``."""
-        return _select(instances, req_info, self.affinity_cache)
+        return _select(instances, req_info, self.affinity_cache, self.kv_breaker)
 
     def _select_instance(self, _: PDRole = None) -> Optional[Instance]:
         # Like KvCacheAffinityPolicy, the per-list selection is the canonical
@@ -293,6 +385,7 @@ def _select(
     instances: list[Instance],
     req_info: RequestInfo,
     cache: ToolsAffinityCache,
+    breaker: KvAffinityCircuitBreaker,
 ) -> Optional[tuple[Instance, Endpoint]]:
     if not instances:
         return None
@@ -302,7 +395,7 @@ def _select(
     if has_function_call_signal(req_data):
         fingerprint = compute_tools_fingerprint(extract_tools(req_data) or [])
 
-    # 1) Sticky route
+    # 1) Sticky route - cheapest; depends only on local cache.
     if fingerprint is not None:
         sticky = _try_sticky(cache, fingerprint, instances)
         if sticky is not None:
@@ -313,12 +406,21 @@ def _select(
             )
             return sticky
 
-    # 2) KV-cache affinity
-    kv_pair = _safe_kv_select(instances, req_info)
-    if kv_pair is not None:
-        if fingerprint is not None:
-            cache.put(fingerprint, kv_pair[0].id, kv_pair[1].id)
-        return kv_pair
+    # 2) KV-cache affinity - skipped while the breaker is open so we do not
+    # hammer the conductor with a per-request RPC that we already know returns
+    # empty.
+    if breaker.allow_request():
+        kv_pair = _safe_kv_select(instances, req_info)
+        if kv_pair is not None:
+            breaker.record_success()
+            if fingerprint is not None:
+                cache.put(fingerprint, kv_pair[0].id, kv_pair[1].id)
+            return kv_pair
+        breaker.record_failure()
+    else:
+        logger.debug(
+            "function_call_affinity: KV breaker open, skipping conductor RPC"
+        )
 
     # 3) Load-balance fallback
     lb_pair = _load_balance_select(instances)
