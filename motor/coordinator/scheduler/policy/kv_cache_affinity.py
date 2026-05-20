@@ -59,8 +59,15 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
 
         rsp = ConductorApiClient.query_conductor(instances, encoded_ids)
         tenant = rsp.get(TENANT_ID, None)
-        if tenant is None:
-            logger.warning(f"tenant is none")
+        if not tenant:
+            logger.warning(
+                "kv-conductor returned no affinity data for tenant %r (normalized response keys=%s). "
+                "Typical cause: P instances not registered to kv-conductor "
+                "(check management coordinator logs for 'Register success' and kv-conductor "
+                "'current tenant has no engine_instance').",
+                TENANT_ID,
+                list(rsp.keys()) if isinstance(rsp, dict) else type(rsp).__name__,
+            )
             return None
 
         max_kv_matched = 0
