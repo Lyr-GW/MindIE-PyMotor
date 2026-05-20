@@ -31,6 +31,7 @@ from motor.common.http.security_utils import sanitize_error_message, log_audit_e
 from motor.config.coordinator import CoordinatorConfig, DeployMode
 from motor.coordinator.metrics.metrics_collector import MetricsCollector
 from motor.coordinator.models.response import RequestResponse
+from motor.coordinator.api_client.conductor_api_client import ConductorApiClient
 from motor.coordinator.api_server.base_server import BaseCoordinatorServer
 from motor.coordinator.scheduler.runtime import SchedulerConnectionManager
 from motor.coordinator.api_server.app_builder import AppBuilder
@@ -44,6 +45,12 @@ from motor.coordinator.domain.probe import (
     RoleShmDaemonLivenessProvider,
 )
 logger = get_logger(__name__)
+
+# Interval (seconds) between automatic re-attempts of failed kv-conductor
+# registrations. Conductor downtime at engine start is the main cause of the
+# "tenant has no engine_instance" state, so periodic resync transparently
+# heals it without needing operator intervention.
+_REGISTRATION_RESYNC_INTERVAL: float = 15.0
 
 # Readiness 503: result -> HTTP detail.
 _READINESS_503: dict[ReadinessResult, str] = {
@@ -134,6 +141,7 @@ class ManagementServer(BaseCoordinatorServer):
             MetricsCollector().start()
         except Exception as e:
             logger.warning("Ignored error setting metrics collector: %s", e)
+        resync_task = self._start_registration_resync()
         try:
             yield
         except asyncio.CancelledError:
@@ -143,11 +151,66 @@ class ManagementServer(BaseCoordinatorServer):
             raise
         finally:
             logger.info("Management server is shutting down...")
+            if resync_task is not None:
+                resync_task.cancel()
+                try:
+                    await resync_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             try:
                 MetricsCollector().stop()
             except Exception as e:
                 logger.warning("Ignored error stopping metrics collector: %s", e)
             await self._scheduler_connection.disconnect()
+
+    def _start_registration_resync(self) -> asyncio.Task | None:
+        """Schedule the periodic kv-conductor registration resync task.
+
+        Returns ``None`` when conductor integration is disabled (no
+        ``conductor_service`` configured), so no background work is started
+        for deployments that don't use prefix-match scheduling.
+        """
+        conductor_service = (
+            self.coordinator_config.prefill_kv_event_config.conductor_service
+        )
+        if not conductor_service:
+            logger.info(
+                "conductor_service is empty; skipping kv-conductor registration "
+                "resync loop"
+            )
+            return None
+        loop = asyncio.get_running_loop()
+        return loop.create_task(self._registration_resync_loop())
+
+    async def _registration_resync_loop(self) -> None:
+        """Periodically retry kv-conductor registrations that previously failed.
+
+        Errors are swallowed and logged at WARN; we never want a transient
+        retry failure to take down the management lifespan.
+        """
+        logger.info(
+            "Started kv-conductor registration resync loop (interval=%.1fs)",
+            _REGISTRATION_RESYNC_INTERVAL,
+        )
+        try:
+            while True:
+                await asyncio.sleep(_REGISTRATION_RESYNC_INTERVAL)
+                try:
+                    recovered = await asyncio.to_thread(
+                        ConductorApiClient.resync_registrations
+                    )
+                    if recovered:
+                        logger.info(
+                            "Periodic resync recovered %d pending registration(s)",
+                            recovered,
+                        )
+                except Exception as exc:  # noqa: BLE001 - background loop
+                    logger.warning(
+                        "Periodic kv-conductor resync attempt failed: %s", exc
+                    )
+        except asyncio.CancelledError:
+            logger.info("Stopped kv-conductor registration resync loop")
+            raise
 
     async def run(self) -> None:
         """Run uvicorn on management port only; does not create or start inference Workers."""
