@@ -16,6 +16,7 @@ from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.config.coordinator import CoordinatorConfig
 from motor.common.logger import get_logger
+from motor.common.utils.log_throttle import StateLogThrottle
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.api_client.conductor_api_client import ConductorApiClient, TENANT_ID
@@ -24,6 +25,33 @@ from motor.coordinator.scheduler.policy.utils import preprocess_input
 
 
 logger = get_logger(__name__)
+
+
+# Per-condition throttles. The selection path runs on every request, so naive
+# WARNING calls flood logs whenever kv-conductor has no data yet (a normal
+# startup race). State-transition logging keeps the signal: operators still see
+# "things are broken now" and "things recovered" but not the per-request spam.
+_TENANT_NONE_THROTTLE = StateLogThrottle(heartbeat_seconds=60.0)
+_NO_INSTANCE_THROTTLE = StateLogThrottle(heartbeat_seconds=60.0)
+_NO_DP_THROTTLE = StateLogThrottle(heartbeat_seconds=60.0)
+_NO_ENDPOINT_THROTTLE = StateLogThrottle(heartbeat_seconds=60.0)
+
+
+def _throttled_warn(throttle: StateLogThrottle, *, true_state: bool, message: str) -> None:
+    """Helper: emit ``message`` at WARNING level on state transitions only.
+
+    ``true_state`` is the boolean condition being tracked (``True`` means we
+    are *currently* in the bad state). This keeps "bad → bad" repeats silent
+    while still surfacing "good → bad" and the periodic heartbeat.
+    """
+    should_log, suppressed = throttle.should_log(true_state)
+    if not should_log:
+        logger.debug("%s (suppressed since last warn)", message)
+        return
+    if suppressed:
+        logger.warning("%s (suppressed %d similar messages)", message, suppressed)
+    else:
+        logger.warning(message)
 
 
 class KvCacheAffinityPolicy(BaseSchedulingPolicy):
@@ -60,8 +88,25 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         rsp = ConductorApiClient.query_conductor(instances, encoded_ids)
         tenant = rsp.get(TENANT_ID, None)
         if tenant is None:
-            logger.warning(f"tenant is none")
+            _throttled_warn(
+                _TENANT_NONE_THROTTLE,
+                true_state=True,
+                message=(
+                    "kv_cache_affinity: conductor returned no data for tenant "
+                    f"'{TENANT_ID}'; check that engine instances are registered "
+                    "(falling back to load_balance)"
+                ),
+            )
             return None
+        # Tenant data is back; if we previously warned, log the recovery once.
+        _throttled_warn(
+            _TENANT_NONE_THROTTLE,
+            true_state=False,
+            message=(
+                f"kv_cache_affinity: conductor tenant '{TENANT_ID}' now has data, "
+                "resuming KV-affinity routing"
+            ),
+        )
 
         max_kv_matched = 0
         max_kv_dp = 0
@@ -82,12 +127,30 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             selected_data_dp = instance_data.get("DP", {})
 
         if selected_instance is None:
-            logger.warning(f"selected_instance is None")
+            _throttled_warn(
+                _NO_INSTANCE_THROTTLE,
+                true_state=True,
+                message=(
+                    "kv_cache_affinity: no candidate instance was reported by "
+                    "conductor (tenant present but no vllm-prefill-* entries)"
+                ),
+            )
             return None
+        _throttled_warn(_NO_INSTANCE_THROTTLE, true_state=False,
+                        message="kv_cache_affinity: candidate instance available again")
 
         if not selected_data_dp:
-            logger.warning(f"selected_data_dp is None")
+            _throttled_warn(
+                _NO_DP_THROTTLE,
+                true_state=True,
+                message=(
+                    f"kv_cache_affinity: instance {selected_instance.id} has no DP "
+                    "endpoint data; falling back"
+                ),
+            )
             return None
+        _throttled_warn(_NO_DP_THROTTLE, true_state=False,
+                        message="kv_cache_affinity: DP endpoint data available again")
 
         for endpoint in selected_instance.endpoints.values():
             for ep in endpoint.values():
@@ -99,9 +162,21 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
                 selected_endpoint = ep
 
         if selected_endpoint is None:
-            logger.warning(f"selected_endpoint is None")
+            _throttled_warn(
+                _NO_ENDPOINT_THROTTLE,
+                true_state=True,
+                message=(
+                    f"kv_cache_affinity: instance {selected_instance.id} reports no "
+                    "matchable endpoint; falling back"
+                ),
+            )
             return None
-        logger.info(f"select_endpoint: {selected_instance.id}-{selected_endpoint.id}  max_kv_matched:{max_kv_matched}")
+        _throttled_warn(_NO_ENDPOINT_THROTTLE, true_state=False,
+                        message="kv_cache_affinity: endpoint selection healthy again")
+        logger.debug(
+            "select_endpoint: %s-%s max_kv_matched:%s",
+            selected_instance.id, selected_endpoint.id, max_kv_matched,
+        )
         return (selected_instance, selected_endpoint)
 
     def _select_instance(self, _: PDRole = None) -> Instance | None:

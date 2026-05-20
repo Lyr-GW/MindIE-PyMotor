@@ -38,8 +38,25 @@ from motor.coordinator.scheduler.policy.function_call_affinity import (
 )
 from motor.coordinator.domain.workload_calculator import calculate_demand_workload
 from motor.coordinator.models.request import RequestInfo
+from motor.common.utils.log_throttle import StateLogThrottle
 
 logger = get_logger(__name__)
+
+# Fallback warnings are emitted on every request that misses the affinity
+# pathway; throttle them so a noisy fallback storm does not drown the log.
+_FALLBACK_THROTTLE = StateLogThrottle(heartbeat_seconds=60.0)
+
+
+def _warn_fallback(reason: str) -> None:
+    """Throttled WARNING for "policy X failed, falling back to Y" messages."""
+    should_log, suppressed = _FALLBACK_THROTTLE.should_log(reason)
+    if not should_log:
+        logger.debug("%s (suppressed)", reason)
+        return
+    if suppressed:
+        logger.warning("%s (suppressed %d repeats)", reason, suppressed)
+    else:
+        logger.warning(reason)
 
 # Callback signature: receives active endpoint list [(ip, port), ...], returns None
 OnInstanceRefreshedCallback = Callable[[list[tuple[str, str]]], Awaitable[None]]
@@ -860,22 +877,22 @@ class AsyncSchedulerClient:
             selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
             if selected_instance is not None:
                 return self._select_endpoint_for_instance(selected_instance)
-            logger.warning("load_balance failed, falling back to round-robin")
+            _warn_fallback("load_balance failed, falling back to round-robin")
         elif st == "kv_cache_affinity":
             if role is PDRole.ROLE_P:
                 selected = KvCacheAffinityPolicy.select_endpoint_from_list(instances, req_info)
                 if selected is not None:
                     return selected
-                logger.warning("kv_cache_affinity failed, falling back to load_balance")
+                _warn_fallback("kv_cache_affinity failed, falling back to load_balance")
                 selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
                 if selected_instance is not None:
                     return self._select_endpoint_for_instance(selected_instance)
-                logger.warning("load_balance also failed, falling back to round-robin")
+                _warn_fallback("load_balance also failed, falling back to round-robin")
             else:
                 selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
             if selected_instance is not None:
                 return self._select_endpoint_for_instance(selected_instance)
-            logger.warning("kv_cache_affinity failed, falling back to round-robin")
+            _warn_fallback("kv_cache_affinity failed, falling back to round-robin")
         elif st == "function_call_affinity":
             if role is PDRole.ROLE_P:
                 selected = FunctionCallAffinityPolicy.select_endpoint_from_list(
@@ -883,18 +900,18 @@ class AsyncSchedulerClient:
                 )
                 if selected is not None:
                     return selected
-                logger.warning(
+                _warn_fallback(
                     "function_call_affinity failed, falling back to load_balance"
                 )
                 selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
                 if selected_instance is not None:
                     return self._select_endpoint_for_instance(selected_instance)
-                logger.warning("load_balance also failed, falling back to round-robin")
+                _warn_fallback("load_balance also failed, falling back to round-robin")
             else:
                 selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
             if selected_instance is not None:
                 return self._select_endpoint_for_instance(selected_instance)
-            logger.warning("function_call_affinity failed, falling back to round-robin")
+            _warn_fallback("function_call_affinity failed, falling back to round-robin")
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
