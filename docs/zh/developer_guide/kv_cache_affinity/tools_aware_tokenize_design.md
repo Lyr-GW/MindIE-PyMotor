@@ -270,3 +270,13 @@ gitGraph
 | `motor/coordinator/scheduler/policy/kv_cache_affinity.py` | 本次修复主体 |
 | `tests/coordinator/scheduler/test_kv_cache_affinity.py` | 测试新增 / 升级 |
 | `motor/coordinator/scheduler/policy/utils.py` | `preprocess_input` 等模板预处理（不动） |
+
+## 11. 后续：与 vLLM 入参全量对齐 & 命中率证据日志
+
+本设计稿只解决 *漏 tools* 这一 0/1 缺陷。Code review 追加两个工程问题（A、 vLLM `apply_chat_template` 还有 `chat_template` / `chat_template_kwargs` / `documents` / `add_generation_prompt` / `continue_final_message` 等入参我们没传；B、prefix-cache 命中率到底怎么算、tools 真的进了计算吗）单独在
+[`prefix_cache_hit_rate_design.md`](./prefix_cache_hit_rate_design.md) 详述。两份文档构成 KV-Cache 亲和性 tokenize 链 + 证据链的完整设计：
+
+```mermaid
+flowchart LR
+    A[tools_aware_tokenize_design.md<br/>漏 tools 0/1 修复] --> B[prefix_cache_hit_rate_design.md<br/>1) vLLM 入参全量对齐<br/>2) prefix-cache 命中率语义<br/>3) tools-in-cache 证据日志]
+```
