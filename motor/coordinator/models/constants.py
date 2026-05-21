@@ -62,5 +62,15 @@ class OpenAIField(StrEnum):
     MESSAGE = "message"
     TOOLS = "tools"
     TOOLS_CALLS = "tool_calls"
-    FUNCTION = "function" 
+    FUNCTION = "function"
     ARGUMENTS = "arguments"
+    # vLLM-compatible chat-template control fields (request body, see
+    # vllm/entrypoints/openai/chat_completion/protocol.ChatCompletionRequest).
+    # Mirrored so the coordinator can render the *same* token sequence vLLM
+    # produces on the prefill engine, keeping conductor `longest_matched`
+    # aligned with real KV-cache distribution.
+    CHAT_TEMPLATE = "chat_template"
+    CHAT_TEMPLATE_KWARGS = "chat_template_kwargs"
+    DOCUMENTS = "documents"
+    ADD_GENERATION_PROMPT = "add_generation_prompt"
+    CONTINUE_FINAL_MESSAGE = "continue_final_message"

@@ -977,3 +977,369 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
         self.assertIsNone(result)
         sent_instances, sent_ids = mock_query.call_args[0]
         self.assertEqual(sent_ids, [])
+
+
+# -----------------------------------------------------------------------------
+# Extended vLLM-aligned chat-template params and tools-in-cache proof logging
+# -----------------------------------------------------------------------------
+
+
+class TestApplyChatTemplateExtendedParams(unittest.TestCase):
+    """``apply_chat_template`` must forward every vLLM-aligned chat-template
+    kwarg so the coordinator-side rendering matches the prefill engine."""
+
+    def setUp(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    def tearDown(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    def test_standard_path_forwards_chat_template(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            chat_template="my-custom-tmpl",
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertEqual(kwargs.get("chat_template"), "my-custom-tmpl")
+
+    def test_standard_path_forwards_documents(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        docs = [{"title": "t", "text": "doc"}]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            documents=docs,
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertEqual(kwargs.get("documents"), docs)
+
+    def test_standard_path_forwards_chat_template_kwargs(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            chat_template_kwargs={"enable_thinking": False, "custom_flag": "x"},
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertFalse(kwargs.get("enable_thinking"))
+        self.assertEqual(kwargs.get("custom_flag"), "x")
+
+    def test_explicit_add_generation_prompt_overrides_default(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            add_generation_prompt=False,
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertFalse(kwargs.get("add_generation_prompt"))
+
+    def test_explicit_kwarg_beats_chat_template_kwargs(self) -> None:
+        """Explicit request-body ``add_generation_prompt`` wins over a stray
+        same-key entry inside ``chat_template_kwargs`` (matches vLLM's
+        ``merge_kwargs`` precedence)."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            chat_template_kwargs={"add_generation_prompt": False},
+            add_generation_prompt=True,
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertTrue(kwargs.get("add_generation_prompt"))
+
+    def test_continue_final_message_forwarded_only_when_true(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            continue_final_message=True,
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertTrue(kwargs.get("continue_final_message"))
+
+        mock_tokenizer.reset_mock()
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            continue_final_message=False,
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertNotIn("continue_final_message", kwargs)
+
+    def test_return_dict_pinned_false_for_v5_compat(self) -> None:
+        """``return_dict=False`` must be set so transformers v5 (default True)
+        still returns ``list[int]`` instead of ``BatchEncoding``."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template([{"role": "user", "content": "hi"}])
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertFalse(kwargs.get("return_dict", True))
+
+    def test_non_standard_path_also_forwards_extended_kwargs(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="DEEPSEEK")
+        mock_tokenizer.apply_chat_template.return_value = "rendered"
+        mock_tokenizer.encode.return_value = [5, 6]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            tools=None,
+            chat_template="custom",
+            chat_template_kwargs={"enable_thinking": True},
+            add_generation_prompt=False,
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertEqual(kwargs.get("chat_template"), "custom")
+        self.assertTrue(kwargs.get("enable_thinking"))
+        self.assertFalse(kwargs.get("add_generation_prompt"))
+        self.assertFalse(kwargs.get("tokenize", True))
+
+
+class TestSelectEndpointForwardsExtendedParams(unittest.TestCase):
+    """``select_endpoint_from_list`` must pull the vLLM-aligned chat-template
+    fields out of ``req_data`` and forward them to the tokenizer."""
+
+    def setUp(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    def tearDown(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_req_data_chat_template_fields_reach_tokenizer(self, mock_query) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1, 2, 3, 4, 5]
+        mock_query.return_value = {}
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "chat_template": "tool-use-tmpl",
+            "documents": [{"text": "doc"}],
+            "chat_template_kwargs": {"enable_thinking": False, "extra": 1},
+            "add_generation_prompt": False,
+            "continue_final_message": True,
+        }
+        KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        mock_tokenizer.apply_chat_template.assert_called()
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertEqual(kwargs.get("chat_template"), "tool-use-tmpl")
+        self.assertEqual(kwargs.get("documents"), [{"text": "doc"}])
+        self.assertFalse(kwargs.get("enable_thinking"))
+        self.assertEqual(kwargs.get("extra"), 1)
+        self.assertFalse(kwargs.get("add_generation_prompt"))
+        self.assertTrue(kwargs.get("continue_final_message"))
+
+
+class TestToolsInCacheProofLog(unittest.TestCase):
+    """``KV_AFFINITY_VERIFY_TOOLS`` mode must emit a tools-in-cache proof log
+    that shows ``tools_token_delta`` so operators have byte-level evidence
+    that tools render into the conductor query."""
+
+    def setUp(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    def tearDown(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_verify_tools_log_emits_when_enabled(self, mock_query) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+
+        def _apply(*args, **kwargs):
+            return list(range(20)) if kwargs.get("tools") else list(range(7))
+
+        mock_tokenizer.apply_chat_template.side_effect = _apply
+        mock_query.return_value = {}
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "1"}, clear=False):
+            with self.assertLogs(mod.logger, level="INFO") as ctx:
+                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        proof_lines = [l for l in ctx.output if "tools-in-cache proof" in l]
+        self.assertEqual(len(proof_lines), 1, ctx.output)
+        self.assertIn("tools_token_delta=13", proof_lines[0])
+        self.assertIn("ids_with_tools=20", proof_lines[0])
+        self.assertIn("ids_without_tools=7", proof_lines[0])
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_verify_tools_log_warns_when_delta_is_zero(self, mock_query) -> None:
+        """If the model's chat template silently drops tools, the proof log
+        must surface a WARNING so the operator notices."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        mock_query.return_value = {}
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "1"}, clear=False):
+            with self.assertLogs(mod.logger, level="INFO") as ctx:
+                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        degenerate = [l for l in ctx.output if "DEGENERATE" in l]
+        self.assertEqual(len(degenerate), 1, ctx.output)
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_verify_tools_disabled_emits_no_proof(self, mock_query) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        mock_query.return_value = {}
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "0"}, clear=False):
+            with self.assertLogs(mod.logger, level="INFO") as ctx:
+                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        proof_lines = [l for l in ctx.output if "tools-in-cache proof" in l]
+        self.assertEqual(len(proof_lines), 0)
+        # Tokenizer called once (no side-channel).
+        self.assertEqual(mock_tokenizer.apply_chat_template.call_count, 1)
+
+
+class TestHitAnalysisLog(unittest.TestCase):
+    """``hit analysis`` log must surface the Mooncake-conductor breakdown
+    (ids / block_size / longest_matched / hit_ratio) after a successful query."""
+
+    def setUp(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    def tearDown(self) -> None:
+        _reset_tokenizer_manager_singleton()
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_hit_analysis_emits_after_query(self, mock_query) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = list(range(256))
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        mock_query.return_value = {
+            TENANT_ID: {
+                "vllm-prefill-1": {
+                    "longest_matched": 128,
+                    "DP": {"0": 64},
+                }
+            }
+        }
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            result = KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        self.assertIsNotNone(result)
+        lines = [l for l in ctx.output if "hit analysis" in l]
+        self.assertEqual(len(lines), 1, ctx.output)
+        self.assertIn("ids=256", lines[0])
+        self.assertIn("longest_matched=128", lines[0])
+        self.assertIn("hit_ratio=50.00%", lines[0])
+        # default block_size=128 => matched_blocks = 128/128 = 1
+        self.assertIn("matched_blocks=1", lines[0])
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_hit_analysis_verdict_tools_in_hit_when_proof_active(
+        self, mock_query
+    ) -> None:
+        """When verification is ON and matched > without_tools length,
+        ``verdict=tools_in_hit`` must appear in the hit analysis log."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+
+        def _apply(*args, **kwargs):
+            return list(range(256)) if kwargs.get("tools") else list(range(64))
+
+        mock_tokenizer.apply_chat_template.side_effect = _apply
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        mock_query.return_value = {
+            TENANT_ID: {
+                "vllm-prefill-1": {
+                    "longest_matched": 128,
+                    "DP": {"0": 64},
+                }
+            }
+        }
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "1"}, clear=False):
+            with self.assertLogs(mod.logger, level="INFO") as ctx:
+                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        lines = [l for l in ctx.output if "hit analysis" in l]
+        self.assertEqual(len(lines), 1, ctx.output)
+        self.assertIn("verdict=tools_in_hit", lines[0])
