@@ -468,12 +468,12 @@ class ControllerAPI:
                 server_config.ssl = context
                 logger.info(
                     f"Starting observability API server on https://"
-                    f"{self.observability_api_host}:{self.observability_api_port}"
+                    f"{format_address(self.observability_api_host, self.observability_api_port)}"
                 )
             else:
                 logger.info(
                     f"Starting observability API server on http://"
-                    f"{self.observability_api_host}:{self.observability_api_port}"
+                    f"{format_address(self.observability_api_host, self.observability_api_port)}"
                 )
 
             self.observability_server = uvicorn.Server(server_config)
