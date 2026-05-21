@@ -1185,7 +1185,7 @@ class TestToolsInCacheProofLog(unittest.TestCase):
             with self.assertLogs(mod.logger, level="INFO") as ctx:
                 KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
-        proof_lines = [l for l in ctx.output if "tools-in-cache proof" in l]
+        proof_lines = [line for line in ctx.output if "tools-in-cache proof" in line]
         self.assertEqual(len(proof_lines), 1, ctx.output)
         self.assertIn("tools_token_delta=13", proof_lines[0])
         self.assertIn("ids_with_tools=20", proof_lines[0])
@@ -1217,7 +1217,7 @@ class TestToolsInCacheProofLog(unittest.TestCase):
             with self.assertLogs(mod.logger, level="INFO") as ctx:
                 KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
-        degenerate = [l for l in ctx.output if "DEGENERATE" in l]
+        degenerate = [line for line in ctx.output if "DEGENERATE" in line]
         self.assertEqual(len(degenerate), 1, ctx.output)
 
     @patch(
@@ -1244,7 +1244,7 @@ class TestToolsInCacheProofLog(unittest.TestCase):
             with self.assertLogs(mod.logger, level="INFO") as ctx:
                 KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
-        proof_lines = [l for l in ctx.output if "tools-in-cache proof" in l]
+        proof_lines = [line for line in ctx.output if "tools-in-cache proof" in line]
         self.assertEqual(len(proof_lines), 0)
         # Tokenizer called once (no side-channel).
         self.assertEqual(mock_tokenizer.apply_chat_template.call_count, 1)
@@ -1292,7 +1292,7 @@ class TestHitAnalysisLog(unittest.TestCase):
             result = KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
         self.assertIsNotNone(result)
-        lines = [l for l in ctx.output if "hit analysis" in l]
+        lines = [line for line in ctx.output if "hit analysis" in line]
         self.assertEqual(len(lines), 1, ctx.output)
         self.assertIn("ids=256", lines[0])
         self.assertIn("longest_matched=128", lines[0])
@@ -1340,6 +1340,6 @@ class TestHitAnalysisLog(unittest.TestCase):
             with self.assertLogs(mod.logger, level="INFO") as ctx:
                 KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
-        lines = [l for l in ctx.output if "hit analysis" in l]
+        lines = [line for line in ctx.output if "hit analysis" in line]
         self.assertEqual(len(lines), 1, ctx.output)
         self.assertIn("verdict=tools_in_hit", lines[0])
