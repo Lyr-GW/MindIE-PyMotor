@@ -11,6 +11,7 @@
 from motor.engine_server.core.config import IConfig
 from motor.common.http.http_client import AsyncSafeHTTPSClient
 from motor.common.logger import get_logger
+from motor.common.utils.net import format_address
 
 logger = get_logger(__name__)
 
@@ -22,7 +23,7 @@ class HealthCollector:
         self.port = endpoint_config.port
         self.infer_tls_config = endpoint_config.deploy_config.infer_tls_config
         self.timeout = endpoint_config.deploy_config.health_check_config.health_collector_timeout
-        self.address = f"{self.host}:{self.port}"
+        self.address = format_address(self.host, self.port)
         self._has_connected = False
 
     async def is_healthy(self) -> bool:

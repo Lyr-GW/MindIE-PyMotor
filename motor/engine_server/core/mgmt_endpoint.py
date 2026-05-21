@@ -22,6 +22,7 @@ from starlette.routing import Mount
 
 from motor.common.http.cert_util import CertUtil
 from motor.common.logger import get_logger
+from motor.common.utils.net import format_address
 from motor.engine_server.core.config import IConfig
 from motor.engine_server.core.endpoint import Endpoint
 from motor.engine_server.core.health_collector import HealthCollector
@@ -91,7 +92,7 @@ class MgmtEndpoint(Endpoint):
     def run(self):
         if self._server_thread and not self._server_thread.is_alive():
             self._server_thread.start()
-            logger.info(f"Endpoint server started: http://{self.host}:{self.mgmt_port}")
+            logger.info(f"Endpoint server started: http://{format_address(self.host, self.mgmt_port)}")
 
     def run_virtual_inference(self):
         # start health check
@@ -150,9 +151,9 @@ class MgmtEndpoint(Endpoint):
                 config.ssl = ssl_context
             else:
                 raise RuntimeError("Failed to create ssl context")
-            logger.info(f"MgmtEndpoint server started: https://{self.host}:{self.mgmt_port}")
+            logger.info(f"MgmtEndpoint server started: https://{format_address(self.host, self.mgmt_port)}")
         else:
-            logger.info(f"MgmtEndpoint server started: http://{self.host}:{self.mgmt_port}")
+            logger.info(f"MgmtEndpoint server started: http://{format_address(self.host, self.mgmt_port)}")
 
         self._server = uvicorn.Server(config)
         if not self._stop_event.is_set():

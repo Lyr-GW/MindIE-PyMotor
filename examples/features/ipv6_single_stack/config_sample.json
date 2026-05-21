@@ -1,0 +1,67 @@
+{
+  "version": "v2.0",
+  "_comment": "A3 IPv6 single-stack sample. Differences vs examples/features/config_sample.json: controller_api_host / coordinator_api_host use IPv6 literals; DNS fields rely on AAAA records resolved by the cluster DNS. See docs/zh/user_guide/service_deployment/ipv6_single_stack.md for the deployment runbook.",
+  "motor_deploy_config": {
+    "p_instances_num": 1,
+    "d_instances_num": 1,
+    "single_p_instance_pod_num": 1,
+    "single_d_instance_pod_num": 1,
+    "p_pod_npu_num": 16,
+    "d_pod_npu_num": 16,
+    "image_name": "",
+    "job_id": "mindie-motor",
+    "hardware_type": "800I_A3",
+    "weight_mount_path": "/mnt/weight/",
+    "tls_config": {
+      "infer_tls_config": { "enable_tls": false },
+      "mgmt_tls_config": { "enable_tls": false },
+      "etcd_tls_config": { "enable_tls": false },
+      "grpc_tls_config": { "enable_tls": false },
+      "observability_tls_config": { "enable_tls": false }
+    }
+  },
+  "motor_controller_config": {
+    "api_config": {
+      "controller_api_host": "::1",
+      "controller_api_dns": "mindie-motor-controller-service.mindie-motor.svc.cluster.local",
+      "controller_api_port": 1026,
+      "observability_api_port": 1027
+    },
+    "etcd_config": {
+      "etcd_host": "etcd.default.svc.cluster.local",
+      "etcd_port": 2379,
+      "etcd_timeout": 5,
+      "enable_etcd_persistence": false
+    }
+  },
+  "motor_coordinator_config": {
+    "scheduler_config": {
+      "deploy_mode": "pd_separate",
+      "scheduler_type": "load_balance"
+    },
+    "inference_workers_config": {
+      "num_workers": 4,
+      "worker_metaserver_base_port": 12000
+    },
+    "etcd_config": {
+      "etcd_host": "etcd.default.svc.cluster.local",
+      "etcd_port": 2379,
+      "etcd_timeout": 5,
+      "enable_etcd_persistence": false
+    },
+    "api_config": {
+      "coordinator_api_host": "::1",
+      "coordinator_api_dns": "mindie-motor-coordinator-service.mindie-motor.svc.cluster.local",
+      "coordinator_api_infer_port": 1025,
+      "coordinator_api_mgmt_port": 1026
+    },
+    "prefill_kv_event_config": {
+      "conductor_service": "",
+      "http_server_port": 13333,
+      "block_size": 128,
+      "endpoint": "",
+      "replay_endpoint": "",
+      "engine_type": "vLLM"
+    }
+  }
+}

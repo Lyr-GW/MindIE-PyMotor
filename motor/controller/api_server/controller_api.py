@@ -26,6 +26,7 @@ from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.http.cert_util import CertUtil
 from motor.common.logger import get_logger, ApiAccessFilter
 from motor.common.http.http_response import format_success_response, raise_internal_error
+from motor.common.utils.net import format_address
 from motor.common.alarm.record import Record
 from motor.config.controller import ControllerConfig
 from motor.controller.api_client import NodeManagerApiClient
@@ -267,9 +268,9 @@ class ControllerAPI:
                     raise RuntimeError("Failed to create SSL context")
 
                 server_config.ssl = context
-                logger.info(f"Starting Controller API server on https://{self.host}:{self.port}")
+                logger.info(f"Starting Controller API server on https://{format_address(self.host, self.port)}")
             else:
-                logger.info(f"Starting Controller API server on http://{self.host}:{self.port}")
+                logger.info(f"Starting Controller API server on http://{format_address(self.host, self.port)}")
 
             self.server = uvicorn.Server(server_config)
             self.loop = asyncio.new_event_loop()
@@ -453,10 +454,10 @@ class ControllerAPI:
     def _run_observability_api_server(self) -> None:
         try:
             server_config = uvicorn.Config(
-                self.observability_app, 
-                host=self.observability_api_host, 
-                port=self.observability_api_port, 
-                log_level="info"
+                self.observability_app,
+                host=self.observability_api_host,
+                port=self.observability_api_port,
+                log_level="info",
             )
             if self.observability_tls_config.enable_tls:
                 server_config.load()
@@ -465,12 +466,16 @@ class ControllerAPI:
                     raise RuntimeError("Failed to create SSL context")
 
                 server_config.ssl = context
-                logger.info(f"Starting observability API server on https://"
-                            f"{self.observability_api_host}:{self.observability_api_port}")
+                logger.info(
+                    f"Starting observability API server on https://"
+                    f"{self.observability_api_host}:{self.observability_api_port}"
+                )
             else:
-                logger.info(f"Starting observability API server on http://"
-                            f"{self.observability_api_host}:{self.observability_api_port}")
-  
+                logger.info(
+                    f"Starting observability API server on http://"
+                    f"{self.observability_api_host}:{self.observability_api_port}"
+                )
+
             self.observability_server = uvicorn.Server(server_config)
             self.observability_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.observability_loop)

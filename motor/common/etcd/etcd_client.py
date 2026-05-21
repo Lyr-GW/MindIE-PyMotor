@@ -24,6 +24,7 @@ from motor.config.tls_config import TLSConfig
 from motor.common.etcd.proto import rpc_pb2, rpc_pb2_grpc
 from motor.common.etcd import locks
 from motor.common.logger import get_logger
+from motor.common.utils.net import format_address
 
 
 T = TypeVar('T', bound=BaseModel)
@@ -64,9 +65,9 @@ class EtcdClient:
                     private_key=private_key,
                     certificate_chain=cert_chain
                 )
-                self.channel = grpc.secure_channel(f'{self.host}:{self.port}', creds)
+                self.channel = grpc.secure_channel(format_address(self.host, self.port), creds)
             else:
-                self.channel = grpc.insecure_channel(f'{self.host}:{self.port}')
+                self.channel = grpc.insecure_channel(format_address(self.host, self.port))
 
             self.kv_stub = rpc_pb2_grpc.KVStub(self.channel)
             self.lease_stub = rpc_pb2_grpc.LeaseStub(self.channel)

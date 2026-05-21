@@ -9,6 +9,7 @@ nav:
           - PD 分离部署: user_guide/service_deployment/pd_disaggregation_deployment.md
           - 配置参考: user_guide/service_deployment/config_reference.md
           - 更新配置白名单: user_guide/service_deployment/update_config_whitelist.md
+          - IPv6 单栈部署 (A3): user_guide/service_deployment/ipv6_single_stack.md
       - Standby 部署: user_guide/standby_deployment.md
       - 链路追踪部署: user_guide/tracing_deployment.md
       - KV Pool 部署: user_guide/KV_pool_deployment_guide.md
