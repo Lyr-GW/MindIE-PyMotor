@@ -103,6 +103,8 @@ HARDWARE_TYPE_800I_A3 = "800I_A3"
 ACCELERATOR_TYPE = "accelerator-type"
 ACCELERATOR_TYPE_910B = "module-910b-8"
 ACCELERATOR_TYPE_A3 = "module-a3-16"
+MINDIE_ROLE = "mindie-role"
+ENABLE_MINDIE_ROLE_NODE_SELECTOR = "enable_mindie_role_node_selector"
 
 CONTAINERS = "containers"
 IMAGE = "image"
