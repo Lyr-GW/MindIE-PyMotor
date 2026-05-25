@@ -1147,9 +1147,9 @@ class TestSelectEndpointForwardsExtendedParams(unittest.TestCase):
 
 
 class TestToolsInCacheProofLog(unittest.TestCase):
-    """``KV_AFFINITY_VERIFY_TOOLS`` mode must emit a tools-in-cache proof log
-    that shows ``tools_token_delta`` so operators have byte-level evidence
-    that tools render into the conductor query."""
+    """The tools-in-cache proof log MUST be emitted at INFO by default
+    (no env switch) so operators always have byte-level evidence that tools
+    render into the conductor query."""
 
     def setUp(self) -> None:
         _reset_tokenizer_manager_singleton()
@@ -1160,7 +1160,7 @@ class TestToolsInCacheProofLog(unittest.TestCase):
     @patch(
         "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
     )
-    def test_verify_tools_log_emits_when_enabled(self, mock_query) -> None:
+    def test_proof_log_emits_by_default_when_tools_present(self, mock_query) -> None:
         manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
 
         def _apply(*args, **kwargs):
@@ -1181,20 +1181,22 @@ class TestToolsInCacheProofLog(unittest.TestCase):
 
         from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
 
-        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "1"}, clear=False):
-            with self.assertLogs(mod.logger, level="INFO") as ctx:
-                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
         proof_lines = [line for line in ctx.output if "tools-in-cache proof" in line]
         self.assertEqual(len(proof_lines), 1, ctx.output)
         self.assertIn("tools_token_delta=13", proof_lines[0])
         self.assertIn("ids_with_tools=20", proof_lines[0])
         self.assertIn("ids_without_tools=7", proof_lines[0])
+        # Side-channel is always-on, so tokenize is called twice: once with
+        # tools (live path) + once without tools (proof side-channel).
+        self.assertEqual(mock_tokenizer.apply_chat_template.call_count, 2)
 
     @patch(
         "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
     )
-    def test_verify_tools_log_warns_when_delta_is_zero(self, mock_query) -> None:
+    def test_proof_log_warns_when_delta_is_zero(self, mock_query) -> None:
         """If the model's chat template silently drops tools, the proof log
         must surface a WARNING so the operator notices."""
         manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
@@ -1213,9 +1215,8 @@ class TestToolsInCacheProofLog(unittest.TestCase):
 
         from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
 
-        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "1"}, clear=False):
-            with self.assertLogs(mod.logger, level="INFO") as ctx:
-                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
         degenerate = [line for line in ctx.output if "DEGENERATE" in line]
         self.assertEqual(len(degenerate), 1, ctx.output)
@@ -1223,9 +1224,54 @@ class TestToolsInCacheProofLog(unittest.TestCase):
     @patch(
         "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
     )
-    def test_verify_tools_disabled_emits_no_proof(self, mock_query) -> None:
+    def test_proof_log_omitted_when_no_tools(self, mock_query) -> None:
+        """Plain chat requests (no tools) must NOT pay for the side-channel
+        tokenize: only the primary path runs, and no proof line appears."""
         manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
         mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        mock_query.return_value = {}
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            # no "tools" key
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        proof_lines = [line for line in ctx.output if "tools-in-cache proof" in line]
+        self.assertEqual(len(proof_lines), 0)
+        # Plain chat: tokenizer called only once (no side-channel).
+        self.assertEqual(mock_tokenizer.apply_chat_template.call_count, 1)
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_proof_log_skipped_when_side_channel_returns_empty(self, mock_query) -> None:
+        """If the side-channel tokenize falls back to ``[]`` (its own
+        ``_safe_fallback_encode`` exhausted retries), do NOT emit the proof
+        line (would mis-report ``tools_token_delta = len(encoded_ids)``).
+        A WARNING tells the operator where to look instead."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        call_count = {"n": 0}
+
+        def _apply(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # live path with tools: succeeds
+                return list(range(20))
+            # every subsequent call (side-channel + its fallback retry) raises
+            # so apply_chat_template returns [] via _safe_fallback_encode
+            raise RuntimeError("side-channel boom")
+
+        mock_tokenizer.apply_chat_template.side_effect = _apply
         mock_query.return_value = {}
 
         instance = Mock()
@@ -1240,14 +1286,16 @@ class TestToolsInCacheProofLog(unittest.TestCase):
 
         from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
 
-        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "0"}, clear=False):
-            with self.assertLogs(mod.logger, level="INFO") as ctx:
-                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
-        proof_lines = [line for line in ctx.output if "tools-in-cache proof" in line]
-        self.assertEqual(len(proof_lines), 0)
-        # Tokenizer called once (no side-channel).
-        self.assertEqual(mock_tokenizer.apply_chat_template.call_count, 1)
+        proof_lines = [line for line in ctx.output if "tools-in-cache proof:" in line]
+        self.assertEqual(len(proof_lines), 0, ctx.output)
+        empty_warn = [
+            line for line in ctx.output
+            if "tools-in-cache side-channel returned empty token list" in line
+        ]
+        self.assertEqual(len(empty_warn), 1, ctx.output)
 
 
 class TestHitAnalysisLog(unittest.TestCase):
@@ -1303,11 +1351,10 @@ class TestHitAnalysisLog(unittest.TestCase):
     @patch(
         "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
     )
-    def test_hit_analysis_verdict_tools_in_hit_when_proof_active(
-        self, mock_query
-    ) -> None:
-        """When verification is ON and matched > without_tools length,
-        ``verdict=tools_in_hit`` must appear in the hit analysis log."""
+    def test_hit_analysis_verdict_tools_in_hit_by_default(self, mock_query) -> None:
+        """``verdict=tools_in_hit`` must appear whenever ``tools`` is present
+        and ``longest_matched > ids_without_tools``; this is always-on, no
+        env switch required."""
         manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
 
         def _apply(*args, **kwargs):
@@ -1336,10 +1383,77 @@ class TestHitAnalysisLog(unittest.TestCase):
 
         from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
 
-        with patch.dict("os.environ", {mod._VERIFY_TOOLS_ENV: "1"}, clear=False):
-            with self.assertLogs(mod.logger, level="INFO") as ctx:
-                KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
 
         lines = [line for line in ctx.output if "hit analysis" in line]
         self.assertEqual(len(lines), 1, ctx.output)
         self.assertIn("verdict=tools_in_hit", lines[0])
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_hit_analysis_verdict_absent_when_no_tools(self, mock_query) -> None:
+        """Plain chat (no tools) ⇒ side-channel skipped ⇒ no verdict suffix
+        on the hit analysis line."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = list(range(256))
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+
+        mock_query.return_value = {
+            TENANT_ID: {
+                "vllm-prefill-1": {
+                    "longest_matched": 128,
+                    "DP": {"0": 64},
+                }
+            }
+        }
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+            # no tools
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        lines = [line for line in ctx.output if "hit analysis" in line]
+        self.assertEqual(len(lines), 1, ctx.output)
+        self.assertNotIn("verdict=", lines[0])
+
+    @patch(
+        "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
+    )
+    def test_tokenize_ok_log_emitted_at_info_by_default(self, mock_query) -> None:
+        """The ``kv_affinity tokenize ok`` line must be visible in default
+        INFO production logs (no DEBUG required)."""
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = list(range(32))
+
+        instance = Mock()
+        instance.id = 1
+        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+        mock_query.return_value = {}
+
+        req_info = Mock()
+        req_info.req_data = {
+            "messages": [{"role": "user", "content": "hi"}],
+        }
+
+        from motor.coordinator.scheduler.policy import kv_cache_affinity as mod
+
+        with self.assertLogs(mod.logger, level="INFO") as ctx:
+            KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
+
+        lines = [line for line in ctx.output if "kv_affinity tokenize ok" in line]
+        self.assertEqual(len(lines), 1, ctx.output)
+        # INFO level prefix on assertLogs is "INFO:<logger>:..."
+        self.assertTrue(lines[0].startswith("INFO:"), lines[0])
+        self.assertIn("encoded_ids=32", lines[0])
+        self.assertIn("fp=", lines[0])

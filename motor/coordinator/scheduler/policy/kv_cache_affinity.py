@@ -28,19 +28,6 @@ from motor.coordinator.scheduler.policy.utils import preprocess_input
 logger = get_logger(__name__)
 
 
-# Env switch (default OFF). When ON, ``select_endpoint_from_list`` also
-# tokenises the request *without* tools as a side-channel diagnostic and emits
-# an INFO log line. This is the operator-facing "proof" that tools are being
-# rendered into the token sequence that is shipped to Mooncake conductor.
-# The extra tokenize call doubles per-request CPU cost on the affinity hot
-# path, so keep it OFF in production unless actively troubleshooting.
-_VERIFY_TOOLS_ENV: str = "KV_AFFINITY_VERIFY_TOOLS"
-
-
-def _is_verify_tools_enabled() -> bool:
-    return os.environ.get(_VERIFY_TOOLS_ENV, "0").strip() not in ("", "0", "false", "False")
-
-
 def _fingerprint_ids(encoded_ids: list[int]) -> str:
     """8-hex-char fingerprint of the token sequence for trace correlation.
 
@@ -100,16 +87,22 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
     ) -> Optional[int]:
         """Side-channel proof that ``tools`` actually inflated the encoded ids.
 
-        Returns the *without-tools* encoded id length when verification is
-        enabled and successful, ``None`` otherwise.
+        Returns the *without-tools* encoded id length on success, ``None`` if
+        the request carries no tools (nothing to prove) or the side-channel
+        tokenize itself fails.
 
         We compare the request rendered ``with tools`` (the live path) and
         ``without tools`` (side-channel). If ``tools_token_delta > 0`` the
         operator has byte-level evidence that conductor's ``longest_matched``
         is computed over the tools-rendered prefix.
+
+        This log is always emitted at INFO whenever ``tools`` is present, so
+        operators do not need to flip any environment variable to see the
+        proof. The cost is one extra tokenize call per function-call request
+        on the affinity hot path; this trade-off is accepted because the
+        proof line is the only evidence linking tokenize correctness to
+        conductor's cache decision.
         """
-        if not _is_verify_tools_enabled():
-            return None
         if not tools:
             return None
         if messages is None:
@@ -120,7 +113,19 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             )
         except Exception as e:
             logger.warning(
-                "kv_affinity verify-tools side-channel failed (continuing): %s", e
+                "kv_affinity tools-in-cache side-channel failed (continuing): %s", e
+            )
+            return None
+
+        # Side-channel returned empty -> the no-tools tokenize fell back to
+        # ``[]`` (e.g. its own ``_safe_fallback_encode`` exhausted retries).
+        # Reporting ``tools_token_delta = len(encoded_ids) - 0`` would
+        # misleadingly look like "tools added all tokens". Skip the proof
+        # entirely and tell the operator where to look instead.
+        if not ids_without_tools:
+            logger.warning(
+                "kv_affinity tools-in-cache side-channel returned empty token list; "
+                "skipping proof line (check upstream tokenize fail-closed ERROR logs)."
             )
             return None
 
@@ -171,7 +176,8 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         the hit:
             ids=A blk=BS matched=M (= blk*K) hit_ratio=M/A
         Plus a verdict on whether the hit clearly covers the tools section
-        (only present when side-channel verification was successful).
+        (present whenever ``tools`` was on the request and the side-channel
+        tokenize succeeded; absent for plain chat requests with no tools).
         """
         if not encoded_ids_len:
             return
@@ -228,7 +234,9 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         # Visibility for the validated invariant: tools, when present, MUST
         # inflate the encoded token sequence. Operators can grep this line to
         # verify function-call requests are being tokenised correctly.
-        logger.debug(
+        # Emitted at INFO so it shows up in default production logs without
+        # any extra configuration.
+        logger.info(
             "kv_affinity tokenize ok: msgs=%d tools=%d encoded_ids=%d fp=%s",
             len(messages or []),
             len(tools or []),

@@ -246,9 +246,11 @@ if TENANT_ID != "default":
 
 | 日志 | 级别 | 角色 |
 | --- | --- | --- |
-| `kv_affinity tokenize ok` | DEBUG | 每次请求记录 `msgs=N tools=M encoded_ids=K fp=<8hex>`。`fp` 是 `encoded_ids` 的 BLAKE2b-32 指纹，**两次相同请求的 fp 必须相同**，跨请求可比对前缀。 |
-| `kv_affinity tools-in-cache proof` | INFO | 开启 `KV_AFFINITY_VERIFY_TOOLS=1` 后启用。**侧信道**把同一请求**不带 tools** 再 tokenize 一次，记录 `tools_token_delta = ids_with_tools - ids_without_tools`。`tools_token_delta > 0` = "tools 真的进了 token 序列、真的被送进 conductor"。 |
-| `kv_affinity hit analysis` | INFO | conductor `/query` 成功返回后，记录 `ids / blk / longest_matched / matched_blocks / hit_ratio`。开启验证模式时，附带 `verdict=tools_in_hit / tools_at_hit_boundary / tools_not_in_hit`，直接给出"tools 段是否被 conductor 当作命中"的判定。 |
+| `kv_affinity tokenize ok` | **INFO**（默认每请求都打）| 每次请求记录 `msgs=N tools=M encoded_ids=K fp=<8hex>`。`fp` 是 `encoded_ids` 的 BLAKE2b-32 指纹，**两次相同请求的 fp 必须相同**，跨请求可比对前缀。 |
+| `kv_affinity tools-in-cache proof` | **INFO**（默认开启，仅当 `tools` 存在时打印）| **侧信道**把同一请求**不带 tools** 再 tokenize 一次，记录 `tools_token_delta = ids_with_tools - ids_without_tools`。`tools_token_delta > 0` = "tools 真的进了 token 序列、真的被送进 conductor"。 |
+| `kv_affinity hit analysis` | **INFO**（默认每命中都打）| conductor `/query` 成功返回后，记录 `ids / blk / longest_matched / matched_blocks / hit_ratio`。`tools` 存在且侧信道成功时，附带 `verdict=tools_in_hit / tools_at_hit_boundary / tools_not_in_hit`，直接给出"tools 段是否被 conductor 当作命中"的判定；无 `tools` 时省略 `verdict`。 |
+
+> 设计取向：所有三条日志**默认开启、均为 INFO**，不依赖任何环境变量。代价是 function-call 请求每次会多调用一次 `apply_chat_template`（无 tools 渲染的侧信道）；plain chat 请求（无 `tools`）只走主路径、零额外开销。详见 §4.5。
 
 ### 4.2 时序图
 
@@ -262,9 +264,9 @@ sequenceDiagram
     U->>C: POST /v1/chat/completions<br/>(messages + tools + chat_template_kwargs ...)
     C->>T: apply_chat_template(<br/> messages, tools, <br/> chat_template, chat_template_kwargs,<br/> documents, add_generation_prompt,<br/> continue_final_message)
     T-->>C: encoded_ids (含 tools)
-    Note over C: DEBUG: kv_affinity tokenize ok msgs=N tools=M encoded_ids=K fp=<hex>
+    Note over C: INFO: kv_affinity tokenize ok msgs=N tools=M encoded_ids=K fp=<hex>
 
-    alt KV_AFFINITY_VERIFY_TOOLS=1
+    alt tools 存在（函数调用请求）
         C->>T: apply_chat_template(messages, tools=None, ...)  # 侧信道
         T-->>C: encoded_ids_without_tools
         Note over C: INFO: tools-in-cache proof<br/>ids_with_tools=A ids_without_tools=B<br/>tools_token_delta=A-B (>0 即证据)
@@ -273,12 +275,12 @@ sequenceDiagram
     C->>K: POST /query {model, block_size, token_ids=encoded_ids}
     K-->>C: { tenant: { instance: { longest_matched, DP, ... } } }
     Note over C: INFO: hit analysis<br/>ids=A blk=BS longest_matched=M<br/>matched_blocks=M/BS hit_ratio=M/A
-    Note over C: INFO (验证模式): verdict=tools_in_hit / tools_at_hit_boundary / tools_not_in_hit
+    Note over C: 含 tools: verdict=tools_in_hit / tools_at_hit_boundary / tools_not_in_hit<br/>无 tools: 省略 verdict 后缀
 ```
 
 ### 4.3 `verdict` 判定规则
 
-只有开启验证模式（成功拿到 `ids_without_tools_len`）才会附带 `verdict`，规则：
+只有请求带 `tools` 且侧信道成功拿到 `ids_without_tools_len`（非空）时，hit analysis 才会附带 `verdict`。规则：
 
 ```
 let M  = longest_matched
@@ -292,24 +294,30 @@ if M <  B:   verdict = tools_not_in_hit      # 命中比"不含 tools"还短，t
 
 逻辑前提：在大多数 chat 模板里，渲染产物的顺序是 `system → tools → messages`，因此 "不含 tools" 渲染产物的长度 `B` 大致等于 "system + messages" 段；如果 `longest_matched > B` 则意味着已经匹配过 tools 段。注意：少数模板会把 tools schema 拼到 messages **之后**，此时该启发式判定会失真——这种情况下 `tools-in-cache proof` 日志里的 `tools_token_delta > 0` 仍然成立，依然可以单独作为"tools 在 token 序列里"的证据。
 
-### 4.4 `_safe_fallback_encode` 与验证模式的交互
+### 4.4 `_safe_fallback_encode` 与侧信道的交互
 
-`KV_AFFINITY_VERIFY_TOOLS=1` 时，侧信道也走相同的 `apply_chat_template(messages, tools=None, ...)` 路径，因此它本身也会经过 `_safe_fallback_encode`。极端场景下侧信道完全失败：
+侧信道也走相同的 `apply_chat_template(messages, tools=None, ...)` 路径，因此本身也会经过 `_safe_fallback_encode`。两种降级情形：
 
-```text
-WARN  kv_affinity verify-tools side-channel failed (continuing): <exc>
-```
+| 情形 | 日志 | 主链路 |
+| --- | --- | --- |
+| 侧信道抛异常被 `_emit_tools_in_cache_proof` 自身 `except` 捕获 | `WARN kv_affinity tools-in-cache side-channel failed (continuing): <exc>` | 不影响 |
+| 侧信道走完所有 fallback 后返回 `[]` | `WARN kv_affinity tools-in-cache side-channel returned empty token list; skipping proof line ...` | 不影响 |
 
-只记 warning，**不影响主链路**——`encoded_ids` 仍然是 §2 的产物，`/query` 仍然照常发送，只是这一次少了一条 `proof` 日志。
+两种降级**都不影响主链路**——`encoded_ids` 仍是 §2 的产物，`/query` 仍照常发送，仅缺一条 `proof` 日志。**关键设计**：返回 `[]` 时主动跳过 proof 输出，避免 `tools_token_delta = len(encoded_ids) - 0` 看起来像"tools 加了全部 token"的假象。
 
 ### 4.5 性能权衡
 
-- 验证模式下每次请求**多调用一次** `apply_chat_template`，CPU 消耗 ~×2（tokenize 占主导）。**默认关闭**。
-- 生产环境只在以下场景临时开启：
-  - 上线初期验证某模型 chat template 是否正确把 tools 渲染成 token；
-  - 怀疑命中率异常下降时，结合 `verdict` 字段定位 "tools 段命中" 还是 "messages 段命中"；
-  - 升级 transformers / 切换模型权重后做 smoke check。
-- 开启方式：`export KV_AFFINITY_VERIFY_TOOLS=1` 后重启 Coordinator；关闭：删除该变量或设为 `0`。
+| 请求类型 | 主路径 tokenize | 侧信道 tokenize | 总开销 |
+| --- | --- | --- | --- |
+| Plain chat（无 `tools`）| 1 次 | 跳过 | 与修复前基线一致 |
+| Function-call（含 `tools`）| 1 次 | 1 次 | CPU ~×2 |
+
+设计取向：
+
+- **三条证据日志默认开启**、均为 INFO；用户无需任何环境变量配置即可在生产日志里直接看到 tools-in-cache 证据。
+- Plain chat 流量不付额外代价（侧信道在 `if not tools: return None` 处早返回）。
+- Function-call 流量上 tokenize CPU 翻倍。**注意**：当 Qwen3-8B 这种 ~8B 模型 + token 数 ~4K 时，tokenize 是纯 CPU、单次几毫秒级，相对 prefill GPU 时延（数十至数百毫秒）通常可忽略，与命中率诊断价值的权衡向后者倾斜。
+- 若未来出现 tokenize 占比过高的场景（例如超长上下文 + 高 QPS），再引入采样开关或环境变量降级；目前不预先优化。
 
 ### 4.6 日志 grep 速查
 
@@ -317,7 +325,7 @@ WARN  kv_affinity verify-tools side-channel failed (continuing): <exc>
 # 1. 看每次请求 tokenize 结果的指纹
 grep "kv_affinity tokenize ok" coordinator.log
 
-# 2. 看 tools 真的进了 token 序列（验证模式开启）
+# 2. 看 tools 真的进了 token 序列（默认每请求都打）
 grep "kv_affinity tools-in-cache proof" coordinator.log | \
     awk -F'tools_token_delta=' '{print $2}'
 
@@ -325,7 +333,7 @@ grep "kv_affinity tools-in-cache proof" coordinator.log | \
 grep "kv_affinity hit analysis" coordinator.log | tail -50
 
 # 4. 异常告警关键字
-grep -E "kv_affinity (DEGENERATE|primary tokenize path failed|tokenize failed on both)" coordinator.log
+grep -E "kv_affinity (DEGENERATE|primary tokenize path failed|tokenize failed on both|side-channel)" coordinator.log
 ```
 
 `DEGENERATE` 是"tokenize 没把 tools 渲染成 token"的硬告警——常见原因：模型的 chat template 完全忽略 `tools` 参数；此时 conductor `longest_matched` 与 function-call 实际 KV-cache 分布**结构性脱钩**，必须换模板或换模型。
@@ -361,12 +369,13 @@ classDiagram
 
 | 维度 | 影响 |
 | --- | --- |
-| 配置 | 新增 env `KV_AFFINITY_VERIFY_TOOLS`，默认 OFF，保持线上 0 影响。 |
+| 配置 | **无新环境变量**；三条证据日志默认开启，无需任何配置切换。 |
 | 协议 | conductor `/query` 请求字段不变；`token_ids` 在 tools-aware 模板配置下会更长，但 conductor 协议本身向下兼容。 |
 | 请求体 | 新增读取 `chat_template` / `chat_template_kwargs` / `documents` / `add_generation_prompt` / `continue_final_message`；旧客户端不带这些字段时行为与修复前完全一致。 |
 | `TokenizerManager.apply_chat_template` | 公共签名**扩展**为 keyword-only kwargs；既有调用点 `TokenizerManager().apply_chat_template(messages, tools)` 仍然兼容。 |
-| 日志 | 新增 `tools-in-cache proof` (INFO, 验证模式) 与 `hit analysis` (INFO, 永久) 两条日志；旧 `kv_affinity tokenize ok` (DEBUG) 新增 `fp=<hex>` 后缀。 |
-| 回滚 | 删除 env 变量即可恢复"无验证模式"行为；`hit analysis` 日志在 conductor 命中链路本来就处于成功路径，无副作用。 |
+| 日志 | 新增 `tools-in-cache proof` (INFO) 与 `hit analysis` (INFO) 两条日志；旧 `kv_affinity tokenize ok` 从 DEBUG **提升为 INFO** 并新增 `fp=<hex>` 后缀。 |
+| 性能 | Plain chat 请求无额外开销；function-call 请求每次多一次 tokenize（仅 CPU，无 GPU），详见 §4.5。 |
+| 回滚 | 若极端场景需要回退到"仅 fail-fix、无证据日志"的行为，单 commit revert `7434176` 即可；`hit analysis` 日志在 conductor 命中链路本来就处于成功路径，无副作用。 |
 
 ---
 
@@ -389,14 +398,17 @@ flowchart TB
     subgraph L2[L2 - 请求体到 tokenizer 链路]
         T9[test_req_data_chat_template_fields_reach_tokenizer]
     end
-    subgraph L3[L3 - tools-in-cache 证据日志]
-        T10[test_verify_tools_log_emits_when_enabled]
-        T11[test_verify_tools_log_warns_when_delta_is_zero]
-        T12[test_verify_tools_disabled_emits_no_proof]
+    subgraph L3[L3 - tools-in-cache 证据日志（默认常开）]
+        T10[test_proof_log_emits_by_default_when_tools_present]
+        T11[test_proof_log_warns_when_delta_is_zero]
+        T12[test_proof_log_omitted_when_no_tools]
+        T13[test_proof_log_skipped_when_side_channel_returns_empty]
     end
     subgraph L4[L4 - hit-analysis 日志]
-        T13[test_hit_analysis_emits_after_query]
-        T14[test_hit_analysis_verdict_tools_in_hit_when_proof_active]
+        T14[test_hit_analysis_emits_after_query]
+        T15[test_hit_analysis_verdict_tools_in_hit_by_default]
+        T16[test_hit_analysis_verdict_absent_when_no_tools]
+        T17[test_tokenize_ok_log_emitted_at_info_by_default]
     end
     L1 --> L2 --> L3 --> L4
 ```
@@ -414,11 +426,14 @@ flowchart TB
 | `test_return_dict_pinned_false_for_v5_compat` | transformers v5 兼容硬钉 |
 | `test_non_standard_path_also_forwards_extended_kwargs` | 非标准路径同样透传 |
 | `test_req_data_chat_template_fields_reach_tokenizer` | E2E：`req_data` 五字段 → tokenizer kwargs |
-| `test_verify_tools_log_emits_when_enabled` | `KV_AFFINITY_VERIFY_TOOLS=1` 时 INFO 日志出现且 delta 正确 |
-| `test_verify_tools_log_warns_when_delta_is_zero` | `tools_token_delta=0` 必须 DEGENERATE 告警 |
-| `test_verify_tools_disabled_emits_no_proof` | 默认关闭：不打日志、不多调用 tokenize |
+| `test_proof_log_emits_by_default_when_tools_present` | **默认开启**：含 tools 请求 INFO proof 日志出现 + 调用 tokenize 2 次 |
+| `test_proof_log_warns_when_delta_is_zero` | `tools_token_delta=0` 必须 DEGENERATE 告警 |
+| `test_proof_log_omitted_when_no_tools` | Plain chat：不打 proof 日志、tokenize 仅 1 次（零额外开销）|
+| `test_proof_log_skipped_when_side_channel_returns_empty` | 侧信道返回 `[]` 时跳过 proof + WARN，避免假数据 |
 | `test_hit_analysis_emits_after_query` | conductor 成功返回后 hit-analysis INFO 日志结构正确 |
-| `test_hit_analysis_verdict_tools_in_hit_when_proof_active` | `longest_matched > B` ⇒ `verdict=tools_in_hit` |
+| `test_hit_analysis_verdict_tools_in_hit_by_default` | 含 tools 且 `longest_matched > B` ⇒ `verdict=tools_in_hit`（默认常开）|
+| `test_hit_analysis_verdict_absent_when_no_tools` | Plain chat：hit analysis **不**带 `verdict=` 后缀 |
+| `test_tokenize_ok_log_emitted_at_info_by_default` | `tokenize ok` 默认 INFO 级别可见，无需 DEBUG 调试 |
 
 ---
 
@@ -431,9 +446,9 @@ flowchart TB
 
 1. tokenize 入参与 vLLM 完整对齐（§2.3 + §2.4）；
 2. conductor 命中率计算逻辑写入文档（§3）；
-3. 三条日志（`tokenize ok` / `tools-in-cache proof` / `hit analysis`）+ 一项 `verdict` 判定，构成完整证据链（§4）；
-4. 14 条新增单测覆盖参数透传 + 日志（§7）；
-5. 性能默认 0 影响（验证模式 opt-in），失败保护沿用 §2 已有的 fail-closed 兜底链。
+3. 三条日志（`tokenize ok` / `tools-in-cache proof` / `hit analysis`）+ 一项 `verdict` 判定，**默认全部 INFO 常开**，构成证据链开箱即用（§4）；
+4. 17 条单测覆盖参数透传 + 日志默认开启 / 关闭分支 / 异常降级（§7）；
+5. 性能：plain chat 请求 0 额外开销；function-call 请求 tokenize CPU ~×2（详见 §4.5）。失败保护沿用 §2 已有的 fail-closed 兜底链。
 
 ---
 
