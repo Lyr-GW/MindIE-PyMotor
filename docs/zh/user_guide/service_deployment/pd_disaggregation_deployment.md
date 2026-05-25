@@ -29,6 +29,8 @@
 
 **部署方式**：当前默认采用 **CRD 方式**（基于 MindCluster 的 infer-operator）进行部署。该方式尚未完成 RAS 能力与池化能力的适配验证。若您需要 RAS（可靠性、可用性、可服务性）或 KV 池化能力，可在 `user_config.json` 的 `motor_deploy_config.deploy_mode` 中配置为 `multi_deployment`，切换为原有的**多 YAML Deployment 方式**（由 `deploy.py` 生成并 apply 多个 Deployment YAML），该方式已支持 RAS 与池化相关能力。
 
+若需将不同 P/D 实例固定调度到指定 K8s 节点，请参阅 [PD 按节点亲和部署操作指导](./pd_node_affinity_guide.md)。
+
 ### 限制与约束
 
 - Atlas 800I A2 推理服务器与 Atlas 800I A3 超节点服务器支持此特性。
