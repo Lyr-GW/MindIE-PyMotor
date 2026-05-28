@@ -1,0 +1,227 @@
+{
+  "uid": "motor-npu",
+  "title": "pyMotor NPU (Ascend)",
+  "tags": ["pymotor", "npu", "ascend"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "editable": true,
+  "graphTooltip": 1,
+  "templating": {
+    "list": [
+      {
+        "name": "source",
+        "label": "Source",
+        "type": "custom",
+        "query": "All : .+, real : real, mock : mock",
+        "current": { "text": "All", "value": ".+" },
+        "options": [
+          { "text": "All",  "value": ".+",  "selected": true  },
+          { "text": "real", "value": "real", "selected": false },
+          { "text": "mock", "value": "mock", "selected": false }
+        ],
+        "includeAll": false,
+        "multi": false
+      },
+      {
+        "name": "pod_name",
+        "label": "Pod",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(npu_chip_info_utilization{source=~\"$source\"}, pod_name)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "npu_id",
+        "label": "NPU ID",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(npu_chip_info_utilization{source=~\"$source\", pod_name=~\"$pod_name\"}, id)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total NPUs",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "count(npu_chip_info_utilization{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"})", "refId": "A" }
+      ],
+      "options": {
+        "graphMode": "none",
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Unhealthy NPUs",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "count(npu_chip_info_health_status{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"} == 0)", "refId": "A" }
+      ],
+      "options": {
+        "graphMode": "none",
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] }, "noValue": "0" } }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Avg AI Core utilization",
+      "gridPos": { "h": 4, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "avg(npu_chip_info_utilization{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"})", "refId": "A" }
+      ],
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "percent", "max": 100, "min": 0, "color": { "mode": "continuous-GrYlRd" } } }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Avg Temperature",
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "avg(npu_chip_info_temperature{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"})", "refId": "A" }
+      ],
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "celsius", "color": { "mode": "continuous-GrYlRd" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 70 }, { "color": "red", "value": 85 }] } } }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Total Power (W)",
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "sum(npu_chip_info_power{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"})", "refId": "A" }
+      ],
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] } } }
+    },
+
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "AI Core utilization per NPU",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "npu_chip_info_utilization{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "{{pod_name}} | id {{id}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Vector utilization per NPU",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "npu_chip_info_vector_utilization{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "{{pod_name}} | id {{id}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Memory usage % per NPU",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "100 * npu_chip_info_used_memory{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"} / npu_chip_info_total_memory{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}",
+          "legendFormat": "{{pod_name}} | id {{id}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Power consumption per NPU",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "npu_chip_info_power{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "{{pod_name}} | id {{id}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "watt", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Temperature per NPU",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "npu_chip_info_temperature{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "{{pod_name}} | id {{id}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "celsius", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "AI Core frequency (MHz)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "npu_chip_info_aicore_current_freq{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "{{pod_name}} | id {{id}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "rotmhz", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    },
+
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "Bandwidth RX / TX per NPU",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "npu_chip_info_bandwidth_rx{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "rx {{pod_name}} | id {{id}}", "refId": "A" },
+        { "expr": "npu_chip_info_bandwidth_tx{source=~\"$source\", pod_name=~\"$pod_name\", id=~\"$npu_id\"}", "legendFormat": "tx {{pod_name}} | id {{id}}", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "MBs", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 5 } } },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+    }
+  ]
+}
