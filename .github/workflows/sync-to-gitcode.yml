@@ -117,7 +117,11 @@ jobs:
           # earlier). That way Gitcode displays a stable LinWei100 identity on
           # every mirrored commit instead of "Cursor Agent" / random GitHub
           # account info.
-          if ! git rebase --onto ascend/master "${OLD_BASE}" "${BRANCH}" \
+          # When Ascend/master advances (e.g. new business commits touching the
+          # same files as a mirrored feature branch), a plain rebase can stop on
+          # conflicts in shared paths like kv_cache_affinity.py. Prefer the
+          # feature replay ("theirs" during rebase) so Gitcode sync keeps moving.
+          if ! git rebase -X theirs --onto ascend/master "${OLD_BASE}" "${BRANCH}" \
                --exec 'git commit --amend --no-edit --reset-author'; then
             echo "::error::Rebase of ${BRANCH} onto ascend/master failed (conflict with upstream business commits). Resolve locally and re-push."
             git rebase --abort || true
