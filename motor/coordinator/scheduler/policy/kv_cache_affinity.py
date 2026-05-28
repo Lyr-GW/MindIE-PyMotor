@@ -29,17 +29,22 @@ logger = get_logger(__name__)
 
 
 def _fingerprint_ids(encoded_ids: list[int]) -> str:
-    """8-hex-char fingerprint of the token sequence for trace correlation.
-
-    Cheap to compute and short enough to grep in logs. Used to verify that two
-    coordinator-side renderings (with vs without tools) produce different
-    token sequences, which is the strongest operator-visible signal that
-    tools really enter the conductor query.
-    """
+    """8-hex-char fingerprint of the token sequence for log grep / trace correlation."""
     if not encoded_ids:
         return "00000000"
     raw = ",".join(str(i) for i in encoded_ids).encode("utf-8")
     return hashlib.blake2b(raw, digest_size=4).hexdigest()
+
+
+def _classify_verdict(longest_matched: int, ids_without_tools_len: Optional[int]) -> str:
+    """Return a `verdict=...` suffix telling whether the hit covers the tools section."""
+    if ids_without_tools_len is None:
+        return ""
+    if longest_matched > ids_without_tools_len:
+        return " verdict=tools_in_hit"
+    if longest_matched == ids_without_tools_len:
+        return " verdict=tools_at_hit_boundary"
+    return " verdict=tools_not_in_hit"
 
 
 class KvCacheAffinityPolicy(BaseSchedulingPolicy):
@@ -56,155 +61,85 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
 
     @staticmethod
     def _extract_chat_template_params(req_data: dict) -> dict[str, Any]:
-        """Mirror the subset of vLLM ChatCompletionRequest fields that change
-        the rendered token sequence (see ``vllm/entrypoints/openai/chat_
-        completion/protocol.py``).
-
-        Any field that vLLM forwards to ``tokenizer.apply_chat_template`` MUST
-        be forwarded here as well; otherwise the coordinator's encoded ids
-        drift from what the prefill engine actually sees and conductor's
-        ``longest_matched`` lies.
-        """
+        """Pull the vLLM-aligned chat-template fields from the request body so
+        coordinator-side tokenize matches what the prefill engine renders."""
         return {
             "chat_template": req_data.get(OpenAIField.CHAT_TEMPLATE),
             "chat_template_kwargs": req_data.get(OpenAIField.CHAT_TEMPLATE_KWARGS),
             "documents": req_data.get(OpenAIField.DOCUMENTS),
-            "add_generation_prompt": req_data.get(
-                OpenAIField.ADD_GENERATION_PROMPT, True
-            ),
-            "continue_final_message": req_data.get(
-                OpenAIField.CONTINUE_FINAL_MESSAGE, False
-            ),
+            "add_generation_prompt": req_data.get(OpenAIField.ADD_GENERATION_PROMPT, True),
+            "continue_final_message": req_data.get(OpenAIField.CONTINUE_FINAL_MESSAGE, False),
         }
 
     @staticmethod
-    def _emit_tools_in_cache_proof(
+    def _compute_ids_without_tools(
         manager: "TokenizerManager",
         messages: Optional[list],
         tools: Optional[list],
         chat_template_params: dict[str, Any],
         encoded_ids: list[int],
     ) -> Optional[int]:
-        """Side-channel proof that ``tools`` actually inflated the encoded ids.
+        """Side-channel re-tokenize with ``tools=None`` to size the tools delta.
 
-        Returns the *without-tools* encoded id length on success, ``None`` if
-        the request carries no tools (nothing to prove) or the side-channel
-        tokenize itself fails.
-
-        We compare the request rendered ``with tools`` (the live path) and
-        ``without tools`` (side-channel). If ``tools_token_delta > 0`` the
-        operator has byte-level evidence that conductor's ``longest_matched``
-        is computed over the tools-rendered prefix.
-
-        This log is always emitted at INFO whenever ``tools`` is present, so
-        operators do not need to flip any environment variable to see the
-        proof. The cost is one extra tokenize call per function-call request
-        on the affinity hot path; this trade-off is accepted because the
-        proof line is the only evidence linking tokenize correctness to
-        conductor's cache decision.
+        Returns the without-tools id length, or ``None`` when the proof cannot be
+        produced (no tools, no messages, side-channel error, or empty fallback).
+        Emits the proof line at DEBUG and a WARNING when delta <= 0 (template
+        silently drops tools).
         """
-        if not tools:
-            return None
-        if messages is None:
+        if not tools or messages is None:
             return None
         try:
             ids_without_tools = manager.apply_chat_template(
                 messages, None, **chat_template_params
             )
         except Exception as e:
-            logger.warning(
-                "kv_affinity tools-in-cache side-channel failed (continuing): %s", e
-            )
+            logger.warning("kv_affinity tools-in-cache side-channel failed: %s", e)
             return None
-
-        # Side-channel returned empty -> the no-tools tokenize fell back to
-        # ``[]`` (e.g. its own ``_safe_fallback_encode`` exhausted retries).
-        # Reporting ``tools_token_delta = len(encoded_ids) - 0`` would
-        # misleadingly look like "tools added all tokens". Skip the proof
-        # entirely and tell the operator where to look instead.
         if not ids_without_tools:
             logger.warning(
                 "kv_affinity tools-in-cache side-channel returned empty token list; "
-                "skipping proof line (check upstream tokenize fail-closed ERROR logs)."
+                "skipping proof line."
             )
             return None
 
         delta = len(encoded_ids) - len(ids_without_tools)
-        logger.info(
-            "kv_affinity tools-in-cache proof: msgs=%d tools=%d "
-            "ids_with_tools=%d ids_without_tools=%d tools_token_delta=%d "
-            "fp_with=%s fp_without=%s",
-            len(messages or []),
-            len(tools or []),
-            len(encoded_ids or []),
-            len(ids_without_tools or []),
-            delta,
-            _fingerprint_ids(encoded_ids),
-            _fingerprint_ids(ids_without_tools),
+        logger.debug(
+            "kv_affinity tools-in-cache proof: msgs=%d tools=%d ids_with_tools=%d "
+            "ids_without_tools=%d tools_token_delta=%d fp_with=%s fp_without=%s",
+            len(messages), len(tools), len(encoded_ids), len(ids_without_tools),
+            delta, _fingerprint_ids(encoded_ids), _fingerprint_ids(ids_without_tools),
         )
         if delta <= 0:
             logger.warning(
                 "kv_affinity tools-in-cache proof DEGENERATE: tools_token_delta=%d "
-                "(<=0). Either the tokenizer chat template silently drops tools, "
-                "or the model's template does not surface tools as tokens. "
-                "Conductor `longest_matched` for function-call requests will not "
-                "reflect the tools schema in this configuration.",
+                "(tokenizer chat template appears to drop tools).",
                 delta,
             )
         return len(ids_without_tools)
 
     @staticmethod
-    def _emit_hit_analysis(
+    def _emit_select_debug(
         instance_id: Any,
         longest_matched: int,
-        encoded_ids_len: int,
+        encoded_ids: list[int],
         ids_without_tools_len: Optional[int],
         block_size: int,
+        msgs_len: int,
+        tools_len: int,
     ) -> None:
-        """Log a Mooncake-conductor-aligned breakdown of the cache hit.
-
-        Conductor's `/query` semantics (see
-        https://kvcache-ai.github.io/Mooncake/design/conductor/indexer-api-design.html):
-        - Token ids are split into complete blocks of ``block_size`` tokens.
-        - Each block produces a rolling sequence hash; the prefix table is
-          scanned in order, the first miss terminates the scan.
-        - ``longest_matched`` is the matched-prefix length **in tokens**,
-          always a multiple of ``block_size`` (trailing partial block is
-          ignored).
-
-        This log gives operators the four numbers they need to reason about
-        the hit:
-            ids=A blk=BS matched=M (= blk*K) hit_ratio=M/A
-        Plus a verdict on whether the hit clearly covers the tools section
-        (present whenever ``tools`` was on the request and the side-channel
-        tokenize succeeded; absent for plain chat requests with no tools).
-        """
-        if not encoded_ids_len:
+        """One DEBUG line summarising tokenize fingerprint, conductor hit and tools verdict."""
+        encoded_len = len(encoded_ids)
+        if not encoded_len:
             return
-        ratio_pct = (longest_matched * 100.0) / encoded_ids_len if encoded_ids_len else 0.0
+        ratio_pct = (longest_matched * 100.0) / encoded_len
         matched_blocks = longest_matched // block_size if block_size else 0
-        verdict = ""
-        if ids_without_tools_len is not None and ids_without_tools_len < encoded_ids_len:
-            # Tools added new tokens; check whether the hit extends past
-            # them. If longest_matched > ids_without_tools_len, the matched
-            # prefix necessarily covers tokens that come from the tools
-            # section.
-            if longest_matched > ids_without_tools_len:
-                verdict = " verdict=tools_in_hit"
-            elif longest_matched == ids_without_tools_len:
-                verdict = " verdict=tools_at_hit_boundary"
-            else:
-                verdict = " verdict=tools_not_in_hit"
-        logger.info(
-            "kv_affinity hit analysis: instance=%s ids=%d blk=%d "
-            "longest_matched=%d matched_blocks=%d hit_ratio=%.2f%%%s",
-            instance_id,
-            encoded_ids_len,
-            block_size,
-            longest_matched,
-            matched_blocks,
-            ratio_pct,
-            verdict,
+        verdict = _classify_verdict(longest_matched, ids_without_tools_len) \
+            if ids_without_tools_len is not None and ids_without_tools_len < encoded_len else ""
+        logger.debug(
+            "kv_affinity hit analysis: instance=%s msgs=%d tools=%d encoded_ids=%d "
+            "fp=%s blk=%d longest_matched=%d matched_blocks=%d hit_ratio=%.2f%%%s",
+            instance_id, msgs_len, tools_len, encoded_len, _fingerprint_ids(encoded_ids),
+            block_size, longest_matched, matched_blocks, ratio_pct, verdict,
         )
 
     @staticmethod
@@ -231,19 +166,7 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             if prompt is not None:
                 encoded_ids = manager.encode(prompt)
 
-        # Visibility for the validated invariant: tools, when present, MUST
-        # inflate the encoded token sequence. Operators can grep this line to
-        # verify function-call requests are being tokenised correctly.
-        # Emitted at INFO so it shows up in default production logs without
-        # any extra configuration.
-        logger.info(
-            "kv_affinity tokenize ok: msgs=%d tools=%d encoded_ids=%d fp=%s",
-            len(messages or []),
-            len(tools or []),
-            len(encoded_ids or []),
-            _fingerprint_ids(encoded_ids),
-        )
-        ids_without_tools_len = KvCacheAffinityPolicy._emit_tools_in_cache_proof(
+        ids_without_tools_len = KvCacheAffinityPolicy._compute_ids_without_tools(
             manager, messages, tools, chat_template_params, encoded_ids
         )
 
@@ -294,12 +217,14 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             logger.warning(f"selected_endpoint is None")
             return None
         logger.info(f"select_endpoint: {selected_instance.id}-{selected_endpoint.id}  max_kv_matched:{max_kv_matched}")
-        KvCacheAffinityPolicy._emit_hit_analysis(
+        KvCacheAffinityPolicy._emit_select_debug(
             selected_instance.id,
             max_kv_matched,
-            len(encoded_ids or []),
+            encoded_ids,
             ids_without_tools_len,
             block_size,
+            len(messages or []),
+            len(tools or []),
         )
         return (selected_instance, selected_endpoint)
 
@@ -359,20 +284,11 @@ class TokenizerManager(ThreadSafeSingleton):
         add_generation_prompt: bool,
         continue_final_message: bool,
     ) -> dict[str, Any]:
-        """Merge the vLLM-aligned chat-template kwargs into one dict.
-
-        Precedence (mirrors ``ChatParams.get_apply_chat_template_kwargs`` in
-        vLLM): explicit request-body fields override anything carried inside
-        the request-body ``chat_template_kwargs`` dict.
-        """
+        """Merge vLLM-aligned chat-template kwargs; explicit fields override
+        same-named entries inside ``chat_template_kwargs`` (vLLM precedence)."""
         merged: dict[str, Any] = dict(chat_template_kwargs or {})
-        # ``return_dict=False`` keeps the API contract stable across
-        # transformers v4 / v5 (v5 default would otherwise be True and break
-        # the ``list[int]`` return when ``tokenize=True``); same trick vLLM
-        # uses in `safe_apply_chat_template`.
+        # Pin return_dict=False for transformers v5 compat (v5 defaults to True).
         merged["return_dict"] = False
-        # Hard-pin these so a stray ``chat_template_kwargs`` entry can't
-        # downgrade the rendering and de-sync from the inference engine.
         merged["add_generation_prompt"] = bool(add_generation_prompt)
         if continue_final_message:
             merged["continue_final_message"] = True
@@ -395,24 +311,10 @@ class TokenizerManager(ThreadSafeSingleton):
     ) -> list[int]:
         """Render messages (and optional tools) into token ids for KV-cache affinity.
 
-        The output token sequence is the *same* one vLLM/SGLang sees during
-        actual inference, so conductor's ``longest_matched`` truly reflects the
-        cluster's KV-cache distribution. ``tools`` MUST be forwarded on every
-        path - dropping it silently was the bug fixed in the previous
-        revision.
-
-        Extra kwargs mirror the subset of vLLM ``ChatCompletionRequest``
-        fields that change the rendered prompt:
-
-        * ``chat_template`` - request-supplied template body or named variant.
-        * ``chat_template_kwargs`` - free-form dict forwarded to the template
-          (e.g. Qwen3 ``enable_thinking``, RAG ``documents`` extras, custom
-          flags model-specific templates expect).
-        * ``documents`` - explicit list of retrieval documents.
-        * ``add_generation_prompt`` - default ``True``; the request body may
-          disable it for assistant continuation.
-        * ``continue_final_message`` - lets the template continue the last
-          assistant message instead of starting a new one.
+        Output must be byte-equivalent to what vLLM/SGLang prefill sees so
+        conductor's ``longest_matched`` reflects real KV-cache distribution.
+        ``tools`` MUST be forwarded on every path. The extra keyword-only kwargs
+        mirror the vLLM ``ChatCompletionRequest`` fields that change rendering.
         """
         if self.tokenizer is None:
             return []
@@ -457,16 +359,8 @@ class TokenizerManager(ThreadSafeSingleton):
         tools: list | None,
         tpl_kwargs: dict[str, Any],
     ) -> list[int]:
-        """Standard OpenAI-compatible model path.
-
-        Calls the model tokenizer's jinja chat-template directly with
-        ``tools`` and ``tokenize=True`` so the resulting token ids are
-        byte-equivalent to what vLLM/SGLang prefill receives. All
-        vLLM-aligned chat-template kwargs (``chat_template``, ``documents``,
-        ``add_generation_prompt``, ``continue_final_message`` plus any
-        request-supplied ``chat_template_kwargs``) come pre-merged in
-        ``tpl_kwargs``.
-        """
+        """Standard path: invoke tokenizer's jinja chat-template directly with
+        ``tokenize=True`` so ids are byte-equivalent to prefill engine input."""
         return self.tokenizer.apply_chat_template(
             conversation=messages,
             tools=tools,
@@ -480,17 +374,10 @@ class TokenizerManager(ThreadSafeSingleton):
         tools: list | None,
         tpl_kwargs: dict[str, Any],
     ) -> list[int]:
-        """Non-standard model path: normalise messages/tools then encode the
-        rendered prompt string. Kept for models whose chat-template cannot be
-        directly invoked with ``tokenize=True`` (e.g. require argument
-        coercion or reordering done by ``preprocess_input``).
-        """
+        """Non-standard path: normalise messages/tools via preprocess_input,
+        render to string with ``tokenize=False`` then encode."""
         messages_copy, tools_copy = preprocess_input(messages, tools)
 
-        # In the non-standard branch we must render first (``tokenize=False``)
-        # and re-encode the string, so override only the ``tokenize`` flag and
-        # ``return_dict`` while keeping every other vLLM-aligned kwarg
-        # (``chat_template``, ``documents``, ``add_generation_prompt`` ...).
         render_kwargs = dict(tpl_kwargs)
         render_kwargs["return_dict"] = False
         prompt = self.tokenizer.apply_chat_template(
@@ -507,15 +394,8 @@ class TokenizerManager(ThreadSafeSingleton):
         tools: list | None,
         tpl_kwargs: dict[str, Any],
     ) -> list[int]:
-        """Last-resort tokenize that NEVER drops ``tools``.
-
-        Tries the tools-aware standard call once more; if that also fails,
-        returns ``[]`` so :meth:`KvCacheAffinityPolicy.select_endpoint_from_list`
-        can surface a None and let the upper scheduler fall back to LB.
-        Returning a partially-correct token list (e.g. messages without tools)
-        would silently mislead conductor's longest_matched and is far worse
-        than failing closed.
-        """
+        """Last-resort tools-aware retry; on second failure return ``[]`` so the
+        scheduler falls back to LoadBalance instead of silently dropping tools."""
         try:
             return self._apply_chat_template_standard(messages, tools, tpl_kwargs)
         except Exception as e:
