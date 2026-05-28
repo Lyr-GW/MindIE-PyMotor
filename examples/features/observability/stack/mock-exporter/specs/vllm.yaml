@@ -1,0 +1,309 @@
+# vLLM 引擎透传指标
+# 1:1 复刻 tests/coordinator/core/metrics_example.txt (vllm:* 部分)
+# bucket 配置与实测样本完全一致
+# 注意：label "engine" 不 emit（pymotor coordinator 聚合时会去掉 engine 标签）
+# 所有指标带 model_name 标签，值取自 profile
+metrics:
+  # ---- Gauges ----
+  - name: "vllm:num_requests_running"
+    type: gauge
+    help: Number of requests in model execution batches.
+    labels: [model_name]
+    value:
+      mode: gauge_sin
+      base: 4.0
+      amp: 4.0
+      period_sec: 60
+      noise: 1.0
+      clamp: [0, 64]
+
+  - name: "vllm:num_requests_waiting"
+    type: gauge
+    help: Number of requests waiting to be processed.
+    labels: [model_name]
+    value:
+      mode: gauge_sin
+      base: 2.0
+      amp: 3.0
+      period_sec: 120
+      noise: 1.0
+      clamp: [0, 256]
+
+  - name: "vllm:kv_cache_usage_perc"
+    type: gauge
+    help: KV-cache usage. 1 means 100 percent usage.
+    labels: [model_name]
+    value:
+      mode: gauge_sin
+      base: 0.45
+      amp: 0.30
+      period_sec: 300
+      noise: 0.05
+      clamp: [0.0, 1.0]
+
+  - name: "vllm:gpu_cache_usage_perc"
+    type: gauge
+    help: 'GPU KV-cache usage. 1 means 100 percent usage.DEPRECATED: Use vllm:kv_cache_usage_perc instead.'
+    labels: [model_name]
+    value:
+      mode: gauge_sin
+      base: 0.45
+      amp: 0.30
+      period_sec: 300
+      noise: 0.05
+      clamp: [0.0, 1.0]
+
+  # ---- Counters ----
+  - name: "vllm:num_preemptions_total"
+    type: counter
+    help: Cumulative number of preemption from the engine.
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 0.01
+
+  - name: "vllm:prompt_tokens_total"
+    type: counter
+    help: Number of prefill tokens processed.
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 80.0   # ~ 0.5 req/s * 160 prompt tokens avg
+
+  - name: "vllm:generation_tokens_total"
+    type: counter
+    help: Number of generation tokens processed.
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 64.0
+
+  - name: "vllm:request_success_total"
+    type: counter
+    help: Count of successfully processed requests.
+    labels: [model_name, finished_reason]
+    label_values:
+      finished_reason: [stop, length, abort]
+    value:
+      mode: counter_rate_per_label
+      finished_reason:
+        stop: 0.35
+        length: 0.13
+        abort: 0.02
+
+  - name: "vllm:prefix_cache_queries_total"
+    type: counter
+    help: Prefix cache queries, in terms of number of queried tokens.
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 80.0
+
+  - name: "vllm:prefix_cache_hits_total"
+    type: counter
+    help: Prefix cache hits, in terms of number of cached tokens.
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 50.0
+
+  - name: "vllm:gpu_prefix_cache_queries_total"
+    type: counter
+    help: 'GPU prefix cache queries, in terms of number of queriedtokens. DEPRECATED: Use vllm:prefix_cache_queries instead.'
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 80.0
+
+  - name: "vllm:gpu_prefix_cache_hits_total"
+    type: counter
+    help: 'GPU prefix cache hits, in terms of number of cached tokens. DEPRECATED: Use vllm:prefix_cache_hits instead.'
+    labels: [model_name]
+    value:
+      mode: counter_rate
+      rate_per_sec: 50.0
+
+  # ---- Histograms (bucket 配置与实测一致) ----
+  - name: "vllm:time_to_first_token_seconds"
+    type: histogram
+    help: Histogram of time to first token in seconds.
+    labels: [model_name]
+    buckets: [0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0, 160.0, 640.0, 2560.0]
+    value:
+      mode: histogram_lognormal
+      mu: -2.3    # exp(-2.3) ≈ 100ms
+      sigma: 0.8
+      rate_per_sec: 0.5
+
+  - name: "vllm:time_per_output_token_seconds"
+    type: histogram
+    help: Histogram of time per output token in seconds.
+    labels: [model_name]
+    buckets: [0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0]
+    value:
+      mode: histogram_lognormal
+      mu: -3.5    # exp(-3.5) ≈ 30ms ITL
+      sigma: 0.6
+      rate_per_sec: 32.0   # ~ 0.5 req/s * 64 token
+
+  - name: "vllm:e2e_request_latency_seconds"
+    type: histogram
+    help: Histogram of e2e request latency in seconds.
+    labels: [model_name]
+    buckets: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0]
+    value:
+      mode: histogram_lognormal
+      mu: 0.7    # exp(0.7) ≈ 2s
+      sigma: 0.5
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_queue_time_seconds"
+    type: histogram
+    help: Histogram of time spent in WAITING phase for request.
+    labels: [model_name]
+    buckets: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0]
+    value:
+      mode: histogram_lognormal
+      mu: -3.0
+      sigma: 0.8
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_inference_time_seconds"
+    type: histogram
+    help: Histogram of time spent in RUNNING phase for request.
+    labels: [model_name]
+    buckets: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0]
+    value:
+      mode: histogram_lognormal
+      mu: 0.5
+      sigma: 0.5
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_prefill_time_seconds"
+    type: histogram
+    help: Histogram of time spent in PREFILL phase for request.
+    labels: [model_name]
+    buckets: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0]
+    value:
+      mode: histogram_lognormal
+      mu: -2.0
+      sigma: 0.6
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_decode_time_seconds"
+    type: histogram
+    help: Histogram of time spent in DECODE phase for request.
+    labels: [model_name]
+    buckets: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0]
+    value:
+      mode: histogram_lognormal
+      mu: 0.4
+      sigma: 0.5
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_prompt_tokens"
+    type: histogram
+    help: Number of prefill tokens processed.
+    labels: [model_name]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0]
+    value:
+      mode: histogram_lognormal
+      mu: 4.5    # exp(4.5) ≈ 90 tokens
+      sigma: 1.0
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_generation_tokens"
+    type: histogram
+    help: Number of generation tokens processed.
+    labels: [model_name]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0]
+    value:
+      mode: histogram_lognormal
+      mu: 4.5
+      sigma: 1.0
+      rate_per_sec: 0.5
+
+  - name: "vllm:iteration_tokens_total"
+    type: histogram
+    help: Histogram of number of tokens per engine_step.
+    labels: [model_name]
+    buckets: [1.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0, 16384.0]
+    value:
+      mode: histogram_lognormal
+      mu: 2.5
+      sigma: 1.0
+      rate_per_sec: 5.0
+
+  - name: "vllm:request_max_num_generation_tokens"
+    type: histogram
+    help: Histogram of maximum number of requested generation tokens.
+    labels: [model_name]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0]
+    value:
+      mode: histogram_lognormal
+      mu: 5.0
+      sigma: 1.0
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_params_n"
+    type: histogram
+    help: Histogram of the n request parameter.
+    labels: [model_name]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0]
+    value:
+      mode: histogram_constant
+      constant: 1.0
+      rate_per_sec: 0.5
+
+  - name: "vllm:request_params_max_tokens"
+    type: histogram
+    help: Histogram of the max_tokens request parameter.
+    labels: [model_name]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0]
+    value:
+      mode: histogram_lognormal
+      mu: 6.0
+      sigma: 1.2
+      rate_per_sec: 0.5
+
+  # ---- Info gauge ----
+  - name: "vllm:cache_config_info"
+    type: info_gauge
+    help: Information of the LLMEngine CacheConfig
+    labels:
+      - block_size
+      - cache_dtype
+      - calculate_kv_scales
+      - cpu_kvcache_space_bytes
+      - cpu_offload_gb
+      - enable_prefix_caching
+      - gpu_memory_utilization
+      - is_attention_free
+      - mamba_page_size_padded
+      - num_cpu_blocks
+      - num_gpu_blocks
+      - num_gpu_blocks_override
+      - prefix_caching_hash_algo
+      - sliding_window
+      - swap_space
+      - swap_space_bytes
+    label_values:
+      block_size: ["128"]
+      cache_dtype: ["auto"]
+      calculate_kv_scales: ["False"]
+      cpu_kvcache_space_bytes: ["None"]
+      cpu_offload_gb: ["0.0"]
+      enable_prefix_caching: ["True"]
+      gpu_memory_utilization: ["0.9"]
+      is_attention_free: ["False"]
+      mamba_page_size_padded: ["None"]
+      num_cpu_blocks: ["None"]
+      num_gpu_blocks: ["72474"]
+      num_gpu_blocks_override: ["None"]
+      prefix_caching_hash_algo: ["builtin"]
+      sliding_window: ["None"]
+      swap_space: ["4.0"]
+      swap_space_bytes: ["4294967296.0"]
+    value:
+      mode: constant
+      value: 1.0

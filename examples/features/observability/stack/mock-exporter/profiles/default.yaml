@@ -1,0 +1,22 @@
+# Default profile: 对齐 examples/features/config_sample.json (1P + 1D, 800I_A3, 16 NPU/pod)
+# scrape interval: 5s
+deploy:
+  job_id: mindie-motor
+  p_instances_num: 1
+  d_instances_num: 1
+  single_p_instance_pod_num: 1
+  single_d_instance_pod_num: 1
+  p_pod_npu_num: 16
+  d_pod_npu_num: 16
+  hardware_type: 800I_A3       # 影响 npu total_memory (A3=128GB)
+
+models:
+  - "/job/model/Qwen2.5-0.5B-Instruct"
+
+specs:
+  - motor
+  - http
+  - vllm
+  - coordinator_future
+  - kv_future
+  - npu
