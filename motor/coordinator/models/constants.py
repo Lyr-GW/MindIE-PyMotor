@@ -62,11 +62,5 @@ class OpenAIField(StrEnum):
     MESSAGE = "message"
     TOOLS = "tools"
     TOOLS_CALLS = "tool_calls"
-    FUNCTION = "function"
+    FUNCTION = "function" 
     ARGUMENTS = "arguments"
-    # vLLM-aligned chat-template control fields forwarded to tokenizer.
-    CHAT_TEMPLATE = "chat_template"
-    CHAT_TEMPLATE_KWARGS = "chat_template_kwargs"
-    DOCUMENTS = "documents"
-    ADD_GENERATION_PROMPT = "add_generation_prompt"
-    CONTINUE_FINAL_MESSAGE = "continue_final_message"
