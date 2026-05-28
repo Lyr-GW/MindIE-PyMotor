@@ -1,0 +1,64 @@
+# EngineServer HTTP 指标
+# 1:1 复刻 motor/engine_server/core/mgmt_endpoint.py 中 prometheus_fastapi_instrumentator 默认输出
+# 来源样本：tests/coordinator/core/metrics_example.txt:428-502
+metrics:
+  - name: http_requests_total
+    type: counter
+    help: Total number of requests by method, status and handler.
+    labels: [handler, method, status]
+    label_values:
+      handler: ["/v1/completions", "/v1/chat/completions"]
+      method: ["POST"]
+      status: ["2xx"]
+    value:
+      mode: counter_rate
+      rate_per_sec: 0.5    # 平均 0.5 req/s/handler
+
+  - name: http_request_duration_seconds
+    type: histogram
+    help: Latency with only few buckets by handler. Made to be only used if aggregation by handler is important.
+    labels: [handler, method]
+    label_values:
+      handler: ["/v1/completions", "/v1/chat/completions"]
+      method: ["POST"]
+    buckets: [0.1, 0.5, 1.0]   # +Inf 自动追加
+    value:
+      mode: histogram_lognormal
+      mu: -0.7       # exp(-0.7) ≈ 0.5s 中位数
+      sigma: 0.7
+      rate_per_sec: 0.5
+
+  - name: http_request_duration_highr_seconds
+    type: histogram
+    help: Latency with many buckets but no API specific labels. Made for more accurate percentile calculations.
+    labels: []
+    buckets: [0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 7.5, 10.0, 30.0, 60.0]
+    value:
+      mode: histogram_lognormal
+      mu: -1.0
+      sigma: 0.9
+      rate_per_sec: 1.0
+
+  - name: http_request_size_bytes
+    type: summary
+    help: 'Content length of incoming requests by handler. Only value of header is respected. Otherwise ignored. No percentile calculated. '
+    labels: [handler]
+    label_values:
+      handler: ["/v1/completions", "/v1/chat/completions"]
+    value:
+      mode: summary_uniform
+      low: 100
+      high: 1024
+      rate_per_sec: 0.5
+
+  - name: http_response_size_bytes
+    type: summary
+    help: 'Content length of outgoing responses by handler. Only value of header is respected. Otherwise ignored. No percentile calculated. '
+    labels: [handler]
+    label_values:
+      handler: ["/v1/completions", "/v1/chat/completions"]
+    value:
+      mode: summary_uniform
+      low: 100
+      high: 8192
+      rate_per_sec: 0.5
