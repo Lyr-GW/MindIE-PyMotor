@@ -27,6 +27,7 @@ cd examples/features/observability/stack
 | node-exporter | http://localhost:9100/metrics | — |
 | cAdvisor | http://localhost:8088 | — |
 | motor-metrics-mock | http://localhost:9105/metrics | — |
+| **controller-metrics-proxy** | http://localhost:9106/metrics | — |
 | npu-exporter | http://localhost:8082/metrics | — |
 
 停止：
@@ -92,6 +93,11 @@ stack/
 ├── tempo/tempo.yaml
 ├── loki/loki.yaml
 ├── otel-collector/otel-collector.yaml
+├── controller-proxy/             # Controller JSON 指标 → Prometheus 文本适配器
+│   ├── Dockerfile
+│   ├── main.py
+│   ├── dev_stub_controller.py    # 本地离线联调用的 Controller 桩
+│   └── README.md
 └── mock-exporter/
     ├── Dockerfile
     ├── requirements.txt
@@ -173,6 +179,47 @@ trace 自动入 Tempo，在 Grafana **Explore → Tempo** 中按 service 名 / s
 | 应用侧补齐 `motor_coordinator_*` 等指标 | 注释 prometheus.yml 中 `motor-metrics-mock` job → `curl -X POST http://localhost:9090/-/reload` |
 | 切到生产 NPU 数据 | 启动时加 `--profile npu-real`，stop 后 `./start.sh --profile npu-real --no-mock` 重启 |
 | 临时只看真实数据 | Dashboard 顶部把 `source` 变量切到 `real` |
+
+### 5.4 接入 Controller 指标接口（controller-metrics-proxy）
+
+Coordinator / Engine 的 `/metrics` 是原生 Prometheus 文本，可被 Prometheus 直接抓取；
+但 **Controller** 的 `GET /observability/metrics`（默认端口 `1027`）返回的是 JSON 信封：
+
+```json
+{ "code": 200, "message": "Success", "data": "# HELP ...\n# TYPE ...\n..." }
+```
+
+Prometheus 直接抓取会报 `Invalid labels: "code":200,...` 并把 target 标记为 DOWN，
+因此 **Grafana 无法直接接入 Controller 指标接口**。本栈用 `controller-metrics-proxy`
+解决：它拉取 Controller 的 JSON，取出 `data` 字段，重新以原生 Prometheus 文本暴露在
+`:9106/metrics`，由 Prometheus 抓取。
+
+- 镜像 / 源码：[controller-proxy/](controller-proxy/)（仅依赖 Python 标准库）。
+- `docker-compose.yml` 已内置该 service，默认随栈启动。
+- `prometheus.yml` 的 `motor-controller` job 抓取的是 `controller-metrics-proxy:9106`。
+
+接入真实 Controller：编辑 `.env`：
+
+```bash
+CONTROLLER_METRICS_URL=http://<controller-host>:1027/observability/metrics
+# Controller observability 端口启用 TLS 时：
+# CONTROLLER_INSECURE_SKIP_VERIFY=false   # 并在 compose 中挂载 CA_FILE/CERT_FILE/KEY_FILE
+```
+
+> 前提：Controller 侧 `motor_controller_config.observability_config.observability_enable`
+> 必须为 `true`，且网络可达 `observability_api_port`（默认 1027）。
+
+校验：
+
+```bash
+curl -s localhost:1027/observability/metrics | head -c 80          # 应为 {"code":200,...}
+curl -s localhost:9106/metrics | grep motor_controller_proxy_up    # 解包后文本 + up 1
+```
+
+**没有完整集群？** 用自带的桩快速看效果：`python controller-proxy/dev_stub_controller.py`
+会在 `:1027/observability/metrics` 返回与真实 Controller 一致的 JSON 信封（`data` 取自
+真实样本 `tests/coordinator/core/metrics_example.txt`），proxy 默认即可抓到。详见
+[controller-proxy/README.md](controller-proxy/README.md)。
 
 ---
 

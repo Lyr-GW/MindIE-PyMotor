@@ -113,12 +113,21 @@ scrape_configs:
           pd_role: decode
           source: real
 
+  # Controller 的 /observability/metrics 返回的是 JSON 信封
+  # ({"code":200,"message":"Success","data":"<Prometheus 文本>"})，
+  # Prometheus 无法直接解析（会报 "Invalid labels" 并把 target 标记为 DOWN）。
+  # 因此这里 **不直接** 抓 1027，而是抓 controller-metrics-proxy 解包后的
+  # 原生 Prometheus 端点 (:9106/metrics)。proxy 会再额外暴露
+  # motor_controller_proxy_up / _scrape_duration_seconds 两个自监控指标。
+  #
+  # 如需接入真实 Controller：修改 docker-compose.yml 中
+  # controller-metrics-proxy 的 CONTROLLER_METRICS_URL（指向你的
+  # Controller observability 地址，默认 host.docker.internal:1027）。
   - job_name: motor-controller
-    metrics_path: /observability/metrics
+    metrics_path: /metrics
     static_configs:
       - targets:
-          # 默认 Controller observability API 端口 1027
-          - "host.docker.internal:1027"
+          - "controller-metrics-proxy:9106"
         labels:
           motor_component: controller
           source: real

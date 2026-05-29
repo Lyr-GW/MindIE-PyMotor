@@ -85,6 +85,7 @@ pyMotor observability stack is up.
   Loki          http://localhost:3100
   OTel OTLP     localhost:4317 (gRPC) / 4318 (HTTP)
   Mock metrics  http://localhost:9105/metrics  (if 'mock' profile enabled)
+  Controller    http://localhost:9106/metrics  (controller-metrics-proxy)
 
 Active profiles: ${PROFILES:-<none>}
 
