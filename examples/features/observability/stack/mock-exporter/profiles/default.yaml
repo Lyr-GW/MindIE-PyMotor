@@ -17,6 +17,7 @@ specs:
   - motor
   - http
   - vllm
+  - vllm_profiling
   - coordinator_future
   - kv_future
   - npu
