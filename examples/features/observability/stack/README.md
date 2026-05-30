@@ -59,8 +59,9 @@ cd examples/features/observability/stack
    ┌──────────────────┐                       │   motor-overview │
    │ motor-metrics-   │──scrape──▶ Prometheus │   motor-kv-cache │
    │ mock (profile:   │  (source=mock)       │   motor-npu      │
-   │  mock)           │                       └──────────────────┘
-   └──────────────────┘
+   │  mock)           │                       │   motor-vllm-    │
+   │                  │                       │     profiling    │
+   └──────────────────┘                       └──────────────────┘
    ┌──────────────────┐
    │ npu-exporter     │──scrape──▶ Prometheus
    │ (profile:        │  (source=real)
@@ -87,7 +88,8 @@ stack/
 │   └── dashboards/
 │       ├── motor-overview.json
 │       ├── motor-kv-cache.json
-│       └── motor-npu.json
+│       ├── motor-npu.json
+│       └── motor-vllm-profiling.json
 ├── prometheus/prometheus.yml
 ├── tempo/tempo.yaml
 ├── loki/loki.yaml
@@ -97,7 +99,7 @@ stack/
     ├── requirements.txt
     ├── main.py                  # 按 spec/profile 注册并刷新指标
     ├── profiles/                # default / multi_pd / dsv3_ep
-    └── specs/                   # 6 个 spec：motor / vllm / http / coordinator_future / kv_future / npu
+    └── specs/                   # 7 个 spec：motor / vllm / vllm_profiling / http / coordinator_future / kv_future / npu
 ```
 
 ---
@@ -127,6 +129,20 @@ stack/
 - 总 NPU 数 / 不健康数量 / 平均 AI Core 利用率 / 平均温度 / 总功耗
 - 每 NPU 的：AI Core 利用率、Vector 利用率、显存使用%、功耗、温度、频率、带宽
 - 标签：`pod_name` / `id` / `pcie_bus_info` 与华为 npu-exporter 1:1 对齐
+
+### 4.4 vLLM Profiling (`motor-vllm-profiling`)
+
+展示 `ms_service_metric`（[Ascend/msserviceprofiler](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）通过 hook 在 vLLM 引擎上暴露的 `vllm_profiling_*` 指标。所有指标自动带 `dp` / `role` / `phase` 三个标签，Dashboard 顶部除 `$source` 外还提供 `$phase`（prefill/decode/mixed）、`$role`（PD 角色）下拉过滤：
+
+- **静态显存** `engine:memory:*`（PR!360 新增 Gauge）：显存利用率、总显存、显存构成（weights / kv_cache / activation / non_torch / npu_graph）饼图、reserved vs total。
+- **阶段时延 Profiling**：engine core step / model_runner / scheduler / executor 等各阶段 P50/P95/P99 分位数与平均耗时拆解（timer→histogram）。
+- **细粒度算子计时** `record_function_or_nullcontext`：按算子名（prepare input / forward / post process / sample_token / draft_token）拆分。
+- **NPU 计算时间线**：`npu:forward_duration` / `npu:kernel_launch` / `npu:non_forward_duration`。
+- **请求链路时延**：create_chat_completion / generate / tokenizer_encode / output_processor。
+- **调度器**：batch_size、running_queue、seqlen、按 `req_phase` 的调度 token 速率，以及 recompute / block_allocate_failures / running_to_waiting / rpc_errors 等异常计数。
+- **EPLB 专家负载**（MoE / EP 场景，默认折叠）：expert hotness 与 imbalance。
+
+> vLLM torch_npu profiler（`VLLM_TORCH_PROFILER_DIR` + `start_profile`/`stop_profile`）产出的是落盘 trace 文件，需用 `torch_npu.profiler.profiler.analyse` 解析后在 MindStudio Insight / TensorBoard 查看，不经 Prometheus；本 Dashboard 展示的是 `ms_service_metric` 实时上报的 profiling 指标。
 
 ---
 
@@ -187,6 +203,7 @@ trace 自动入 Tempo，在 Grafana **Explore → Tempo** 中按 service 名 / s
 | `motor.yaml` | `motor/coordinator/metrics/metrics_collector.py` | 真实已存在 |
 | `http.yaml` | `motor/engine_server/core/mgmt_endpoint.py` (prometheus_fastapi_instrumentator) | 真实已存在 |
 | `vllm.yaml` | vLLM 引擎透传，bucket 与实测一致 | 真实已存在 |
+| `vllm_profiling.yaml` | `ms_service_metric` hook 暴露的 `vllm_profiling_*`（含静态显存 / 各阶段时延 profiling 指标） | 真实可替换 |
 | `coordinator_future.yaml` | 对标 `dynamo_frontend_*`（pymotor 未实现） | 占位，待补齐 |
 | `kv_future.yaml` | 对标 `kvbm_*`（pymotor 未实现） | 占位，待补齐 |
 | `npu.yaml` | 1:1 复刻华为 mind-cluster npu-exporter | 真实可替换 |
