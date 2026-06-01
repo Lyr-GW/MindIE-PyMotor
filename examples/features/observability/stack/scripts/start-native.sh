@@ -148,7 +148,7 @@ install_otel_collector() {
 }
 
 install_grafana() {
-  local grafana_home="${RUNTIME_DIR}/grafana-${GRAFANA_VERSION}"
+  local grafana_home="${RUNTIME_DIR}/grafana-v${GRAFANA_VERSION}"
   [[ -x "${grafana_home}/bin/grafana" ]] && return
   local archive="${RUNTIME_DIR}/grafana-${GRAFANA_VERSION}.tar.gz"
   local url="https://dl.grafana.com/oss/release/grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz"
@@ -346,7 +346,7 @@ start_component "prometheus" \
   "--web.enable-remote-write-receiver" \
   "--enable-feature=utf8-names"
 
-GRAFANA_HOME="${RUNTIME_DIR}/grafana-${GRAFANA_VERSION}"
+GRAFANA_HOME="${RUNTIME_DIR}/grafana-v${GRAFANA_VERSION}"
 start_component "grafana" \
   env \
   GF_SECURITY_ADMIN_USER="${GF_SECURITY_ADMIN_USER}" \
