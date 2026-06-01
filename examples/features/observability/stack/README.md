@@ -1,8 +1,8 @@
 # pyMotor 可观测性平台（本地一键部署）
 
-一套对标 **NVIDIA Dynamo Observability (Local)** 的可视化栈，基于 Docker Compose 一键拉起 Prometheus + Grafana + Tempo + Loki + OpenTelemetry Collector + Exporters，并为 pyMotor 量身预置 Dashboard。
+一套对标 **NVIDIA Dynamo Observability (Local)** 的可视化栈，基于 Docker Compose 一键拉起 Prometheus + Grafana + Tempo + Loki + OpenTelemetry Collector + Exporters，并为 pyMotor 预置 Dashboard。
 
-> 设计取向：**只负责"展示数据"**。不修改 pyMotor 应用代码；对应用侧尚未暴露的指标使用 `motor-metrics-mock` 按真实 schema 模拟，后续真实指标接入时 Dashboard 零修改。
+> 设计取向：**只负责"展示数据"**。不修改 pyMotor 应用代码；指标来自真实 Coordinator / Engine / Controller 端点及可选的 npu-exporter。
 
 ---
 
@@ -10,9 +10,9 @@
 
 ```bash
 cd examples/features/observability/stack
-./start.sh                          # 含 mock 数据，任何节点都能跑
-# 或在昇腾节点上：
-./start.sh --profile mock,npu-real  # 同时启用 NPU 真实数据
+./start.sh
+# 昇腾节点上额外启用 NPU exporter：
+./start.sh --profile npu-real
 ```
 
 启动完成后访问：
@@ -26,8 +26,8 @@ cd examples/features/observability/stack
 | OTel Collector | grpc :4317 / http :4318 | — |
 | node-exporter | http://localhost:9100/metrics | — |
 | cAdvisor | http://localhost:8088 | — |
-| motor-metrics-mock | http://localhost:9105/metrics | — |
-| npu-exporter | http://localhost:8082/metrics | — |
+| controller-metrics-proxy | http://localhost:9106/metrics | — |
+| npu-exporter | http://localhost:8082/metrics | —（`--profile npu-real`） |
 
 停止：
 
@@ -47,28 +47,19 @@ cd examples/features/observability/stack
    ├──────────────┤            │           ┌─────────────────────────────────┐
    │ Coordinator  │──/metrics──┼──scrape──▶│ Prometheus :9090                │
    ├──────────────┤            │           │   - prometheus.yml multi-job   │
-   │ Controller   │──/metrics──┘           │   - relabel source="mock"      │
-   └──────┬───────┘                        └────────────┬────────────────────┘
-          │ OTLP                                       │
-          ▼                                            ▼
-   ┌──────────────────┐                       ┌──────────────────┐
-   │ OTel Collector   │──traces──▶ Tempo ────▶│                  │
-   │  :4317 / :4318   │──logs────▶ Loki  ────▶│  Grafana :3000   │
-   └──────────────────┘                       │  (motor/motor)   │
-                                              │ Dashboards:      │
-   ┌──────────────────┐                       │   motor-overview │
-   │ motor-metrics-   │──scrape──▶ Prometheus │   motor-kv-cache │
-   │ mock (profile:   │  (source=mock)       │   motor-npu      │
-   │  mock)           │                       └──────────────────┘
-   └──────────────────┘
+   │ Controller   │──/metrics──┘           └────────────┬────────────────────┘
+   └──────┬───────┘                                     │
+          │ OTLP                                         ▼
+          ▼                                  ┌──────────────────┐
+   ┌──────────────────┐                      │  Grafana :3000   │
+   │ OTel Collector   │──traces──▶ Tempo ───▶│  Dashboards:     │
+   │  :4317 / :4318   │──logs────▶ Loki  ───▶│   motor-all-     │
+   └──────────────────┘                      │   metrics / ...  │
+                                             └──────────────────┘
    ┌──────────────────┐
-   │ npu-exporter     │──scrape──▶ Prometheus
-   │ (profile:        │  (source=real)
-   │  npu-real)       │
+   │ npu-exporter     │──scrape──▶ Prometheus  (profile: npu-real)
    └──────────────────┘
 ```
-
-所有 Dashboard 顶部带 `source` 变量（`All` / `real` / `mock`），切换 mock/real 视图无需修改 PromQL。
 
 ---
 
@@ -76,226 +67,211 @@ cd examples/features/observability/stack
 
 ```
 stack/
-├── docker-compose.yml           # 编排（mock / npu-real profiles）
+├── docker-compose.yml
 ├── .env.example
 ├── start.sh / stop.sh
 ├── grafana/
-│   ├── Dockerfile               # 预置 dashboards 的自定义镜像
+│   ├── Dockerfile
 │   ├── provisioning/
-│   │   ├── datasources/datasources.yml
-│   │   └── dashboards/dashboard-providers.yml
 │   └── dashboards/
+│       ├── motor-all-metrics.json
 │       ├── motor-overview.json
 │       ├── motor-kv-cache.json
-│       └── motor-npu.json
+│       ├── motor-npu.json
+│       └── motor-vllm-profiling.json
+├── config/tracing.example.json   # pyMotor tracing 配置片段（env + user_config）
+├── scripts/verify-tracing.sh     # 验证 OTLP → Tempo 通路
 ├── prometheus/prometheus.yml
 ├── tempo/tempo.yaml
 ├── loki/loki.yaml
 ├── otel-collector/otel-collector.yaml
-└── mock-exporter/
-    ├── Dockerfile
-    ├── requirements.txt
-    ├── main.py                  # 按 spec/profile 注册并刷新指标
-    ├── profiles/                # default / multi_pd / dsv3_ep
-    └── specs/                   # 6 个 spec：motor / vllm / http / coordinator_future / kv_future / npu
+└── controller-proxy/
 ```
 
 ---
 
 ## 4. Dashboard 说明
 
-### 4.1 pyMotor Overview (`motor-overview`)
+### 4.1 pyMotor All Metrics (`motor-all-metrics`)
 
-- P/D 实例数（基于 `motor_active_*`）
-- 5 分钟成功请求数
-- Engine HTTP QPS by handler
-- Coordinator 请求速率 by pd_role（mock 占位，应用侧补齐自动有数据）
-- **TTFT / ITL / E2E Latency** P50/P95/P99（vllm + coordinator）
-- Prompt / Generation token rate
-- vLLM running / waiting / kv_cache usage
-- 节点 CPU / 内存
+可视化总览看板，聚合 Coordinator / Engine 核心指标，全部以 stat / timeseries / barchart / piechart 呈现。
 
-### 4.2 KV Cache (`motor-kv-cache`)
+顶部变量：`$cluster` / `$motor_metric_scope` / `$role` / `$pd_role` / `$instance_id` / `$model_name`。
 
-- vLLM `kv_cache_usage_perc`（真实，立即可用）
-- vLLM prefix cache hit rate（真实）
-- `motor_kv_cache_hit_rate` / `motor_kv_*` 未来指标（mock）
-- offload / onboard blocks per direction（mock）
+### 4.2 pyMotor Overview (`motor-overview`)
 
-### 4.3 Ascend NPU (`motor-npu`)
+P/D 实例数、请求吞吐、TTFT / ITL / E2E 延迟、token rate、vLLM running/waiting、节点 CPU/内存。
 
-- 总 NPU 数 / 不健康数量 / 平均 AI Core 利用率 / 平均温度 / 总功耗
-- 每 NPU 的：AI Core 利用率、Vector 利用率、显存使用%、功耗、温度、频率、带宽
-- 标签：`pod_name` / `id` / `pcie_bus_info` 与华为 npu-exporter 1:1 对齐
+### 4.3 KV Cache (`motor-kv-cache`)
+
+vLLM `kv_cache_usage_perc`、prefix cache hit rate 等引擎侧真实指标。
+
+### 4.4 Ascend NPU (`motor-npu`)
+
+华为 npu-exporter 指标（需 `--profile npu-real`）。
+
+### 4.5 vLLM Profiling (`motor-vllm-profiling`)
+
+`ms_service_metric` hook 暴露的 `vllm_profiling_*` 指标。前置条件见 [5.4](#54-接入-vllm-profiling-指标)。
 
 ---
 
-## 5. 接入真实 pyMotor
+## 5. 接入 pyMotor
 
 ### 5.1 接入指标
 
-修改 [prometheus/prometheus.yml](prometheus/prometheus.yml) 中的 `motor-coordinator` / `motor-engine-prefill` / `motor-engine-decode` / `motor-controller` job 的 `targets`，替换为你的实际 `host:port`：
+**请勿在仓库配置中硬编码真实 IP / NodePort。** 文档示例使用 `<placeholder>`；真实环境通过本地配置文件或 `file_sd_configs` 接入。
 
-```yaml
-- job_name: motor-coordinator
-  metrics_path: /metrics
-  static_configs:
-    - targets:
-        - "10.0.0.10:1026"     # Coordinator 管理端口
-        - "10.0.0.11:1026"
-      labels:
-        source: real
+#### Coordinator 多 scope 接口
+
+| Scope | 路径 | `motor_metric_scope` 标签 |
+|-------|------|---------------------------|
+| 集群聚合 | `/metrics` | `cluster` |
+| 按 instance | `/metrics?type=instance` | `instance` |
+| 按 PD 角色 | `/metrics?type=role&role=prefill` / `decode` | `role` |
+
+#### Engine 标签
+
+`motor-engine` job 使用 `honor_labels: true`。按实际部署为每个 target 配置 `role` / `pd_role` / `instance_id`，或使用 `file_sd_configs`（见 [prometheus/prometheus.yml](prometheus/prometheus.yml) 注释）。
+
+#### 切换 Prometheus 配置
+
+```bash
+cp .env.example .env
+# 复制 prometheus.yml 为本地文件，修改 targets 后：
+PROMETHEUS_CONFIG_FILE=./prometheus/prometheus.local.yml
+docker compose up -d prometheus
 ```
 
 热加载：`curl -X POST http://localhost:9090/-/reload`
 
-### 5.2 接入链路追踪
+### 5.2 接入链路追踪（Tracing → Tempo）
 
-在 pyMotor 的 `env.json` 中对应 service 段下，将 OTLP endpoint 指向本地 collector：
+Tracing 数据流：**pyMotor OTLP → OTel Collector (:4317/:4318) → Tempo (:3200) → Grafana Explore**。
+
+#### 必填配置（两处同时改）
+
+Coordinator **不会**读取 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`；导出地址来自 `user_config.json` 的 `tracer_config.endpoint`。完整片段见 [config/tracing.example.json](config/tracing.example.json)。
+
+**1. `env.json`** — 协议与服务名：
 
 ```json
 {
   "motor_coordinator_env": {
     "OTEL_SERVICE_NAME": "motor-coordinator",
     "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
-    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://<obs-host>:4317",
+    "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
+  },
+  "motor_engine_prefill_env": {
+    "OTEL_SERVICE_NAME": "vllm-server-p",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
+  },
+  "motor_engine_decode_env": {
+    "OTEL_SERVICE_NAME": "vllm-server-d",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
     "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
   }
 }
 ```
 
-trace 自动入 Tempo，在 Grafana **Explore → Tempo** 中按 service 名 / span 名 / `x_request_id` 检索。
+**2. `user_config.json`** — 导出 endpoint（`<obs-host>` 为 observability 栈可达地址）：
 
-### 5.3 Mock → Real 平滑切换
+```json
+{
+  "motor_coordinator_config": {
+    "tracer_config": {
+      "endpoint": "grpc://<obs-host>:4317",
+      "root_sampling_rate": 1.0,
+      "remote_parent_sampled": 1.0,
+      "remote_parent_not_sampled": 1.0,
+      "local_parent_sampled": 1.0,
+      "local_parent_not_sampled": 1.0
+    }
+  },
+  "motor_engine_prefill_config": {
+    "engine_config": {
+      "otlp-traces-endpoint": "grpc://<obs-host>:4317"
+    }
+  },
+  "motor_engine_decode_config": {
+    "engine_config": {
+      "otlp-traces-endpoint": "grpc://<obs-host>:4317"
+    }
+  }
+}
+```
 
-| 切换内容 | 操作 |
-|----------|------|
-| 应用侧补齐 `motor_coordinator_*` 等指标 | 注释 prometheus.yml 中 `motor-metrics-mock` job → `curl -X POST http://localhost:9090/-/reload` |
-| 切到生产 NPU 数据 | 启动时加 `--profile npu-real`，stop 后 `./start.sh --profile npu-real --no-mock` 重启 |
-| 临时只看真实数据 | Dashboard 顶部把 `source` 变量切到 `real` |
+| 协议 | `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `tracer_config.endpoint` / `otlp-traces-endpoint` |
+|------|--------------------------------------|--------------------------------------------------|
+| gRPC（推荐） | `grpc` | `grpc://<obs-host>:4317` |
+| HTTP | `http/protobuf` | `http://<obs-host>:4318/v1/traces` |
 
----
+> pyMotor 与 stack 同机 Docker 部署时，`<obs-host>` 可用 `host.docker.internal`；K8s 场景填 Node IP 或 Service 地址。
 
-## 6. Mock Exporter 内部机制
+#### 验证 Tracing 通路
 
-### 6.1 指标 schema 与真实形态一致
-
-`mock-exporter/specs/` 下每个 YAML 描述一族指标，**指标名、标签、bucket、help 文本完全复刻 pyMotor 现有真实暴露形态**（vllm bucket 取自 `tests/coordinator/core/metrics_example.txt` 实测样本）。当前包含：
-
-| Spec | 来源 / 对标 | 状态 |
-|------|------------|------|
-| `motor.yaml` | `motor/coordinator/metrics/metrics_collector.py` | 真实已存在 |
-| `http.yaml` | `motor/engine_server/core/mgmt_endpoint.py` (prometheus_fastapi_instrumentator) | 真实已存在 |
-| `vllm.yaml` | vLLM 引擎透传，bucket 与实测一致 | 真实已存在 |
-| `coordinator_future.yaml` | 对标 `dynamo_frontend_*`（pymotor 未实现） | 占位，待补齐 |
-| `kv_future.yaml` | 对标 `kvbm_*`（pymotor 未实现） | 占位，待补齐 |
-| `npu.yaml` | 1:1 复刻华为 mind-cluster npu-exporter | 真实可替换 |
-
-### 6.2 数据生成模式
-
-| mode | 适用 | 说明 |
-|------|------|------|
-| `pd_active_count` / `pd_inactive_count` | Gauge | 根据 profile 的 P/D 实例数模拟（2% 概率短暂降为 N-1） |
-| `gauge_sin` | Gauge | base + amp·sin(2π·t/period) + Gaussian noise，可 clamp |
-| `counter_rate` | Counter | 每 tick 按 `rate_per_sec × dt × (0.8~1.2)` 增量 |
-| `counter_rate_per_label` | Counter | 不同 label 值给不同 rate（如 `finished_reason: stop=0.35, length=0.13, abort=0.02`） |
-| `histogram_lognormal` | Histogram | 对数正态样本，每 tick 数量按 `rate_per_sec` 取整 + 伯努利 |
-| `histogram_constant` | Histogram | 恒定值（如 `request_params_n=1`） |
-| `summary_uniform` | Summary | 区间均匀分布 |
-| `gauge_npu_used/total_memory_mb` | Gauge | 与 hardware_type 联动（A2=64GB, A3=128GB） |
-| `constant` / `info_gauge` | Info Gauge | 恒为 1.0 |
-
-### 6.3 切换 mock profile
+stack 启动后，先验证 **Collector → Tempo** 是否连通（不依赖 pyMotor）：
 
 ```bash
-MOCK_PROFILE=multi_pd ./start.sh     # 4P+4D
-MOCK_PROFILE=dsv3_ep ./start.sh      # DeepSeek-V3.2 EP
+./scripts/verify-tracing.sh
+# 自定义端口：OTEL_HOST=127.0.0.1 OTEL_GRPC_PORT=4317 ./scripts/verify-tracing.sh
 ```
 
-或编辑 `.env` 中的 `MOCK_PROFILE`，再 `docker compose up -d motor-metrics-mock`。
+成功后在 Grafana **Explore → Tempo** 搜索 service `pymotor-tracing-verify`。
 
-### 6.4 新增 mock 指标
+pyMotor 部署完成并发请求后，按 `OTEL_SERVICE_NAME`（如 `motor-coordinator`）搜索 span；Coordinator 常见 span 名：`PDHybrid`、`CDP_Prefill`、`CDP_Decode_stream` 等。
 
-在 `mock-exporter/specs/<name>.yaml` 中追加：
+#### 传播与关联
 
-```yaml
-- name: my_metric_name
-  type: gauge|counter|histogram|summary|info_gauge
-  help: ...
-  labels: [foo, bar]
-  buckets: [0.1, 0.5, 1.0]   # 仅 histogram
-  value:
-    mode: gauge_sin
-    base: 50.0
-    amp: 10.0
-    period_sec: 60
+- 入站：客户端 `traceparent` / `tracestate`（W3C Trace Context）
+- Coordinator → Engine：HTTP 转发时注入相同 trace headers
+- Trace ↔ Log：Grafana 已配置 Tempo↔Loki 互跳，但 pyMotor 日志尚未输出 `trace_id`（log 接入待后续）
+
+详见 [docs/zh/user_guide/tracing_deployment.md](../../../../docs/zh/user_guide/tracing_deployment.md)。
+
+### 5.3 接入 Controller 指标（controller-metrics-proxy）
+
+Controller 的 `/observability/metrics` 返回 JSON 信封，Prometheus 无法直接解析。本栈通过 `controller-metrics-proxy` 解包后在 `:9106/metrics` 暴露原生 Prometheus 文本。
+
+```bash
+CONTROLLER_METRICS_URL=http://<controller-host>:1027/observability/metrics
 ```
 
-然后在对应 profile 的 `specs:` 列表中加入文件名（不带 `.yaml`），重启容器。
+详见 [controller-proxy/README.md](controller-proxy/README.md)。
+
+### 5.4 接入 vLLM profiling 指标
+
+**前置条件：** 安装 [ms_service_metric](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric) 并执行 `ms-service-metric on`。
+
+- **pymotor engine_server**：`vllm_profiling_*` 通常已随 `motor-engine` job 一并采集。
+- **独立 vllm serve**：启用 `vllm-profiling` job 并填写 targets。
 
 ---
 
-## 7. 端口冲突 / 自定义
-
-复制 `.env.example` 为 `.env` 后修改：
+## 6. 端口冲突 / 自定义
 
 ```bash
 GRAFANA_PORT=3030
 PROMETHEUS_PORT=19090
-MOCK_PROFILE=multi_pd
+PROMETHEUS_CONFIG_FILE=./prometheus/prometheus.yml
 REGISTRY_PREFIX=harbor.example.com/library/
 ```
 
 ---
 
-## 8. 镜像构建（离线环境）
+## 7. 镜像构建（离线环境）
 
 ```bash
-# 单独构建自定义镜像
-docker compose build grafana motor-metrics-mock
-
-# 推送到内网 Harbor
-REGISTRY_PREFIX=harbor.example.com/library/ \
-  docker compose build && \
-  docker push harbor.example.com/library/pymotor/grafana:11.3.0 && \
-  docker push harbor.example.com/library/pymotor/metrics-mock:latest
+docker compose build grafana controller-metrics-proxy
 ```
 
 ---
 
-## 9. 与 NVIDIA Dynamo 的对标关系
-
-| Dynamo | 本栈对应 |
-|--------|----------|
-| `deploy/docker-observability.yml` | `docker-compose.yml` |
-| `grafana_dashboards/dynamo.json` | `motor-overview.json` |
-| `grafana_dashboards/dcgm-metrics.json` | `motor-npu.json`（DCGM → npu-exporter） |
-| `grafana_dashboards/kvbm.json` | `motor-kv-cache.json` |
-| `dynamo_frontend_*` 指标 | `motor_coordinator_*`（mock 占位） |
-| `dynamo_component_*` 指标 | pyMotor `motor_*` + vLLM 透传 |
-| `kvbm_*` 指标 | `motor_kv_*`（mock 占位） |
-| `dcgm_*` 指标 | `npu_chip_info_*` |
-| Loki + Tempo + trace_id 跳转 | 完全对齐 |
-| OTel Collector | 完全对齐 |
-
----
-
-## 10. 后续工作（不在本目录范围）
-
-> 这些是应用侧需要补齐的能力，等待独立 PR 推进。补齐后无需修改本栈即可让 Dashboard 显示真实数据：
-
-- Coordinator 埋点 `motor_coordinator_time_to_first_token_seconds` / `motor_coordinator_inter_token_latency_seconds` 等 SLI
-- 修正 [motor/coordinator/metrics/metrics_collector.py](../../motor/coordinator/metrics/metrics_collector.py) 对 histogram 的 sum/mean 聚合（破坏分位数）
-- KV Pool / KV Conductor / Mooncake 暴露 `motor_kv_*` 指标
-- pyMotor 各组件默认 OTLP 目标改为 Collector（当前默认 Jaeger）
-- pyMotor 日志切换为 JSONL 并带 `trace_id` 字段，使 Loki ↔ Tempo 互跳无缝
-
----
-
-## 11. 相关文档
+## 8. 相关文档
 
 - pyMotor 架构：[docs/zh/architecture.md](../../../../docs/zh/architecture.md)
-- 现有 tracing 部署：[docs/zh/user_guide/tracing_deployment.md](../../../../docs/zh/user_guide/tracing_deployment.md)
+- tracing 部署：[docs/zh/user_guide/tracing_deployment.md](../../../../docs/zh/user_guide/tracing_deployment.md)
 - CCAE 北向：[examples/features/observability/REAME.md](../REAME.md)
 - 华为 npu-exporter：<https://gitcode.com/Ascend/mind-cluster>
 - NVIDIA Dynamo Observability：<https://docs.nvidia.com/dynamo/user-guides/observability-local>

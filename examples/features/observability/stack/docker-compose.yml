@@ -5,13 +5,12 @@
 # Collector + Exporters) for pyMotor.
 #
 # Profiles:
-#   - default(no profile flag) : core stack (mock exporter optional)
-#   - mock     : enable motor-metrics-mock for dashboards-without-real-data
+#   - default(no profile flag) : core stack
 #   - npu-real : enable Ascend npu-exporter (requires Ascend drivers on host)
 #
 # Usage:
-#   docker compose --profile mock up -d
-#   docker compose --profile mock --profile npu-real up -d        # both
+#   docker compose up -d
+#   docker compose --profile npu-real up -d
 
 name: pymotor-observability
 
@@ -48,7 +47,7 @@ services:
       # metric_name_validation_scheme: utf8 配套）
       - --enable-feature=utf8-names
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${PROMETHEUS_CONFIG_FILE:-./prometheus/prometheus.yml}:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -160,23 +159,30 @@ services:
       - "${CADVISOR_PORT:-8088}:8080"
 
   # ---------------------------------------------------------------
-  # Mock exporter (profile: mock) — emits pymotor-shaped metrics
+  # controller-metrics-proxy — 把 Controller 的 JSON 包装指标
+  # (/observability/metrics) 解包为原生 Prometheus 文本，供 Prometheus 抓取。
+  # Prometheus 无法直接解析 Controller 的 JSON 信封，必须经过本适配器。
+  # 默认指向宿主机 Controller (host.docker.internal:1027)；按实际部署修改
+  # CONTROLLER_METRICS_URL 即可（支持多实例：复制该 service 或使用编排）。
   # ---------------------------------------------------------------
-  motor-metrics-mock:
+  controller-metrics-proxy:
     build:
-      context: ./mock-exporter
-    image: ${REGISTRY_PREFIX:-}pymotor/metrics-mock:latest
-    container_name: pymotor-metrics-mock
+      context: ./controller-proxy
+    image: ${REGISTRY_PREFIX:-}pymotor/controller-metrics-proxy:latest
+    container_name: pymotor-controller-metrics-proxy
     restart: unless-stopped
     networks: [obs]
-    profiles: [mock]
     environment:
-      MOCK_PROFILE: ${MOCK_PROFILE:-default}
-      MOCK_TICK_INTERVAL_SEC: ${MOCK_TICK_INTERVAL_SEC:-1.0}
-      MOCK_PORT: "9105"
-      MOCK_LOG_LEVEL: INFO
+      CONTROLLER_METRICS_URL: ${CONTROLLER_METRICS_URL:-http://host.docker.internal:1027/observability/metrics}
+      PROXY_PORT: "9106"
+      CONTROLLER_TIMEOUT: ${CONTROLLER_TIMEOUT:-5}
+      # Controller 启用 TLS 时设为 false 并挂载证书 (CA_FILE/CERT_FILE/KEY_FILE)。
+      INSECURE_SKIP_VERIFY: ${CONTROLLER_INSECURE_SKIP_VERIFY:-true}
+      PROXY_LOG_LEVEL: INFO
     ports:
-      - "${MOCK_EXPORTER_PORT:-9105}:9105"
+      - "${CONTROLLER_PROXY_PORT:-9106}:9106"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # ---------------------------------------------------------------
   # Ascend NPU exporter (profile: npu-real) — requires host drivers

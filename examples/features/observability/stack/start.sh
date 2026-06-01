@@ -2,10 +2,8 @@
 # Launch the pyMotor observability stack.
 #
 # Usage:
-#   ./start.sh                       # core stack + mock exporter
-#   ./start.sh --no-mock             # core stack only (real metrics expected)
-#   ./start.sh --profile npu-real    # core stack + NPU exporter (Ascend host)
-#   ./start.sh --profile mock,npu-real
+#   ./start.sh                    # core stack (Prometheus/Grafana/Tempo/Loki/OTel)
+#   ./start.sh --profile npu-real # additionally enable Ascend npu-exporter
 
 set -euo pipefail
 
@@ -17,8 +15,7 @@ if [[ ! -f .env ]]; then
   echo "[start] created .env from .env.example"
 fi
 
-PROFILES="mock"
-NO_MOCK=0
+PROFILES=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,16 +24,11 @@ while [[ $# -gt 0 ]]; do
       PROFILES="$1"
       shift
       ;;
-    --no-mock)
-      NO_MOCK=1
-      shift
-      ;;
     -h|--help)
       cat <<EOF
 Usage: $0 [options]
-  --profile <list>   comma-separated profiles (default: mock)
-                     known: mock, npu-real
-  --no-mock          drop the 'mock' profile (real-data only)
+  --profile <list>   comma-separated profiles (default: none)
+                     known: npu-real
   -h, --help         show this help
 EOF
       exit 0
@@ -47,10 +39,6 @@ EOF
       ;;
   esac
 done
-
-if [[ "${NO_MOCK}" -eq 1 ]]; then
-  PROFILES="$(echo "${PROFILES}" | tr ',' '\n' | grep -v '^mock$' | paste -sd, -)"
-fi
 
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 if ! "${DOCKER_BIN}" compose version >/dev/null 2>&1; then
@@ -84,15 +72,15 @@ pyMotor observability stack is up.
   Tempo         http://localhost:3200
   Loki          http://localhost:3100
   OTel OTLP     localhost:4317 (gRPC) / 4318 (HTTP)
-  Mock metrics  http://localhost:9105/metrics  (if 'mock' profile enabled)
+  Controller    http://localhost:9106/metrics  (controller-metrics-proxy)
 
 Active profiles: ${PROFILES:-<none>}
 
 Tips:
-  * In Grafana, every dashboard has a \$source variable (real / mock / all).
-  * To wire pyMotor metrics, edit prometheus/prometheus.yml and replace
-    the host.docker.internal:* targets with your real coordinator/engine.
-  * To send traces from pyMotor, set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to
-    http://<this-host>:4317 in your motor_coordinator_env.
+  * Verify tracing: ./scripts/verify-tracing.sh  (OTLP → Tempo)
+  * Wire pyMotor metrics: edit prometheus/prometheus.yml (or set
+    PROMETHEUS_CONFIG_FILE in .env) and replace placeholder targets.
+  * Wire pyMotor tracing: config/tracing.example.json + README §5.2
+    (tracer_config.endpoint + OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
 ================================================================
 EOF
