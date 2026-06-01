@@ -113,16 +113,34 @@ scrape_configs:
           pd_role: decode
           source: real
 
-  # Controller 的 /observability/metrics 返回的是 JSON 信封
-  # ({"code":200,"message":"Success","data":"<Prometheus 文本>"})，
-  # Prometheus 无法直接解析（会报 "Invalid labels" 并把 target 标记为 DOWN）。
-  # 因此这里 **不直接** 抓 1027，而是抓 controller-metrics-proxy 解包后的
-  # 原生 Prometheus 端点 (:9106/metrics)。proxy 会再额外暴露
-  # motor_controller_proxy_up / _scrape_duration_seconds 两个自监控指标。
+  # -----------------------------------------------------------------------
+  # vLLM profiling 指标 (ms_service_metric, vllm_profiling_*)
+  # 真实数据源：由 Ascend/msserviceprofiler -> ms_service_metric 在 vLLM
+  # 引擎进程内 hook 后，注册进 vLLM 的 prometheus registry，统一从 vLLM
+  # 的 /metrics 端点暴露（与原生 vllm:* 指标同一端点）。
   #
-  # 如需接入真实 Controller：修改 docker-compose.yml 中
-  # controller-metrics-proxy 的 CONTROLLER_METRICS_URL（指向你的
-  # Controller observability 地址，默认 host.docker.internal:1027）。
+  # 启用方式（引擎侧，参考 ms_service_metric README）：
+  #   pip install ms_service_metric
+  #   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && \
+  #       mkdir -p $PROMETHEUS_MULTIPROC_DIR
+  #   # 启动 vLLM 后开启采集： ms-service-metric on
+  #
+  # 采集方式（按部署形态二选一）：
+  #   A. pymotor engine_server 部署：vllm_profiling_* 已随上面的
+  #      motor-engine-prefill / motor-engine-decode job 一并采集，
+  #      无需本 job（避免对同一 /metrics 端点重复抓取）。
+  #   B. 直接 `vllm serve` 部署：把下面 targets 改为各 vLLM 节点的
+  #      API server host:port（如 D 节点 IP:Port），启用本 job。
+  - job_name: vllm-profiling
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # 替换为实际 vLLM serve 节点（OpenAI API server 端口）
+          - "host.docker.internal:8000"
+        labels:
+          motor_component: vllm
+          source: real
+
   - job_name: motor-controller
     metrics_path: /metrics
     static_configs:
