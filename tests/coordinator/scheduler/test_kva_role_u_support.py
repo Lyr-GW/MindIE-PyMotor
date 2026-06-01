@@ -67,13 +67,14 @@ def test_kv_cache_affinity_uses_kva_for_role_u() -> None:
         return_value=(instance, endpoint),
     ) as mock_kva, patch.object(
         client,
-        "_select_instance_and_endpoint_by_load_balance",
+        "_select_endpoint_candidates_by_load_balance",
     ) as mock_load_balance:
-        result = client._select_instance_and_endpoint_from_list(
-            [instance], PDRole.ROLE_U, req_info
+        candidates, candidate_policy = client._select_endpoint_candidates_from_list_with_policy(
+            [instance], PDRole.ROLE_U, req_info, top_k=1
         )
 
-    assert result == (instance, endpoint)
+    assert candidates == [(instance, endpoint, 0.0)]
+    assert candidate_policy == "kv_cache_affinity"
     mock_kva.assert_called_once_with([instance], req_info)
     mock_load_balance.assert_not_called()
 
@@ -84,6 +85,7 @@ def test_kv_cache_affinity_falls_back_to_load_balance_for_role_u() -> None:
     endpoint = Mock()
     req_info = Mock()
     lb_instance = Mock()
+    lb_candidates = [(lb_instance, endpoint, 0.42)]
 
     with patch(
         "motor.coordinator.scheduler.runtime.scheduler_client."
@@ -91,21 +93,17 @@ def test_kv_cache_affinity_falls_back_to_load_balance_for_role_u() -> None:
         return_value=None,
     ) as mock_kva, patch.object(
         client,
-        "_select_instance_and_endpoint_by_load_balance",
-        return_value=lb_instance,
-    ) as mock_load_balance, patch.object(
-        client,
-        "_select_endpoint_for_instance",
-        return_value=(lb_instance, endpoint),
-    ) as mock_select_endpoint:
-        result = client._select_instance_and_endpoint_from_list(
-            [instance], PDRole.ROLE_U, req_info
+        "_select_endpoint_candidates_by_load_balance",
+        return_value=lb_candidates,
+    ) as mock_load_balance:
+        candidates, candidate_policy = client._select_endpoint_candidates_from_list_with_policy(
+            [instance], PDRole.ROLE_U, req_info, top_k=1
         )
 
-    assert result == (lb_instance, endpoint)
+    assert candidates == lb_candidates
+    assert candidate_policy == "load_balance"
     mock_kva.assert_called_once_with([instance], req_info)
-    mock_load_balance.assert_called_once_with([instance], PDRole.ROLE_U)
-    mock_select_endpoint.assert_called_once_with(lb_instance)
+    mock_load_balance.assert_called_once_with([instance], PDRole.ROLE_U, 1)
 
 
 def test_kv_cache_affinity_skips_kva_for_non_kva_roles() -> None:
@@ -114,24 +112,21 @@ def test_kv_cache_affinity_skips_kva_for_non_kva_roles() -> None:
     endpoint = Mock()
     req_info = Mock()
     lb_instance = Mock()
+    lb_candidates = [(lb_instance, endpoint, 0.24)]
 
     with patch(
         "motor.coordinator.scheduler.runtime.scheduler_client."
         "KvCacheAffinityPolicy.select_endpoint_from_list"
     ) as mock_kva, patch.object(
         client,
-        "_select_instance_and_endpoint_by_load_balance",
-        return_value=lb_instance,
-    ) as mock_load_balance, patch.object(
-        client,
-        "_select_endpoint_for_instance",
-        return_value=(lb_instance, endpoint),
-    ) as mock_select_endpoint:
-        result = client._select_instance_and_endpoint_from_list(
-            [instance], PDRole.ROLE_D, req_info
+        "_select_endpoint_candidates_by_load_balance",
+        return_value=lb_candidates,
+    ) as mock_load_balance:
+        candidates, candidate_policy = client._select_endpoint_candidates_from_list_with_policy(
+            [instance], PDRole.ROLE_D, req_info, top_k=1
         )
 
-    assert result == (lb_instance, endpoint)
+    assert candidates == lb_candidates
+    assert candidate_policy == "load_balance"
     mock_kva.assert_not_called()
-    mock_load_balance.assert_called_once_with([instance], PDRole.ROLE_D)
-    mock_select_endpoint.assert_called_once_with(lb_instance)
+    mock_load_balance.assert_called_once_with([instance], PDRole.ROLE_D, 1)

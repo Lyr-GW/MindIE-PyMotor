@@ -38,6 +38,10 @@ from motor.coordinator.models.request import RequestInfo
 
 logger = get_logger(__name__)
 
+CANDIDATE_POLICY_LOAD_BALANCE = "load_balance"
+CANDIDATE_POLICY_ROUND_ROBIN = "round_robin"
+CANDIDATE_POLICY_KV_CACHE_AFFINITY = "kv_cache_affinity"
+
 # Callback signature: receives active endpoint list [(ip, port), ...], returns None
 OnInstanceRefreshedCallback = Callable[[list[tuple[str, str]]], Awaitable[None]]
 
