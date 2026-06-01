@@ -28,7 +28,6 @@ scrape_configs:
 
   # -----------------------------------------------------------------------
   # Ascend NPU exporter (profile: npu-real)
-  # 仅在昇腾节点启用 (docker compose --profile npu-real up)
   # -----------------------------------------------------------------------
   - job_name: ascend-npu-exporter
     static_configs:
@@ -51,27 +50,30 @@ scrape_configs:
           - "cadvisor:8080"
 
   # -----------------------------------------------------------------------
-  # pymotor coordinator / engine / controller
-  # 这些目标在大多数环境里不可达；保留为示例，使用者按实际部署修改 targets。
-  # 端口规则参考 motor/config/coordinator.py / controller.py。
+  # pymotor Coordinator — 多 scope 采集
+  #   /metrics                      集群聚合视图 (motor_metric_scope=cluster)
+  #   /metrics?type=instance        按 instance 拆分 (motor_metric_scope=instance)
+  #   /metrics?type=role&role=*     按 PD 角色拆分 (motor_metric_scope=role)
+  # 端口规则参考 motor/config/coordinator.py。
   # -----------------------------------------------------------------------
   - job_name: motor-coordinator
     metrics_path: /metrics
     static_configs:
       - targets:
-          # 默认 Coordinator 管理端口，参考 motor_coordinator_config.api_config
           - "host.docker.internal:1026"
         labels:
           motor_component: coordinator
+          motor_metric_scope: cluster
           source: real
 
   - job_name: motor-coordinator-instance
-    metrics_path: /instance/metrics
+    metrics_path: /metrics?type=instance
     static_configs:
       - targets:
           - "host.docker.internal:1026"
         labels:
           motor_component: coordinator
+          motor_metric_scope: instance
           source: real
 
   - job_name: motor-coordinator-role-prefill
@@ -105,10 +107,9 @@ scrape_configs:
   # -----------------------------------------------------------------------
   - job_name: motor-engine
     metrics_path: /metrics
+    honor_labels: true
     static_configs:
       - targets:
-          # 实际目标由用户根据 EngineServer mgmt_port 填写，可在 .env / compose
-          # 中追加 host:port，相同 job 内多 target 即可。
           - "host.docker.internal:8001"
         labels:
           motor_component: engine
@@ -130,7 +131,6 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets:
-          # 替换为实际 vLLM serve 节点（OpenAI API server 端口）
           - "host.docker.internal:8000"
         labels:
           motor_component: vllm

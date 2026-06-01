@@ -102,15 +102,15 @@ stack/
 
 P/D 实例数、请求吞吐、TTFT / ITL / E2E 延迟、token rate、vLLM running/waiting、节点 CPU/内存。
 
-### 4.2 KV Cache (`motor-kv-cache`)
+### 4.3 KV Cache (`motor-kv-cache`)
 
 vLLM `kv_cache_usage_perc`、prefix cache hit rate 等引擎侧真实指标。
 
-### 4.3 Ascend NPU (`motor-npu`)
+### 4.4 Ascend NPU (`motor-npu`)
 
 华为 npu-exporter 指标（需 `--profile npu-real`）。
 
-### 4.4 vLLM Profiling (`motor-vllm-profiling`)
+### 4.5 vLLM Profiling (`motor-vllm-profiling`)
 
 `ms_service_metric` hook 暴露的 `vllm_profiling_*` 指标。前置条件见 [5.4](#54-接入-vllm-profiling-指标)。
 
