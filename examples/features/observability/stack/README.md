@@ -99,7 +99,7 @@ stack/
     ├── requirements.txt
     ├── main.py                  # 按 spec/profile 注册并刷新指标
     ├── profiles/                # default / multi_pd / dsv3_ep
-    └── specs/                   # 7 个 spec：motor / vllm / vllm_profiling / http / coordinator_future / kv_future / npu
+    └── specs/                   # motor / vllm / http / coordinator_future / kv_future / npu (+ vllm_profiling：默认不启用，真实数据优先)
 ```
 
 ---
@@ -132,7 +132,9 @@ stack/
 
 ### 4.4 vLLM Profiling (`motor-vllm-profiling`)
 
-展示 `ms_service_metric`（[Ascend/msserviceprofiler](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）通过 hook 在 vLLM 引擎上暴露的 `vllm_profiling_*` 指标。所有指标自动带 `dp` / `role` / `phase` 三个标签，Dashboard 顶部除 `$source` 外还提供 `$phase`（prefill/decode/mixed）、`$role`（PD 角色）下拉过滤：
+展示 `ms_service_metric`（[Ascend/msserviceprofiler](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）通过 hook 在 vLLM 引擎上暴露的 `vllm_profiling_*` 指标。所有指标自动带 `dp` / `role` / `phase` 三个标签，Dashboard 顶部除 `$source` 外还提供 `$phase`（prefill/decode/mixed）、`$role`（PD 角色）下拉过滤。
+
+> **数据源：默认 `source=real`（真实接口）**。该 Dashboard 直接采集 vLLM 引擎 `/metrics` 暴露的真实 `vllm_profiling_*` 指标，不依赖 mock。启用步骤见下文 [5.4 接入真实 vLLM profiling 指标](#54-接入真实-vllm-profiling-指标)。如需在无昇腾硬件时用 mock 预览，把 `vllm_profiling` 加回某个 `mock-exporter/profiles/*.yaml` 的 `specs` 列表，并将 Dashboard 顶部 `$source` 切到 `mock`/`All` 即可。
 
 - **静态显存** `engine:memory:*`（PR!360 新增 Gauge）：显存利用率、总显存、显存构成（weights / kv_cache / activation / non_torch / npu_graph）饼图、reserved vs total。
 - **阶段时延 Profiling**：engine core step / model_runner / scheduler / executor 等各阶段 P50/P95/P99 分位数与平均耗时拆解（timer→histogram）。
@@ -190,6 +192,42 @@ trace 自动入 Tempo，在 Grafana **Explore → Tempo** 中按 service 名 / s
 | 切到生产 NPU 数据 | 启动时加 `--profile npu-real`，stop 后 `./start.sh --profile npu-real --no-mock` 重启 |
 | 临时只看真实数据 | Dashboard 顶部把 `source` 变量切到 `real` |
 
+### 5.4 接入真实 vLLM profiling 指标
+
+`motor-vllm-profiling` Dashboard 默认即为真实接口数据源（`source=real`），无需 mock。接入步骤：
+
+1. **引擎侧启用 ms_service_metric**（参考其 [README](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）：
+
+   ```bash
+   pip install ms_service_metric
+   # vLLM 多进程 metric 采集目录
+   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
+   # 启动 vLLM 服务后开启采集
+   ms-service-metric on        # 关闭：ms-service-metric off
+   ```
+
+   启用后 `vllm_profiling_*` 指标会注册进 vLLM 的 prometheus registry，从 vLLM 的 `/metrics`（与原生 `vllm:*` 同一端点）暴露。
+
+2. **配置 Prometheus 抓取真实端点**（[prometheus/prometheus.yml](prometheus/prometheus.yml)）：
+   - **pymotor engine_server 部署**：`vllm_profiling_*` 已随 `motor-engine-prefill` / `motor-engine-decode` job 一并采集，无需额外配置。
+   - **直接 `vllm serve` 部署**：编辑 `vllm-profiling` job，把 `targets` 改为各 vLLM 节点的 API server `host:port`（如 D 节点 `IP:Port`），并打上 `source: real`。
+
+   ```yaml
+   - job_name: vllm-profiling
+     metrics_path: /metrics
+     static_configs:
+       - targets: ["10.0.0.20:8000", "10.0.0.21:8000"]
+         labels:
+           motor_component: vllm
+           source: real
+   ```
+
+   热加载：`curl -X POST http://localhost:9090/-/reload`
+
+3. 打开 Grafana 的 **pyMotor vLLM Profiling** Dashboard，`$source` 保持 `real` 即可看到真实数据。
+
+> torch_npu profiler（`VLLM_TORCH_PROFILER_DIR` + `start_profile`/`stop_profile`）落盘的 trace 不经 Prometheus，请用 `torch_npu.profiler.profiler.analyse` 解析后在 MindStudio Insight / TensorBoard 查看。
+
 ---
 
 ## 6. Mock Exporter 内部机制
@@ -203,7 +241,7 @@ trace 自动入 Tempo，在 Grafana **Explore → Tempo** 中按 service 名 / s
 | `motor.yaml` | `motor/coordinator/metrics/metrics_collector.py` | 真实已存在 |
 | `http.yaml` | `motor/engine_server/core/mgmt_endpoint.py` (prometheus_fastapi_instrumentator) | 真实已存在 |
 | `vllm.yaml` | vLLM 引擎透传，bucket 与实测一致 | 真实已存在 |
-| `vllm_profiling.yaml` | `ms_service_metric` hook 暴露的 `vllm_profiling_*`（含静态显存 / 各阶段时延 profiling 指标） | 真实可替换 |
+| `vllm_profiling.yaml` | `ms_service_metric` hook 暴露的 `vllm_profiling_*`（含静态显存 / 各阶段时延 profiling 指标） | 真实优先，默认不启用（schema 参考 / 可选 mock） |
 | `coordinator_future.yaml` | 对标 `dynamo_frontend_*`（pymotor 未实现） | 占位，待补齐 |
 | `kv_future.yaml` | 对标 `kvbm_*`（pymotor 未实现） | 占位，待补齐 |
 | `npu.yaml` | 1:1 复刻华为 mind-cluster npu-exporter | 真实可替换 |
