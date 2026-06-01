@@ -79,6 +79,8 @@ stack/
 │       ├── motor-kv-cache.json
 │       ├── motor-npu.json
 │       └── motor-vllm-profiling.json
+├── config/tracing.example.json   # pyMotor tracing 配置片段（env + user_config）
+├── scripts/verify-tracing.sh     # 验证 OTLP → Tempo 通路
 ├── prometheus/prometheus.yml
 ├── tempo/tempo.yaml
 ├── loki/loki.yaml
@@ -143,20 +145,90 @@ docker compose up -d prometheus
 
 热加载：`curl -X POST http://localhost:9090/-/reload`
 
-### 5.2 接入链路追踪
+### 5.2 接入链路追踪（Tracing → Tempo）
 
-在 pyMotor `env.json` 中将 OTLP endpoint 指向 collector：
+Tracing 数据流：**pyMotor OTLP → OTel Collector (:4317/:4318) → Tempo (:3200) → Grafana Explore**。
+
+#### 必填配置（两处同时改）
+
+Coordinator **不会**读取 `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`；导出地址来自 `user_config.json` 的 `tracer_config.endpoint`。完整片段见 [config/tracing.example.json](config/tracing.example.json)。
+
+**1. `env.json`** — 协议与服务名：
 
 ```json
 {
   "motor_coordinator_env": {
     "OTEL_SERVICE_NAME": "motor-coordinator",
     "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
-    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://<obs-host>:4317",
+    "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
+  },
+  "motor_engine_prefill_env": {
+    "OTEL_SERVICE_NAME": "vllm-server-p",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
+    "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
+  },
+  "motor_engine_decode_env": {
+    "OTEL_SERVICE_NAME": "vllm-server-d",
+    "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
     "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
   }
 }
 ```
+
+**2. `user_config.json`** — 导出 endpoint（`<obs-host>` 为 observability 栈可达地址）：
+
+```json
+{
+  "motor_coordinator_config": {
+    "tracer_config": {
+      "endpoint": "grpc://<obs-host>:4317",
+      "root_sampling_rate": 1.0,
+      "remote_parent_sampled": 1.0,
+      "remote_parent_not_sampled": 1.0,
+      "local_parent_sampled": 1.0,
+      "local_parent_not_sampled": 1.0
+    }
+  },
+  "motor_engine_prefill_config": {
+    "engine_config": {
+      "otlp-traces-endpoint": "grpc://<obs-host>:4317"
+    }
+  },
+  "motor_engine_decode_config": {
+    "engine_config": {
+      "otlp-traces-endpoint": "grpc://<obs-host>:4317"
+    }
+  }
+}
+```
+
+| 协议 | `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `tracer_config.endpoint` / `otlp-traces-endpoint` |
+|------|--------------------------------------|--------------------------------------------------|
+| gRPC（推荐） | `grpc` | `grpc://<obs-host>:4317` |
+| HTTP | `http/protobuf` | `http://<obs-host>:4318/v1/traces` |
+
+> pyMotor 与 stack 同机 Docker 部署时，`<obs-host>` 可用 `host.docker.internal`；K8s 场景填 Node IP 或 Service 地址。
+
+#### 验证 Tracing 通路
+
+stack 启动后，先验证 **Collector → Tempo** 是否连通（不依赖 pyMotor）：
+
+```bash
+./scripts/verify-tracing.sh
+# 自定义端口：OTEL_HOST=127.0.0.1 OTEL_GRPC_PORT=4317 ./scripts/verify-tracing.sh
+```
+
+成功后在 Grafana **Explore → Tempo** 搜索 service `pymotor-tracing-verify`。
+
+pyMotor 部署完成并发请求后，按 `OTEL_SERVICE_NAME`（如 `motor-coordinator`）搜索 span；Coordinator 常见 span 名：`PDHybrid`、`CDP_Prefill`、`CDP_Decode_stream` 等。
+
+#### 传播与关联
+
+- 入站：客户端 `traceparent` / `tracestate`（W3C Trace Context）
+- Coordinator → Engine：HTTP 转发时注入相同 trace headers
+- Trace ↔ Log：Grafana 已配置 Tempo↔Loki 互跳，但 pyMotor 日志尚未输出 `trace_id`（log 接入待后续）
+
+详见 [docs/zh/user_guide/tracing_deployment.md](../../../../docs/zh/user_guide/tracing_deployment.md)。
 
 ### 5.3 接入 Controller 指标（controller-metrics-proxy）
 
