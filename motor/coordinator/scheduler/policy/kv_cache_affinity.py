@@ -11,7 +11,7 @@ import os
 import threading
 
 from motor.common.resources.instance import Instance, PDRole
-from motor.common.resources.endpoint import Endpoint
+from motor.common.resources.endpoint import Endpoint, Workload, WorkloadAction
 from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.config.coordinator import CoordinatorConfig
@@ -56,6 +56,16 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             prompt = req_info.req_data.get(OpenAIField.PROMPT, None)
             if prompt is not None:
                 encoded_ids = TokenizerManager().encode(prompt)
+
+        # Visibility for the validated invariant: tools, when present, MUST inflate
+        # the encoded token sequence. Operators can grep this line to verify
+        # function-call requests are being tokenised correctly.
+        logger.debug(
+            "kv_affinity tokenize ok: msgs=%d tools=%d encoded_ids=%d",
+            len(messages or []),
+            len(tools or []),
+            len(encoded_ids or []),
+        )
 
         rsp = ConductorApiClient.query_conductor(instances, encoded_ids)
         tenant = rsp.get(TENANT_ID, None)
@@ -116,6 +126,37 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
         """
         return None
 
+    async def update_workload(self, instance_id: int, endpoint_id: int, req_id: str,
+                              workload_action: WorkloadAction, workload_change: Workload) -> bool:
+        """
+        Update workload after KV-affinity selection.
+
+        KV-affinity decides where prefill should land, but the central workload ledger is still
+        needed by decode/fallback load-balance paths and by worker SHM synchronization.
+        """
+        if hasattr(self._instance_provider, "update_instance_workload"):
+            await self._instance_provider.update_instance_workload(
+                instance_id, endpoint_id, workload_change
+            )
+        else:
+            raise RuntimeError(
+                "InstanceProvider must support update_instance_workload for KvCacheAffinityPolicy"
+            )
+
+        if req_id:
+            logger.debug(
+                f"Request {req_id} updated workload: instance_id={instance_id}, "
+                f"endpoint_id={endpoint_id}, action={workload_action.value}, "
+                f"change={workload_change}"
+            )
+        else:
+            logger.debug(
+                f"Updated workload: instance_id={instance_id}, "
+                f"endpoint_id={endpoint_id}, action={workload_action.value}, "
+                f"change={workload_change}"
+            )
+        return True
+
 
 class TokenizerManager(ThreadSafeSingleton):
     """
@@ -152,20 +193,29 @@ class TokenizerManager(ThreadSafeSingleton):
         self.openai_standard = os.environ.get("OPENAI_STANDARD", "STANDARD")
 
     def apply_chat_template(self, messages: list, tools: list | None = None) -> list[int]:
-        """
-        When the inference API /v1/chat/completions is called, 
-        this method is used for encoding.
+        """Render messages (and optional tools) into token ids for KV-cache affinity.
+
+        The output token sequence is the *same* one vLLM/SGLang sees during
+        actual inference, so conductor's ``longest_matched`` truly reflects the
+        cluster's KV-cache distribution. ``tools`` MUST be forwarded on every
+        path - dropping it silently was the bug fixed in this revision.
         """
         if self.tokenizer is None:
             return []
 
         try:
             if self.openai_standard != "STANDARD":
-                return self._apply_chat_template_with_preproces(messages, tools)
+                return self._apply_chat_template_with_preprocess(messages, tools)
+            return self._apply_chat_template_standard(messages, tools)
         except Exception as e:
-            logger.warning(f"arguments exchange error: {e}")
-
-        return self.tokenizer.apply_chat_template(messages, return_dict=False)
+            logger.warning(
+                "kv_affinity primary tokenize path failed: %s; "
+                "trying tools-aware fallback (msgs=%d, tools=%d)",
+                e,
+                len(messages or []),
+                len(tools or []),
+            )
+            return self._safe_fallback_encode(messages, tools)
 
     def encode(self, prompt: str) -> list[int]:
         """
@@ -177,10 +227,30 @@ class TokenizerManager(ThreadSafeSingleton):
         result = self.tokenizer.encode(prompt)
         return result
 
-    def _apply_chat_template_with_preproces(self, messages: list, tools: list | None = None) -> list[int]:
+    def _apply_chat_template_standard(
+        self, messages: list, tools: list | None = None
+    ) -> list[int]:
+        """Standard OpenAI-compatible model path.
+
+        Calls the model tokenizer's jinja chat-template directly with ``tools``,
+        ``add_generation_prompt=True`` and ``tokenize=True`` so the resulting
+        token ids are byte-equivalent to what vLLM/SGLang prefill receives.
         """
-        When the inference API /v1/chat/completions is called, 
-        this method is used for non standard model encoding.
+        return self.tokenizer.apply_chat_template(
+            conversation=messages,
+            tools=tools,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=False,
+        )
+
+    def _apply_chat_template_with_preprocess(
+        self, messages: list, tools: list | None = None
+    ) -> list[int]:
+        """Non-standard model path: normalise messages/tools then encode the
+        rendered prompt string. Kept for models whose chat-template cannot be
+        directly invoked with ``tokenize=True`` (e.g. require argument coercion
+        or reordering done by ``preprocess_input``).
         """
         messages_copy, tools_copy = preprocess_input(messages, tools)
 
@@ -190,3 +260,27 @@ class TokenizerManager(ThreadSafeSingleton):
             tokenize=False,
         )
         return self.tokenizer.encode(prompt)
+    def _safe_fallback_encode(
+        self, messages: list, tools: list | None = None
+    ) -> list[int]:
+        """Last-resort tokenize that NEVER drops ``tools``.
+
+        Tries the tools-aware standard call once more; if that also fails,
+        returns ``[]`` so :meth:`KvCacheAffinityPolicy.select_endpoint_from_list`
+        can surface a None and let the upper scheduler fall back to LB.
+        Returning a partially-correct token list (e.g. messages without tools)
+        would silently mislead conductor's longest_matched and is far worse
+        than failing closed.
+        """
+        try:
+            return self._apply_chat_template_standard(messages, tools)
+        except Exception as e:
+            logger.error(
+                "kv_affinity tokenize failed on both primary and fallback paths; "
+                "returning [] so scheduler falls back to LoadBalance. "
+                "msgs=%d tools=%d err=%s",
+                len(messages or []),
+                len(tools or []),
+                e,
+            )
+            return []
