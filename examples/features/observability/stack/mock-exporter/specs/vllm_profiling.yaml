@@ -1,7 +1,13 @@
-# ms_service_metric (vllm_profiling) 指标
+# ms_service_metric (vllm_profiling) 指标 —— schema 参考 / 可选 mock
 # ------------------------------------------------------------------
-# 1:1 复刻 Ascend/msserviceprofiler -> ms_service_metric 在 vLLM 上
-# 通过 hook 暴露的 profiling 指标。
+# 说明：motor-vllm-profiling Dashboard 默认使用「真实接口」数据
+# (source=real，来自 vLLM /metrics 暴露的 vllm_profiling_*)，本 spec
+# 默认不在任何 profile 的 specs 列表中启用。
+# 仅在无昇腾硬件、需用 mock 数据预览 Dashboard 时，可手动将
+# "vllm_profiling" 加回 profiles/<name>.yaml 的 specs 列表。
+#
+# 本文件 1:1 复刻 Ascend/msserviceprofiler -> ms_service_metric 在
+# vLLM 上通过 hook 暴露的 profiling 指标，可作为真实指标 schema 参考。
 #
 # 关键约定（与 ms_service_metric 实现保持一致）：
 #   * 指标名前缀固定为 "vllm_profiling_"

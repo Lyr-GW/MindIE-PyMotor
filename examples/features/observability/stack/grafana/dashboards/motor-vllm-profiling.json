@@ -15,11 +15,11 @@
         "name": "source",
         "label": "Source",
         "type": "custom",
-        "query": "All : .+, real : real, mock : mock",
-        "current": { "text": "All", "value": ".+" },
+        "query": "real : real, All : .+, mock : mock",
+        "current": { "text": "real", "value": "real" },
         "options": [
-          { "text": "All",  "value": ".+",  "selected": true  },
-          { "text": "real", "value": "real", "selected": false },
+          { "text": "real", "value": "real", "selected": true  },
+          { "text": "All",  "value": ".+",  "selected": false },
           { "text": "mock", "value": "mock", "selected": false }
         ],
         "includeAll": false,
