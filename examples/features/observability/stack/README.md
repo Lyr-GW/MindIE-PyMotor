@@ -60,8 +60,9 @@ cd examples/features/observability/stack
    ┌──────────────────┐                       │   motor-overview │
    │ motor-metrics-   │──scrape──▶ Prometheus │   motor-kv-cache │
    │ mock (profile:   │  (source=mock)       │   motor-npu      │
-   │  mock)           │                       └──────────────────┘
-   └──────────────────┘
+   │  mock)           │                       │   motor-vllm-    │
+   │                  │                       │     profiling    │
+   └──────────────────┘                       └──────────────────┘
    ┌──────────────────┐
    │ npu-exporter     │──scrape──▶ Prometheus
    │ (profile:        │  (source=real)
@@ -88,7 +89,8 @@ stack/
 │   └── dashboards/
 │       ├── motor-overview.json
 │       ├── motor-kv-cache.json
-│       └── motor-npu.json
+│       ├── motor-npu.json
+│       └── motor-vllm-profiling.json
 ├── prometheus/prometheus.yml
 ├── tempo/tempo.yaml
 ├── loki/loki.yaml
@@ -103,7 +105,7 @@ stack/
     ├── requirements.txt
     ├── main.py                  # 按 spec/profile 注册并刷新指标
     ├── profiles/                # default / multi_pd / dsv3_ep
-    └── specs/                   # 6 个 spec：motor / vllm / http / coordinator_future / kv_future / npu
+    └── specs/                   # motor / vllm / http / coordinator_future / kv_future / npu (+ vllm_profiling：默认不启用，真实数据优先)
 ```
 
 ---
@@ -133,6 +135,22 @@ stack/
 - 总 NPU 数 / 不健康数量 / 平均 AI Core 利用率 / 平均温度 / 总功耗
 - 每 NPU 的：AI Core 利用率、Vector 利用率、显存使用%、功耗、温度、频率、带宽
 - 标签：`pod_name` / `id` / `pcie_bus_info` 与华为 npu-exporter 1:1 对齐
+
+### 4.4 vLLM Profiling (`motor-vllm-profiling`)
+
+展示 `ms_service_metric`（[Ascend/msserviceprofiler](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）通过 hook 在 vLLM 引擎上暴露的 `vllm_profiling_*` 指标。所有指标自动带 `dp` / `role` / `phase` 三个标签，Dashboard 顶部除 `$source` 外还提供 `$phase`（prefill/decode/mixed）、`$role`（PD 角色）下拉过滤。
+
+> **数据源：默认 `source=real`（真实接口）**。该 Dashboard 直接采集 vLLM 引擎 `/metrics` 暴露的真实 `vllm_profiling_*` 指标，不依赖 mock。启用步骤见下文 [5.4 接入真实 vLLM profiling 指标](#54-接入真实-vllm-profiling-指标)。如需在无昇腾硬件时用 mock 预览，把 `vllm_profiling` 加回某个 `mock-exporter/profiles/*.yaml` 的 `specs` 列表，并将 Dashboard 顶部 `$source` 切到 `mock`/`All` 即可。
+
+- **静态显存** `engine:memory:*`（PR!360 新增 Gauge）：显存利用率、总显存、显存构成（weights / kv_cache / activation / non_torch / npu_graph）饼图、reserved vs total。
+- **阶段时延 Profiling**：engine core step / model_runner / scheduler / executor 等各阶段 P50/P95/P99 分位数与平均耗时拆解（timer→histogram）。
+- **细粒度算子计时** `record_function_or_nullcontext`：按算子名（prepare input / forward / post process / sample_token / draft_token）拆分。
+- **NPU 计算时间线**：`npu:forward_duration` / `npu:kernel_launch` / `npu:non_forward_duration`。
+- **请求链路时延**：create_chat_completion / generate / tokenizer_encode / output_processor。
+- **调度器**：batch_size、running_queue、seqlen、按 `req_phase` 的调度 token 速率，以及 recompute / block_allocate_failures / running_to_waiting / rpc_errors 等异常计数。
+- **EPLB 专家负载**（MoE / EP 场景，默认折叠）：expert hotness 与 imbalance。
+
+> vLLM torch_npu profiler（`VLLM_TORCH_PROFILER_DIR` + `start_profile`/`stop_profile`）产出的是落盘 trace 文件，需用 `torch_npu.profiler.profiler.analyse` 解析后在 MindStudio Insight / TensorBoard 查看，不经 Prometheus；本 Dashboard 展示的是 `ms_service_metric` 实时上报的 profiling 指标。
 
 ---
 
@@ -180,46 +198,41 @@ trace 自动入 Tempo，在 Grafana **Explore → Tempo** 中按 service 名 / s
 | 切到生产 NPU 数据 | 启动时加 `--profile npu-real`，stop 后 `./start.sh --profile npu-real --no-mock` 重启 |
 | 临时只看真实数据 | Dashboard 顶部把 `source` 变量切到 `real` |
 
-### 5.4 接入 Controller 指标接口（controller-metrics-proxy）
+### 5.4 接入真实 vLLM profiling 指标
 
-Coordinator / Engine 的 `/metrics` 是原生 Prometheus 文本，可被 Prometheus 直接抓取；
-但 **Controller** 的 `GET /observability/metrics`（默认端口 `1027`）返回的是 JSON 信封：
+`motor-vllm-profiling` Dashboard 默认即为真实接口数据源（`source=real`），无需 mock。接入步骤：
 
-```json
-{ "code": 200, "message": "Success", "data": "# HELP ...\n# TYPE ...\n..." }
-```
+1. **引擎侧启用 ms_service_metric**（参考其 [README](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）：
 
-Prometheus 直接抓取会报 `Invalid labels: "code":200,...` 并把 target 标记为 DOWN，
-因此 **Grafana 无法直接接入 Controller 指标接口**。本栈用 `controller-metrics-proxy`
-解决：它拉取 Controller 的 JSON，取出 `data` 字段，重新以原生 Prometheus 文本暴露在
-`:9106/metrics`，由 Prometheus 抓取。
+   ```bash
+   pip install ms_service_metric
+   # vLLM 多进程 metric 采集目录
+   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
+   # 启动 vLLM 服务后开启采集
+   ms-service-metric on        # 关闭：ms-service-metric off
+   ```
 
-- 镜像 / 源码：[controller-proxy/](controller-proxy/)（仅依赖 Python 标准库）。
-- `docker-compose.yml` 已内置该 service，默认随栈启动。
-- `prometheus.yml` 的 `motor-controller` job 抓取的是 `controller-metrics-proxy:9106`。
+   启用后 `vllm_profiling_*` 指标会注册进 vLLM 的 prometheus registry，从 vLLM 的 `/metrics`（与原生 `vllm:*` 同一端点）暴露。
 
-接入真实 Controller：编辑 `.env`：
+2. **配置 Prometheus 抓取真实端点**（[prometheus/prometheus.yml](prometheus/prometheus.yml)）：
+   - **pymotor engine_server 部署**：`vllm_profiling_*` 已随 `motor-engine-prefill` / `motor-engine-decode` job 一并采集，无需额外配置。
+   - **直接 `vllm serve` 部署**：编辑 `vllm-profiling` job，把 `targets` 改为各 vLLM 节点的 API server `host:port`（如 D 节点 `IP:Port`），并打上 `source: real`。
 
-```bash
-CONTROLLER_METRICS_URL=http://<controller-host>:1027/observability/metrics
-# Controller observability 端口启用 TLS 时：
-# CONTROLLER_INSECURE_SKIP_VERIFY=false   # 并在 compose 中挂载 CA_FILE/CERT_FILE/KEY_FILE
-```
+   ```yaml
+   - job_name: vllm-profiling
+     metrics_path: /metrics
+     static_configs:
+       - targets: ["10.0.0.20:8000", "10.0.0.21:8000"]
+         labels:
+           motor_component: vllm
+           source: real
+   ```
 
-> 前提：Controller 侧 `motor_controller_config.observability_config.observability_enable`
-> 必须为 `true`，且网络可达 `observability_api_port`（默认 1027）。
+   热加载：`curl -X POST http://localhost:9090/-/reload`
 
-校验：
+3. 打开 Grafana 的 **pyMotor vLLM Profiling** Dashboard，`$source` 保持 `real` 即可看到真实数据。
 
-```bash
-curl -s localhost:1027/observability/metrics | head -c 80          # 应为 {"code":200,...}
-curl -s localhost:9106/metrics | grep motor_controller_proxy_up    # 解包后文本 + up 1
-```
-
-**没有完整集群？** 用自带的桩快速看效果：`python controller-proxy/dev_stub_controller.py`
-会在 `:1027/observability/metrics` 返回与真实 Controller 一致的 JSON 信封（`data` 取自
-真实样本 `tests/coordinator/core/metrics_example.txt`），proxy 默认即可抓到。详见
-[controller-proxy/README.md](controller-proxy/README.md)。
+> torch_npu profiler（`VLLM_TORCH_PROFILER_DIR` + `start_profile`/`stop_profile`）落盘的 trace 不经 Prometheus，请用 `torch_npu.profiler.profiler.analyse` 解析后在 MindStudio Insight / TensorBoard 查看。
 
 ---
 
@@ -234,6 +247,7 @@ curl -s localhost:9106/metrics | grep motor_controller_proxy_up    # 解包后�
 | `motor.yaml` | `motor/coordinator/metrics/metrics_collector.py` | 真实已存在 |
 | `http.yaml` | `motor/engine_server/core/mgmt_endpoint.py` (prometheus_fastapi_instrumentator) | 真实已存在 |
 | `vllm.yaml` | vLLM 引擎透传，bucket 与实测一致 | 真实已存在 |
+| `vllm_profiling.yaml` | `ms_service_metric` hook 暴露的 `vllm_profiling_*`（含静态显存 / 各阶段时延 profiling 指标） | 真实优先，默认不启用（schema 参考 / 可选 mock） |
 | `coordinator_future.yaml` | 对标 `dynamo_frontend_*`（pymotor 未实现） | 占位，待补齐 |
 | `kv_future.yaml` | 对标 `kvbm_*`（pymotor 未实现） | 占位，待补齐 |
 | `npu.yaml` | 1:1 复刻华为 mind-cluster npu-exporter | 真实可替换 |
