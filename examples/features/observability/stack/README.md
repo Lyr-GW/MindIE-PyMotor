@@ -60,8 +60,9 @@ cd examples/features/observability/stack
    ┌──────────────────┐                       │   motor-overview │
    │ motor-metrics-   │──scrape──▶ Prometheus │   motor-kv-cache │
    │ mock (profile:   │  (source=mock)       │   motor-npu      │
-   │  mock)           │                       └──────────────────┘
-   └──────────────────┘
+   │  mock)           │                       │   motor-vllm-    │
+   │                  │                       │     profiling    │
+   └──────────────────┘                       └──────────────────┘
    ┌──────────────────┐
    │ npu-exporter     │──scrape──▶ Prometheus
    │ (profile:        │  (source=real)
@@ -87,9 +88,13 @@ stack/
 │   │   └── dashboards/dashboard-providers.yml
 │   └── dashboards/
 │       ├── motor-overview.json
+│       ├── motor-all-metrics.json
 │       ├── motor-kv-cache.json
-│       └── motor-npu.json
-├── prometheus/prometheus.yml
+│       ├── motor-npu.json
+│       └── motor-vllm-profiling.json
+├── prometheus/
+│   ├── prometheus.yml                  # 默认示例（host.docker.internal 占位符）
+│   └── prometheus-real-2p1d.example.yml # 真实 2P1D 接入模板（占位符，勿提交本地 IP）
 ├── tempo/tempo.yaml
 ├── loki/loki.yaml
 ├── otel-collector/otel-collector.yaml
@@ -103,14 +108,31 @@ stack/
     ├── requirements.txt
     ├── main.py                  # 按 spec/profile 注册并刷新指标
     ├── profiles/                # default / multi_pd / dsv3_ep
-    └── specs/                   # 6 个 spec：motor / vllm / http / coordinator_future / kv_future / npu
+    └── specs/                   # motor / vllm / http / coordinator_future / kv_future / npu (+ vllm_profiling：默认不启用，真实数据优先)
 ```
 
 ---
 
 ## 4. Dashboard 说明
 
-### 4.1 pyMotor Overview (`motor-overview`)
+### 4.1 pyMotor All Metrics (`motor-all-metrics`)
+
+可视化总览看板，聚合 Coordinator / Engine 核心指标，**不使用原始大表格**，全部以 stat / timeseries / barchart / piechart 呈现。
+
+顶部变量：
+
+| 变量 | 说明 |
+|------|------|
+| `$source` | mock / real 数据源切换 |
+| `$cluster` | 集群名（由 Prometheus external_labels 或 static_configs 注入） |
+| `$motor_metric_scope` | Coordinator scope：`cluster` / `instance` / `role` |
+| `$role` / `$pd_role` | PD 角色过滤 |
+| `$instance_id` | 实例 ID 过滤与分组 |
+| `$model_name` | vLLM 模型名 |
+
+面板涵盖：Active P/D workers、Running/Waiting 请求、KV cache 使用率、按 pd_role/instance_id 分组的吞吐与延迟（TTFT / E2E P50/P95/P99）、HTTP QPS、Prefix cache hit rate。
+
+### 4.2 pyMotor Overview (`motor-overview`)
 
 - P/D 实例数（基于 `motor_active_*`）
 - 5 分钟成功请求数
@@ -121,18 +143,34 @@ stack/
 - vLLM running / waiting / kv_cache usage
 - 节点 CPU / 内存
 
-### 4.2 KV Cache (`motor-kv-cache`)
+### 4.3 KV Cache (`motor-kv-cache`)
 
 - vLLM `kv_cache_usage_perc`（真实，立即可用）
 - vLLM prefix cache hit rate（真实）
 - `motor_kv_cache_hit_rate` / `motor_kv_*` 未来指标（mock）
 - offload / onboard blocks per direction（mock）
 
-### 4.3 Ascend NPU (`motor-npu`)
+### 4.4 Ascend NPU (`motor-npu`)
 
 - 总 NPU 数 / 不健康数量 / 平均 AI Core 利用率 / 平均温度 / 总功耗
 - 每 NPU 的：AI Core 利用率、Vector 利用率、显存使用%、功耗、温度、频率、带宽
 - 标签：`pod_name` / `id` / `pcie_bus_info` 与华为 npu-exporter 1:1 对齐
+
+### 4.5 vLLM Profiling (`motor-vllm-profiling`)
+
+展示 `ms_service_metric`（[Ascend/msserviceprofiler](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)）通过 hook 在 vLLM 引擎上暴露的 `vllm_profiling_*` 指标。所有指标自动带 `dp` / `role` / `phase` 三个标签，Dashboard 顶部除 `$source` 外还提供 `$phase`（prefill/decode/mixed）、`$role`（PD 角色）下拉过滤。
+
+> **数据源：默认 `source=real`（真实接口）**。该 Dashboard 直接采集 vLLM 引擎 `/metrics` 暴露的真实 `vllm_profiling_*` 指标，不依赖 mock。启用步骤见下文 [5.5 接入真实 vLLM profiling 指标](#55-接入真实-vllm-profiling-指标)。如需在无昇腾硬件时用 mock 预览，把 `vllm_profiling` 加回某个 `mock-exporter/profiles/*.yaml` 的 `specs` 列表，并将 Dashboard 顶部 `$source` 切到 `mock`/`All` 即可。
+
+- **静态显存** `engine:memory:*`（PR!360 新增 Gauge）：显存利用率、总显存、显存构成（weights / kv_cache / activation / non_torch / npu_graph）饼图、reserved vs total。
+- **阶段时延 Profiling**：engine core step / model_runner / scheduler / executor 等各阶段 P50/P95/P99 分位数与平均耗时拆解（timer→histogram）。
+- **细粒度算子计时** `record_function_or_nullcontext`：按算子名（prepare input / forward / post process / sample_token / draft_token）拆分。
+- **NPU 计算时间线**：`npu:forward_duration` / `npu:kernel_launch` / `npu:non_forward_duration`。
+- **请求链路时延**：create_chat_completion / generate / tokenizer_encode / output_processor。
+- **调度器**：batch_size、running_queue、seqlen、按 `req_phase` 的调度 token 速率，以及 recompute / block_allocate_failures / running_to_waiting / rpc_errors 等异常计数。
+- **EPLB 专家负载**（MoE / EP 场景，默认折叠）：expert hotness 与 imbalance。
+
+> vLLM torch_npu profiler（`VLLM_TORCH_PROFILER_DIR` + `start_profile`/`stop_profile`）产出的是落盘 trace 文件，需用 `torch_npu.profiler.profiler.analyse` 解析后在 MindStudio Insight / TensorBoard 查看，不经 Prometheus；本 Dashboard 展示的是 `ms_service_metric` 实时上报的 profiling 指标。
 
 ---
 
@@ -140,18 +178,53 @@ stack/
 
 ### 5.1 接入指标
 
-修改 [prometheus/prometheus.yml](prometheus/prometheus.yml) 中的 `motor-coordinator` / `motor-engine-prefill` / `motor-engine-decode` / `motor-controller` job 的 `targets`，替换为你的实际 `host:port`：
+**重要：请勿在 PR 或仓库配置中硬编码真实 IP / NodePort。** 文档示例统一使用 `<placeholder>`；真实环境通过本地配置文件或 `file_sd_configs` 接入。
 
-```yaml
-- job_name: motor-coordinator
-  metrics_path: /metrics
-  static_configs:
-    - targets:
-        - "10.0.0.10:1026"     # Coordinator 管理端口
-        - "10.0.0.11:1026"
-      labels:
-        source: real
+#### Coordinator 多 scope 接口
+
+Coordinator 管理端口（默认 `1026`）提供以下 metrics 端点，Prometheus 通过不同 `metrics_path` 分别采集：
+
+| Scope | 路径 | `motor_metric_scope` 标签 |
+|-------|------|---------------------------|
+| 集群聚合 | `/metrics` | `cluster` |
+| 按 instance | `/metrics?type=instance` | `instance` |
+| 按 PD 角色 | `/metrics?type=role&role=prefill` / `decode` | `role` |
+
+对应 Prometheus job 见 [prometheus/prometheus.yml](prometheus/prometheus.yml) 中的 `motor-coordinator*` 系列。
+
+#### Engine 标签
+
+`motor-engine` job 使用 `honor_labels: true`，静态注入 `role` / `pd_role` / `instance_id` 标签；若应用侧已在 `/metrics` 输出同名标签，应用侧标签优先覆盖静态标签。
+
+#### 切换 Prometheus 配置文件
+
+复制 `.env.example` 为 `.env`，通过 `PROMETHEUS_CONFIG_FILE` 切换配置：
+
+```bash
+# 默认：本地示例（host.docker.internal 占位符）
+PROMETHEUS_CONFIG_FILE=./prometheus/prometheus.yml
+
+# 真实 2P1D：复制模板后填入本地 target（勿提交）
+cp prometheus/prometheus-real-2p1d.example.yml prometheus/prometheus-real.local.yml
+# 编辑 prometheus-real.local.yml，替换 <coordinator-node-ip> 等占位符
+PROMETHEUS_CONFIG_FILE=./prometheus/prometheus-real.local.yml
 ```
+
+`docker-compose.yml` 会将该文件挂载到 Prometheus 容器。修改后重启：`docker compose up -d prometheus`
+
+#### 真实 2P1D 接入步骤
+
+1. 复制 [prometheus/prometheus-real-2p1d.example.yml](prometheus/prometheus-real-2p1d.example.yml) 为本地文件（如 `prometheus-real.local.yml`）。
+2. 替换占位符：
+   - `<coordinator-node-ip>:<coordinator-obs-nodeport>` — Coordinator 可观测端口
+   - `<p0-metrics-host>:<p0-metrics-port>` / `<p1-metrics-host>:<p1-metrics-port>` — Prefill Engine
+   - `<d0-metrics-host>:<d0-metrics-port>` — Decode Engine
+   - `<cluster-name>` — 集群标识（供 Dashboard `$cluster` 变量）
+3. 在 `.env` 中设置 `PROMETHEUS_CONFIG_FILE=./prometheus/prometheus-real.local.yml`。
+4. 以真实数据模式启动：`./start.sh --no-mock`
+5. 热加载（若仅改 targets）：`curl -X POST http://localhost:9090/-/reload`
+
+> 也可使用 `file_sd_configs` 维护 engine targets（见模板内注释），将 `prometheus/targets/*.json` 加入 `.gitignore`。
 
 热加载：`curl -X POST http://localhost:9090/-/reload`
 
@@ -212,14 +285,52 @@ CONTROLLER_METRICS_URL=http://<controller-host>:1027/observability/metrics
 校验：
 
 ```bash
-curl -s localhost:1027/observability/metrics | head -c 80          # 应为 {"code":200,...}
-curl -s localhost:9106/metrics | grep motor_controller_proxy_up    # 解包后文本 + up 1
+curl -s <controller-host>:1027/observability/metrics | head -c 80   # 应为 {"code":200,...}
+curl -s localhost:9106/metrics | grep motor_controller_proxy_up       # 解包后文本 + up 1
 ```
 
 **没有完整集群？** 用自带的桩快速看效果：`python controller-proxy/dev_stub_controller.py`
 会在 `:1027/observability/metrics` 返回与真实 Controller 一致的 JSON 信封（`data` 取自
 真实样本 `tests/coordinator/core/metrics_example.txt`），proxy 默认即可抓到。详见
 [controller-proxy/README.md](controller-proxy/README.md)。
+
+### 5.5 接入真实 vLLM profiling 指标
+
+`motor-vllm-profiling` Dashboard 默认即为真实接口数据源（`source=real`），无需 mock。
+
+**前置条件：** `vllm_profiling_*` 指标依赖 [ms_service_metric](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric) 在 vLLM 引擎进程内 hook 注册；未安装或未执行 `ms-service-metric on` 时 Dashboard 无数据。
+
+接入步骤：
+
+1. **引擎侧启用 ms_service_metric**（参考其 README）：
+
+   ```bash
+   pip install ms_service_metric
+   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
+   ms-service-metric on        # 关闭：ms-service-metric off
+   ```
+
+   启用后 `vllm_profiling_*` 指标会注册进 vLLM 的 prometheus registry，从 vLLM 的 `/metrics`（与原生 `vllm:*` 同一端点）暴露。
+
+2. **配置 Prometheus 抓取真实端点**（[prometheus/prometheus.yml](prometheus/prometheus.yml)）：
+   - **pymotor engine_server 部署**：`vllm_profiling_*` 已随 `motor-engine` job 一并采集，无需额外配置。
+   - **直接 `vllm serve` 部署**：编辑 `vllm-profiling` job，把 `targets` 改为各 vLLM 节点的 API server `<host>:<port>`，并打上 `source: real`。
+
+   ```yaml
+   - job_name: vllm-profiling
+     metrics_path: /metrics
+     static_configs:
+       - targets: ["<vllm-host-1>:<port>", "<vllm-host-2>:<port>"]
+         labels:
+           motor_component: vllm
+           source: real
+   ```
+
+   热加载：`curl -X POST http://localhost:9090/-/reload`
+
+3. 打开 Grafana 的 **pyMotor vLLM Profiling** Dashboard，`$source` 保持 `real` 即可看到真实数据。
+
+> torch_npu profiler（`VLLM_TORCH_PROFILER_DIR` + `start_profile`/`stop_profile`）落盘的 trace 不经 Prometheus，请用 `torch_npu.profiler.profiler.analyse` 解析后在 MindStudio Insight / TensorBoard 查看。
 
 ---
 
@@ -234,6 +345,7 @@ curl -s localhost:9106/metrics | grep motor_controller_proxy_up    # 解包后�
 | `motor.yaml` | `motor/coordinator/metrics/metrics_collector.py` | 真实已存在 |
 | `http.yaml` | `motor/engine_server/core/mgmt_endpoint.py` (prometheus_fastapi_instrumentator) | 真实已存在 |
 | `vllm.yaml` | vLLM 引擎透传，bucket 与实测一致 | 真实已存在 |
+| `vllm_profiling.yaml` | `ms_service_metric` hook 暴露的 `vllm_profiling_*`（含静态显存 / 各阶段时延 profiling 指标） | 真实优先，默认不启用（schema 参考 / 可选 mock） |
 | `coordinator_future.yaml` | 对标 `dynamo_frontend_*`（pymotor 未实现） | 占位，待补齐 |
 | `kv_future.yaml` | 对标 `kvbm_*`（pymotor 未实现） | 占位，待补齐 |
 | `npu.yaml` | 1:1 复刻华为 mind-cluster npu-exporter | 真实可替换 |
@@ -289,6 +401,7 @@ MOCK_PROFILE=dsv3_ep ./start.sh      # DeepSeek-V3.2 EP
 ```bash
 GRAFANA_PORT=3030
 PROMETHEUS_PORT=19090
+PROMETHEUS_CONFIG_FILE=./prometheus/prometheus.yml
 MOCK_PROFILE=multi_pd
 REGISTRY_PREFIX=harbor.example.com/library/
 ```

@@ -49,7 +49,9 @@ EOF
 done
 
 if [[ "${NO_MOCK}" -eq 1 ]]; then
-  PROFILES="$(echo "${PROFILES}" | tr ',' '\n' | grep -v '^mock$' | paste -sd, -)"
+  # grep exits 1 when nothing matches; with set -e that would abort start.sh.
+  filtered="$(echo "${PROFILES}" | tr ',' '\n' | grep -v '^mock$' || true)"
+  PROFILES="$(echo "${filtered}" | paste -sd, - || true)"
 fi
 
 DOCKER_BIN="${DOCKER_BIN:-docker}"
@@ -91,8 +93,8 @@ Active profiles: ${PROFILES:-<none>}
 
 Tips:
   * In Grafana, every dashboard has a \$source variable (real / mock / all).
-  * To wire pyMotor metrics, edit prometheus/prometheus.yml and replace
-    the host.docker.internal:* targets with your real coordinator/engine.
+  * To wire pyMotor metrics, edit prometheus/prometheus.yml (or set
+    PROMETHEUS_CONFIG_FILE in .env) and replace placeholder targets.
   * To send traces from pyMotor, set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to
     http://<this-host>:4317 in your motor_coordinator_env.
 ================================================================
