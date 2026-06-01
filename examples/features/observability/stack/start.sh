@@ -77,9 +77,10 @@ pyMotor observability stack is up.
 Active profiles: ${PROFILES:-<none>}
 
 Tips:
+  * Verify tracing: ./scripts/verify-tracing.sh  (OTLP → Tempo)
   * Wire pyMotor metrics: edit prometheus/prometheus.yml (or set
     PROMETHEUS_CONFIG_FILE in .env) and replace placeholder targets.
-  * Send traces: set OTEL_EXPORTER_OTLP_TRACES_ENDPOINT to
-    http://<this-host>:4317 in your motor_coordinator_env.
+  * Wire pyMotor tracing: config/tracing.example.json + README §5.2
+    (tracer_config.endpoint + OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
 ================================================================
 EOF
