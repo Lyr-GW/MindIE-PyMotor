@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--purge" ]]; then
 fi
 
 DOCKER_BIN="${DOCKER_BIN:-docker}"
-ARGS=(compose --profile mock --profile npu-real down)
+ARGS=(compose --profile npu-real down)
 if [[ "${PURGE}" -eq 1 ]]; then
   ARGS+=(-v)
 fi
