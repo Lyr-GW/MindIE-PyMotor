@@ -1,12 +1,11 @@
 # Prometheus configuration for pymotor observability stack.
 #
 # Notes:
-#   * 所有 pymotor 相关 job 通过环境变量替换实际目标地址，由 docker-compose.yml
-#     在启动时通过 PROMETHEUS_EXTRA_HOSTS 等机制注入。
-#   * mock-exporter job 通过 relabel_configs 注入 source="mock" 标签，便于
-#     Dashboard 通过 $source variable 切换 mock/real 视图。
+#   * pymotor 相关 job 的 targets 为示例占位符，请按实际部署修改，
+#     或使用 file_sd_configs 维护本地 target 列表（勿提交真实 IP/NodePort）。
 #   * scrape_interval 设置为 5s，与 pymotor coordinator 默认 metrics 缓存
 #     (prometheus_metrics_config.reuse_time=3) 接近，避免过度采集。
+#   * Dashboard 常用标签：cluster / motor_metric_scope / role / pd_role / instance_id
 
 global:
   scrape_interval: 5s
@@ -26,22 +25,6 @@ scrape_configs:
     static_configs:
       - targets:
           - "localhost:9090"
-
-  # -----------------------------------------------------------------------
-  # Mock exporter
-  # 不带 source 标签 -> 由 prometheus relabel 强制注入 source="mock"
-  # -----------------------------------------------------------------------
-  - job_name: motor-metrics-mock
-    static_configs:
-      - targets:
-          - "motor-metrics-mock:9105"
-        labels:
-          # 用 source 标签区分真假数据；Dashboard 用 $source 变量切换。
-          source: mock
-    # 显式 relabel 保证即使 static_configs.labels 被覆盖，source=mock 不丢
-    relabel_configs:
-      - target_label: source
-        replacement: mock
 
   # -----------------------------------------------------------------------
   # Ascend NPU exporter (profile: npu-real)
@@ -91,7 +74,36 @@ scrape_configs:
           motor_component: coordinator
           source: real
 
-  - job_name: motor-engine-prefill
+  - job_name: motor-coordinator-role-prefill
+    metrics_path: /metrics?type=role&role=prefill
+    static_configs:
+      - targets:
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          motor_metric_scope: role
+          role: prefill
+          pd_role: prefill
+          source: real
+
+  - job_name: motor-coordinator-role-decode
+    metrics_path: /metrics?type=role&role=decode
+    static_configs:
+      - targets:
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          motor_metric_scope: role
+          role: decode
+          pd_role: decode
+          source: real
+
+  # -----------------------------------------------------------------------
+  # pymotor Engine — honor_labels: true 保留应用侧原生标签，
+  # 静态标签 (role / pd_role / instance_id) 可被应用侧同名标签覆盖。
+  # 按实际部署为每个 engine target 配置 labels，或使用 file_sd_configs。
+  # -----------------------------------------------------------------------
+  - job_name: motor-engine
     metrics_path: /metrics
     static_configs:
       - targets:
@@ -100,37 +112,20 @@ scrape_configs:
           - "host.docker.internal:8001"
         labels:
           motor_component: engine
-          pd_role: prefill
           source: real
-
-  - job_name: motor-engine-decode
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - "host.docker.internal:8002"
-        labels:
-          motor_component: engine
-          pd_role: decode
-          source: real
+    # 示例：file_sd_configs（targets 文件本地维护，勿提交）
+    # file_sd_configs:
+    #   - files:
+    #       - /etc/prometheus/targets/engine.json
+    #     refresh_interval: 30s
 
   # -----------------------------------------------------------------------
   # vLLM profiling 指标 (ms_service_metric, vllm_profiling_*)
-  # 真实数据源：由 Ascend/msserviceprofiler -> ms_service_metric 在 vLLM
-  # 引擎进程内 hook 后，注册进 vLLM 的 prometheus registry，统一从 vLLM
-  # 的 /metrics 端点暴露（与原生 vllm:* 指标同一端点）。
+  # 由 ms_service_metric hook 注册进 vLLM prometheus registry，与 vllm:* 同端点。
   #
-  # 启用方式（引擎侧，参考 ms_service_metric README）：
-  #   pip install ms_service_metric
-  #   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && \
-  #       mkdir -p $PROMETHEUS_MULTIPROC_DIR
-  #   # 启动 vLLM 后开启采集： ms-service-metric on
-  #
-  # 采集方式（按部署形态二选一）：
-  #   A. pymotor engine_server 部署：vllm_profiling_* 已随上面的
-  #      motor-engine-prefill / motor-engine-decode job 一并采集，
-  #      无需本 job（避免对同一 /metrics 端点重复抓取）。
-  #   B. 直接 `vllm serve` 部署：把下面 targets 改为各 vLLM 节点的
-  #      API server host:port（如 D 节点 IP:Port），启用本 job。
+  # pymotor engine_server 部署：通常已随 motor-engine job 一并采集，无需本 job。
+  # 独立 vllm serve 部署：启用本 job 并填写 targets。
+  # -----------------------------------------------------------------------
   - job_name: vllm-profiling
     metrics_path: /metrics
     static_configs:
@@ -141,6 +136,9 @@ scrape_configs:
           motor_component: vllm
           source: real
 
+  # -----------------------------------------------------------------------
+  # Controller — 经 controller-metrics-proxy 解包 JSON 信封
+  # -----------------------------------------------------------------------
   - job_name: motor-controller
     metrics_path: /metrics
     static_configs:
