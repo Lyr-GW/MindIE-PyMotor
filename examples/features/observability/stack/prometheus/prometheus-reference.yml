@@ -1,13 +1,5 @@
-# Prometheus 通用模板（建议通过 scripts/discover-targets.py 生成运行时配置）
-#
-# 正式一键启动入口:
-#   ./launch.sh
-# 运行时会覆盖为:
-#   generated/prometheus.yml
-#
-# 模板用途:
-#   - 作为本地调试与配置说明参考
-#   - 说明 Coordinator / Engine / Controller 的标准 scrape 约定
+# 示例：真实集群 Prometheus 配置模板
+# 推荐方式：使用 ./launch.sh 自动发现并生成 generated/prometheus.yml
 
 global:
   scrape_interval: 5s
@@ -22,7 +14,6 @@ scrape_configs:
       - targets:
           - "localhost:9090"
 
-  # Coordinator observability / typed metrics
   - job_name: motor-coordinator
     metrics_path: /metrics
     static_configs:
@@ -50,7 +41,6 @@ scrape_configs:
           - "host.docker.internal:1027"
         labels:
           motor_component: coordinator
-          motor_metric_scope: role
           role: prefill
           pd_role: prefill
           cluster: example-namespace
@@ -62,12 +52,10 @@ scrape_configs:
           - "host.docker.internal:1027"
         labels:
           motor_component: coordinator
-          motor_metric_scope: role
           role: decode
           pd_role: decode
           cluster: example-namespace
 
-  # Engine management metrics（honor_labels 打开，保留应用侧标签）
   - job_name: motor-engine
     metrics_path: /metrics
     honor_labels: true
@@ -97,18 +85,6 @@ scrape_configs:
           instance_id: d0
           cluster: example-namespace
 
-  # vLLM Profiling（来自 ms_service_metric 的 vllm_profiling_*）
-  - job_name: vllm-profiling
-    metrics_path: /metrics
-    honor_labels: true
-    static_configs:
-      - targets:
-          - "host.docker.internal:10001"
-        labels:
-          motor_component: vllm
-          cluster: example-namespace
-
-  # Controller JSON envelope metrics 由本地 proxy 解包后再抓取
   - job_name: motor-controller
     metrics_path: /metrics
     static_configs:
@@ -117,14 +93,3 @@ scrape_configs:
         labels:
           motor_component: controller
           cluster: example-namespace
-
-  # Docker Compose 基础 exporter
-  - job_name: node-exporter
-    static_configs:
-      - targets:
-          - "node-exporter:9100"
-
-  - job_name: cadvisor
-    static_configs:
-      - targets:
-          - "cadvisor:8080"

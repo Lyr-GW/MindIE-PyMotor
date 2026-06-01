@@ -6,11 +6,11 @@
 #
 # Profiles:
 #   - default(no profile flag) : core stack
-#   - npu-real : enable Ascend npu-exporter (requires Ascend drivers on host)
+#   - npu : enable Ascend npu-exporter (requires Ascend drivers on host)
 #
 # Usage:
 #   docker compose up -d
-#   docker compose --profile npu-real up -d
+#   docker compose --profile npu up -d
 
 name: pymotor-observability
 
@@ -185,13 +185,13 @@ services:
       - "host.docker.internal:host-gateway"
 
   # ---------------------------------------------------------------
-  # Ascend NPU exporter (profile: npu-real) — requires host drivers
+  # Ascend NPU exporter (profile: npu) — requires host drivers
   # ---------------------------------------------------------------
   ascend-npu-exporter:
     image: ${NPU_EXPORTER_IMAGE:-swr.cn-south-1.myhuaweicloud.com/ascendhub/npu-exporter:v6.0.0}
     container_name: pymotor-npu-exporter
     restart: unless-stopped
-    profiles: [npu-real]
+    profiles: [npu]
     # NPU exporter needs host network + privileged + DCMI / driver mounts.
     network_mode: host
     privileged: true

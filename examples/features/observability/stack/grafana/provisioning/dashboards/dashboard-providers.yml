@@ -3,7 +3,7 @@ apiVersion: 1
 providers:
   - name: motor
     orgId: 1
-    folder: pymotor
+    folder: ""
     type: file
     disableDeletion: false
     editable: true

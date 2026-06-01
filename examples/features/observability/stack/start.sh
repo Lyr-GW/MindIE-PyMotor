@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Launch the pyMotor observability stack.
+# Launch the pyMotor observability stack via Docker Compose.
 #
 # Usage:
-#   ./start.sh                    # core stack (Prometheus/Grafana/Tempo/Loki/OTel)
-#   ./start.sh --profile npu-real # additionally enable Ascend npu-exporter
+#   ./start.sh               # core stack (Prometheus/Grafana/Tempo/Loki/OTel)
+#   ./start.sh --profile npu # additionally enable Ascend npu-exporter
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ while [[ $# -gt 0 ]]; do
       cat <<EOF
 Usage: $0 [options]
   --profile <list>   comma-separated profiles (default: none)
-                     known: npu-real
+                     known: npu
   -h, --help         show this help
 EOF
       exit 0
@@ -55,7 +55,7 @@ if [[ -n "${PROFILES}" ]]; then
   done
 fi
 
-echo "[start] starting stack with profiles: ${PROFILES:-<none>}"
+echo "[start] starting Docker Compose stack with profiles: ${PROFILES:-<none>}"
 "${DOCKER_BIN}" compose "${PROFILE_ARGS[@]}" up -d --build
 
 # shellcheck disable=SC2046
@@ -77,10 +77,8 @@ pyMotor observability stack is up.
 Active profiles: ${PROFILES:-<none>}
 
 Tips:
+  * 推荐入口: ./launch.sh （自动发现 + 自动生成 Prometheus 配置）
+  * 当前 Prometheus 配置: ${PROMETHEUS_CONFIG_FILE:-./prometheus/prometheus.yml}
   * Verify tracing: ./scripts/verify-tracing.sh  (OTLP → Tempo)
-  * Wire pyMotor metrics: edit prometheus/prometheus.yml (or set
-    PROMETHEUS_CONFIG_FILE in .env) and replace placeholder targets.
-  * Wire pyMotor tracing: config/tracing.example.json + README §5.2
-    (tracer_config.endpoint + OTEL_EXPORTER_OTLP_TRACES_PROTOCOL)
 ================================================================
 EOF

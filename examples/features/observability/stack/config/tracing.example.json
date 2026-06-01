@@ -1,26 +1,26 @@
 {
-  "_comment": "Tracing 接入示例片段。复制到 deploy 使用的 env.json / user_config.json，将 <obs-host> 替换为 observability 栈所在主机 IP 或 host.docker.internal。",
+  "_comment": "Tracing 接入示例片段。复制到 deploy 使用的 env.json / user_config.json，将 <obs-host> 替换为 observability 栈所在主机 IP 或 Service 地址。",
   "env_json_snippet": {
     "motor_coordinator_env": {
-      "OTEL_SERVICE_NAME": "motor-coordinator",
-      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
+      "OTEL_SERVICE_NAME": "mindie-motor-coordinator",
+      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
       "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
     },
     "motor_engine_prefill_env": {
       "OTEL_SERVICE_NAME": "vllm-server-p",
-      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
+      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
       "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
     },
     "motor_engine_decode_env": {
       "OTEL_SERVICE_NAME": "vllm-server-d",
-      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc",
+      "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
       "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
     }
   },
   "user_config_snippet": {
     "motor_coordinator_config": {
       "tracer_config": {
-        "endpoint": "grpc://<obs-host>:4317",
+        "endpoint": "http://<obs-host>:4318/v1/traces",
         "root_sampling_rate": 1.0,
         "remote_parent_sampled": 1.0,
         "remote_parent_not_sampled": 1.0,
@@ -30,25 +30,18 @@
     },
     "motor_engine_prefill_config": {
       "engine_config": {
-        "otlp-traces-endpoint": "grpc://<obs-host>:4317"
+        "otlp-traces-endpoint": "http://<obs-host>:4318/v1/traces"
       }
     },
     "motor_engine_decode_config": {
       "engine_config": {
-        "otlp-traces-endpoint": "grpc://<obs-host>:4317"
+        "otlp-traces-endpoint": "http://<obs-host>:4318/v1/traces"
       }
     }
   },
-  "protocol_alternatives": {
-    "grpc": {
-      "coordinator_tracer_config_endpoint": "grpc://<obs-host>:4317",
-      "engine_otlp_traces_endpoint": "grpc://<obs-host>:4317",
-      "env_OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc"
-    },
-    "http_protobuf": {
-      "coordinator_tracer_config_endpoint": "http://<obs-host>:4318/v1/traces",
-      "engine_otlp_traces_endpoint": "http://<obs-host>:4318/v1/traces",
-      "env_OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"
-    }
+  "recommended_protocol": {
+    "coordinator_tracer_config_endpoint": "http://<obs-host>:4318/v1/traces",
+    "engine_otlp_traces_endpoint": "http://<obs-host>:4318/v1/traces",
+    "env_OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"
   }
 }

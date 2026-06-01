@@ -1,6 +1,6 @@
 {
   "uid": "motor-kv-cache",
-  "title": "pyMotor KV Cache",
+  "title": "KV 缓存",
   "tags": [
     "pymotor",
     "kv-cache"
@@ -40,7 +40,7 @@
     {
       "id": 1,
       "type": "timeseries",
-      "title": "vLLM KV cache usage % (real)",
+      "title": "vLLM KV cache usage %",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -83,7 +83,7 @@
     {
       "id": 2,
       "type": "timeseries",
-      "title": "vLLM prefix cache hit rate (real)",
+      "title": "vLLM prefix cache hit rate",
       "gridPos": {
         "h": 8,
         "w": 12,

@@ -75,5 +75,5 @@ curl -s localhost:1027/observability/metrics | head -c 80      # JSON 信封
 curl -s localhost:9106/metrics | grep motor_controller_proxy_up # proxy 解包后 + up 1
 ```
 
-随后访问 Grafana（http://localhost:3000 ，motor/motor），把面板顶部 `source` 变量切到
-`real`，即可看到来自 Controller 接口的指标。
+随后访问 Grafana（http://localhost:3000 ，motor/motor），即可看到来自 Controller
+接口的指标。
