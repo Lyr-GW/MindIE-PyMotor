@@ -30,7 +30,10 @@ from motor.coordinator.scheduler.runtime.zmq_protocol import (
 )
 from motor.common.logger import get_logger
 from motor.config.coordinator import DeployMode
-from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
+from motor.coordinator.scheduler.policy.load_balance import (
+    LoadBalancePolicy,
+    DEFAULT_ENDPOINT_INSTANCE_SCORE_WEIGHT,
+)
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
 from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
 from motor.coordinator.domain.workload_calculator import calculate_demand_workload
@@ -490,6 +493,7 @@ class AsyncSchedulerClient:
         self._instance_rr_counters: dict[PDRole, int] = {}
         self._endpoint_rr_counters: dict[int, int] = {}
         self._scheduler_type: str = config.scheduler_type or "round_robin"
+        self._endpoint_instance_score_weight: float = DEFAULT_ENDPOINT_INSTANCE_SCORE_WEIGHT
         self._workload_reader = None
         self._last_instance_version: int | None = None
         self._on_instance_refreshed = config.on_instance_refreshed
@@ -963,40 +967,16 @@ class AsyncSchedulerClient:
         role: PDRole,
         top_k: int = 1,
     ) -> list[tuple[Instance, Endpoint, float]]:
-        if not instances:
-            return []
-        candidate_count = max(1, top_k)
-        remaining_instances = list(instances)
-        selected_candidates: list[tuple[Instance, Endpoint, float]] = []
-        start_index = (
-            (len(remaining_instances) * self._client_index) // self._client_count
-            if remaining_instances
-            else 0
+        n = len(instances)
+        start_index = (n * self._client_index) // self._client_count if n else 0
+        candidates = LoadBalancePolicy.select_endpoint_candidates_from_list(
+            instances,
+            role,
+            top_k=max(1, top_k),
+            instance_score_weight=self._endpoint_instance_score_weight,
+            start_index=start_index,
         )
-        while remaining_instances and len(selected_candidates) < candidate_count:
-            selected_instance = LoadBalancePolicy.select_instance_from_list(
-                remaining_instances, role, start_index=start_index
-            )
-            if selected_instance is None:
-                break
-            selected = self._select_endpoint_for_instance(selected_instance)
-            if selected is None:
-                remaining_instances = [
-                    instance for instance in remaining_instances
-                    if instance.id != selected_instance.id
-                ]
-                start_index = 0
-                continue
-            instance, endpoint = selected
-            try:
-                instance_score = instance.gathered_workload.calculate_workload_score(
-                    role=instance.role
-                )
-            except Exception:
-                instance_score = 0.0
-            selected_candidates.append((instance, endpoint, float(instance_score)))
-            remaining_instances = [
-                item for item in remaining_instances if item.id != instance.id
-            ]
-            start_index = 0
-        return selected_candidates
+        return [
+            (candidate.instance, candidate.endpoint, candidate.score)
+            for candidate in candidates
+        ]
