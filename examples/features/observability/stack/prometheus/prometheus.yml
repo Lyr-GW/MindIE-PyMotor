@@ -1,14 +1,11 @@
 # Prometheus configuration for pymotor observability stack.
 #
 # Notes:
-#   * pymotor 相关 job 的 targets 为示例占位符，请按实际部署修改，或使用
-#     prometheus-real-2p1d.example.yml / file_sd_configs 接入真实 2P1D 集群。
-#   * mock-exporter job 通过 relabel_configs 注入 source="mock" 标签，便于
-#     Dashboard 通过 $source variable 切换 mock/real 视图。
+#   * pymotor 相关 job 的 targets 为示例占位符，请按实际部署修改，
+#     或使用 file_sd_configs 维护本地 target 列表（勿提交真实 IP/NodePort）。
 #   * scrape_interval 设置为 5s，与 pymotor coordinator 默认 metrics 缓存
 #     (prometheus_metrics_config.reuse_time=3) 接近，避免过度采集。
-#   * Dashboard 依赖标签：source / cluster / motor_metric_scope / role /
-#     pd_role / instance_id — 请勿在 PR 中硬编码 IP/NodePort。
+#   * Dashboard 常用标签：cluster / motor_metric_scope / role / pd_role / instance_id
 
 global:
   scrape_interval: 5s
@@ -28,20 +25,6 @@ scrape_configs:
     static_configs:
       - targets:
           - "localhost:9090"
-
-  # -----------------------------------------------------------------------
-  # Mock exporter
-  # 不带 source 标签 -> 由 prometheus relabel 强制注入 source="mock"
-  # -----------------------------------------------------------------------
-  - job_name: motor-metrics-mock
-    static_configs:
-      - targets:
-          - "motor-metrics-mock:9105"
-        labels:
-          source: mock
-    relabel_configs:
-      - target_label: source
-        replacement: mock
 
   # -----------------------------------------------------------------------
   # Ascend NPU exporter (profile: npu-real)
@@ -120,7 +103,7 @@ scrape_configs:
   # -----------------------------------------------------------------------
   # pymotor Engine — honor_labels: true 保留应用侧原生标签，
   # 静态标签 (role / pd_role / instance_id) 可被应用侧同名标签覆盖。
-  # 真实 2P1D 部署请参考 prometheus-real-2p1d.example.yml 或 file_sd_configs。
+  # 按实际部署为每个 engine target 配置 labels，或使用 file_sd_configs。
   # -----------------------------------------------------------------------
   - job_name: motor-engine
     metrics_path: /metrics
@@ -130,36 +113,20 @@ scrape_configs:
           - "host.docker.internal:8001"
         labels:
           motor_component: engine
-          role: prefill
-          pd_role: prefill
-          instance_id: "0"
           source: real
-      - targets:
-          - "host.docker.internal:8002"
-        labels:
-          motor_component: engine
-          role: decode
-          pd_role: decode
-          instance_id: "0"
-          source: real
+    # 示例：file_sd_configs（targets 文件本地维护，勿提交）
+    # file_sd_configs:
+    #   - files:
+    #       - /etc/prometheus/targets/engine.json
+    #     refresh_interval: 30s
 
   # -----------------------------------------------------------------------
   # vLLM profiling 指标 (ms_service_metric, vllm_profiling_*)
-  # 真实数据源：由 Ascend/msserviceprofiler -> ms_service_metric 在 vLLM
-  # 引擎进程内 hook 后，注册进 vLLM 的 prometheus registry，统一从 vLLM
-  # 的 /metrics 端点暴露（与原生 vllm:* 指标同一端点）。
+  # 由 ms_service_metric hook 注册进 vLLM prometheus registry，与 vllm:* 同端点。
   #
-  # 启用方式（引擎侧，参考 ms_service_metric README）：
-  #   pip install ms_service_metric
-  #   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && \
-  #       mkdir -p $PROMETHEUS_MULTIPROC_DIR
-  #   # 启动 vLLM 后开启采集： ms-service-metric on
-  #
-  # 采集方式（按部署形态二选一）：
-  #   A. pymotor engine_server 部署：vllm_profiling_* 已随上面的
-  #      motor-engine job 一并采集，无需本 job（避免对同一 /metrics 端点重复抓取）。
-  #   B. 直接 `vllm serve` 部署：把下面 targets 改为各 vLLM 节点的
-  #      API server host:port，启用本 job。
+  # pymotor engine_server 部署：通常已随 motor-engine job 一并采集，无需本 job。
+  # 独立 vllm serve 部署：启用本 job 并填写 targets。
+  # -----------------------------------------------------------------------
   - job_name: vllm-profiling
     metrics_path: /metrics
     static_configs:
@@ -171,11 +138,6 @@ scrape_configs:
 
   # -----------------------------------------------------------------------
   # Controller — 经 controller-metrics-proxy 解包 JSON 信封
-  # Controller 的 /observability/metrics 返回 JSON 信封
-  # ({"code":200,"message":"Success","data":"<Prometheus 文本>"})，
-  # Prometheus 无法直接解析。proxy 解包后以原生 Prometheus 文本暴露在
-  # :9106/metrics。
-  # 如需接入真实 Controller：修改 .env 中 CONTROLLER_METRICS_URL。
   # -----------------------------------------------------------------------
   - job_name: motor-controller
     metrics_path: /metrics

@@ -1,40 +1,38 @@
 {
   "uid": "motor-kv-cache",
   "title": "pyMotor KV Cache",
-  "tags": ["pymotor", "kv-cache"],
+  "tags": [
+    "pymotor",
+    "kv-cache"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "10s",
-  "time": { "from": "now-30m", "to": "now" },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
   "editable": true,
   "graphTooltip": 1,
   "templating": {
     "list": [
       {
-        "name": "source",
-        "label": "Source",
-        "type": "custom",
-        "query": "All : .+, real : real, mock : mock",
-        "current": { "text": "All", "value": ".+" },
-        "options": [
-          { "text": "All",  "value": ".+",  "selected": true  },
-          { "text": "real", "value": "real", "selected": false },
-          { "text": "mock", "value": "mock", "selected": false }
-        ],
-        "includeAll": false,
-        "multi": false
-      },
-      {
         "name": "instance_id",
         "label": "Instance",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
         "query": "label_values(motor_kv_cache_hit_rate{source=~\"$source\"}, instance_id)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
-        "current": { "text": "All", "value": "$__all" }
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
       }
     ]
   },
@@ -43,73 +41,87 @@
       "id": 1,
       "type": "timeseries",
       "title": "vLLM KV cache usage % (real)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        { "expr": "avg by (model_name) (vllm:kv_cache_usage_perc{source=~\"$source\"}) * 100", "legendFormat": "{{model_name}}", "refId": "A" }
+        {
+          "expr": "avg by (model_name) (vllm:kv_cache_usage_perc{source=~\"$source\"}) * 100",
+          "legendFormat": "{{model_name}}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "percent", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }, "min": 0, "max": 100 } },
-      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "max": 100
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
     },
     {
       "id": 2,
       "type": "timeseries",
       "title": "vLLM prefix cache hit rate (real)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
       "targets": [
-        { "expr": "(sum(rate(vllm:prefix_cache_hits_total{source=~\"$source\"}[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total{source=~\"$source\"}[5m])), 1))", "legendFormat": "hit_rate", "refId": "A" }
+        {
+          "expr": "(sum(rate(vllm:prefix_cache_hits_total{source=~\"$source\"}[5m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total{source=~\"$source\"}[5m])), 1))",
+          "legendFormat": "hit_rate",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }, "min": 0, "max": 1 } },
-      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
-    },
-    {
-      "id": 10,
-      "type": "timeseries",
-      "title": "motor_kv_cache_hit_rate (future, mock)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "motor_kv_cache_hit_rate{source=~\"$source\", instance_id=~\"$instance_id\"}", "legendFormat": "{{pd_role}} | inst {{instance_id}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "percentunit", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }, "min": 0, "max": 1 } },
-      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
-    },
-    {
-      "id": 11,
-      "type": "timeseries",
-      "title": "motor_kv_matched_tokens per sec (future, mock)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "sum by (instance_id) (rate(motor_kv_matched_tokens_total{source=~\"$source\", instance_id=~\"$instance_id\"}[1m]))", "legendFormat": "inst {{instance_id}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 } } },
-      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
-    },
-    {
-      "id": 20,
-      "type": "timeseries",
-      "title": "Offload blocks per direction (future, mock)",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "sum by (direction) (rate(motor_kv_offload_blocks_total{source=~\"$source\", instance_id=~\"$instance_id\"}[1m]))", "legendFormat": "offload {{direction}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 } } },
-      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
-    },
-    {
-      "id": 21,
-      "type": "timeseries",
-      "title": "Onboard blocks per direction (future, mock)",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "targets": [
-        { "expr": "sum by (direction) (rate(motor_kv_onboard_blocks_total{source=~\"$source\", instance_id=~\"$instance_id\"}[1m]))", "legendFormat": "onboard {{direction}}", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 } } },
-      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "table", "placement": "bottom" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10
+          },
+          "min": 0,
+          "max": 1
+        }
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        }
+      }
     }
   ]
 }

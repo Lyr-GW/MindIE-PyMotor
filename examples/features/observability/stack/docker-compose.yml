@@ -5,13 +5,12 @@
 # Collector + Exporters) for pyMotor.
 #
 # Profiles:
-#   - default(no profile flag) : core stack (mock exporter optional)
-#   - mock     : enable motor-metrics-mock for dashboards-without-real-data
+#   - default(no profile flag) : core stack
 #   - npu-real : enable Ascend npu-exporter (requires Ascend drivers on host)
 #
 # Usage:
-#   docker compose --profile mock up -d
-#   docker compose --profile mock --profile npu-real up -d        # both
+#   docker compose up -d
+#   docker compose --profile npu-real up -d
 
 name: pymotor-observability
 
@@ -184,25 +183,6 @@ services:
       - "${CONTROLLER_PROXY_PORT:-9106}:9106"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  # ---------------------------------------------------------------
-  # Mock exporter (profile: mock) — emits pymotor-shaped metrics
-  # ---------------------------------------------------------------
-  motor-metrics-mock:
-    build:
-      context: ./mock-exporter
-    image: ${REGISTRY_PREFIX:-}pymotor/metrics-mock:latest
-    container_name: pymotor-metrics-mock
-    restart: unless-stopped
-    networks: [obs]
-    profiles: [mock]
-    environment:
-      MOCK_PROFILE: ${MOCK_PROFILE:-default}
-      MOCK_TICK_INTERVAL_SEC: ${MOCK_TICK_INTERVAL_SEC:-1.0}
-      MOCK_PORT: "9105"
-      MOCK_LOG_LEVEL: INFO
-    ports:
-      - "${MOCK_EXPORTER_PORT:-9105}:9105"
 
   # ---------------------------------------------------------------
   # Ascend NPU exporter (profile: npu-real) — requires host drivers
