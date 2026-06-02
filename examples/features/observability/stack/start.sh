@@ -62,8 +62,8 @@ fi
 prepare_minimal_provisioning() {
   local out_dir="${SCRIPT_DIR}/generated/grafana-provisioning-minimal"
   mkdir -p "${out_dir}/datasources" "${out_dir}/dashboards"
-  cp "${SCRIPT_DIR}/grafana/provisioning/dashboards/dashboard-providers.yml" "${out_dir}/dashboards/dashboard-providers.yml"
-  cp "${SCRIPT_DIR}/grafana/provisioning/datasources/datasources-minimal.yml" "${out_dir}/datasources/datasources.yml"
+  cp -f "${SCRIPT_DIR}/grafana/provisioning/dashboards/dashboard-providers.yml" "${out_dir}/dashboards/dashboard-providers.yml"
+  cp -f "${SCRIPT_DIR}/grafana/provisioning/datasources/datasources-minimal.yml" "${out_dir}/datasources/datasources.yml"
   GRAFANA_PROVISIONING_DIR="./generated/grafana-provisioning-minimal"
   export GRAFANA_PROVISIONING_DIR
 }
@@ -129,8 +129,37 @@ export PROMETHEUS_CONFIG_FILE OTEL_CONFIG_FILE
 
 start_host_helpers
 
+ensure_compose_images() {
+  # shellcheck disable=SC1091
+  [[ -f .env ]] && source .env
+  local prefix="${REGISTRY_PREFIX:-}"
+  local gv="${GRAFANA_VERSION:-11.3.0}"
+  local grafana_img="${prefix}grafana/grafana:${gv}"
+  local legacy_img="${prefix}pymotor/grafana:${gv}"
+
+  if ! "${DOCKER_BIN}" image inspect "${grafana_img}" >/dev/null 2>&1; then
+    if "${DOCKER_BIN}" image inspect "grafana/grafana:${gv}" >/dev/null 2>&1; then
+      echo "[start] tagging grafana/grafana:${gv} -> ${grafana_img}"
+      "${DOCKER_BIN}" tag "grafana/grafana:${gv}" "${grafana_img}"
+    fi
+  fi
+  if ! "${DOCKER_BIN}" image inspect "${legacy_img}" >/dev/null 2>&1 \
+    && "${DOCKER_BIN}" image inspect "${grafana_img}" >/dev/null 2>&1; then
+    "${DOCKER_BIN}" tag "${grafana_img}" "${legacy_img}" 2>/dev/null || true
+  fi
+}
+
+ensure_compose_images
+
+COMPOSE_UP_ARGS=(up -d --pull never)
+if [[ "${OBS_COMPOSE_BUILD:-0}" == "1" ]]; then
+  COMPOSE_UP_ARGS+=(--build)
+else
+  COMPOSE_UP_ARGS+=(--no-build)
+fi
+
 echo "[start] starting Docker Compose stack mode=${STACK_MODE} profiles: ${PROFILES:-<none>}"
-"${DOCKER_BIN}" compose "${PROFILE_ARGS[@]}" up -d --build
+"${DOCKER_BIN}" compose "${PROFILE_ARGS[@]}" "${COMPOSE_UP_ARGS[@]}"
 
 GRAFANA_PORT="${GRAFANA_PORT:-3000}"
 PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
