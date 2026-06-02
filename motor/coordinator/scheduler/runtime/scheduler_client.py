@@ -40,12 +40,6 @@ from motor.coordinator.domain.workload_calculator import calculate_demand_worklo
 from motor.coordinator.models.request import RequestInfo
 
 logger = get_logger(__name__)
-
-CANDIDATE_POLICY_LOAD_BALANCE = "load_balance"
-CANDIDATE_POLICY_ROUND_ROBIN = "round_robin"
-CANDIDATE_POLICY_KV_CACHE_AFFINITY = "kv_cache_affinity"
-
-# Callback signature: receives active endpoint list [(ip, port), ...], returns None
 OnInstanceRefreshedCallback = Callable[[list[tuple[str, str]]], Awaitable[None]]
 
 
@@ -859,63 +853,32 @@ class AsyncSchedulerClient:
     def _select_instance_and_endpoint_from_list(
         self, instances: list[Instance], role: PDRole, req_info: RequestInfo
     ) -> tuple[Instance, Endpoint] | None:
-        candidates, _ = self._select_endpoint_candidates_from_list_with_policy(
-            instances, role, req_info, top_k=1
-        )
-        if not candidates:
-            return None
-        instance, endpoint, _ = candidates[0]
-        return instance, endpoint
-
-    def _select_endpoint_candidates_from_list(
-        self,
-        instances: list[Instance],
-        role: PDRole,
-        req_info: RequestInfo,
-        top_k: int = 1,
-    ) -> list[tuple[Instance, Endpoint, float]]:
-        candidates, _ = self._select_endpoint_candidates_from_list_with_policy(
-            instances, role, req_info, top_k
-        )
-        return candidates
-
-    def _select_endpoint_candidates_from_list_with_policy(
-        self,
-        instances: list[Instance],
-        role: PDRole,
-        req_info: RequestInfo,
-        top_k: int = 1,
-    ) -> tuple[list[tuple[Instance, Endpoint, float]], str]:
         if not instances:
-            return [], self._scheduler_type or CANDIDATE_POLICY_ROUND_ROBIN
+            return None
         st = self._scheduler_type or "round_robin"
         if st == "load_balance":
-            candidates = self._select_endpoint_candidates_by_load_balance(
-                instances, role, top_k
-            )
-            if candidates:
-                return candidates, CANDIDATE_POLICY_LOAD_BALANCE
+            selected = self._select_instance_and_endpoint_by_load_balance(instances, role)
+            if selected is not None:
+                return selected
             logger.warning("load_balance failed, falling back to round-robin")
         elif st == "kv_cache_affinity":
             if role in _KVA_SELECT_ROLES:
                 selected = KvCacheAffinityPolicy.select_endpoint_from_list(instances, req_info)
                 if selected is not None:
-                    instance, endpoint = selected
-                    return [(instance, endpoint, 0.0)], CANDIDATE_POLICY_KV_CACHE_AFFINITY
+                    return selected
                 logger.warning("kv_cache_affinity failed, falling back to load_balance")
-                candidates = self._select_endpoint_candidates_by_load_balance(
-                    instances, role, top_k
-                )
-                if candidates:
-                    return candidates, CANDIDATE_POLICY_LOAD_BALANCE
+                selected = self._select_instance_and_endpoint_by_load_balance(instances, role)
+                if selected is not None:
+                    return selected
                 logger.warning("load_balance also failed, falling back to round-robin")
             else:
-                candidates = self._select_endpoint_candidates_by_load_balance(
-                    instances, role, top_k
+                selected = self._select_instance_and_endpoint_by_load_balance(instances, role)
+                if selected is not None:
+                    return selected
+                logger.warning(
+                    "load_balance failed for role %s (not eligible for kv_cache_affinity), falling back to round-robin",
+                    role,
                 )
-                if candidates:
-                    return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-                logger.warning("load_balance failed for role %s (not eligible for kv_cache_affinity), falling back to round-robin", role)
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
@@ -928,12 +891,8 @@ class AsyncSchedulerClient:
         )
         self._instance_rr_counters[role] = next_counter - start_offset
         if not selected_instance:
-            return [], CANDIDATE_POLICY_ROUND_ROBIN
-        selected = self._select_endpoint_for_instance(selected_instance)
-        if not selected:
-            return [], CANDIDATE_POLICY_ROUND_ROBIN
-        instance, endpoint = selected
-        return [(instance, endpoint, 0.0)], CANDIDATE_POLICY_ROUND_ROBIN
+            return None
+        return self._select_endpoint_for_instance(selected_instance)
 
     def _select_endpoint_for_instance(
         self, instance: Instance
@@ -961,22 +920,14 @@ class AsyncSchedulerClient:
         except Exception as e:
             logger.warning("Failed to initialize instance cache: %s", e, exc_info=True)
 
-    def _select_endpoint_candidates_by_load_balance(
-        self,
-        instances: list[Instance],
-        role: PDRole,
-        top_k: int = 1,
-    ) -> list[tuple[Instance, Endpoint, float]]:
+    def _select_instance_and_endpoint_by_load_balance(
+        self, instances: list[Instance], role: PDRole
+    ) -> tuple[Instance, Endpoint] | None:
         n = len(instances)
         start_index = (n * self._client_index) // self._client_count if n else 0
-        candidates = LoadBalancePolicy.select_endpoint_candidates_from_list(
+        return LoadBalancePolicy.select_endpoint_from_list(
             instances,
             role,
-            top_k=max(1, top_k),
-            instance_score_weight=self._endpoint_instance_score_weight,
             start_index=start_index,
+            instance_score_weight=self._endpoint_instance_score_weight,
         )
-        return [
-            (candidate.instance, candidate.endpoint, candidate.score)
-            for candidate in candidates
-        ]
