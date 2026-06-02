@@ -7,7 +7,7 @@
 #
 # 模板用途:
 #   - 作为本地调试与配置说明参考
-#   - 说明 Coordinator / Engine / Controller 的标准 scrape 约定
+#   - 说明 Coordinator / Engine 的标准 scrape 约定
 
 global:
   scrape_interval: 5s
@@ -106,16 +106,6 @@ scrape_configs:
           - "host.docker.internal:10001"
         labels:
           motor_component: vllm
-          cluster: example-namespace
-
-  # Controller JSON envelope metrics 由本地 proxy 解包后再抓取
-  - job_name: motor-controller
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - "controller-metrics-proxy:9106"
-        labels:
-          motor_component: controller
           cluster: example-namespace
 
   # Docker Compose 基础 exporter

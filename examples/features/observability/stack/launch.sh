@@ -125,7 +125,6 @@ fi
 echo "[launch] starting Docker Compose stack..."
 set +e
 PROMETHEUS_CONFIG_FILE="./generated/prometheus.yml" \
-CONTROLLER_METRICS_URL="${CONTROLLER_METRICS_URL:-}" \
 OBS_HOST="${OBS_HOST:-}" \
 ./start.sh
 DOCKER_RC=$?

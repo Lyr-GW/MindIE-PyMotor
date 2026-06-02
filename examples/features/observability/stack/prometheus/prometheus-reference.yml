@@ -84,12 +84,3 @@ scrape_configs:
           role: decode
           instance_id: d0
           cluster: example-namespace
-
-  - job_name: motor-controller
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - "controller-metrics-proxy:9106"
-        labels:
-          motor_component: controller
-          cluster: example-namespace

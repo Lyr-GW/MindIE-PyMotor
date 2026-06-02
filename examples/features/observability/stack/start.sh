@@ -72,7 +72,6 @@ pyMotor observability stack is up.
   Tempo         http://localhost:3200
   Loki          http://localhost:3100
   OTel OTLP     localhost:4317 (gRPC) / 4318 (HTTP)
-  Controller    http://localhost:9106/metrics  (controller-metrics-proxy)
 
 Active profiles: ${PROFILES:-<none>}
 
