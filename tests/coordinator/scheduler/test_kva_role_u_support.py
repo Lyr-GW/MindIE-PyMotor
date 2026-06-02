@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """Regression tests for ROLE_U support in KVA register/select flows."""
 
+import logging
 from unittest.mock import Mock, patch
+
+import pytest
 
 from motor.common.resources.instance import PDRole
 from motor.coordinator.api_client.conductor_api_client import ConductorApiClient
@@ -130,3 +133,34 @@ def test_kv_cache_affinity_skips_kva_for_non_kva_roles() -> None:
     assert candidate_policy == "load_balance"
     mock_kva.assert_not_called()
     mock_load_balance.assert_called_once_with([instance], PDRole.ROLE_D, 1)
+
+
+def test_kv_cache_affinity_non_kva_role_lb_failure_logs_load_balance_not_kva(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = _build_kv_client()
+    instance = _build_instance(PDRole.ROLE_D)
+    req_info = Mock()
+    endpoint = instance.endpoints["pod-0"][0]
+
+    with patch(
+        "motor.coordinator.scheduler.runtime.scheduler_client."
+        "KvCacheAffinityPolicy.select_endpoint_from_list"
+    ) as mock_kva, patch.object(
+        client,
+        "_select_endpoint_candidates_by_load_balance",
+        return_value=[],
+    ), patch.object(
+        client,
+        "_select_endpoint_for_instance",
+        return_value=(instance, endpoint),
+    ):
+        with caplog.at_level(logging.WARNING):
+            client._select_endpoint_candidates_from_list_with_policy(
+                [instance], PDRole.ROLE_D, req_info, top_k=1
+            )
+
+    mock_kva.assert_not_called()
+    warning_messages = [record.message for record in caplog.records]
+    assert not any("kv_cache_affinity failed" in msg for msg in warning_messages)
+    assert any("not eligible for kv_cache_affinity" in msg for msg in warning_messages)

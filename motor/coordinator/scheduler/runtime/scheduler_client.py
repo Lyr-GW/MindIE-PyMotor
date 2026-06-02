@@ -915,7 +915,11 @@ class AsyncSchedulerClient:
                 )
                 if candidates:
                     return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-            logger.warning("kv_cache_affinity failed, falling back to round-robin")
+                logger.warning(
+                    "load_balance failed for role %s (not eligible for kv_cache_affinity), "
+                    "falling back to round-robin",
+                    role,
+                )
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
