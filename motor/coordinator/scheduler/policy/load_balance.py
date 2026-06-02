@@ -92,7 +92,10 @@ class LoadBalancePolicy(BaseSchedulingPolicy):
             return []
 
         n = len(instances)
-        rotated_instances = [instances[(start_index + i) % n] for i in range(n)]
+        rotated_instances = [
+            instances[(start_index + i) % n]
+            for i in range(n)
+        ]
         scored: list[tuple[float, int, EndpointCandidate]] = []
         tie_order = 0
         for instance in rotated_instances:
