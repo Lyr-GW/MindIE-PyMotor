@@ -40,7 +40,7 @@ export PROXY_SH=/mnt/l00957062/proxy.sh
 ## 2. 脚本职责
 
 - `launch.sh`：用户入口，执行目标发现 + 启动；Docker 失败自动回退 native。
-- `scripts/discover-targets.py`：自动发现 Coordinator / Engine / Controller，生成：
+- `scripts/discover-targets.py`：自动发现 Coordinator / Engine，生成：
   - `generated/prometheus.yml`
   - `generated/discovered.env`
   - `generated/discovery-summary.txt`
@@ -67,10 +67,6 @@ export PROXY_SH=/mnt/l00957062/proxy.sh
   - 若无 NodePort，回退 PodIP + `MOTOR_ENGINE_MGMT_PORT`（默认 `10001`）
   - 自动推断 `pd_role` 与 `instance_id`（`p0/p1/d0`）
   - Engine job 启用 `honor_labels: true`
-- Controller：
-  - 自动发现 Controller observability NodePort（默认服务端口 `1027`）
-  - 写入 `CONTROLLER_METRICS_URL=http://<host>:<port>/observability/metrics`
-  - Prometheus 抓取 `controller-metrics-proxy:9106`（native 下自动改写成 `localhost:9106`）
 - Tracing：
   - 写入 `OBS_HOST`
   - 写入 `OTLP_HTTP_ENDPOINT=http://<obs-host>:4318/v1/traces`
@@ -87,7 +83,6 @@ export PROXY_SH=/mnt/l00957062/proxy.sh
 | OTel Collector HTTP | `4318` | OTLP HTTP `/v1/traces` |
 | Coordinator observability | `1027` | Coordinator typed metrics |
 | Engine management metrics | `10001` | Engine `/metrics` |
-| Controller metrics proxy | `9106` | Controller JSON 解包后 Prometheus 文本 |
 | Loki（仅 Docker） | `3100` | 日志数据源 |
 
 ## 5. Grafana 看板（仅保留 3 个）
@@ -149,7 +144,7 @@ curl -s -u motor:motor http://localhost:3000/api/health
 curl -s http://localhost:3200/ready
 curl -s http://localhost:9090/api/v1/targets
 curl -sG http://localhost:9090/api/v1/query \
-  --data-urlencode 'query=count(up{motor_component=~"coordinator|engine|controller"})'
+  --data-urlencode 'query=count(up{motor_component=~"coordinator|engine"})'
 curl -s http://localhost:3200/api/search?limit=5
 ```
 

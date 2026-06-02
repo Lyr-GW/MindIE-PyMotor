@@ -81,13 +81,10 @@ PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 TEMPO_QUERY_PORT="${TEMPO_QUERY_PORT:-3200}"
 OTEL_GRPC_PORT="${OTEL_GRPC_PORT:-4317}"
 OTEL_HTTP_PORT="${OTEL_HTTP_PORT:-4318}"
-CONTROLLER_PROXY_PORT="${CONTROLLER_PROXY_PORT:-9106}"
 TEMPO_OTLP_GRPC_PORT="${TEMPO_OTLP_GRPC_PORT:-14317}"
 TEMPO_OTLP_HTTP_PORT="${TEMPO_OTLP_HTTP_PORT:-14318}"
 GF_SECURITY_ADMIN_USER="${GF_SECURITY_ADMIN_USER:-motor}"
 GF_SECURITY_ADMIN_PASSWORD="${GF_SECURITY_ADMIN_PASSWORD:-motor}"
-CONTROLLER_METRICS_URL="${CONTROLLER_METRICS_URL:-http://localhost:1027/observability/metrics}"
-
 PROMETHEUS_VERSION="${PROMETHEUS_VERSION:-v2.55.1}"
 TEMPO_VERSION="${TEMPO_VERSION:-2.6.1}"
 OTEL_COLLECTOR_VERSION="${OTEL_COLLECTOR_VERSION:-0.115.1}"
@@ -235,7 +232,6 @@ EOF
 from pathlib import Path
 runtime_file = Path(".native-runtime/prometheus.yml")
 text = runtime_file.read_text(encoding="utf-8")
-text = text.replace("controller-metrics-proxy:9106", "localhost:9106")
 text = text.replace("node-exporter:9100", "localhost:9100")
 text = text.replace("cadvisor:8080", "localhost:8088")
 runtime_file.write_text(text, encoding="utf-8")
@@ -328,14 +324,6 @@ start_component "otel-collector" \
   "${BIN_DIR}/otelcol-contrib" \
   "--config=${RUNTIME_DIR}/otel-collector.yaml"
 
-start_component "controller-metrics-proxy" \
-  env \
-  CONTROLLER_METRICS_URL="${CONTROLLER_METRICS_URL}" \
-  PROXY_PORT="${CONTROLLER_PROXY_PORT}" \
-  CONTROLLER_TIMEOUT="${CONTROLLER_TIMEOUT:-5}" \
-  INSECURE_SKIP_VERIFY="${CONTROLLER_INSECURE_SKIP_VERIFY:-true}" \
-  python3 "./controller-proxy/main.py"
-
 start_component "prometheus" \
   "${BIN_DIR}/prometheus" \
   "--config.file=${RUNTIME_DIR}/prometheus.yml" \
@@ -367,7 +355,6 @@ pyMotor observability stack is running in native mode.
   Prometheus    http://localhost:${PROMETHEUS_PORT}
   Tempo         http://localhost:${TEMPO_QUERY_PORT}
   OTel OTLP     localhost:${OTEL_GRPC_PORT} (gRPC) / ${OTEL_HTTP_PORT} (HTTP)
-  Controller    http://localhost:${CONTROLLER_PROXY_PORT}/metrics
 
 Runtime dir: ${RUNTIME_DIR}
 Logs dir:    ${LOG_DIR}

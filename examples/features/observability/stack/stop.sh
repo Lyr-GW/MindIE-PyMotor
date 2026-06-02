@@ -43,7 +43,6 @@ if [[ -d "${RUN_DIR}" ]]; then
   stop_pid_file "${RUN_DIR}/prometheus.pid"
   stop_pid_file "${RUN_DIR}/otel-collector.pid"
   stop_pid_file "${RUN_DIR}/tempo.pid"
-  stop_pid_file "${RUN_DIR}/controller-metrics-proxy.pid"
 fi
 
 if [[ "${PURGE}" -eq 1 ]]; then
