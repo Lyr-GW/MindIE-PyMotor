@@ -14,6 +14,7 @@ OBS_HOST_INPUT="${OBS_HOST:-}"
 FORCE_NATIVE=0
 DISCOVER_ONLY=0
 DRY_RUN=0
+STACK_MODE="${OBS_STACK_MODE:-full}"
 
 usage() {
   cat <<'EOF'
@@ -23,6 +24,8 @@ Options:
   --namespace <namespace>     Kubernetes namespace / job_id
   --node-ip <node-ip>         Node IP used for NodePort access
   --user-config <path>        pyMotor user_config.json path
+  --minimal                   Start minimal Docker stack (Prometheus/Grafana/Tempo/OTel)
+  --full                      Start full Docker stack (adds Loki/node-exporter/cAdvisor)
   --discover-only             Only run discovery, do not start stack
   --dry-run                   Run discovery and print generated Prometheus config
   --native                    Skip Docker Compose and run native runtime
@@ -55,6 +58,14 @@ while [[ $# -gt 0 ]]; do
       USER_CONFIG="$2"
       shift 2
       ;;
+    --minimal)
+      STACK_MODE="minimal"
+      shift
+      ;;
+    --full)
+      STACK_MODE="full"
+      shift
+      ;;
     --discover-only)
       DISCOVER_ONLY=1
       shift
@@ -84,7 +95,11 @@ if [[ ! -f .env && -f .env.example ]]; then
   echo "[launch] created .env from .env.example"
 fi
 
-DISCOVERY_CMD=(python3 "./scripts/discover-targets.py" "--output-dir" "./generated" "--engine-mgmt-port" "${ENGINE_MGMT_PORT}")
+DISCOVERY_RUNTIME="docker"
+if [[ "${FORCE_NATIVE}" -eq 1 ]]; then
+  DISCOVERY_RUNTIME="native"
+fi
+DISCOVERY_CMD=(python3 "./scripts/discover-targets.py" "--output-dir" "./generated" "--engine-mgmt-port" "${ENGINE_MGMT_PORT}" "--runtime" "${DISCOVERY_RUNTIME}")
 [[ -n "${NAMESPACE}" ]] && DISCOVERY_CMD+=("--namespace" "${NAMESPACE}")
 [[ -n "${NODE_IP}" ]] && DISCOVERY_CMD+=("--node-ip" "${NODE_IP}")
 [[ -n "${USER_CONFIG}" ]] && DISCOVERY_CMD+=("--user-config" "${USER_CONFIG}")
@@ -112,6 +127,13 @@ fi
 
 run_native() {
   echo "[launch] starting native runtime..."
+  echo "[launch] refreshing discovery for native runtime..."
+  NATIVE_DISCOVERY_CMD=(python3 "./scripts/discover-targets.py" "--output-dir" "./generated" "--engine-mgmt-port" "${ENGINE_MGMT_PORT}" "--runtime" "native")
+  [[ -n "${NAMESPACE}" ]] && NATIVE_DISCOVERY_CMD+=("--namespace" "${NAMESPACE}")
+  [[ -n "${NODE_IP}" ]] && NATIVE_DISCOVERY_CMD+=("--node-ip" "${NODE_IP}")
+  [[ -n "${USER_CONFIG}" ]] && NATIVE_DISCOVERY_CMD+=("--user-config" "${USER_CONFIG}")
+  [[ -n "${OBS_HOST_INPUT}" ]] && NATIVE_DISCOVERY_CMD+=("--obs-host" "${OBS_HOST_INPUT}")
+  "${NATIVE_DISCOVERY_CMD[@]}"
   ./scripts/start-native.sh \
     --env-file "./generated/discovered.env" \
     --prometheus-file "./generated/prometheus.yml"
@@ -126,7 +148,7 @@ echo "[launch] starting Docker Compose stack..."
 set +e
 PROMETHEUS_CONFIG_FILE="./generated/prometheus.yml" \
 OBS_HOST="${OBS_HOST:-}" \
-./start.sh
+./start.sh "--${STACK_MODE}"
 DOCKER_RC=$?
 set -e
 

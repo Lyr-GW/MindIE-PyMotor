@@ -19,6 +19,24 @@
   "templating": {
     "list": [
       {
+        "name": "source",
+        "label": "Source",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values({source!=\"\"}, source)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
         "name": "cluster",
         "label": "Cluster",
         "type": "query",
@@ -26,14 +44,15 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(motor_active_prefill_workers{source=~\"$source\"}, cluster)",
+        "query": "label_values({source=~\"$source\", cluster!=\"\"}, cluster)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       },
       {
         "name": "motor_metric_scope",
@@ -43,14 +62,15 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values({source=~\"$source\", motor_metric_scope!=\"\"}, motor_metric_scope)",
+        "query": "label_values({source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope!=\"\"}, motor_metric_scope)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       },
       {
         "name": "role",
@@ -60,14 +80,15 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values({source=~\"$source\", role!=\"\"}, role)",
+        "query": "label_values({source=~\"$source\", cluster=~\"$cluster\", role!=\"\"}, role)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       },
       {
         "name": "pd_role",
@@ -77,14 +98,53 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values({source=~\"$source\", pd_role!=\"\"}, pd_role)",
+        "query": "label_values({source=~\"$source\", cluster=~\"$cluster\", pd_role!=\"\"}, pd_role)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
+      },
+      {
+        "name": "dp_rank",
+        "label": "DP Rank",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values({source=~\"$source\", cluster=~\"$cluster\", dp_rank!=\"\"}, dp_rank)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "sort": 3
+      },
+      {
+        "name": "pod_ip",
+        "label": "Pod IP",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values({source=~\"$source\", cluster=~\"$cluster\", pod_ip!=\"\"}, pod_ip)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        },
+        "sort": 3
       },
       {
         "name": "instance_id",
@@ -94,7 +154,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values({source=~\"$source\", instance_id!=\"\"}, instance_id)",
+        "query": "label_values({source=~\"$source\", cluster=~\"$cluster\", instance_id!=\"\"}, instance_id)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
@@ -102,7 +162,8 @@
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       },
       {
         "name": "model_name",
@@ -112,14 +173,15 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(vllm:num_requests_running{source=~\"$source\"}, model_name)",
+        "query": "label_values(vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\"}, model_name)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,
         "current": {
           "text": "All",
           "value": "$__all"
-        }
+        },
+        "allValue": ".*"
       }
     ]
   },
@@ -152,7 +214,7 @@
       },
       "targets": [
         {
-          "expr": "sum(motor_active_prefill_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\"})",
+          "expr": "sum(motor_active_prefill_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -199,7 +261,7 @@
       },
       "targets": [
         {
-          "expr": "sum(motor_active_decode_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\"})",
+          "expr": "sum(motor_active_decode_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -246,7 +308,7 @@
       },
       "targets": [
         {
-          "expr": "sum(vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"})",
+          "expr": "sum(vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -283,7 +345,7 @@
       },
       "targets": [
         {
-          "expr": "sum(vllm:num_requests_waiting{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"})",
+          "expr": "sum(vllm:num_requests_waiting{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -320,7 +382,7 @@
       },
       "targets": [
         {
-          "expr": "max(vllm:kv_cache_usage_perc{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"})",
+          "expr": "max(vllm:kv_cache_usage_perc{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -374,7 +436,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(vllm:request_success_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m]))",
+          "expr": "sum(increase(vllm:request_success_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
           "refId": "A"
         }
       ],
@@ -421,7 +483,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"})",
+          "expr": "sum by (pd_role) (vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "legendFormat": "{{pd_role}}",
           "refId": "A"
         }
@@ -468,7 +530,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (instance_id, pd_role) (vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"})",
+          "expr": "sum by (instance_id, pd_role) (vllm:num_requests_running{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "legendFormat": "{{pd_role}}/{{instance_id}}",
           "refId": "A"
         }
@@ -511,13 +573,13 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (motor_active_prefill_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\"})",
+          "expr": "sum by (pd_role) (motor_active_prefill_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "legendFormat": "prefill {{pd_role}}",
           "refId": "A",
           "instant": true
         },
         {
-          "expr": "sum by (pd_role) (motor_active_decode_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\"})",
+          "expr": "sum by (pd_role) (motor_active_decode_workers{source=~\"$source\", cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "legendFormat": "decode {{pd_role}}",
           "refId": "B",
           "instant": true
@@ -554,7 +616,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (finished_reason) (increase(vllm:request_success_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m]))",
+          "expr": "sum by (finished_reason) (increase(vllm:request_success_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
           "legendFormat": "{{finished_reason}}",
           "refId": "A",
           "instant": true
@@ -593,7 +655,7 @@
       },
       "targets": [
         {
-          "expr": "vllm:kv_cache_usage_perc{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}",
+          "expr": "vllm:kv_cache_usage_perc{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}",
           "legendFormat": "{{pd_role}}/{{instance_id}}",
           "refId": "A"
         }
@@ -648,7 +710,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (rate(vllm:prompt_tokens_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[1m]))",
+          "expr": "sum by (pd_role) (rate(vllm:prompt_tokens_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
           "legendFormat": "prompt {{pd_role}}",
           "refId": "A"
         }
@@ -693,7 +755,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (rate(vllm:generation_tokens_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[1m]))",
+          "expr": "sum by (pd_role) (rate(vllm:generation_tokens_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
           "legendFormat": "gen {{pd_role}}",
           "refId": "A"
         }
@@ -739,17 +801,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p50 {{pd_role}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p95 {{pd_role}}",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p99 {{pd_role}}",
           "refId": "C"
         }
@@ -791,12 +853,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p50 {{pd_role}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p95 {{pd_role}}",
           "refId": "B"
         }
@@ -849,7 +911,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (handler) (rate(http_request_duration_seconds_count{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\"}[1m]))",
+          "expr": "sum by (handler) (rate(http_request_duration_seconds_count{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
           "legendFormat": "{{handler}}",
           "refId": "A"
         }
@@ -894,7 +956,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (instance_id, pd_role) (rate(vllm:prefix_cache_hits_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])) / clamp_min(sum by (instance_id, pd_role) (rate(vllm:prefix_cache_queries_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\"}[5m])), 1e-9)",
+          "expr": "sum by (instance_id, pd_role) (rate(vllm:prefix_cache_hits_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])) / clamp_min(sum by (instance_id, pd_role) (rate(vllm:prefix_cache_queries_total{source=~\"$source\", cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])), 1e-9)",
           "legendFormat": "{{pd_role}}/{{instance_id}}",
           "refId": "A"
         }

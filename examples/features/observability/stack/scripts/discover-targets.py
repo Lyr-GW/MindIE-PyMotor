@@ -26,6 +26,20 @@ DEFAULT_GRAFANA_PORT = 3000
 DEFAULT_TEMPO_PORT = 3200
 DEFAULT_OTLP_GRPC_PORT = 4317
 DEFAULT_OTLP_HTTP_PORT = 4318
+DEFAULT_CONTROLLER_PROXY_PORT = 9106
+DEFAULT_PORT_FORWARD_BASE = 19000
+
+
+@dataclass
+class PortForwardSpec:
+    namespace: str
+    pod_ip: str
+    remote_port: int
+    local_port: int
+    pod_name: str
+
+    def to_env_value(self) -> str:
+        return f"{self.namespace}|{self.pod_ip}|{self.remote_port}|{self.local_port}|{self.pod_name}"
 
 
 @dataclass
@@ -34,8 +48,11 @@ class DiscoveryResult:
     node_ip: str
     obs_host: str
     mode: str
+    runtime: str
     coordinator_target: str
+    controller_proxy_target: str
     engine_targets: List[Dict[str, Any]]
+    port_forwards: List[PortForwardSpec]
     warnings: List[str]
 
     @property
@@ -155,6 +172,10 @@ def _resolve_namespace(args: argparse.Namespace) -> str:
     return "default"
 
 
+def _has_explicit_namespace(args: argparse.Namespace) -> bool:
+    return bool(args.namespace or os.getenv("MOTOR_NAMESPACE"))
+
+
 def _resolve_node_ip(namespace: str, args: argparse.Namespace, warnings: List[str]) -> str:
     if args.node_ip:
         return args.node_ip
@@ -256,6 +277,18 @@ def _infer_engine_identity(name: str, counters: Dict[str, int]) -> Tuple[str, st
     return pd_role, instance_id
 
 
+def _infer_dp_rank(name: str, labels: Optional[Dict[str, Any]] = None) -> str:
+    labels = labels or {}
+    for key in ("dp_rank", "dp-rank", "rank"):
+        if labels.get(key) is not None:
+            return str(labels[key])
+    lowered = name.lower()
+    match = re.search(r"(?:dp|rank)[-_]?(\d+)", lowered)
+    if match:
+        return match.group(1)
+    return ""
+
+
 def _discover_engine_targets_from_services(
     services: Sequence[Dict[str, Any]],
     node_ip: str,
@@ -285,6 +318,7 @@ def _discover_engine_targets_from_services(
                     "role": pd_role,
                     "instance_id": instance_id,
                     "cluster": cluster_label,
+                    "source": "real",
                 },
             }
         )
@@ -300,6 +334,7 @@ def _discover_engine_targets_from_pods(
     targets: List[Dict[str, Any]] = []
     counters = {"prefill": 0, "decode": 0}
     for pod in pod_json.get("items", []):
+        metadata = pod.get("metadata", {})
         pod_name = str(pod.get("metadata", {}).get("name", ""))
         if not _has_keyword(pod_name, ("engine", "mindie-motor-engine")):
             continue
@@ -308,6 +343,8 @@ def _discover_engine_targets_from_pods(
         if phase != "Running" or not pod_ip:
             continue
         pd_role, instance_id = _infer_engine_identity(pod_name, counters)
+        pod_labels = metadata.get("labels", {})
+        dp_rank = _infer_dp_rank(pod_name, pod_labels if isinstance(pod_labels, dict) else {})
         targets.append(
             {
                 "target": f"{pod_ip}:{engine_port}",
@@ -317,10 +354,51 @@ def _discover_engine_targets_from_pods(
                     "role": pd_role,
                     "instance_id": instance_id,
                     "cluster": cluster_label,
+                    "source": "real",
+                    "pod_ip": pod_ip,
+                    "pod_name": pod_name,
+                    "pod_namespace": namespace,
+                    "dp_rank": dp_rank,
                 },
             }
         )
     return targets
+
+
+def _split_target(target: str) -> Tuple[str, int]:
+    host, port = target.rsplit(":", 1)
+    return host.strip("[]"), int(port)
+
+
+def _apply_docker_gateway(result: DiscoveryResult, base_port: int) -> None:
+    next_port = base_port
+    for item in result.engine_targets:
+        target = str(item.get("target", ""))
+        try:
+            host, remote_port = _split_target(target)
+        except (ValueError, TypeError):
+            continue
+        if not re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+            continue
+        labels = item.setdefault("labels", {})
+        if labels.get("pod_ip") != host:
+            if host == "127.0.0.1":
+                item["target"] = f"host.docker.internal:{remote_port}"
+            continue
+        pod_name = str(labels.get("pod_name") or f"pod-{next_port}")
+        local_port = next_port
+        next_port += 1
+        result.port_forwards.append(
+            PortForwardSpec(
+                namespace=result.namespace,
+                pod_ip=host,
+                remote_port=remote_port,
+                local_port=local_port,
+                pod_name=pod_name,
+            )
+        )
+        labels["original_target"] = target
+        item["target"] = f"host.docker.internal:{local_port}"
 
 
 def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> DiscoveryResult:
@@ -328,11 +406,18 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
     obs_host = args.obs_host or os.getenv("OBS_HOST") or node_ip or DEFAULT_OBS_HOST
     engine_port = args.engine_mgmt_port
     cluster_label = namespace
+    runtime = args.runtime
 
     mode = "fallback"
     coordinator_host = node_ip
     coordinator_port = DEFAULT_COORDINATOR_PORT
+    controller_proxy_target = (
+        f"host.docker.internal:{DEFAULT_CONTROLLER_PROXY_PORT}"
+        if runtime == "docker"
+        else f"localhost:{DEFAULT_CONTROLLER_PROXY_PORT}"
+    )
     engine_targets: List[Dict[str, Any]] = []
+    port_forwards: List[PortForwardSpec] = []
 
     if _is_kubectl_ready():
         try:
@@ -353,12 +438,21 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
                     f"coordinator NodePort not found, fallback to default {node_ip}:{DEFAULT_COORDINATOR_PORT}."
                 )
 
-            engine_targets = _discover_engine_targets_from_services(
-                services=services,
-                node_ip=node_ip,
-                engine_port=engine_port,
-                cluster_label=cluster_label,
-            )
+            if runtime == "docker":
+                engine_targets = _discover_engine_targets_from_pods(
+                    namespace=namespace,
+                    engine_port=engine_port,
+                    cluster_label=cluster_label,
+                )
+                if engine_targets:
+                    warnings.append("docker runtime uses PodIP targets via host tcp forwarders.")
+            if not engine_targets:
+                engine_targets = _discover_engine_targets_from_services(
+                    services=services,
+                    node_ip=node_ip,
+                    engine_port=engine_port,
+                    cluster_label=cluster_label,
+                )
             if not engine_targets:
                 engine_targets = _discover_engine_targets_from_pods(
                     namespace=namespace,
@@ -369,10 +463,18 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
                     warnings.append("engine NodePort service not found, fallback to PodIP targets.")
 
         except subprocess.CalledProcessError as exc:
+            if _has_explicit_namespace(args):
+                raise RuntimeError(
+                    f"kubernetes discovery failed for explicit namespace '{namespace}': {exc}"
+                ) from exc
             warnings.append(f"kubernetes discovery failed: {exc}. fallback to static defaults.")
             mode = "fallback"
             engine_targets = []
     else:
+        if _has_explicit_namespace(args):
+            raise RuntimeError(
+                f"kubectl is unavailable or cluster is unreachable for explicit namespace '{namespace}'."
+            )
         warnings.append("kubectl unavailable or cluster unreachable, using fallback static discovery.")
 
     if not engine_targets:
@@ -386,6 +488,7 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
                     "role": "prefill",
                     "instance_id": "p0",
                     "cluster": cluster_label,
+                    "source": "local",
                 },
             },
             {
@@ -396,6 +499,7 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
                     "role": "prefill",
                     "instance_id": "p1",
                     "cluster": cluster_label,
+                    "source": "local",
                 },
             },
             {
@@ -406,6 +510,7 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
                     "role": "decode",
                     "instance_id": "d0",
                     "cluster": cluster_label,
+                    "source": "local",
                 },
             },
         ]
@@ -413,15 +518,21 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
 
     coordinator_target = f"{coordinator_host}:{coordinator_port}"
 
-    return DiscoveryResult(
+    result = DiscoveryResult(
         namespace=namespace,
         node_ip=node_ip,
         obs_host=obs_host,
         mode=mode,
+        runtime=runtime,
         coordinator_target=coordinator_target,
+        controller_proxy_target=controller_proxy_target,
         engine_targets=engine_targets,
+        port_forwards=port_forwards,
         warnings=warnings,
     )
+    if runtime == "docker":
+        _apply_docker_gateway(result, args.port_forward_base)
+    return result
 
 
 def _render_job(
@@ -453,6 +564,7 @@ def _build_prometheus_config(result: DiscoveryResult) -> str:
     coordinator_labels = {
         "motor_component": "coordinator",
         "cluster": namespace,
+        "source": "real" if result.mode == "kubernetes" else "local",
     }
     coordinator_targets = [{"target": result.coordinator_target, "labels": coordinator_labels}]
 
@@ -566,6 +678,23 @@ def _build_prometheus_config(result: DiscoveryResult) -> str:
         )
     )
     lines.append("")
+    lines.extend(
+        _render_job(
+            "motor-controller",
+            [
+                {
+                    "target": result.controller_proxy_target,
+                    "labels": {
+                        "motor_component": "controller",
+                        "cluster": namespace,
+                        "source": "real" if result.mode == "kubernetes" else "local",
+                    },
+                }
+            ],
+            metrics_path="/metrics",
+        )
+    )
+    lines.append("")
     lines.extend(_render_job("ascend-npu-exporter", [{"target": "host.docker.internal:8082"}]))
     lines.append("")
     lines.extend(_render_job("node-exporter", [{"target": "node-exporter:9100"}]))
@@ -582,6 +711,7 @@ def _build_env(result: DiscoveryResult) -> str:
         f"MOTOR_NODE_IP={result.node_ip}",
         f"CLUSTER_LABEL={result.namespace}",
         f"OBS_HOST={obs_host}",
+        f"OBS_RUNTIME={result.runtime}",
         f"OTLP_HTTP_ENDPOINT=http://{obs_host}:{DEFAULT_OTLP_HTTP_PORT}/v1/traces",
         f"OTLP_GRPC_ENDPOINT=http://{obs_host}:{DEFAULT_OTLP_GRPC_PORT}",
         "PROMETHEUS_CONFIG_FILE=./generated/prometheus.yml",
@@ -593,20 +723,32 @@ def _build_env(result: DiscoveryResult) -> str:
         f"TEMPO_QUERY_PORT={os.getenv('TEMPO_QUERY_PORT', str(DEFAULT_TEMPO_PORT))}",
         f"OTEL_GRPC_PORT={os.getenv('OTEL_GRPC_PORT', str(DEFAULT_OTLP_GRPC_PORT))}",
         f"OTEL_HTTP_PORT={os.getenv('OTEL_HTTP_PORT', str(DEFAULT_OTLP_HTTP_PORT))}",
+        f"CONTROLLER_PROXY_PORT={DEFAULT_CONTROLLER_PROXY_PORT}",
+        f"CONTROLLER_METRICS_URL=http://{result.coordinator_target}/observability/metrics",
+        f"PORT_FORWARD_COUNT={len(result.port_forwards)}",
     ]
+    for idx, spec in enumerate(result.port_forwards):
+        value = spec.to_env_value().replace("'", "'\"'\"'")
+        lines.append(f"PORT_FORWARD_{idx}='{value}'")
     return "\n".join(lines) + "\n"
 
 
 def _build_summary(result: DiscoveryResult) -> str:
     lines = [
         f"Discovery mode: {result.mode}",
+        f"Runtime: {result.runtime}",
         f"Namespace: {result.namespace}",
         f"Cluster label: {result.namespace}",
         f"Node IP: {result.node_ip}",
         f"Coordinator: {result.coordinator_target}",
         f"Engine prefill targets: {result.prefill_count}",
         f"Engine decode targets: {result.decode_count}",
+        f"Port forwards: {len(result.port_forwards)}",
     ]
+    for spec in result.port_forwards:
+        lines.append(
+            f"- {spec.namespace}/{spec.pod_name} {spec.pod_ip}:{spec.remote_port} -> localhost:{spec.local_port}"
+        )
     if result.warnings:
         lines.append("Warnings:")
         lines.extend(f"- {item}" for item in result.warnings)
@@ -619,6 +761,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--node-ip", help="Node IP for NodePort access.")
     parser.add_argument("--user-config", help="Path to pyMotor user_config.json.")
     parser.add_argument("--obs-host", help="Observability host for OTLP endpoint generation.")
+    parser.add_argument(
+        "--runtime",
+        choices=("docker", "native"),
+        default=os.getenv("MOTOR_DISCOVERY_RUNTIME", "docker"),
+        help="Runtime target for generated configs (default: docker).",
+    )
+    parser.add_argument(
+        "--port-forward-base",
+        type=int,
+        default=int(os.getenv("MOTOR_PORT_FORWARD_BASE", str(DEFAULT_PORT_FORWARD_BASE))),
+        help="First local port for Docker PodIP bridge forwards (default: 19000).",
+    )
     parser.add_argument(
         "--engine-mgmt-port",
         type=int,
@@ -636,9 +790,17 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     warnings: List[str] = []
-    namespace = _resolve_namespace(args)
-    node_ip = _resolve_node_ip(namespace=namespace, args=args, warnings=warnings)
-    result = _discover(namespace=namespace, node_ip=node_ip, args=args)
+    try:
+        namespace = _resolve_namespace(args)
+        if _has_explicit_namespace(args) and not _is_kubectl_ready():
+            raise RuntimeError(
+                f"kubectl is unavailable or cluster is unreachable for explicit namespace '{namespace}'."
+            )
+        node_ip = _resolve_node_ip(namespace=namespace, args=args, warnings=warnings)
+        result = _discover(namespace=namespace, node_ip=node_ip, args=args)
+    except RuntimeError as exc:
+        print(f"[discover-targets] error: {exc}", file=sys.stderr)
+        return 2
     result.warnings = [*warnings, *result.warnings]
 
     out_dir = Path(args.output_dir)

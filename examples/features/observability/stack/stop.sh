@@ -6,6 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 cd "${SCRIPT_DIR}"
 
+"${SCRIPT_DIR}/scripts/stop-k8s-port-forwards-host.sh" || true
+"${SCRIPT_DIR}/scripts/stop-controller-proxy-host.sh" || true
+
 PURGE=0
 if [[ "${1:-}" == "--purge" ]]; then
   PURGE=1
