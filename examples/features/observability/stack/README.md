@@ -1,5 +1,7 @@
 # pyMotor 可观测性一键栈（PR202）
 
+合入与联调说明：[PR202_CHANGE_GUIDE.md](PR202_CHANGE_GUIDE.md) · [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)
+
 目标：在已部署 pyMotor 的节点上，通过一条命令自动发现真实接口并启动观测栈，浏览器可直接查看 metrics / tracing / profiling 页面。
 
 ## 1. 推荐启动方式（唯一入口）
@@ -65,6 +67,7 @@ export PROXY_SH=/mnt/l00957062/proxy.sh
 - Engine：
   - 优先使用 Engine metrics NodePort
   - 若无 NodePort，回退 PodIP + `MOTOR_ENGINE_MGMT_PORT`（默认 `10001`）
+  - 识别 `vllm-p0` / `vllm-d0` 等 Pod 命名（见 `ENGINE_POD_RE`）
   - 自动推断 `pd_role` 与 `instance_id`（`p0/p1/d0`）
   - Engine job 启用 `honor_labels: true`
 - Tracing：

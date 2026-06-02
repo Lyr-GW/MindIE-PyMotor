@@ -29,6 +29,28 @@ DEFAULT_OTLP_HTTP_PORT = 4318
 DEFAULT_CONTROLLER_PROXY_PORT = 9106
 DEFAULT_PORT_FORWARD_BASE = 19000
 
+ENGINE_POD_RE = re.compile(
+    r"^(?P<base>vllm|mindie-server|mindie-llm|sglang)(?:-(?P<role>p|d|e)(?P<idx>\d+))(?:-|$)",
+    re.IGNORECASE,
+)
+COORDINATOR_POD_KEYWORDS = ("coordinator", "mindie-motor-coordinator")
+
+_PROXY_ENV_KEYS = (
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+)
+
+
+def _kubectl_env() -> Dict[str, str]:
+    env = os.environ.copy()
+    for key in _PROXY_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
 
 @dataclass
 class PortForwardSpec:
@@ -66,7 +88,9 @@ class DiscoveryResult:
 
 def _run_kubectl_json(args: Sequence[str]) -> Dict[str, Any]:
     cmd = ["kubectl", *args, "-o", "json"]
-    output = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    output = subprocess.run(
+        cmd, check=True, capture_output=True, text=True, env=_kubectl_env()
+    )
     return json.loads(output.stdout)
 
 
@@ -90,18 +114,21 @@ def _read_user_config_job_id(path: Optional[str]) -> Optional[str]:
 def _is_kubectl_ready() -> bool:
     if shutil.which("kubectl") is None:
         return False
+    kubectl_env = _kubectl_env()
     try:
         subprocess.run(
             ["kubectl", "version", "--client"],
             check=True,
             capture_output=True,
             text=True,
+            env=kubectl_env,
         )
         subprocess.run(
             ["kubectl", "get", "ns"],
             check=True,
             capture_output=True,
             text=True,
+            env=kubectl_env,
         )
         return True
     except subprocess.CalledProcessError:
@@ -125,6 +152,38 @@ def _service_ports(service: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _has_keyword(text: str, keywords: Sequence[str]) -> bool:
     text_lower = text.lower()
     return any(key in text_lower for key in keywords)
+
+
+def _is_engine_pod(name: str) -> bool:
+    if ENGINE_POD_RE.search(name):
+        return True
+    return _has_keyword(name, ("engine", "mindie-motor-engine"))
+
+
+def _infer_engine_identity_from_pod(name: str, counters: Dict[str, int]) -> Tuple[str, str]:
+    match = ENGINE_POD_RE.search(name)
+    if match:
+        role_char = (match.group("role") or "p").lower()
+        idx = match.group("idx") or "0"
+        pd_role = "decode" if role_char == "d" else "prefill"
+        return pd_role, f"{role_char}{idx}"
+    return _infer_engine_identity(name, counters)
+
+
+def _discover_coordinator_pod(
+    namespace: str,
+    port: int = DEFAULT_COORDINATOR_PORT,
+) -> Optional[Tuple[str, str]]:
+    pod_json = _run_kubectl_json(["get", "pods", "-n", namespace])
+    for pod in pod_json.get("items", []):
+        pod_name = str(pod.get("metadata", {}).get("name", ""))
+        if not _has_keyword(pod_name, COORDINATOR_POD_KEYWORDS):
+            continue
+        phase = str(pod.get("status", {}).get("phase", ""))
+        pod_ip = str(pod.get("status", {}).get("podIP", ""))
+        if phase == "Running" and pod_ip:
+            return pod_ip, pod_name
+    return None
 
 
 def _find_namespace_from_services() -> Optional[str]:
@@ -336,13 +395,13 @@ def _discover_engine_targets_from_pods(
     for pod in pod_json.get("items", []):
         metadata = pod.get("metadata", {})
         pod_name = str(pod.get("metadata", {}).get("name", ""))
-        if not _has_keyword(pod_name, ("engine", "mindie-motor-engine")):
+        if not _is_engine_pod(pod_name):
             continue
         phase = str(pod.get("status", {}).get("phase", ""))
         pod_ip = str(pod.get("status", {}).get("podIP", ""))
         if phase != "Running" or not pod_ip:
             continue
-        pd_role, instance_id = _infer_engine_identity(pod_name, counters)
+        pd_role, instance_id = _infer_engine_identity_from_pod(pod_name, counters)
         pod_labels = metadata.get("labels", {})
         dp_rank = _infer_dp_rank(pod_name, pod_labels if isinstance(pod_labels, dict) else {})
         targets.append(
@@ -370,8 +429,39 @@ def _split_target(target: str) -> Tuple[str, int]:
     return host.strip("[]"), int(port)
 
 
+def _register_docker_port_forward(
+    result: DiscoveryResult,
+    *,
+    host: str,
+    remote_port: int,
+    pod_name: str,
+    next_port: int,
+) -> Tuple[str, int]:
+    local_port = next_port
+    result.port_forwards.append(
+        PortForwardSpec(
+            namespace=result.namespace,
+            pod_ip=host,
+            remote_port=remote_port,
+            local_port=local_port,
+            pod_name=pod_name,
+        )
+    )
+    return f"host.docker.internal:{local_port}", next_port + 1
+
+
 def _apply_docker_gateway(result: DiscoveryResult, base_port: int) -> None:
     next_port = base_port
+    coord_host, coord_port = _split_target(result.coordinator_target)
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", coord_host) and coord_host not in ("127.0.0.1", "0.0.0.0"):
+        result.coordinator_target, next_port = _register_docker_port_forward(
+            result,
+            host=coord_host,
+            remote_port=coord_port,
+            pod_name="mindie-motor-coordinator",
+            next_port=next_port,
+        )
+
     for item in result.engine_targets:
         target = str(item.get("target", ""))
         try:
@@ -386,19 +476,14 @@ def _apply_docker_gateway(result: DiscoveryResult, base_port: int) -> None:
                 item["target"] = f"host.docker.internal:{remote_port}"
             continue
         pod_name = str(labels.get("pod_name") or f"pod-{next_port}")
-        local_port = next_port
-        next_port += 1
-        result.port_forwards.append(
-            PortForwardSpec(
-                namespace=result.namespace,
-                pod_ip=host,
-                remote_port=remote_port,
-                local_port=local_port,
-                pod_name=pod_name,
-            )
-        )
         labels["original_target"] = target
-        item["target"] = f"host.docker.internal:{local_port}"
+        item["target"], next_port = _register_docker_port_forward(
+            result,
+            host=host,
+            remote_port=remote_port,
+            pod_name=pod_name,
+            next_port=next_port,
+        )
 
 
 def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> DiscoveryResult:
@@ -434,9 +519,16 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
             if coord_match:
                 _, coordinator_port = coord_match
             else:
-                warnings.append(
-                    f"coordinator NodePort not found, fallback to default {node_ip}:{DEFAULT_COORDINATOR_PORT}."
-                )
+                coord_pod = _discover_coordinator_pod(namespace)
+                if coord_pod:
+                    coordinator_host, coordinator_port = coord_pod[0], DEFAULT_COORDINATOR_PORT
+                    warnings.append(
+                        f"coordinator NodePort not found, using PodIP {coordinator_host}:{coordinator_port}."
+                    )
+                else:
+                    warnings.append(
+                        f"coordinator NodePort not found, fallback to default {node_ip}:{DEFAULT_COORDINATOR_PORT}."
+                    )
 
             if runtime == "docker":
                 engine_targets = _discover_engine_targets_from_pods(
@@ -703,6 +795,20 @@ def _build_prometheus_config(result: DiscoveryResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _controller_metrics_url(result: DiscoveryResult) -> str:
+    for spec in result.port_forwards:
+        if _has_keyword(spec.pod_name, COORDINATOR_POD_KEYWORDS):
+            return f"http://127.0.0.1:{spec.local_port}/observability/metrics"
+    host, port = _split_target(result.coordinator_target)
+    if host == "host.docker.internal":
+        for spec in result.port_forwards:
+            if spec.local_port and spec.remote_port == DEFAULT_COORDINATOR_PORT:
+                return f"http://127.0.0.1:{spec.local_port}/observability/metrics"
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+        return f"http://{host}:{port}/observability/metrics"
+    return f"http://{result.node_ip}:{DEFAULT_COORDINATOR_PORT}/observability/metrics"
+
+
 def _build_env(result: DiscoveryResult) -> str:
     obs_host = result.obs_host
     lines = [
@@ -724,7 +830,7 @@ def _build_env(result: DiscoveryResult) -> str:
         f"OTEL_GRPC_PORT={os.getenv('OTEL_GRPC_PORT', str(DEFAULT_OTLP_GRPC_PORT))}",
         f"OTEL_HTTP_PORT={os.getenv('OTEL_HTTP_PORT', str(DEFAULT_OTLP_HTTP_PORT))}",
         f"CONTROLLER_PROXY_PORT={DEFAULT_CONTROLLER_PROXY_PORT}",
-        f"CONTROLLER_METRICS_URL=http://{result.coordinator_target}/observability/metrics",
+        f"CONTROLLER_METRICS_URL={_controller_metrics_url(result)}",
         f"PORT_FORWARD_COUNT={len(result.port_forwards)}",
     ]
     for idx, spec in enumerate(result.port_forwards):
