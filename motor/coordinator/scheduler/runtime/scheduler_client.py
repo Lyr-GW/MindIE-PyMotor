@@ -870,9 +870,9 @@ class AsyncSchedulerClient:
                 logger.warning("load_balance also failed, falling back to round-robin")
             else:
                 selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
-            if selected_instance is not None:
-                return self._select_endpoint_for_instance(selected_instance)
-            logger.warning("kv_cache_affinity failed, falling back to round-robin")
+                if selected_instance is not None:
+                    return self._select_endpoint_for_instance(selected_instance)
+                logger.warning("load_balance failed for role %s (not eligible for kv_cache_affinity), falling back to round-robin", role)
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
