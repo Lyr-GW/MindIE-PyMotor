@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from motor.common.logger import get_logger
+from motor.config.resolver import ConfigResolver
 
 logger = get_logger(__name__)
 
@@ -34,7 +35,6 @@ ENDPOINT = "endpoint"
 REPLAY_ENDPOINT = "replay_endpoint"
 KV_CONDUCTOR_CONFIG = "kv_conductor_config"
 HTTP_SERVER_PORT = "http_server_port"
-MODEL_CONFIG = "model_config"
 MODEL_PATH = "model_path"
 SSL_ENABLE = "ssl_enable"
 SSL_CA_CERTS = "ssl_ca_certs"
@@ -46,6 +46,9 @@ KV_CONNECTOR_EXTRA_CONFIG = "kv_connector_extra_config"
 DEPLOY_CONFIG = "deploy_config"
 P_INSTANCES_NUM = "p_instances_num"
 D_INSTANCES_NUM = "d_instances_num"
+HYBRID_INSTANCES_NUM = "hybrid_instances_num"
+SINGLE_HYBRID_INSTANCE_POD_NUM = "single_hybrid_instance_pod_num"
+HYBRID_POD_NPU_NUM = "hybrid_pod_npu_num"
 
 
 class ConfigKey(Enum):
@@ -168,9 +171,20 @@ def _update_instances_num(
     if not isinstance(deploy_config, dict):
         return
 
+    hybrid_instances = deploy_config.get(HYBRID_INSTANCES_NUM)
+    if hybrid_instances is not None:
+        updated_config[DEPLOY_CONFIG] = {
+            P_INSTANCES_NUM: hybrid_instances,
+            D_INSTANCES_NUM: hybrid_instances,
+            HYBRID_INSTANCES_NUM: hybrid_instances,
+            SINGLE_HYBRID_INSTANCE_POD_NUM: deploy_config.get(SINGLE_HYBRID_INSTANCE_POD_NUM),
+            HYBRID_POD_NPU_NUM: deploy_config.get(HYBRID_POD_NPU_NUM),
+        }
+        return
+
     updated_config[DEPLOY_CONFIG] = {
         P_INSTANCES_NUM: deploy_config.get(P_INSTANCES_NUM, 1),
-        D_INSTANCES_NUM: deploy_config.get(D_INSTANCES_NUM, 1)
+        D_INSTANCES_NUM: deploy_config.get(D_INSTANCES_NUM, 1),
     }
 
 
@@ -189,12 +203,15 @@ def _update_prefill_kv_event_config(
             logger.warning("kv_events_config is None")
             return
 
+        prefill_section = user_config_data[MOTOR_ENGINE_PREFILL_CONFIG]
+        resolver = ConfigResolver(prefill_section)
+
         updated_config[PREFILL_KV_EVENT_CONFIG] = {
             ENDPOINT: kv_events_config.get(ENDPOINT, ""),
             REPLAY_ENDPOINT: kv_events_config.get(REPLAY_ENDPOINT, ""),
             BLOCK_SIZE: prefill_engine_config.get("block-size", 128),
             HTTP_SERVER_PORT: user_config_data[KV_CONDUCTOR_CONFIG][HTTP_SERVER_PORT],
-            MODEL_PATH: user_config_data[MOTOR_ENGINE_PREFILL_CONFIG][MODEL_CONFIG][MODEL_PATH]
+            MODEL_PATH: resolver.get_model_path("")
         }
     except Exception as e:
         logger.warning("Failed to get prefill config: %s", e)

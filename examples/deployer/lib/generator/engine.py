@@ -8,23 +8,26 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import os
-
 import lib.constant as C
 from lib.utils import (
     generate_unique_id, load_yaml, write_yaml, safe_exec_cmd, logger,
-    modify_log_mount, obtain_engine_instance_total
+    modify_log_mount, obtain_engine_instance_total, obtain_engine_e_instance_total
 )
 from lib.generator import k8s_utils
 from lib.generator.k8s_utils import set_engine_base_name, modify_sp_block_num
 
 
 def update_engine_base_name(user_config):
-    engine_type = user_config.get(C.MOTOR_ENGINE_PREFILL_CONFIG, {}).get(C.ENGINE_TYPE, C.ENGINE_TYPE_MINDIE_LLM)
+    engine_section = user_config.get(C.MOTOR_ENGINE_PREFILL_CONFIG) or user_config.get(C.MOTOR_ENGINE_UNION_CONFIG, {})
+    engine_type = engine_section.get(C.ENGINE_TYPE, C.ENGINE_TYPE_MINDIE_LLM)
     if engine_type in C.SERVER_BASE_NAME_MAP:
         set_engine_base_name(C.SERVER_BASE_NAME_MAP[engine_type])
     else:
         set_engine_base_name(C.ENGINE_TYPE_MINDIE_SERVER)
+
+
+def is_hybrid_deploy(deploy_config):
+    return C.HYBRID_INSTANCES_NUM in deploy_config
 
 
 def build_engine_env_items(role, deploy_config, job_name, include_kv_pool=False):
@@ -67,14 +70,25 @@ def set_engine_metadata(deployment_data, deploy_config, index, node_type, job_na
 
 
 def set_engine_env(container, deploy_config, node_type, job_name):
-    role = C.ROLE_PREFILL if node_type == C.NODE_TYPE_P else C.ROLE_DECODE
+    if node_type == C.NODE_TYPE_U:
+        role = C.ROLE_UNION
+    else:
+        role_map = {
+            C.NODE_TYPE_E: C.ROLE_ENCODE,
+            C.NODE_TYPE_P: C.ROLE_PREFILL,
+            C.NODE_TYPE_D: C.ROLE_DECODE
+        }
+        role = role_map.get(node_type)
     if C.ENV not in container:
         container[C.ENV] = []
     container[C.ENV].extend(build_engine_env_items(role, deploy_config, job_name, include_kv_pool=True))
 
 
 def set_engine_replicas(deployment_data, deploy_config, node_type):
-    instance_pod_num_key = C.SINGER_P_INSTANCES_NUM if node_type == C.NODE_TYPE_P else C.SINGER_D_INSTANCES_NUM
+    if node_type == C.NODE_TYPE_U:
+        instance_pod_num_key = C.SINGLE_HYBRID_INSTANCE_POD_NUM
+    else:
+        instance_pod_num_key = C.SINGER_P_INSTANCES_NUM if node_type == C.NODE_TYPE_P else C.SINGER_D_INSTANCES_NUM
     if instance_pod_num_key in deploy_config:
         deployment_data[C.SPEC][C.REPLICAS] = int(deploy_config[instance_pod_num_key])
 
@@ -87,7 +101,11 @@ def set_container_npu(container, npu_num):
 
 
 def set_engine_npu(container, deploy_config, node_type):
-    if node_type == C.NODE_TYPE_P and C.P_POD_NPU_NUM in deploy_config:
+    if node_type == C.NODE_TYPE_U and C.HYBRID_POD_NPU_NUM in deploy_config:
+        npu_num = int(deploy_config[C.HYBRID_POD_NPU_NUM])
+    elif node_type == C.NODE_TYPE_E and C.E_POD_NPU_NUM in deploy_config:
+        npu_num = int(deploy_config[C.E_POD_NPU_NUM])
+    elif node_type == C.NODE_TYPE_P and C.P_POD_NPU_NUM in deploy_config:
         npu_num = int(deploy_config[C.P_POD_NPU_NUM])
     elif node_type == C.NODE_TYPE_D and C.D_POD_NPU_NUM in deploy_config:
         npu_num = int(deploy_config[C.D_POD_NPU_NUM])
@@ -101,6 +119,36 @@ def apply_node_selector_by_hardware(pod_spec, hardware_type):
         pod_spec[C.NODE_SELECTOR][C.ACCELERATOR_TYPE] = C.ACCELERATOR_TYPE_910B
     elif hardware_type == C.HARDWARE_TYPE_800I_A3:
         pod_spec[C.NODE_SELECTOR][C.ACCELERATOR_TYPE] = C.ACCELERATOR_TYPE_A3
+    elif hardware_type in C.HARDWARE_TYPE_950I_A5:
+        pod_spec[C.NODE_SELECTOR][C.ACCELERATOR_TYPE] = hardware_type
+        pod_spec[C.NODE_SELECTOR][C.ACCELERATOR] = C.ACCELERATOR_A5
+
+
+def apply_pd_heterogeneous_node_selector(pod_spec, deploy_config, node_type):
+    if deploy_config.get(C.ENABLE_PD_HETEROGENEOUS) is not True:
+        return
+    label_key = deploy_config.get(
+        C.PD_HETEROGENEOUS_LABEL_KEY, C.DEFAULT_PD_HETEROGENEOUS_LABEL_KEY
+    )
+    label_value_map = {
+        C.NODE_TYPE_P: deploy_config.get(
+            C.PD_HETEROGENEOUS_PREFILL_LABEL_VALUE, C.DEFAULT_PD_HETEROGENEOUS_PREFILL_VALUE
+        ),
+        C.NODE_TYPE_D: deploy_config.get(
+            C.PD_HETEROGENEOUS_DECODE_LABEL_VALUE, C.DEFAULT_PD_HETEROGENEOUS_DECODE_VALUE
+        ),
+    }
+    if node_type in label_value_map:
+        pod_spec[C.NODE_SELECTOR][label_key] = label_value_map[node_type]
+        logger.info(
+            f"Applied PD heterogeneous node selector: "
+            f"node_type={node_type}, {label_key}={label_value_map[node_type]}"
+        )
+    else:
+        logger.warning(
+            f"PD heterogeneous enabled but unexpected node_type={node_type}, "
+            f"expected one of {list(label_value_map.keys())}, node selector not applied"
+        )
 
 
 def set_engine_node_selector(deployment_data, deploy_config, node_type):
@@ -109,6 +157,7 @@ def set_engine_node_selector(deployment_data, deploy_config, node_type):
     pod_spec = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC]
     pod_spec[C.NODE_SELECTOR] = pod_spec.get(C.NODE_SELECTOR, {})
     apply_node_selector_by_hardware(pod_spec, hardware_type)
+    apply_pd_heterogeneous_node_selector(pod_spec, deploy_config, node_type)
 
 
 def set_weight_mount(pod_spec, container, weight_mount_path):
@@ -166,6 +215,14 @@ def modify_engine_yaml(deployment_data, user_config, index, node_type):
 
 def validate_instance_nums(user_config):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
+    if is_hybrid_deploy(deploy_config):
+        hybrid_total, _ = obtain_engine_instance_total(deploy_config)
+        if hybrid_total <= C.INSTANCE_NUM_ZERO:
+            raise ValueError(f"{C.HYBRID_INSTANCES_NUM} must be greater than {C.INSTANCE_NUM_ZERO}")
+        if hybrid_total > C.INSTANCE_NUM_MAX:
+            raise ValueError(f"{C.HYBRID_INSTANCES_NUM} must not exceed {C.INSTANCE_NUM_MAX}")
+        return
+
     p_total, d_total = obtain_engine_instance_total(deploy_config)
     if p_total <= C.INSTANCE_NUM_ZERO:
         raise ValueError(f"{C.P_INSTANCES_NUM} must be greater than {C.INSTANCE_NUM_ZERO}")
@@ -180,7 +237,26 @@ def validate_instance_nums(user_config):
 def generate_yaml_engine(input_yaml, output_file, user_config):
     logger.info(f"Generating YAML from {input_yaml} to {output_file}")
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
+    # generate yaml engine E
+    e_total = obtain_engine_e_instance_total(deploy_config)
+    for e_index in range(e_total):
+        data = load_yaml(input_yaml, True)
+        modify_engine_yaml(data, user_config, e_index, C.NODE_TYPE_E)
+        output_file_e = output_file + f"_{C.NODE_TYPE_E}{e_index}.yaml"
+        write_yaml(data, output_file_e, True)
+        k8s_utils.g_generate_yaml_list.append(output_file_e)
+  
+    # generate yaml engine P/D
     p_total, d_total = obtain_engine_instance_total(deploy_config)
+    if is_hybrid_deploy(deploy_config):
+        for u_index in range(p_total):
+            data = load_yaml(input_yaml, True)
+            modify_engine_yaml(data, user_config, u_index, C.NODE_TYPE_U)
+            output_file_u = output_file + f"_{C.NODE_TYPE_U}{u_index}.yaml"
+            write_yaml(data, output_file_u, True)
+            k8s_utils.g_generate_yaml_list.append(output_file_u)
+        return
+
     for p_index in range(p_total):
         data = load_yaml(input_yaml, True)
         modify_engine_yaml(data, user_config, p_index, C.NODE_TYPE_P)
@@ -194,28 +270,3 @@ def generate_yaml_engine(input_yaml, output_file, user_config):
         write_yaml(data, output_file_d, True)
         k8s_utils.g_generate_yaml_list.append(output_file_d)
 
-
-def elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path):
-    scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, C.NODE_TYPE_P)
-    scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, C.NODE_TYPE_D)
-    logger.info("Engine scale done.")
-
-
-def scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, node_type):
-    job_id = deploy_config[C.CONFIG_JOB_ID]
-    totals = obtain_engine_instance_total(deploy_config)
-    bases = obtain_engine_instance_total(baseline_deploy_config)
-    total = totals[0] if node_type == C.NODE_TYPE_P else totals[1]
-    base = bases[0] if node_type == C.NODE_TYPE_P else bases[1]
-    if total < base:
-        logger.info(f"Scale-in {node_type} instance, {base} -> {total}")
-        for index in reversed(range(total, base)):
-            yaml_path = os.path.join(out_deploy_yaml_path, f"{k8s_utils.g_engine_base_name}_{node_type}{index}.yaml")
-            safe_exec_cmd(f"kubectl delete -f {yaml_path} -n {job_id}")
-            if os.path.exists(yaml_path):
-                os.remove(yaml_path)
-    if total > base:
-        logger.info(f"Scale-out {node_type} instance, {base} -> {total}")
-        for index in range(base, total):
-            yaml_path = os.path.join(out_deploy_yaml_path, f"{k8s_utils.g_engine_base_name}_{node_type}{index}.yaml")
-            safe_exec_cmd(f"kubectl apply -f {yaml_path} -n {job_id}")

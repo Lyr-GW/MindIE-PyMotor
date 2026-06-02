@@ -71,23 +71,31 @@ class Daemon(ThreadSafeSingleton):
 
         return True
 
+    @staticmethod
+    def _to_engine_role(pd_role_info: PDRole) -> str:
+        if pd_role_info == PDRole.ROLE_U:
+            return "union"
+        return str(pd_role_info.value)
+
     def pull_engine(
         self,
         pd_role_info: PDRole,
         endpoints_info: list[Endpoint],
         instance_id: int,
-        master_dp_ip: str
+        master_dp_ip: str,
+        node_rank: int = 0,
     ):
         """
         start engine processes based on the provided role and endpoint information.
         engine_server parameters:
             --dp-rank engine dpGroup rank
             --engine-id
-            --role  prefill | decode | both
+            --role  prefill | decode | union
             --host engine service ip
             --port engine service port
             --mgmt-port endpoint management port
             --master-dp-ip master data parallel node IP address
+            --node-rank node rank assigned by Controller (registration order)
             --config-path engine config file path
         """
         try:
@@ -106,11 +114,12 @@ class Daemon(ThreadSafeSingleton):
                     "engine_server",
                     "--dp-rank", str(endpoint.id),
                     "--instance-id", str(instance_id),
-                    "--role", str(pd_role_info.value),
+                    "--role", self._to_engine_role(pd_role_info),
                     "--host", str(endpoint.ip),
                     "--port", str(int(endpoint.business_port)),
                     "--mgmt-port", str(int(endpoint.mgmt_port)),
                     "--master-dp-ip", master_dp_ip,
+                    "--node-rank", str(node_rank),
                     "--config-path", str(Env.user_config_path)
                 ]
                 if self.single_container_flag:
@@ -148,7 +157,7 @@ class Daemon(ThreadSafeSingleton):
         Returns:
             Comma-separated device IDs string, e.g., "0,1,2,3"
         """
-        local_world_size = self.parallel_config.tp_size * self.parallel_config.pp_size
+        local_world_size = self.parallel_config.local_world_size
         start_device_id = (index * local_world_size % device_size)
         end_device_id = start_device_id + local_world_size
         if end_device_id > device_size:

@@ -30,6 +30,8 @@ class RequestType(Enum):
 
 class ReqState(Enum):
     ARRIVE = 'Arrive'               # Request arrive
+    E_SCHEDULING = 'E_Scheduling'   # Currently scheduling E instance
+    E_ALLOCATED = 'E_Allocated'     # Allocated E instance
     P_SCHEDULING = 'P_Scheduling'   # Currently scheduling P instance
     P_ALLOCATED = 'P_Allocated'     # Allocated P instance
     PREFILL_END = 'Prefill End'     # Prefill completed
@@ -65,6 +67,7 @@ class RequestInfo(BaseModel):
     trace_obj: TraceObj = Field(default_factory=TraceObj, description="Tracing object")
     _p_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
     _d_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
+    _e_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
     prompt_tokens_details: dict = Field(default={}, description="prefill prompt_tokens_details")
 
     def __init__(self, **data):
@@ -74,7 +77,8 @@ class RequestInfo(BaseModel):
     @property
     def is_cancelled(self) -> bool:
         return (self._p_cancel_scope and self._p_cancel_scope.cancel_called) \
-            or (self._d_cancel_scope and self._d_cancel_scope.cancel_called)
+            or (self._d_cancel_scope and self._d_cancel_scope.cancel_called) \
+            or (self._e_cancel_scope and self._e_cancel_scope.cancel_called)
 
     def effective_entry_api(self) -> str:
         """Path used for client-contract checks (Chat vs Completion); falls back to ``api``."""
@@ -92,9 +96,13 @@ class RequestInfo(BaseModel):
             self._p_cancel_scope = cancel_scope
         elif role == PDRole.ROLE_D:
             self._d_cancel_scope = cancel_scope
+        elif role == PDRole.ROLE_E:
+            self._e_cancel_scope = cancel_scope
     
     def cancel_scope(self):
         if self._p_cancel_scope and not self._p_cancel_scope.cancel_called:
             self._p_cancel_scope.cancel()
         if self._d_cancel_scope and not self._d_cancel_scope.cancel_called:
             self._d_cancel_scope.cancel()
+        if self._e_cancel_scope and not self._e_cancel_scope.cancel_called:
+            self._e_cancel_scope.cancel()

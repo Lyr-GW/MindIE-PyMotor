@@ -15,7 +15,7 @@ import lib.constant as C
 from lib.utils import logger, safe_exec_cmd, load_yaml
 
 g_controller_service = "mindie-motor-controller-service"
-g_coordinator_service = "mindie-motor-coordinator-service"
+g_coordinator_service = "mindie-motor-coordinator-mgmt"
 g_kv_pool_service = "kvp-master"
 g_kv_conductor_service = "kv-conductor"
 g_kv_pool_enabled = False
@@ -67,8 +67,8 @@ def update_kv_pool_enabled_flag(user_config):
     global g_kv_pool_enabled
     g_kv_pool_enabled = False
 
-    kv_connector = user_config.get(C.MOTOR_ENGINE_PREFILL_CONFIG, {}).get(C.ENGINE_CONFIG, {})\
-        .get(C.KV_TRANSFER_CONFIG, {}).get(C.KV_CONNECTOR, "")
+    engine_section = user_config.get(C.MOTOR_ENGINE_PREFILL_CONFIG) or user_config.get(C.MOTOR_ENGINE_UNION_CONFIG, {})
+    kv_connector = engine_section.get(C.ENGINE_CONFIG, {}).get(C.KV_TRANSFER_CONFIG, {}).get(C.KV_CONNECTOR, "")
     if kv_connector == C.MULTI_CONNECTOR:
         g_kv_pool_enabled = True
 
@@ -90,7 +90,8 @@ def update_engine_type_flag(user_config):
     global g_mf_store_enabled
     g_mf_store_enabled = False
 
-    g_engine_type = user_config.get(C.MOTOR_ENGINE_PREFILL_CONFIG, {}).get("engine_type", "")
+    engine_section = user_config.get(C.MOTOR_ENGINE_PREFILL_CONFIG) or user_config.get(C.MOTOR_ENGINE_UNION_CONFIG, {})
+    g_engine_type = engine_section.get("engine_type", "")
     if g_engine_type == C.ENGINE_TYPE_SGLANG:
         g_mf_store_enabled = True
 
@@ -100,10 +101,30 @@ def get_deploy_mode_from_config(deploy_config):
     mode = deploy_config.get(C.DEPLOY_MODE_CONFIG_KEY, C.DEPLOY_MODE_INFER_SERVICE_SET)
     if mode not in C.VALID_DEPLOY_MODES:
         raise ValueError(
-            f"motor_deploy_config.{C.DEPLOY_MODE_CONFIG_KEY} must be one of {list(C.VALID_DEPLOY_MODES)}, "
-            f"got: {mode}"
+            f"motor_deploy_config.{C.DEPLOY_MODE_CONFIG_KEY} must be one of {list(C.VALID_DEPLOY_MODES)}, got: {mode}"
         )
     return mode
+
+
+def _pick_mgmt_service(docs: list[dict]):
+    """Pick the management Service (port 1026) from a list of YAML docs.
+
+    When the coordinator template defines multiple Services (infer, mgmt, obs),
+    the first Service in document order may not be the management one.
+    Select by port (1026) so the COORDINATOR_SERVICE FQDN resolves to the
+    correct ClusterIP that serves /readiness and /instances/refresh.
+    Falls back to the first Service if none exposes port 1026.
+    """
+    for doc in docs:
+        if doc.get(C.KIND) == C.SERVICE:
+            for port_entry in doc.get("spec", {}).get("ports", []):
+                if port_entry.get("port") == 1026 or port_entry.get("targetPort") == 1026:
+                    return doc
+    # Fallback: first Service (backward-compatible with single-service templates)
+    for doc in docs:
+        if doc.get(C.KIND) == C.SERVICE:
+            return doc
+    return None
 
 
 def init_service_domain_name(paths, deploy_config):
@@ -119,11 +140,7 @@ def init_service_domain_name(paths, deploy_config):
             controller_service_data = doc
             break
 
-    coordinator_service_data = None
-    for doc in coordinator_data:
-        if doc.get(C.KIND) == C.SERVICE:
-            coordinator_service_data = doc
-            break
+    coordinator_service_data = _pick_mgmt_service(coordinator_data)
 
     kv_pull_service_data = None
     for doc in kv_pool_data:
@@ -203,8 +220,11 @@ def extract_resources(data):
 
 
 def extract_rbac_resources(docs):
-    """Extract RBAC resources (ServiceAccount, ClusterRoleBinding) from YAML docs"""
-    return [doc for doc in docs if doc and doc.get(C.KIND) in (C.SERVICE_ACCOUNT, C.CLUSTER_ROLE_BINDING)]
+    """Extract RBAC resources (ServiceAccount, ClusterRole, ClusterRoleBinding) from YAML docs"""
+    return [
+        doc for doc in docs
+        if doc and doc.get(C.KIND) in (C.SERVICE_ACCOUNT, "ClusterRole", C.CLUSTER_ROLE_BINDING)
+    ]
 
 
 def set_rbac_namespace(rbac_resources, namespace):
@@ -212,7 +232,14 @@ def set_rbac_namespace(rbac_resources, namespace):
     for rbac_resource in rbac_resources:
         if rbac_resource.get(C.KIND) == C.SERVICE_ACCOUNT:
             rbac_resource[C.METADATA][C.NAMESPACE] = namespace
+        elif rbac_resource.get(C.KIND) == "ClusterRole":
+            rbac_resource[C.METADATA][C.NAME] = f"{rbac_resource[C.METADATA][C.NAME]}-{namespace}"
         elif rbac_resource.get(C.KIND) == C.CLUSTER_ROLE_BINDING:
+            rbac_resource[C.METADATA][C.NAME] = f"{rbac_resource[C.METADATA][C.NAME]}-{namespace}"
+            # Update roleRef to reference the namespace-scoped ClusterRole name
+            role_ref = rbac_resource.get("roleRef")
+            if role_ref:
+                role_ref[C.NAME] = f"{role_ref[C.NAME]}-{namespace}"
             if C.SUBJECTS in rbac_resource:
                 for subject in rbac_resource[C.SUBJECTS]:
                     if subject.get(C.KIND) == C.SERVICE_ACCOUNT:
@@ -241,10 +268,14 @@ def modify_sp_block_num(data, pd_flag, config):
         if C.ANNOTATIONS in data[C.METADATA]:
             del data[C.METADATA][C.ANNOTATIONS]
         return
-    if pd_flag == C.NODE_TYPE_D:
+    if pd_flag == C.NODE_TYPE_E:
+        sp_block_num = int(config[C.SINGER_E_INSTANCES_NUM]) * int(config[C.E_POD_NPU_NUM])
+    elif pd_flag == C.NODE_TYPE_D:
         sp_block_num = int(config[C.SINGER_D_INSTANCES_NUM]) * int(config[C.D_POD_NPU_NUM])
     elif pd_flag == C.NODE_TYPE_P:
         sp_block_num = int(config[C.SINGER_P_INSTANCES_NUM]) * int(config[C.P_POD_NPU_NUM])
+    elif pd_flag == C.NODE_TYPE_U:
+        sp_block_num = int(config[C.SINGLE_HYBRID_INSTANCE_POD_NUM]) * int(config[C.HYBRID_POD_NPU_NUM])
     else:
         return
     apply_sp_block_annotation(data[C.METADATA], sp_block_num, hardware_type)
@@ -271,16 +302,11 @@ def create_motor_config_configmap(job_id):
         f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/all_combine_in_single_container.sh "
         "--from-file=./probe/probe.sh "
         "--from-file=./probe/probe.py "
-        f"--from-file=user_config.json={g_user_config_path}"
-        + " -n " + job_id
+        f"--from-file=user_config.json={g_user_config_path}" + " -n " + job_id
     )
 
 
-def exec_all_kubectl_multi(
-    deploy_config,
-    baseline_config,
-    deploy_mode_arg=C.DEPLOY_MODE_INFER_SERVICE_SET
-):
+def exec_all_kubectl_multi(deploy_config, baseline_config, deploy_mode_arg=C.DEPLOY_MODE_INFER_SERVICE_SET):
     """Execute kubectl commands for multi-deployment or infer-service-set mode."""
     job_id = deploy_config[C.CONFIG_JOB_ID]
     out_deploy_yaml_path = C.OUTPUT_ROOT_PATH
@@ -305,14 +331,18 @@ def exec_all_kubectl_singer(deploy_config, yaml_file):
 
 
 def scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, node_type):
-    """Scale engine instances by type (p or d)."""
+    """Scale engine instances by type (p, d or u)."""
     from lib.generator.engine import obtain_engine_instance_total
-    
+
     job_id = deploy_config[C.CONFIG_JOB_ID]
     totals = obtain_engine_instance_total(deploy_config)
     bases = obtain_engine_instance_total(baseline_deploy_config)
-    total = totals[0] if node_type == C.NODE_TYPE_P else totals[1]
-    base = bases[0] if node_type == C.NODE_TYPE_P else bases[1]
+    if node_type in (C.NODE_TYPE_P, C.NODE_TYPE_U):
+        total = totals[0]
+        base = bases[0]
+    else:
+        total = totals[1]
+        base = bases[1]
     if total < base:
         logger.info(f"Scale-in {node_type} instance, {base} -> {total}")
         for index in reversed(range(total, base)):
@@ -326,11 +356,37 @@ def scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_
             yaml_path = os.path.join(out_deploy_yaml_path, f"{g_engine_base_name}_{node_type}{index}.yaml")
             safe_exec_cmd(f"kubectl apply -f {yaml_path} -n {job_id}")
 
+def scale_engine_e_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path):
+    """Scale engine instances by type (p, d or u)."""
+    from lib.generator.engine import obtain_engine_e_instance_total
+    
+    job_id = deploy_config[C.CONFIG_JOB_ID]
+    total = obtain_engine_e_instance_total(deploy_config)
+    base = obtain_engine_e_instance_total(baseline_deploy_config)
+    if total < base:
+        logger.info(f"Scale-in {C.NODE_TYPE_E} instance, {base} -> {total}")
+        for index in reversed(range(total, base)):
+            yaml_path = os.path.join(out_deploy_yaml_path, f"{g_engine_base_name}_{C.NODE_TYPE_E}{index}.yaml")
+            safe_exec_cmd(f"kubectl delete -f {yaml_path} -n {job_id}")
+            if os.path.exists(yaml_path):
+                os.remove(yaml_path)
+    if total > base:
+        logger.info(f"Scale-out {C.NODE_TYPE_E} instance, {base} -> {total}")
+        for index in range(base, total):
+            yaml_path = os.path.join(out_deploy_yaml_path, f"{g_engine_base_name}_{C.NODE_TYPE_E}{index}.yaml")
+            safe_exec_cmd(f"kubectl apply -f {yaml_path} -n {job_id}")
 
 def elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path):
     """Elastic distributed engine deployment - scale in/out engine instances."""
+    if C.HYBRID_INSTANCES_NUM in deploy_config:
+        scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, C.NODE_TYPE_U)
+        logger.info("Engine scale done.")
+        return
+
     scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, C.NODE_TYPE_P)
     scale_engine_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path, C.NODE_TYPE_D)
+    if C.E_INSTANCES_NUM in deploy_config:
+        scale_engine_e_by_type(deploy_config, baseline_deploy_config, out_deploy_yaml_path)
     logger.info("Engine scale done.")
 
 

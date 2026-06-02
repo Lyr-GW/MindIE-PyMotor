@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -10,12 +9,15 @@
 # See the Mulan PSL v2 for more details.
 
 import asyncio
+import math
 import re
 import time
 import threading
+from dataclasses import dataclass, field
 from enum import Enum
 from collections import Counter
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from motor.common.resources.instance import Instance
 from motor.common.resources import PDRole
@@ -42,27 +44,30 @@ class MetricType(Enum):
         return cls[type_string.upper()]
 
 
-class SingleMetric():
-    def __init__(self, single_metric=None):
-        if single_metric:
-            self.name: str = single_metric.name
-            self.help: str = single_metric.help
-            self.type: MetricType = single_metric.type
-            self.label: list[str] = single_metric.label
-            self.value: list[float] = [0.0] * len(single_metric.label)
-        else:
-            self.name: str = ""
-            self.help: str = ""
-            self.type: MetricType = MetricType.NONE
-            self.label: list[str] = []
-            self.value: list[float] = []
+@dataclass
+class Metric:
+    name: str = ""
+    help: str = ""
+    type: MetricType = MetricType.NONE
+    label: list[str] = field(default_factory=list)
+    value: list[float] = field(default_factory=list)
+
+    def copy(self) -> "Metric":
+        return Metric(
+            name=self.name,
+            help=self.help,
+            type=self.type,
+            label=list(self.label),
+            value=list(self.value),
+        )
 
 
 class MetricsCollector(ThreadSafeSingleton):
     METRICS_KEY = "metrics"
+    _ENGINE_LABEL_RE = re.compile(r'engine="\d+",')
 
     def __init__(self, config: CoordinatorConfig | None = None):
-        if hasattr(self, '_initialized'):
+        if hasattr(self, "_initialized"):
             return
 
         self._config_lock = threading.RLock()
@@ -72,10 +77,14 @@ class MetricsCollector(ThreadSafeSingleton):
         self._deploy_config = config.deploy_config
 
         # Initial metrics state
-        self._inactive_instance_metrics_aggregate: list[SingleMetric] = []
-        self._instance_metrics_cached: dict[int, dict[str, list[SingleMetric]]] = {}
-        self._last_metrics: str = ""
-        self._last_instance_metrics: dict[int, list[SingleMetric]] = {}
+        self._inactive_instance_metrics_aggregate: list[Metric] = []
+        self._instance_metrics_cached: dict[int, dict[str, list[Metric]]] = {}
+        self._last_collects: dict[int, dict[str, Any]] = {}
+
+        self._collects_version: int = 0
+        self._caches: dict[str, Any] = {}
+        self._cache_version: int = -1
+        self._serialize_lock = threading.Lock()
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -88,18 +97,6 @@ class MetricsCollector(ThreadSafeSingleton):
         self._initialized = True
         logger.info("MetricsCollector initialized.")
 
-    @staticmethod
-    def _get_value_str(value: float) -> str:
-        """ Transform float to str.  """
-
-        if value == float("nan"):
-            return "Nan"
-        elif value == float("inf"):
-            return "+Inf"
-        elif value == float("-inf"):
-            return "-Inf"
-        return str(value)
-
     def set_event_loop(self, loop):
         """Set the event loop for async calls from the metrics thread (call from lifespan)."""
         self._loop = loop
@@ -109,28 +106,17 @@ class MetricsCollector(ThreadSafeSingleton):
         self._scheduler_provider = get_scheduler
 
     def start(self) -> None:
-        """
-        Start update metrics thread.
-
-        :returns:
-        """
+        """Start update metrics thread."""
         if self._stop_event.is_set():
             self._stop_event.clear()
         self._metrics_update_thread = threading.Thread(
-            target=self._update_metrics_thread,
-            daemon=True,
-            name="MetricsUpdate"
+            target=self._update_metrics_thread, daemon=True, name="MetricsUpdate"
         )
         self._metrics_update_thread.start()
         logger.info("MetricsCollector started.")
 
     def stop(self) -> None:
-        """
-        Stop update metrics thread.
-
-        :returns:
-        """
-
+        """Stop update metrics thread."""
         self._stop_event.set()
         if self._metrics_update_thread and self._metrics_update_thread.is_alive():
             self._metrics_update_thread.join()
@@ -143,93 +129,282 @@ class MetricsCollector(ThreadSafeSingleton):
             self._deploy_config = config.deploy_config
         logger.info("MetricsCollector configuration updated")
 
-    def prometheus_instance_metrics_handler(self):
+    def get_metrics(
+        self,
+        metrics_type: str = "full",
+        role: str | None = None,
+    ) -> str:
         """
-        Callback of http /metrics.
+        Unified metrics retrieval with type selection.  All types return Prometheus text.
 
-        :returns:
+        :param metrics_type: "full" (default), "instance", "role", "dp", or "node"
+        :param role: when metrics_type is "role", filter to a specific role (e.g. "prefill", "decode")
+        :returns: Prometheus text
         """
-
         with self._lock:
-            instance_metrics = self._last_instance_metrics
-        return instance_metrics
+            version = self._collects_version
+            collects = self._last_collects
+        with self._serialize_lock:
+            if self._cache_version != version:
+                self._caches = {}
+                self._cache_version = version
+            if metrics_type == "instance":
+                if "instance" not in self._caches:
+                    self._caches["instance"] = self._generate_instance_metrics(collects)
+                return self._caches["instance"]
+            if metrics_type == "role":
+                if "role" not in self._caches:
+                    self._caches["role"] = self._generate_role_metrics(collects)
+                if role:
+                    return self._caches["role"].get(role, "")
+                return "\n".join(self._caches["role"].values())
+            if metrics_type == "dp":
+                if "dp" not in self._caches:
+                    self._caches["dp"] = self._generate_dp_metrics(collects)
+                return self._caches["dp"]
+            if metrics_type == "node":
+                if "node" not in self._caches:
+                    self._caches["node"] = self._generate_node_metrics(collects)
+                return self._caches["node"]
+            if "full" not in self._caches:
+                self._caches["full"] = self._generate_full_metrics(collects)
+            return self._caches["full"]
 
-    def prometheus_metrics_handler(self):
-        """
-        Callback of http /instance/metrics.
+    @classmethod
+    def _inject_labels(
+        cls,
+        metric: Metric,
+        **labels: str,
+    ) -> Metric:
+        extra = ",".join(f'{k}="{v}"' for k, v in labels.items())
+        result = metric.copy()
+        result.label = [
+            lbl.replace("{", "{" + extra + ",") if "{" in lbl else lbl + "{" + extra + "}" for lbl in metric.label
+        ]
+        return result
 
-        :returns:
-        """
+    def _generate_instance_metrics(
+        self,
+        collects: dict[int, dict[str, Any]],
+    ) -> str:
+        instance_metrics = self._aggregate_collects_by_instance(collects)
+        if not instance_metrics:
+            return ""
+        all_metrics: list[Metric] = []
+        for ins_id, metrics_list in instance_metrics.items():
+            role = collects.get(ins_id, {}).get("role", "unknown")
+            for m in metrics_list:
+                all_metrics.append(self._inject_labels(m, instance_id=str(ins_id), role=role))
+        return self._format_prometheus(all_metrics)
 
-        with self._lock:
-            metrics = self._last_metrics
-        return metrics
+    def _generate_role_metrics(
+        self,
+        collects: dict[int, dict[str, Any]],
+    ) -> dict[str, str]:
+        instance_metrics = self._aggregate_collects_by_instance(collects)
+        role_groups: dict[str, list[list[Metric]]] = {}
+        for ins_id, metrics_list in instance_metrics.items():
+            role = collects.get(ins_id, {}).get("role", "unknown")
+            role_groups.setdefault(role, []).append(metrics_list)
+
+        result: dict[str, str] = {}
+        for role, metrics_lists in role_groups.items():
+            aggregated = self._aggregate_metrics(metrics_lists)
+            if aggregated:
+                labeled = [self._inject_labels(m, role=role) for m in aggregated]
+                result[role] = self._format_prometheus(labeled)
+        return result
 
     def _update_metrics_thread(self) -> None:
-        """
-        Start update metrics thread.
-
-        :returns:
-        """
-
         while not self._stop_event.is_set():
-            metrics, instance_metrics = self._get_and_aggregate_metrics()
-            with self._lock:
-                if metrics and instance_metrics:
-                    self._last_metrics = metrics
-                    self._last_instance_metrics = instance_metrics
+            collects = self._collect_metrics()
+            if collects is not None:
+                with self._lock:
+                    self._last_collects = collects
+                    self._collects_version += 1
             with self._config_lock:
                 reuse_time = self._prometheus_metrics_config.reuse_time
             time.sleep(reuse_time)
 
-    def _get_server_metrics_single(self, ip: str, port: str) -> str:
-        """
-        Get metrics of single engine server.
+    def _collect_metrics(self) -> dict[int, dict[str, Any]] | None:
+        available_instances, unavailable_instances = self._get_available_instances()
+        self._clear_inactive_metrics(unavailable_instances)
 
-        :param ip: engine server ip
-        :param port: engine server port
-        :returns: engine server metrics. If request failed, return "".
-        """
-        return EngineServerApiClient.query_metrics(f"{ip}:{port}")
+        # Step 1: get instances/endpoints info and get all endpoints metrics text.
+        collects = self._fetch_instance_metrics(available_instances)
 
-    def _get_server_metrics_endpoints(self, ins_info: Instance) -> dict[str, dict[int, str]]:
-        """
-        Get all endpoints metrics text in single instance.
+        # Step 2: parse metrics text to format data for all instances/endpoints.
+        if not self._parse_metrics(collects):
+            logger.error("[Metrics] Parse vllm server metrics failed.")
+            return None
 
-        :param ins_info:
-        :returns: if any failed, return {}
-            for example:
-            {
-                "endpoints": {
-                    endpoint_id0: {
-                        "metrics_str": "xxx"
-                    },
-                    endpoint_id1: ...
-                }
-            }
-        """
+        return collects
 
-        collect = {
-            "endpoints": {}
-        }
-
-        for ens_info in ins_info.endpoints.values():
-            for en_info in ens_info.values():
-                metrics_str = self._get_server_metrics_single(en_info.ip, en_info.mgmt_port)
-                if not metrics_str:
-                    return {}
-                collect["endpoints"][en_info.id] = {
-                    "metrics_str": metrics_str
-                }
-
-        return collect
-
-    def _get_server_metrics(
+    def _aggregate_collects_by_instance(
         self,
-        available_instances: dict[int, Instance]
+        collects: dict[int, dict[str, Any]],
+    ) -> dict[int, list[Metric]]:
+        """Non-destructively aggregate endpoints per instance from raw collects."""
+        instance_metrics: dict[int, list[Metric]] = {}
+        for ins_id, ins_data in collects.items():
+            if not isinstance(ins_data, dict) or "endpoints" not in ins_data:
+                continue
+            aggr_input = []
+            for pod_info in ins_data["endpoints"].values():
+                if self.METRICS_KEY in pod_info:
+                    aggr_input.append(pod_info[self.METRICS_KEY])
+            if aggr_input:
+                instance_metrics[ins_id] = self._aggregate_metrics(aggr_input)
+        return instance_metrics
+
+    def _get_available_instances(self) -> tuple[dict[int, Instance], dict[int, Instance]]:
+        loop = self._loop
+        if loop is None or self._scheduler_provider is None:
+            return {}, {}
+        try:
+            future = asyncio.run_coroutine_threadsafe(self._scheduler_provider().get_all_instances(), loop)
+            return future.result(timeout=10)
+        except Exception as e:
+            logger.warning("[Metrics] get_all_instances failed: %s", e)
+            return {}, {}
+
+    def _clear_inactive_metrics(self, unavailable_pool: dict[int, Instance]) -> None:
+        # 1. get instance list to clear
+        clear_ins_list = []
+        for ins_id in unavailable_pool.keys():
+            if ins_id in self._instance_metrics_cached:
+                clear_ins_list.append(ins_id)
+
+        # 2. add clear cache data to input data
+        aggr_input = []
+        for ins_id in clear_ins_list:
+            metrics = self._instance_metrics_cached[ins_id][self.METRICS_KEY]
+            aggr_input_single = []
+            for metric in metrics:
+                aggr_input_single.append(self._copy_metric_zero_gauge(metric))
+            aggr_input.append(aggr_input_single)
+
+        # 3. add history metric to input data
+        aggr_input_single = []
+        for metric in self._inactive_instance_metrics_aggregate:
+            aggr_input_single.append(metric)
+        aggr_input.append(aggr_input_single)
+
+        # 4. excute aggregate and update history metric
+        self._inactive_instance_metrics_aggregate = self._aggregate_metrics(aggr_input)
+
+        # 5. remove ins_id from cache
+        for ins_id in clear_ins_list:
+            del self._instance_metrics_cached[ins_id]
+
+    def _parse_metrics(self, collects: dict[int, dict[str, dict[int, dict[str, str]]]]) -> bool:
+        if not isinstance(collects, dict):
+            logger.error("[Metrics] Invalid collects type, expected dict.")
+            return False
+        if not collects:
+            return True
+
+        for instance_id, inst_data in collects.items():
+            if not isinstance(inst_data, dict) or not inst_data:
+                logger.error("[Metrics] Invalid instance entry for instance %s", instance_id)
+                return False
+            pods = inst_data.get("endpoints")
+            if not pods:
+                logger.error("[Metrics] Missing 'endpoints' in instance %s", instance_id)
+                return False
+
+            for pod_info in pods.values():
+                metrics_str = pod_info.get("metrics_str")
+                if not metrics_str:
+                    logger.error("[Metrics] Missing 'metrics_str' for endpoint in instance %s", instance_id)
+                    return False
+                parsed_metric = self._parse_metric_text(metrics_str)
+                if not parsed_metric:
+                    logger.error("[Metrics] Parse metric text failed for instance %s", instance_id)
+                    return False
+                pod_info[self.METRICS_KEY] = parsed_metric
+        return True
+
+    def _parse_metric_text(self, metrics_str: str) -> list[Metric]:
+        lines = [ln for ln in metrics_str.strip().split("\n") if ln]
+        if not lines:
+            return []
+
+        metric_array: list[Metric] = []
+        i, n = 0, len(lines)
+        while i < n:
+            metric = Metric()
+            if not self._parse_metric_help(metric, lines[i]):
+                return []
+            i += 1
+            if i >= n or not self._parse_metric_type(metric, lines[i]):
+                return []
+            i += 1
+            while i < n and not lines[i].startswith("#"):
+                if not self._parse_metric_body_block(metric, lines[i]):
+                    return []
+                i += 1
+            metric_array.append(metric)
+        return metric_array
+
+    @staticmethod
+    def _parse_metric_help(
+        metric: Metric,
+        line: str,
+    ) -> bool:
+        parts = line.split()
+        if len(parts) >= 4 and parts[0] == "#" and parts[1] == "HELP":
+            metric.name = parts[2]
+            metric.help = " ".join(parts[3:])
+            return True
+        logger.error("[Metrics] Parse metric help failed.")
+        return False
+
+    @staticmethod
+    def _parse_metric_type(
+        metric: Metric,
+        line: str,
+    ) -> bool:
+        parts = line.split()
+        if len(parts) == 4 and parts[0] == "#" and parts[1] == "TYPE":
+            try:
+                metric.type = MetricType.from_string(parts[3])
+                return True
+            except KeyError:
+                logger.error("[Metrics] Illegal metric type: %s", parts[3])
+                return False
+        logger.error("[Metrics] Parse metric type failed.")
+        return False
+
+    @classmethod
+    def _parse_metric_body_block(
+        cls,
+        metric: Metric,
+        line: str,
+    ) -> bool:
+        parts = line.split()
+        if len(parts) != 2:
+            logger.error("[Metrics] Parse metric body failed.")
+            return False
+
+        label = cls._ENGINE_LABEL_RE.sub("", parts[0])
+        metric.label.append(label)
+        try:
+            value = float(parts[1])
+            if value < 0:
+                logger.error("[Metrics] Illegal metric value: %s", parts[1])
+                return False
+            metric.value.append(value)
+        except ValueError:
+            logger.error("[Metrics] Illegal metric value: %s", parts[1])
+            return False
+        return True
+
+    def _fetch_instance_metrics(
+        self,
+        available_instances: dict[int, Instance],
     ) -> dict[int, dict[str, dict[int, str]]]:
-        """
-        Get instances/endpoints info and get all endpoints metrics text.
+        """Get instances/endpoints info and get all endpoints metrics text.
 
         :param available_instances: alive instances
         :returns:
@@ -246,288 +421,48 @@ class MetricsCollector(ThreadSafeSingleton):
                 instance_id1: ...
             }
         """
-
         collects = {}
         for ins_info in available_instances.values():
-            collect = self._get_server_metrics_endpoints(ins_info)
+            collect = self._fetch_endpoint_metrics(ins_info)
             if collect:
+                collect["role"] = ins_info.role
                 collects[ins_info.id] = collect
 
         return collects
 
-    def _parse_metric_help(self, single_metric: SingleMetric, line: str) -> bool:
-        """
-        Parse help line.
+    def _fetch_endpoint_metrics(self, ins_info: Instance) -> dict[str, dict[int, str]]:
+        """Get all endpoints metrics text in single instance.
 
-        :param single_metric:
-        :param line: format: "# HELP <name> <help description>"
-        :returns: if success, update single_metric and return True, else return False
-        """
-
-        parts = line.split()
-        sharp_index = 0
-        help_mark_index = 1
-        name_index = 2
-        help_desc_index = 3
-        if len(parts) >= help_desc_index + 1 and parts[sharp_index] == "#" and parts[help_mark_index] == "HELP":
-            single_metric.name = parts[name_index]
-            single_metric.help = " ".join(parts[help_desc_index:])
-            return True
-        else:
-            logger.error("[Metrics] Parse metric help failed.")
-            return False
-
-    def _parse_metric_type(self, single_metric: SingleMetric, line: str) -> bool:
-        """
-        Parse type line.
-
-        :param single_metric:
-        :param line: format: "# TYPE <name> <gauge|counter|histogram|summary>"
-        :returns: if success, update single_metric and return True, else return False
-        """
-
-        parts = line.split()
-        sharp_index = 0
-        type_mark_index = 1
-        type_index = 3
-        if len(parts) == type_index + 1 and parts[sharp_index] == "#" and parts[type_mark_index] == "TYPE":
-            try:
-                single_metric.type = MetricType.from_string(parts[3])
-            except KeyError:
-                logger.error("[Metrics] Illegal metric type: %s", parts[3])
-                return False
-            return True
-        else:
-            logger.error("[Metrics] Parse metric type failed.")
-            return False
-
-    def _parse_metric_body_block(self, single_metric: SingleMetric, line: str) -> bool:
-        """
-        Parse label and value line.
-
-        :param single_metric:
-        :param line: format: "<label> <value>"
-        :returns: if success, update single_metric and return True, else return False
-        """
-
-        parts = line.split()
-        label_index = 0
-        value_index = 1
-
-        if len(parts) != value_index + 1:
-            logger.error("[Metrics] Parse metric body failed.")
-            return False
-
-        # Remove sub label engine if exist
-        label = re.sub(r'engine="\d+",', '', parts[label_index])
-        single_metric.label.append(label)
-        try:
-            value = float(parts[value_index])
-            if value < 0:
-                logger.error("[Metrics] Illegal metric value: %s", parts[value_index])
-                return False
-            single_metric.value.append(value)
-        except ValueError:
-            logger.error("[Metrics] Illegal metric value: %s", parts[value_index])
-            return False
-        return True
-
-    def _parse_metric_text(self, metrics_str) -> list[SingleMetric]:
-        """
-        Parse metrics from text to format data.
-
-        :param metrics_str:
-            metrics_str format:
-                # HELP <name> <help description>
-                # TYPE <name> <gauge|counter|histogram|summary>
-                <label0> <value0>
-                <label1> <value1>
-                ...
-                <labeln> <valuen>
-                # HELP ...
-                # TYPE ...
-                ...
-        :returns: If success, return a list of SingleMetric, else return []
-            SingleMetric format:
-                name = <name>
-                help = <help description>
-                type = <gauge|counter|histogram|summary>
-                label = [label0, label1, ..., labeln]
-                value = [value0, value1, ..., valuen]
-        """
-
-        metric_array = []
-        lines = metrics_str.strip().split("\n")
-        i = 0
-        while i < len(lines):
-            single_metric = SingleMetric()
-            if i < len(lines) and not self._parse_metric_help(single_metric, lines[i]):
-                return []
-            i += 1
-            if i < len(lines) and not self._parse_metric_type(single_metric, lines[i]):
-                return []
-            i += 1
-            while i < len(lines) and lines[i][0] != "#":
-                if not self._parse_metric_body_block(single_metric, lines[i]):
-                    return []
-                i += 1
-            metric_array.append(single_metric)
-        return metric_array
-
-    def _parse_metrics(
-        self,
-        collects: dict[int, dict[str, dict[int, dict[str, str]]]]
-    ) -> bool:
-        """
-        Parse metrics text to format data for all instances/endpoints.
-
-        :param collects:
-            collects before call:
+        :param ins_info:
+        :returns: if any failed, return {}
+            for example:
             {
-                instance_id0: {
-                    "endpoints": {
-                        endpoint_id0: {
-                            "metrics_str": "xxx"
-                        },
-                        endpoint_id1: ...
-                    }
-                },
-                instance_id1: ...
+                "endpoints": {
+                    endpoint_id0: {
+                        "metrics_str": "xxx"
+                    },
+                    endpoint_id1: ...
+                }
             }
-            collects after call:
-            {
-                instance_id0: {
-                    "endpoints": {
-                        endpoint_id0: {
-                            "metrics": metrics_value # the type of metrics_value: list[SingleMetric]
-                        },
-                        endpoint_id1: ...
-                    }
-                },
-                instance_id1: ...
-            }
-        :returns: if success, replace "metrics_str" by "metrics" and return True, else return False
         """
+        collect = {"endpoints": {}}
 
-        if not isinstance(collects, dict):
-            logger.error("[Metrics] Invalid pods metric JSON file.")
-            return False
+        for ens_info in ins_info.endpoints.values():
+            for en_info in ens_info.values():
+                metrics_str = EngineServerApiClient.query_metrics(f"{en_info.ip}:{en_info.mgmt_port}")
+                if not metrics_str:
+                    return {}
+                collect["endpoints"][en_info.id] = {
+                    "metrics_str": metrics_str,
+                    "pod_ip": en_info.ip,
+                }
 
-        if not collects:
-            return True
-
-        for instance_id in collects.keys():
-            if (
-                not isinstance(collects[instance_id], dict)
-                or not collects[instance_id]
-                or "endpoints" not in collects[instance_id]
-            ):
-                logger.error("[Metrics] Invalid pods metric JSON file.")
-                return False
-
-            pods = collects[instance_id]["endpoints"]
-            for pod_info in pods.values():
-                if "metrics_str" not in pod_info:
-                    logger.error("[Metrics] Invalid 'metrics_str' in pod metrics JSON file.")
-                    return False
-                parsed_metric = self._parse_metric_text(pod_info["metrics_str"])
-                if not parsed_metric:
-                    logger.error("[Metrics] Parse metric text failed.")
-                    return False
-                pod_info[self.METRICS_KEY] = parsed_metric
-        return True
-
-    def _aggregate_labels_by_sum(self, metric_list: list[SingleMetric]) -> dict[str, float]:
-        """
-        Aggregate all labels by sum.
-
-        :param metric_list:
-        :returns:
-        """
-        aggregate = {}
-        for metric in metric_list:
-            for i, label in enumerate(metric.label):
-                if label not in aggregate:
-                    aggregate[label] = 0.0
-                aggregate[label] += metric.value[i]
-        return aggregate
-
-    def _aggregate_labels_by_mean(self, metric_list: list[SingleMetric]) -> dict[str, float]:
-        """
-        Aggregate all labels by mean.
-
-        :param metric_list:
-        :returns:
-        """
-        aggregate = self._aggregate_labels_by_sum(metric_list)
-        for label in aggregate:
-            aggregate[label] /= len(metric_list)
-        return aggregate
-
-    def _aggregate_metric_common(self, metric_list: list[SingleMetric]) -> SingleMetric:
-        """
-        Aggregate single metric using different rule according metric name.
-
-        :param metric_list: the same metric from different pods or instances
-        :returns:
-        """
-
-        # vllm:kv_cache_usage_perc use mean rule, other use sum rule
-        if metric_list[0].name == "vllm:kv_cache_usage_perc":
-            aggregate = self._aggregate_labels_by_mean(metric_list)
-        else:
-            aggregate = self._aggregate_labels_by_sum(metric_list)
-
-        metric_aggregate = SingleMetric()
-        metric_aggregate.name = metric_list[0].name
-        metric_aggregate.help = metric_list[0].help
-        metric_aggregate.type = metric_list[0].type
-        metric_aggregate.label = []
-        metric_aggregate.value = []
-        for label, value in aggregate.items():
-            metric_aggregate.label.append(label)
-            metric_aggregate.value.append(value)
-        return metric_aggregate
-
-    def _aggregate_metrics_common(self, metrics_list: list[list[SingleMetric]]) -> list[SingleMetric]:
-        """
-        Aggregate metrics using different rule according metric name.
-
-        :param metrics_list:
-        :returns:
-        """
-
-        # 1. find longest metrics as aggregate format
-        max_index = 0
-        max_length = len(metrics_list[max_index])
-        for i, metrics in enumerate(metrics_list):
-            if len(metrics) > max_length:
-                max_index = i
-                max_length = len(metrics)
-
-        # 2. insert metric.name sequence by sequence
-        aggr_input = {}
-        for metric in metrics_list[max_index]:
-            aggr_input[metric.name] = []
-
-        # 3. prepare input metric data to be aggregated
-        for metrics in metrics_list:
-            for metric in metrics:
-                aggr_input[metric.name].append(metric)
-
-        # 4. aggregate all metrics
-        metrics_aggregate = []
-        for value in aggr_input.values():
-            metrics_aggregate.append(self._aggregate_metric_common(value))
-
-        return metrics_aggregate
+        return collect
 
     def _aggregate_metrics_by_instance(
-        self,
-        collects: dict[int, dict[str, dict[int, dict[str, list[SingleMetric]]]]]
+        self, collects: dict[int, dict[str, dict[int, dict[str, list[Metric]]]]]
     ) -> None:
-        """
-        For each instance, aggreagte metrics of all endpoints.
+        """For each instance, aggreagte metrics of all endpoints.
 
         :param collects:
             collects before call:
@@ -535,7 +470,7 @@ class MetricsCollector(ThreadSafeSingleton):
                 instance_id0: {
                     "endpoints": {
                         endpoint_id0: {
-                            "metrics": metrics_value # the type of metrics_value: list[SingleMetric]
+                            "metrics": metrics_value # the type of metrics_value: list[Metric]
                         },
                         endpoint_id1: ...
                     }
@@ -545,13 +480,11 @@ class MetricsCollector(ThreadSafeSingleton):
             collects after call:
             {
                 instance_id0: {
-                    "metrics": metrics_value # the type of metrics_value: list[SingleMetric]
+                    "metrics": metrics_value # the type of metrics_value: list[Metric]
                 },
                 instance_id1: ...
             }
-        :returns:
         """
-
         for instance_id in collects.keys():
             endpoints = collects[instance_id]["endpoints"]
             if not endpoints:
@@ -560,18 +493,14 @@ class MetricsCollector(ThreadSafeSingleton):
             aggr_input = []
             for pod in endpoints.values():
                 aggr_input.append(pod[self.METRICS_KEY])
-            collects[instance_id][self.METRICS_KEY] = self._aggregate_metrics_common(aggr_input)
+            collects[instance_id][self.METRICS_KEY] = self._aggregate_metrics(aggr_input)
             del collects[instance_id]["endpoints"]
 
             # update cache
-            self._instance_metrics_cached[instance_id] = {
-                self.METRICS_KEY: collects[instance_id][self.METRICS_KEY]
-            }
+            self._instance_metrics_cached[instance_id] = {self.METRICS_KEY: collects[instance_id][self.METRICS_KEY]}
 
-    def _aggregate_metrics_all_instance(
-        self, collects: dict[int, dict[str, list[SingleMetric]]]
-    ) -> list[SingleMetric]:
-        """ Aggreagte metrics of all instances.  """
+    def _aggregate_metrics_all_instance(self, collects: dict[int, dict[str, list[Metric]]]) -> list[Metric]:
+        """Aggreagte metrics of all instances."""
 
         if not self._instance_metrics_cached:
             return []
@@ -581,12 +510,7 @@ class MetricsCollector(ThreadSafeSingleton):
         for ins_id, ins_info in self._instance_metrics_cached.items():
             aggr_input_single = []
             for metric in ins_info[self.METRICS_KEY]:
-                # gauge type only aggregate active instances
-                if metric.type == MetricType.GAUGE and ins_id not in collects:
-                    new_metric = SingleMetric(metric)
-                    aggr_input_single.append(new_metric)
-                else:
-                    aggr_input_single.append(metric)
+                aggr_input_single.append(self._copy_metric_zero_gauge(metric) if ins_id not in collects else metric)
             aggr_input.append(aggr_input_single)
 
         # 2. add history metric to input data
@@ -596,138 +520,196 @@ class MetricsCollector(ThreadSafeSingleton):
         aggr_input.append(aggr_input_single)
 
         # 3. excute aggregate
-        aggregate = self._aggregate_metrics_common(aggr_input)
+        aggregate = self._aggregate_metrics(aggr_input)
 
         return aggregate
 
-    def _get_serialize_metrics(self, aggregate: list[SingleMetric]) -> str:
-        """ Metrics serialize.  """
+    @staticmethod
+    def _copy_metric_zero_gauge(metric: Metric) -> Metric:
+        """Copy metric; if gauge, zero out values (inactive instances contribute 0)."""
+        if metric.type != MetricType.GAUGE:
+            return metric
+        zeroed = metric.copy()
+        zeroed.value = [0.0] * len(zeroed.value)
+        return zeroed
 
+    def _aggregate_labels_by_sum(self, metric_list: list[Metric]) -> dict[str, float]:
+        """Aggregate all labels by sum."""
+        aggregate = {}
+        for metric in metric_list:
+            for i, label in enumerate(metric.label):
+                if label not in aggregate:
+                    aggregate[label] = 0.0
+                aggregate[label] += metric.value[i]
+        return aggregate
+
+    def _aggregate_labels_by_mean(self, metric_list: list[Metric]) -> dict[str, float]:
+        """Aggregate all labels by mean."""
+        aggregate = self._aggregate_labels_by_sum(metric_list)
+        for label in aggregate:
+            aggregate[label] /= len(metric_list)
+        return aggregate
+
+    def _aggregate_metrics(self, metrics_list: list[list[Metric]]) -> list[Metric]:
+        template = max(metrics_list, key=len)
+        aggr_input: dict[str, list[Metric]] = {m.name: [] for m in template}
+        for metrics in metrics_list:
+            for metric in metrics:
+                aggr_input[metric.name].append(metric)
+        return [self._aggregate_single_metric(v) for v in aggr_input.values()]
+
+    def _aggregate_single_metric(self, metric_list: list[Metric]) -> Metric:
+        first = metric_list[0]
+        agg_fn = (
+            self._aggregate_labels_by_mean
+            if first.name == "vllm:kv_cache_usage_perc"
+            else self._aggregate_labels_by_sum
+        )
+        aggregate = agg_fn(metric_list)
+        return Metric(
+            name=first.name,
+            help=first.help,
+            type=first.type,
+            label=list(aggregate.keys()),
+            value=list(aggregate.values()),
+        )
+
+    def _append_coordinator_metrics(
+        self,
+        aggregate: list[Metric],
+        collects: dict[int, dict[str, Any]],
+    ) -> None:
+        role_counts = Counter(ins_data.get("role", "") for ins_data in collects.values())
+        available_p = role_counts.get(PDRole.ROLE_P, 0)
+        available_d = role_counts.get(PDRole.ROLE_D, 0)
+        with self._config_lock:
+            p_num = self._deploy_config.p_instances_num
+            d_num = self._deploy_config.d_instances_num
+
+        def _new(name: str, num: int) -> Metric:
+            return Metric(
+                name=name,
+                help="Number of instances",
+                type=MetricType.GAUGE,
+                label=[name],
+                value=[num],
+            )
+
+        aggregate.append(_new("motor_active_prefill_workers", available_p))
+        aggregate.append(_new("motor_active_decode_workers", available_d))
+        aggregate.append(_new("motor_inactive_prefill_workers", p_num - available_p))
+        aggregate.append(_new("motor_inactive_decode_workers", d_num - available_d))
+
+    def _generate_full_metrics(
+        self,
+        collects: dict[int, dict[str, Any]],
+    ) -> str:
+        instance_metrics = self._aggregate_collects_by_instance(collects)
+        if not instance_metrics:
+            return ""
+        aggregate = self._aggregate_metrics(list(instance_metrics.values()))
+        self._append_coordinator_metrics(aggregate, collects)
+        return self._format_prometheus(aggregate)
+
+    def _format_prometheus(self, aggregate: list[Metric]) -> str:
         lines = []
         for item in aggregate:
             lines.append("# HELP {} {}".format(item.name, item.help))
             lines.append("# TYPE {} {}".format(item.name, item.type))
-            for i, lable_name in enumerate(item.label):
-                lines.append("{} {}".format(lable_name, self._get_value_str(item.value[i])))
+            for i, label in enumerate(item.label):
+                v = item.value[i]
+                if math.isnan(v):
+                    vs = "Nan"
+                elif v == float("inf"):
+                    vs = "+Inf"
+                elif v == float("-inf"):
+                    vs = "-Inf"
+                else:
+                    vs = str(v)
+                lines.append("{} {}".format(label, vs))
         return "\n".join(lines)
 
-    def _get_serialize_instance_metrics(
-        self,
-        collects: dict[int, dict[str, list[SingleMetric]]]
-    ) -> dict[int, list[SingleMetric]]:
-        """ Instance metrics serialize.  """
+    @staticmethod
+    def _prepend_dim_labels(
+        label_str: str,
+        dim_labels: str,
+    ) -> str:
+        if "{" not in label_str:
+            return f"{label_str}{{{dim_labels}}}"
+        name_part, rest = label_str.split("{", 1)
+        if rest == "}":
+            return f"{name_part}{{{dim_labels}}}"
+        return f"{name_part}{{{dim_labels},{rest}"
 
-        instance_metrics = {}
-        for ins_id in collects.keys():
-            instance_metrics[ins_id] = self._instance_metrics_cached[ins_id][self.METRICS_KEY]
+    @staticmethod
+    def _metric_value_str(value: float) -> str:
+        if math.isnan(value):
+            return "Nan"
+        if value == float("inf"):
+            return "+Inf"
+        if value == float("-inf"):
+            return "-Inf"
+        return str(value)
 
-        return instance_metrics
+    @staticmethod
+    def _emit_metric_groups(name_to_meta: dict[str, dict[str, Any]]) -> str:
+        out_lines: list[str] = []
+        for name in sorted(name_to_meta.keys()):
+            meta = name_to_meta[name]
+            out_lines.append(f"# HELP {name} {meta['help']}")
+            out_lines.append(f"# TYPE {name} {meta['type']}")
+            meta["lines"].sort(key=lambda kv: (kv[0], kv[1]))
+            out_lines.extend(line for _, line in meta["lines"])
+        return "\n".join(out_lines)
 
-    def _clear_inactive_metrics(self, unavailable_pool: dict[int, Instance]) -> None:
-        # 1. get instance list to clear
-        clear_ins_list = []
-        for ins_id in unavailable_pool.keys():
-            if ins_id in self._instance_metrics_cached:
-                clear_ins_list.append(ins_id)
-
-        # 2. add clear cache data to input data
-        aggr_input = []
-        for ins_id in clear_ins_list:
-            metrics = self._instance_metrics_cached[ins_id][self.METRICS_KEY]
-            aggr_input_single = []
-            for metric in metrics:
-                # gauge type only aggregate active instances
-                if metric.type == MetricType.GAUGE:
-                    new_metric = SingleMetric(metric)
-                    aggr_input_single.append(new_metric)
-                else:
-                    aggr_input_single.append(metric)
-            aggr_input.append(aggr_input_single)
-
-        # 3. add history metric to input data
-        aggr_input_single = []
-        for metric in self._inactive_instance_metrics_aggregate:
-            aggr_input_single.append(metric)
-        aggr_input.append(aggr_input_single)
-
-        # 4. excute aggregate and update history metric
-        self._inactive_instance_metrics_aggregate = self._aggregate_metrics_common(aggr_input)
-
-        # 5. remove ins_id from cache
-        for ins_id in clear_ins_list:
-            del self._instance_metrics_cached[ins_id]
-
-    def _get_instances_metrics(self, 
-                               name: str,
-                               num: int
-    ) -> SingleMetric:
-        single_metric = SingleMetric()
-        single_metric.name = name
-        single_metric.help = "Number of instances"
-        single_metric.type = MetricType.GAUGE
-        single_metric.label = [name]
-        single_metric.value = [num]
-        return single_metric
-
-    def _add_coordinator_metrics(self, 
-                                 aggregate: list[SingleMetric],
-                                 available_instances: dict[int, Instance]
-    ) -> None:
-        available_role_counts = Counter(instance.role for instance in available_instances.values())
-        available_p = available_role_counts.get(PDRole.ROLE_P, 0)
-        available_d = available_role_counts.get(PDRole.ROLE_D, 0)
-
-        p_num = self._deploy_config.p_instances_num
-        d_num = self._deploy_config.d_instances_num
-        unavailable_p = p_num - available_p
-        unavailable_d = d_num - available_d
-
-        aggregate.append(self._get_instances_metrics("motor_active_prefill_workers", available_p))
-        aggregate.append(self._get_instances_metrics("motor_active_decode_workers", available_d))
-        aggregate.append(self._get_instances_metrics("motor_inactive_prefill_workers", unavailable_p))
-        aggregate.append(self._get_instances_metrics("motor_inactive_decode_workers", unavailable_d))
-        return
-
-    def _get_and_aggregate_metrics(self) -> tuple[str, dict[str, list[SingleMetric]]]:
-        """ Get and Aggregate metrics.  """
-
-        # Step 0: get instances (same view as scheduling when _scheduler_provider is set)
-        loop = getattr(self, '_loop', None)
-        if loop is None:
-            available_instances, unavailable_instances = {}, {}
-        else:
-            try:
-                get_scheduler = getattr(self, '_scheduler_provider', None)
-                if get_scheduler is None:
-                    logger.warning("[Metrics] scheduler_provider not set, skipping instance metrics")
-                    available_instances, unavailable_instances = {}, {}
-                else:
-                    scheduler = get_scheduler()
-                    future = asyncio.run_coroutine_threadsafe(
-                        scheduler.get_all_instances(), loop
+    def _generate_dp_metrics(self, collects: dict[int, dict[str, Any]]) -> str:
+        name_to_meta: dict[str, dict[str, Any]] = {}
+        for instance_id, ins_collect in collects.items():
+            if not isinstance(ins_collect, dict) or "endpoints" not in ins_collect:
+                continue
+            role = ins_collect.get("role", "")
+            for ep_id, pod_info in ins_collect["endpoints"].items():
+                if self.METRICS_KEY not in pod_info:
+                    continue
+                pod_ip = pod_info.get("pod_ip", "")
+                dim_labels = f'dp_rank="{ep_id}",role="{role}",instance_id="{instance_id}",pod_ip="{pod_ip}"'
+                for metric in pod_info[self.METRICS_KEY]:
+                    meta = name_to_meta.setdefault(
+                        metric.name,
+                        {"help": metric.help, "type": metric.type, "lines": []},
                     )
-                    available_instances, unavailable_instances = future.result(timeout=10)
-            except Exception as e:
-                logger.warning("[Metrics] get_all_instances failed: %s", e)
-                available_instances, unavailable_instances = {}, {}
-        self._clear_inactive_metrics(unavailable_instances)
+                    for i, label_str in enumerate(metric.label):
+                        new_label = self._prepend_dim_labels(label_str, dim_labels)
+                        meta["lines"].append(
+                            ((instance_id, ep_id), f"{new_label} {self._metric_value_str(metric.value[i])}")
+                        )
+        return self._emit_metric_groups(name_to_meta)
 
-        # Step 1: get instances/endpoints info and get all endpoints metrics text.
-        collects = self._get_server_metrics(available_instances)
-
-        # Step 2: parse metrics text to format data for all instances/endpoints.
-        if not self._parse_metrics(collects):
-            logger.error("[Metrics] Parse vllm server metrics failed.")
-            return "", {}
-
-        # Step 3: for each instance, aggreagte metrics of all endpoints.
-        self._aggregate_metrics_by_instance(collects)
-
-        # Step 4: aggreagte metrics of all instances.
-        aggregate = self._aggregate_metrics_all_instance(collects)
-
-        # Step 5: add coordinator metrics
-        self._add_coordinator_metrics(aggregate, available_instances)
-
-        # Step 6: serialize and return to handler.
-        return self._get_serialize_metrics(aggregate), self._get_serialize_instance_metrics(collects)
+    def _generate_node_metrics(self, collects: dict[int, dict[str, Any]]) -> str:
+        key_to_lists: dict[tuple[str, str], list[list[Metric]]] = {}
+        for ins_collect in collects.values():
+            if not isinstance(ins_collect, dict) or "endpoints" not in ins_collect:
+                continue
+            role = ins_collect.get("role", "")
+            for pod_info in ins_collect["endpoints"].values():
+                if self.METRICS_KEY not in pod_info:
+                    continue
+                pod_ip = pod_info.get("pod_ip", "")
+                if not pod_ip:
+                    continue
+                key_to_lists.setdefault((pod_ip, role), []).append(pod_info[self.METRICS_KEY])
+        pod_aggregates = {
+            key: self._aggregate_metrics(metrics_lists) for key, metrics_lists in key_to_lists.items() if metrics_lists
+        }
+        name_to_meta: dict[str, dict[str, Any]] = {}
+        for (pod_ip, role), aggregate in pod_aggregates.items():
+            dim_labels = f'pod_ip="{pod_ip}",role="{role}"'
+            for metric in aggregate:
+                meta = name_to_meta.setdefault(
+                    metric.name,
+                    {"help": metric.help, "type": metric.type, "lines": []},
+                )
+                for i, label_str in enumerate(metric.label):
+                    new_label = self._prepend_dim_labels(label_str, dim_labels)
+                    meta["lines"].append(((pod_ip, role), f"{new_label} {self._metric_value_str(metric.value[i])}"))
+        return self._emit_metric_groups(name_to_meta)
