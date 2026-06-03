@@ -37,7 +37,7 @@ PR202 在 `examples/features/observability/stack/` 提供：
 - [ ] 显式 `MOTOR_NAMESPACE` 时，kubectl 不可达应报错而非静默 fallback
 - [ ] `vllm-p0` / `vllm-d0` 等 Pod 能被识别为 engine target
 - [ ] Docker runtime 下 Coordinator / Engine PodIP 生成 `PORT_FORWARD_*` 与 `host.docker.internal` target
-- [ ] `docker compose up` 默认不 build Grafana（`OBS_COMPOSE_BUILD=1` 可显式开启）
+- [ ] `docker compose up` 默认 `--pull missing`（本地有镜像不拉）、不 build Grafana（`OBS_COMPOSE_BUILD=1` 可显式开启）
 - [ ] Grafana 容器 `HTTP_PROXY` 为空，`NO_PROXY` 含 `prometheus,tempo`
 - [ ] 运行时产物（`generated/`、`.env`）未提交
 

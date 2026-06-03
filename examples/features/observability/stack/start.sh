@@ -151,7 +151,10 @@ ensure_compose_images() {
 
 ensure_compose_images
 
-COMPOSE_UP_ARGS=(up -d --pull never)
+# missing: 本地已有镜像则不拉，缺失时才 pull（与 docker-compose pull_policy: if_not_present 一致）
+# 可覆盖：OBS_COMPOSE_PULL=never|always|missing
+COMPOSE_PULL="${OBS_COMPOSE_PULL:-missing}"
+COMPOSE_UP_ARGS=(up -d --pull "${COMPOSE_PULL}")
 if [[ "${OBS_COMPOSE_BUILD:-0}" == "1" ]]; then
   COMPOSE_UP_ARGS+=(--build)
 else
