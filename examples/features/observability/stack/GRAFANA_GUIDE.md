@@ -196,18 +196,22 @@ pyMotor 建议配置（`<obs-host>` 为观测主机，参考 `config/tracing.exa
 
 ### 5.2 Profiling
 
+需在 Engine 侧安装 [`ms_service_metric`](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)（`pip install ms_service_metric`；依赖 Python >= 3.10、pyyaml、prometheus-client、posix_ipc）。详细步骤见 [SERVICE_GUIDE.md §1.4.2](SERVICE_GUIDE.md)。
+
 Engine 启动前：
 
 ```bash
-export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics
-mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
+export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
+# 可选：rm -rf $PROMETHEUS_MULTIPROC_DIR/*
 ```
 
 Engine ready 后开启指标采集：
 
 ```bash
-ms-service-metric on
-ms-service-metric status
+ms-service-metric on      # 开启
+ms-service-metric off     # 关闭
+ms-service-metric restart # 重启（重新加载配置）
+ms-service-metric status  # 查看状态
 ```
 
 随后 `vllm_profiling_*` 指标会被 Prometheus 抓取，「引擎性能剖析」看板即可显示数据。

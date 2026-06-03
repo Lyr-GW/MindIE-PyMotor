@@ -79,20 +79,54 @@ cp -n .env.example .env   # launch.sh 在无 .env 时也会自动从 .env.exampl
 
 #### 1.4.2 Profiling 接入（让「引擎性能剖析」看板有数据）
 
-「引擎性能剖析」看板依赖 `ms_service_metric` 暴露的 `vllm_profiling_*` 指标，需在 **Engine 侧**：
+「引擎性能剖析」看板依赖 `ms_service_metric` 暴露的 `vllm_profiling_*` 指标，需在 **Engine 侧** 安装并开启采集。完整说明见上游文档：[ms_service_metric · Ascend/msserviceprofiler](https://gitcode.com/Ascend/msserviceprofiler/tree/master/ms_service_metric)。
 
-1. 安装 `ms_service_metric`（随 MindIE / 引擎环境提供）。
-2. Engine 启动**前**设置多进程指标目录：
+**安装**
+
+```bash
+pip install ms_service_metric
+```
+
+**依赖**
+
+- Python >= 3.10
+- pyyaml
+- prometheus-client
+- posix_ipc（Linux 平台）
+
+**快速开始**
+
+1. **vLLM 集成**
+
+   vLLM 通过 `entry_points` 机制自动适配，无需额外代码：
+
+   - 安装 `ms_service_metric`
+   - Engine 启动**前**设置多进程 metric 采集环境变量：
+
+     ```bash
+     # 开启 vLLM 多进程 metric 采集环境变量
+     export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
+
+     # 可选，清理上次的指标文件
+     # rm -rf $PROMETHEUS_MULTIPROC_DIR/*
+
+     # 启动 vLLM / Engine
+     # vllm serve --model your_model
+     ```
+
+2. **控制指标采集**（Engine ready **后**执行）
 
    ```bash
-   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics
-   mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
-   ```
-
-3. Engine ready **后**开启采集：
-
-   ```bash
+   # 开启指标采集
    ms-service-metric on
+
+   # 关闭指标采集
+   ms-service-metric off
+
+   # 重启（重新加载配置）
+   ms-service-metric restart
+
+   # 查看状态
    ms-service-metric status
    ```
 
