@@ -3,7 +3,6 @@
 本指导说明栈内 Grafana 的页面设计、内置看板与数据源，并提供「如何在看板中新增其他 metrics 指标」的可复现步骤。
 
 > 服务拉起 / 停止操作见 [SERVICE_GUIDE.md](SERVICE_GUIDE.md)。
-> 历史文档已归档在 [`archive/`](archive/) 目录，仅供追溯。
 
 前提：已按 [SERVICE_GUIDE.md](SERVICE_GUIDE.md) 拉起栈，且 `http://localhost:3000` 可访问。
 
@@ -55,16 +54,16 @@
 
 以「指标总览」为例，顶部变量用于跨集群 / 角色 / 实例过滤，均为 `query` 类型并基于 Prometheus 标签动态生成：
 
-| 变量 | Label | 取值来源（`label_values`） |
-|------|-------|---------------------------|
-| `$cluster` | Cluster | `label_values({cluster!=""}, cluster)` |
-| `$motor_metric_scope` | Metric Scope | `label_values({cluster=~"$cluster", motor_metric_scope!=""}, motor_metric_scope)` |
-| `$role` | Role | `label_values({cluster=~"$cluster", role!=""}, role)` |
-| `$pd_role` | PD Role | `label_values({cluster=~"$cluster", pd_role!=""}, pd_role)` |
-| `$dp_rank` | DP Rank | `label_values({cluster=~"$cluster", dp_rank!=""}, dp_rank)` |
-| `$pod_ip` | Pod IP | `label_values({cluster=~"$cluster", pod_ip!=""}, pod_ip)` |
-| `$instance_id` | Instance ID | `label_values({cluster=~"$cluster", instance_id!=""}, instance_id)` |
-| `$model_name` | Model | `label_values(vllm:num_requests_running{cluster=~"$cluster"}, model_name)` |
+| 变量 | Label | 取值来源（label_values） |
+|------|-------|-------------------------|
+| $cluster | Cluster | label_values({cluster!=""}, cluster) |
+| $motor_metric_scope | Metric Scope | label_values({cluster=~"$cluster", motor_metric_scope!=""}, motor_metric_scope) |
+| $role | Role | label_values({cluster=~"$cluster", role!=""}, role) |
+| $pd_role | PD Role | label_values({cluster=~"$cluster", pd_role!=""}, pd_role) |
+| $dp_rank | DP Rank | label_values({cluster=~"$cluster", dp_rank!=""}, dp_rank) |
+| $pod_ip | Pod IP | label_values({cluster=~"$cluster", pod_ip!=""}, pod_ip) |
+| $instance_id | Instance ID | label_values({cluster=~"$cluster", instance_id!=""}, instance_id) |
+| $model_name | Model | label_values(vllm:num_requests_running{cluster=~"$cluster"}, model_name) |
 
 新增面板时**应复用这些变量**做标签过滤，并将变量的 `allValue` 设为 `.*`，避免标签缺失导致 No Data。「引擎性能剖析」看板另有 `$source`、`$job`、`$phase`、`$dp` 等变量，含义类似。
 

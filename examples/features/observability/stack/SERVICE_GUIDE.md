@@ -3,7 +3,6 @@
 本指导面向需要在已部署 pyMotor 的节点上拉起 / 停止可观测性栈（Prometheus + Grafana + Tempo + OTel Collector + Loki）的使用者，提供可逐步复现的完整操作步骤。
 
 > 配套文档：Grafana 页面设计与看板指标扩展见 [GRAFANA_GUIDE.md](GRAFANA_GUIDE.md)。
-> 历史合入 / 联调记录已归档在 [`archive/`](archive/) 目录，仅供追溯，不再维护。
 
 整体流程：
 
