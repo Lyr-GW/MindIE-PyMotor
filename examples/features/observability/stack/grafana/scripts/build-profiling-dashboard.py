@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 import urllib.error
 import urllib.parse
@@ -16,6 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List
 
+logger = logging.getLogger(__name__)
 
 CORE_METRICS = [
     "vllm_profiling_forward_duration_seconds_bucket",
@@ -209,23 +211,27 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(name)s] %(message)s",
+    )
     args = parse_args()
     try:
         metric_names = fetch_metric_names(args.prometheus_url)
     except (urllib.error.URLError, RuntimeError, json.JSONDecodeError) as exc:
-        print(f"[build-profiling-dashboard] failed to query Prometheus: {exc}", file=sys.stderr)
+        logger.error("failed to query Prometheus: %s", exc)
         return 1
 
     if not metric_names:
-        print("[build-profiling-dashboard] no vllm_profiling_* metrics found.", file=sys.stderr)
+        logger.error("no vllm_profiling_* metrics found.")
         return 1
 
     dashboard = build_dashboard(metric_names=metric_names, title=args.title)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(dashboard, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(f"[build-profiling-dashboard] generated: {output}")
-    print(f"[build-profiling-dashboard] metrics: {len(metric_names)}")
+    logger.info("generated: %s", output)
+    logger.info("metrics: %d", len(metric_names))
     return 0
 
 

@@ -18,6 +18,24 @@
   "templating": {
     "list": [
       {
+        "name": "source",
+        "label": "Source",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "query": "label_values({source!=\"\"}, source)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
         "name": "instance_id",
         "label": "Instance",
         "type": "query",

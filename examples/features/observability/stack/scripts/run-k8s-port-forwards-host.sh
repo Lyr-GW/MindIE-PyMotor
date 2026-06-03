@@ -70,6 +70,14 @@ stop_existing() {
   rm -f "${PID_FILE}" "${META_FILE}"
 }
 
+args_matches_listen_port() {
+  local args="$1"
+  local port="$2"
+  [[ "${args}" =~ (^|[[:space:]])--listen-port[[:space:]]+${port}([^0-9]|$) ]] && return 0
+  [[ "${args}" =~ --listen-port=${port}([^0-9]|$) ]] && return 0
+  return 1
+}
+
 cleanup_orphans_for_ports() {
   local ports=("$@")
   command -v pgrep >/dev/null 2>&1 || return 0
@@ -79,7 +87,7 @@ cleanup_orphans_for_ports() {
     args="$(ps -p "${pid}" -o args= 2>/dev/null || true)"
     [[ "${args}" == *"tcp-forward.py"* ]] || continue
     for port in "${ports[@]}"; do
-      if [[ "${args}" == *"--listen-port ${port}"* || "${args}" == *"--listen-port=${port}"* ]]; then
+      if args_matches_listen_port "${args}" "${port}"; then
         echo "[port-forward] cleaning orphan pid=${pid} listen_port=${port}"
         kill "${pid}" || true
       fi
