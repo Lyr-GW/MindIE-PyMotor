@@ -36,7 +36,7 @@ export MOTOR_NODE_IP=<node-ip>
 export MOTOR_USER_CONFIG=/path/user_config.json
 export MOTOR_ENGINE_MGMT_PORT=10001
 export OBS_HOST=<obs-host>
-export PROXY_SH=/mnt/l00957062/proxy.sh
+export PROXY_SH=/path/to/proxy.sh
 ```
 
 ### 1.1 代理环境与镜像拉取
