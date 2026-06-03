@@ -96,6 +96,14 @@ services:
     networks: [obs]
     depends_on: [tempo]
     command: ["--config=/etc/otelcol/otel-collector.yaml"]
+    environment:
+      # Host proxy must not apply to in-compose export targets (tempo:4317).
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      NO_PROXY: tempo,otel-collector,prometheus,localhost,127.0.0.1,host.docker.internal,.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+      no_proxy: tempo,otel-collector,prometheus,localhost,127.0.0.1,host.docker.internal,.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
     volumes:
       - ${OTEL_CONFIG_FILE:-./otel-collector/otel-collector.yaml}:/etc/otelcol/otel-collector.yaml:ro
     ports:
