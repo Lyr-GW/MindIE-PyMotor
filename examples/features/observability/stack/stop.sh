@@ -25,8 +25,8 @@ else
   echo "[stop] docker compose unavailable, skip docker runtime cleanup."
 fi
 
-RUNTIME_DIR="${SCRIPT_DIR}/.native-runtime"
-RUN_DIR="${RUNTIME_DIR}/run"
+RUNTIME_DIR="${SCRIPT_DIR:?}/.native-runtime"
+RUN_DIR="${RUNTIME_DIR:?}/run"
 
 stop_pid_file() {
   local pid_file="$1"
@@ -49,7 +49,7 @@ fi
 
 if [[ "${PURGE}" -eq 1 ]]; then
   echo "[stop] purge native runtime data."
-  rm -rf "${RUNTIME_DIR}/data" "${RUNTIME_DIR}/logs" "${RUNTIME_DIR}/run"
+  rm -rf "${RUNTIME_DIR:?}/data" "${RUNTIME_DIR:?}/logs" "${RUNTIME_DIR:?}/run"
 fi
 
 echo "[stop] done."
