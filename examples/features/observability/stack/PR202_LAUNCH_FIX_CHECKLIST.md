@@ -11,6 +11,7 @@
 
 | # | 现象 | 根因 |
 |---|------|------|
+| P0 | Tempo 无 trace / otel-collector 导出超时 | otel-collector 继承主机 `HTTP_PROXY`，导出 `tempo:4317` 走外网代理超时；已为 otel-collector 清空代理并设置 `NO_PROXY` |
 | P1 | `kubectl is unavailable` … mindie-yangan | `source proxy` 后 `kubectl get ns` 走 HTTP 代理访问 API Server 超时 |
 | P2 | `launch.sh` / `docker compose up --build` 失败 | 强制 build `pymotor/grafana`，buildx 拉 Docker Hub 超时；本地仅有 `grafana/grafana` |
 | P3 | Grafana Dashboard 变量报错 500/504 | Grafana 容器继承 `HTTP_PROXY`，访问 `prometheus:9090` / `tempo:3200` 走外网代理超时 |
@@ -23,7 +24,7 @@
 | 文件 | 变更类型 | 说明 |
 |------|----------|------|
 | `scripts/discover-targets.py` | 修改 | kubectl 免代理、vllm Pod、Coordinator PodIP、Docker 端口转发 |
-| `docker-compose.yml` | 修改 | Grafana 镜像/代理、核心服务 `pull_policy` |
+| `docker-compose.yml` | 修改 | Grafana / otel-collector 镜像/代理、核心服务 `pull_policy` |
 | `start.sh` | 修改 | 本地镜像 tag、`--pull missing --no-build`、`cp -f` |
 | `PR202_LAUNCH_FIX_CHECKLIST.md` | 新增 | 本文档 |
 | `PR202_CHANGE_GUIDE.md` | 修改 | 文首增加指向本 Checklist 的链接 |
@@ -47,6 +48,7 @@
 - [x] `prometheus` / `tempo` / `otel-collector` 增加 `pull_policy: if_not_present`
 - [x] `grafana` 删除 `build`，镜像改为 `grafana/grafana`
 - [x] `grafana` 增加清空代理与 `NO_PROXY` 环境变量
+- [x] `otel-collector` 增加清空代理与 `NO_PROXY` 环境变量（含 `tempo`）
 
 ### 3.3 `start.sh`
 

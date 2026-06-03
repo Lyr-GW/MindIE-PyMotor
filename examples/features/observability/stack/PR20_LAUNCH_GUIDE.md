@@ -1,6 +1,6 @@
 # PR20 可观测性栈 · 拉起指导
 
-本文档面向 **PR #20**（`feat(observability): PR202 一键发现并拉起本地观测栈`）的联调与验收，说明前提条件、镜像与代理策略，以及 **`launch.sh` 统一入口** 与各启动模式。日常参数与端口见 [README.md](README.md)；合入范围见 [PR202_CHANGE_GUIDE.md](PR202_CHANGE_GUIDE.md)；联调问题根因见 [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)。
+本文档面向 **PR #20**（`feat(observability): PR202 一键发现并拉起本地观测栈`）的联调与验收，说明前提条件、镜像与代理策略，以及 **`launch.sh` 统一入口** 与各启动模式。日常参数与端口见 [README.md](README.md)；Tempo 无数据排障见 [TRACING_TROUBLESHOOTING.md](TRACING_TROUBLESHOOTING.md)；合入范围见 [PR202_CHANGE_GUIDE.md](PR202_CHANGE_GUIDE.md)；联调问题根因见 [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)。
 
 ---
 
@@ -90,7 +90,7 @@ docker compose up -d --pull missing --no-build
 |------|-------------------|------|
 | `kubectl` / `discover-targets.py` | **建议关闭** | 脚本内 `_kubectl_env()` 会剔除代理，避免 API Server 经代理超时；也可 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY` |
 | `docker pull` / `compose pull` / `up --pull missing` | **需要时开启** | 拉镜像时 Docker 客户端继承**当前 shell** 代理 |
-| Grafana / Prometheus 等容器内 | **已禁用** | Compose 为 Grafana 清空 `HTTP_PROXY`，`NO_PROXY` 含 `prometheus,tempo`，访问栈内数据源不走外网代理 |
+| Grafana / Prometheus / OTel Collector 等容器内 | **已禁用** | Compose 为 Grafana、otel-collector 清空 `HTTP_PROXY`，`NO_PROXY` 含 `prometheus,tempo,otel-collector` |
 
 ### 3.3 推荐流程（代理环境 · 首次拉起）
 
@@ -225,7 +225,9 @@ curl -s http://localhost:9090/api/v1/targets
 |------|----------|
 | `kubectl` 超时 | 发现阶段 `unset` 代理；确认 `MOTOR_NAMESPACE` 正确 |
 | `docker pull` 超时 | 拉镜像前 `source` 代理；或内网预拉后 `OBS_COMPOSE_PULL=never` |
-| Grafana 看板 500/504 | 多为历史代理问题；确认 PR20 镜像与 Compose 已更新，容器内 `HTTP_PROXY` 为空 |
+| Grafana 看板 500/504 | Grafana 或 otel-collector 容器继承了 `HTTP_PROXY`，访问栈内服务走外网代理超时；确认 Compose 为最新，容器内 `HTTP_PROXY` 为空 |
+| Tempo 无 trace / 仅 `pymotor-tracing-verify` | 栈通路正常但 pyMotor 未配置 Tracing，或 endpoint 端口与 `OTEL_HTTP_PORT` 不一致。见 [README.md §6](README.md#6-tracing-接入pymotor-侧) 与 [TRACING_TROUBLESHOOTING.md](TRACING_TROUBLESHOOTING.md) |
+| `verify-tracing.sh` 失败 | 检查 `docker compose logs otel-collector` 是否有代理超时；确认 otel-collector 的 `NO_PROXY` 含 `tempo` |
 | Dashboard No Data | 重新 `./launch.sh` 发现；确认 namespace / Pod IP 变化后 port-forward 已重建 |
 | 无 Docker | `./launch.sh --native` |
 
@@ -236,7 +238,8 @@ curl -s http://localhost:9090/api/v1/targets
 - **统一入口**：`launch.sh` 合入 PR20，替代分散的「先手写 prometheus 再 compose up」流程。
 - **minimal / full**：对应 PR 中 `start.sh` 模式与 Compose `profile full`。
 - **无 controller-proxy**：发现结果与 `prometheus.yml` 不再含 `9106` / `motor-controller` proxy job。
-- **代理与 pull**：`--pull missing`、Grafana 容器禁代理、kubectl 清代理，见 PR 说明与 [README.md §1.1](README.md#11-代理环境与镜像拉取)。
+- **代理与 pull**：`--pull missing`、Grafana / otel-collector 容器禁代理、kubectl 清代理，见 PR 说明与 [README.md §1.1](README.md#11-代理环境与镜像拉取)。
+- **Tracing**：栈内通路验证 `./scripts/verify-tracing.sh`；业务 trace 需在 pyMotor 配置 `tracer_config.endpoint` 并 `deploy.py` 重新部署，见 [README.md §6](README.md#6-tracing-接入pymotor-侧)。
 
 ---
 
