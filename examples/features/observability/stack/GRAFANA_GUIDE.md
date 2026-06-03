@@ -44,7 +44,7 @@
 
 | 看板 | UID | 文件 | 内容 |
 |------|-----|------|------|
-| **pyMotor Metrics · 指标总览** | `motor-all-metrics` | `motor-all-metrics.json` | 集群概览、PD Role / Instance 分组、吞吐与延迟、Engine HTTP QPS |
+| **pyMotor Metrics · 指标总览** | `motor-all-metrics` | `motor-all-metrics.json` | 集群概览、PD Role / Instance 分组、吞吐与延迟 |
 | **KV 缓存** | `motor-kv-cache` | `motor-kv-cache.json` | vLLM KV cache 使用率、prefix cache 命中率 |
 | **引擎性能剖析** | `motor-vllm-profiling` | `motor-vllm-profiling.json` | `vllm_profiling_*` 性能剖析（显存、forward/execute/scheduler 时延等） |
 
