@@ -107,7 +107,7 @@ MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 |------|---------------------|------|
 | `kubectl` / `discover-targets.py` | **否** | `discover-targets.py` 内 `_kubectl_env()` 剔除代理；避免 API Server 经 HTTP 代理超时 |
 | 首次缺镜像、`docker pull` / `compose pull` | **是** | `--pull missing` 触发拉取时，Docker 客户端使用**当前 shell** 代理；可先 `source proxy` 再 `./launch.sh`，或先 `docker compose pull` |
-| Grafana / Prometheus 容器内 | **否** | Compose 为 Grafana 清空 `HTTP_PROXY` 并配置 `NO_PROXY`（`prometheus,tempo` 等），栈内数据源不走外网代理 |
+| Grafana / Prometheus / OTel Collector 容器内 | **否** | Compose 为 Grafana、otel-collector 清空 `HTTP_PROXY` 并配置 `NO_PROXY`（`prometheus,tempo,otel-collector` 等），栈内数据源不走外网代理 |
 | 离线 / 镜像已齐 | **否** | 设置 `OBS_COMPOSE_PULL=never` 禁止拉取 |
 
 **代理环境首次拉起示例**
