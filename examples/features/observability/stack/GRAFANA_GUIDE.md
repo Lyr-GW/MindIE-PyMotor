@@ -54,16 +54,27 @@
 
 以「指标总览」为例，顶部变量用于跨集群 / 角色 / 实例过滤，均为 `query` 类型并基于 Prometheus 标签动态生成：
 
-| 变量 | Label | 取值来源（label_values） |
-|------|-------|-------------------------|
-| $cluster | Cluster | label_values({cluster!=""}, cluster) |
-| $motor_metric_scope | Metric Scope | label_values({cluster=~"$cluster", motor_metric_scope!=""}, motor_metric_scope) |
-| $role | Role | label_values({cluster=~"$cluster", role!=""}, role) |
-| $pd_role | PD Role | label_values({cluster=~"$cluster", pd_role!=""}, pd_role) |
-| $dp_rank | DP Rank | label_values({cluster=~"$cluster", dp_rank!=""}, dp_rank) |
-| $pod_ip | Pod IP | label_values({cluster=~"$cluster", pod_ip!=""}, pod_ip) |
-| $instance_id | Instance ID | label_values({cluster=~"$cluster", instance_id!=""}, instance_id) |
-| $model_name | Model | label_values(vllm:num_requests_running{cluster=~"$cluster"}, model_name) |
+| 变量 | Label |
+|------|-------|
+| $cluster | Cluster |
+| $motor_metric_scope | Metric Scope |
+| $role | Role |
+| $pd_role | PD Role |
+| $dp_rank | DP Rank |
+| $pod_ip | Pod IP |
+| $instance_id | Instance ID |
+| $model_name | Model |
+
+各变量在 Grafana 中的取值查询（`label_values`）：
+
+- **$cluster**：`label_values({cluster!=""}, cluster)`
+- **$motor_metric_scope**：`label_values({cluster=~"$cluster", motor_metric_scope!=""}, motor_metric_scope)`
+- **$role**：`label_values({cluster=~"$cluster", role!=""}, role)`
+- **$pd_role**：`label_values({cluster=~"$cluster", pd_role!=""}, pd_role)`
+- **$dp_rank**：`label_values({cluster=~"$cluster", dp_rank!=""}, dp_rank)`
+- **$pod_ip**：`label_values({cluster=~"$cluster", pod_ip!=""}, pod_ip)`
+- **$instance_id**：`label_values({cluster=~"$cluster", instance_id!=""}, instance_id)`
+- **$model_name**：`label_values(vllm:num_requests_running{cluster=~"$cluster"}, model_name)`
 
 新增面板时**应复用这些变量**做标签过滤，并将变量的 `allValue` 设为 `.*`，避免标签缺失导致 No Data。「引擎性能剖析」看板另有 `$source`、`$job`、`$phase`、`$dp` 等变量，含义类似。
 
