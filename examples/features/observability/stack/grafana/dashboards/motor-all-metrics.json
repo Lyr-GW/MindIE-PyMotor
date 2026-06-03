@@ -403,41 +403,6 @@
       }
     },
     {
-      "id": 6,
-      "type": "stat",
-      "title": "Success (5m)",
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 1
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "expr": "sum(increase(vllm:request_success_total{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "graphMode": "none",
-        "colorMode": "value",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "decimals": 0
-        }
-      }
-    },
-    {
       "id": 200,
       "type": "row",
       "title": "按 PD Role / Instance 分组",
@@ -579,45 +544,6 @@
       "fieldConfig": {
         "defaults": {
           "min": 0
-        }
-      }
-    },
-    {
-      "id": 13,
-      "type": "piechart",
-      "title": "Request Success by finished_reason",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 14
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "expr": "sum by (finished_reason) (increase(vllm:request_success_total{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
-          "legendFormat": "{{finished_reason}}",
-          "refId": "A",
-          "instant": true
-        }
-      ],
-      "options": {
-        "pieType": "donut",
-        "legend": {
-          "displayMode": "table",
-          "placement": "right",
-          "values": [
-            "value",
-            "percent"
-          ]
-        },
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
         }
       }
     },
@@ -862,63 +788,6 @@
         "legend": {
           "displayMode": "table",
           "placement": "bottom"
-        }
-      }
-    },
-    {
-      "id": 400,
-      "type": "row",
-      "title": "Engine HTTP QPS by handler",
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 47
-      },
-      "collapsed": false
-    },
-    {
-      "id": 30,
-      "type": "timeseries",
-      "title": "Engine HTTP QPS by handler",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 48
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "expr": "sum by (handler) (rate(http_request_duration_seconds_count{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
-          "legendFormat": "{{handler}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "custom": {
-            "drawStyle": "line",
-            "lineWidth": 1,
-            "fillOpacity": 10
-          }
-        }
-      },
-      "options": {
-        "tooltip": {
-          "mode": "multi"
-        },
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "mean",
-            "max"
-          ]
         }
       }
     }
