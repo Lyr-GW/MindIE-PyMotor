@@ -47,6 +47,7 @@ cp -n .env.example .env   # launch.sh 在无 .env 时也会自动从 .env.exampl
 | `GF_SECURITY_ADMIN_USER` / `GF_SECURITY_ADMIN_PASSWORD` | Grafana 管理员账号 / 密码（默认 `motor` / `motor`） |
 | `GRAFANA_PORT` / `PROMETHEUS_PORT` / `TEMPO_QUERY_PORT` / `OTEL_GRPC_PORT` / `OTEL_HTTP_PORT` / `LOKI_PORT` | 主机侧服务端口 |
 | `MOTOR_PORT_FORWARD_BASE` | Docker 需要 PodIP 桥接转发时使用的起始主机端口（默认 `19000`） |
+| `PROXY_SH` | **可选**。Native runtime 从 GitHub / Grafana CDN 下载二进制时使用的代理配置文件路径；留空则不加载（见 [§2.4 代理配置](#24-代理配置)） |
 
 ### 1.4 需要调整 pyMotor 配置才能生效的能力（重要，请提前配置）
 
@@ -143,8 +144,8 @@ docker compose up -d --pull missing --no-build
 ```bash
 cd examples/features/observability/stack
 
-# ① 需要拉镜像时：先开代理预拉（可选；也可交给 launch 的 --pull missing 拉取）
-source /path/to/proxy.sh          # 或 export PROXY_SH=/path/to/proxy.sh
+# ① 需要拉镜像时：在**当前 shell** 开启代理（见 §2.4；与 PROXY_SH 无关）
+source /path/to/your-proxy.sh     # 或手动 export HTTP_PROXY / HTTPS_PROXY
 docker compose pull               # 仅需一次；本地已有镜像可跳过
 
 # ② 发现与启动：建议关闭代理，避免 kubectl 异常
@@ -158,6 +159,97 @@ MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 export OBS_COMPOSE_PULL=never
 MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 ```
+
+### 2.4 代理配置
+
+内网环境访问外网 registry 或 GitHub 时常需 HTTP/HTTPS 代理。观测栈在**不同阶段**对代理的要求不同，请按场景配置，避免混用导致 kubectl 超时或 Grafana 看板 504。
+
+#### 2.4.1 三阶段分工（速查）
+
+| 阶段 | 配置方式 | 是否建议开代理 |
+|------|----------|----------------|
+| **目标发现**（`discover-targets.py` / `kubectl`） | 关闭 shell 代理；脚本内已对 kubectl 剔除代理变量 | **否** |
+| **Docker 拉镜像**（`docker compose pull` / `launch.sh` → `start.sh`） | 在**启动前**对当前 shell `source` 代理脚本或 `export HTTP_PROXY=...` | **需要外网 registry 时是** |
+| **Native 下载二进制**（`start-native.sh` / `launch.sh --native`） | `.env` 中设置 `PROXY_SH`，或启动前 export 同名环境变量 | **需要访问 GitHub / dl.grafana.com 时是** |
+| **容器内访问 Prometheus / Tempo** | 无需配置；Compose 已清空 Grafana 的 `HTTP_PROXY` 并设置 `NO_PROXY` | **否**（已内置） |
+
+#### 2.4.2 `PROXY_SH`（Native runtime 专用）
+
+`PROXY_SH` 仅用于 **native runtime** 首次下载 Prometheus、Grafana、Tempo、OTel Collector 等二进制（`curl`/`wget` 访问 GitHub、Grafana CDN）。**不会**影响 Docker 镜像拉取，也不会自动作用于 `kubectl`。
+
+**配置步骤：**
+
+1. 复制并编辑环境文件：
+
+   ```bash
+   cd examples/features/observability/stack
+   cp -n .env.example .env
+   ```
+
+2. 准备代理配置文件（**dotenv 格式**，每行 `KEY=VALUE`，与 `.env` 相同；不要用个人机器上的绝对路径提交到仓库）：
+
+   ```bash
+   # 示例：~/pymotor-proxy.env（路径自定）
+   cat > ~/pymotor-proxy.env <<'EOF'
+   http_proxy=http://proxy.example.com:8080
+   https_proxy=http://proxy.example.com:8080
+   HTTP_PROXY=http://proxy.example.com:8080
+   HTTPS_PROXY=http://proxy.example.com:8080
+   no_proxy=localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+   NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+   EOF
+   ```
+
+3. 在 `.env` 中指向该文件（**留空表示不加载**，为默认值）：
+
+   ```bash
+   PROXY_SH=/home/you/pymotor-proxy.env
+   ```
+
+4. 启动 native 栈：
+
+   ```bash
+   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY   # 发现阶段仍建议关代理
+   MOTOR_NAMESPACE=<namespace> ./launch.sh --native
+   ```
+
+启动日志出现 `[native] loaded proxy config: ...` 表示已加载；若路径不存在或 `PROXY_SH` 为空，则跳过（下载失败时需检查网络或补全代理文件）。
+
+> **注意：** 请勿将他人开发机路径（如 `/mnt/<工号>/proxy.sh`）写入 `.env` 并提交；每台机器应使用本机可访问的代理文件路径，或保持 `PROXY_SH=` 为空。
+
+#### 2.4.3 Docker 模式拉镜像（shell 代理，非 `PROXY_SH`）
+
+Docker 客户端继承**当前 shell** 的 `HTTP_PROXY` / `HTTPS_PROXY`，不读取 `PROXY_SH`。推荐在**同一终端**按顺序执行：
+
+```bash
+cd examples/features/observability/stack
+source /path/to/your-proxy.sh    # 或 export HTTP_PROXY=... HTTPS_PROXY=...
+
+# 可选：预拉镜像
+docker compose --profile full pull
+
+# 发现前关闭代理，避免 kubectl 走代理
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
+MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
+```
+
+也可在已 `source` 代理的 shell 中直接 `./launch.sh`（`start.sh` 在 `--pull missing` 时会用当前 shell 代理拉缺失镜像）；若发现阶段报错，请按上表在 `launch` 前 `unset` 代理变量。
+
+#### 2.4.4 使用公司统一 shell 代理脚本
+
+若团队提供 `source proxy.sh`（bash `export` 形式），可用于 **Docker 拉镜像**；Native 下载请任选其一：
+
+- 启动前在同一 shell 执行 `source proxy.sh`，并**不要**设置 `PROXY_SH`（依赖当前环境变量）；或
+- 将相同变量写入 dotenv 文件，仅在 `.env` 中配置 `PROXY_SH=/path/to/pymotor-proxy.env`（推荐，与 `launch.sh` 解耦）。
+
+#### 2.4.5 常见问题
+
+| 现象 | 处理 |
+|------|------|
+| Native 下载 Prometheus/Grafana 超时 | 检查 `PROXY_SH` 路径、代理是否可达；`cat "$PROXY_SH"` 确认含 `https_proxy` |
+| `kubectl` / 发现超时 | `unset` 全部代理后再 `./launch.sh`；勿对 API Server 走 HTTP 代理 |
+| Grafana 看板 500 / 504 | 容器内代理问题，见本文 [§6](#6-常见问题) 与 `docker-compose.yml` 中 Grafana 的 `NO_PROXY` |
+| `.env` 里 `PROXY_SH` 指向不存在文件 | 保持为空即可；错误路径不会加载，但 native 下载可能失败 |
 
 ---
 
@@ -206,7 +298,7 @@ export MOTOR_USER_CONFIG=/path/user_config.json
 export MOTOR_ENGINE_MGMT_PORT=10001         # Engine /metrics 管理端口，默认 10001
 export OBS_HOST=<obs-host>                  # pyMotor 上报 tracing / OTLP 的观测主机
 export OBS_STACK_MODE=minimal|full          # 未传 --minimal/--full 时生效
-export PROXY_SH=/path/to/proxy.sh           # native runtime 下载二进制时使用
+export PROXY_SH=/path/to/pymotor-proxy.env  # native runtime 下载二进制（dotenv 格式，可选；见 §2.4）
 ```
 
 ### 3.4 `launch.sh` 模式一览

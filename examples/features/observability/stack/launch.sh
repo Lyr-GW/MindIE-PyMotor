@@ -38,13 +38,13 @@ Environment:
   MOTOR_USER_CONFIG
   MOTOR_ENGINE_MGMT_PORT
   OBS_HOST
-  PROXY_SH
+  PROXY_SH              dotenv file for native binary downloads only (see SERVICE_GUIDE.md §2.4)
 
-Proxy / image pull (see SERVICE_GUIDE.md §2.2):
-  - discover-targets.py clears proxy for kubectl (do not rely on proxy for API Server).
-  - start.sh uses compose --pull missing: pull only when image is absent locally;
-    docker pull inherits current shell proxy — source proxy before launch if registry needs it.
-  - Grafana container clears HTTP_PROXY for in-stack datasources (prometheus/tempo).
+Proxy (see SERVICE_GUIDE.md §2.4):
+  - Discovery/kubectl: unset shell proxy before launch (script also strips proxy for kubectl).
+  - Docker image pull: export HTTP_PROXY in current shell or source your proxy.sh before launch.
+  - Native runtime: set PROXY_SH=/path/to/dotenv in .env (optional; default empty).
+  - Grafana container: HTTP_PROXY cleared for in-stack prometheus/tempo.
   - OBS_COMPOSE_PULL=never|missing|always  OBS_COMPOSE_BUILD=0|1
 EOF
 }

@@ -17,3 +17,7 @@ MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 ```
 
 Grafana 默认：<http://localhost:3000>（`motor` / `motor`）。
+
+## 代理 / 内网拉镜像
+
+内网需代理访问外网时，请区分 **Docker 拉镜像**（当前 shell 的 `HTTP_PROXY`）与 **Native 下载二进制**（`.env` 中的 `PROXY_SH`）；发现阶段建议关闭代理。完整说明见 [SERVICE_GUIDE.md §2.4](SERVICE_GUIDE.md#24-代理配置)。
