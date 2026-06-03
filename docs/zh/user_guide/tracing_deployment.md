@@ -22,7 +22,7 @@ pyMotor开启tracing能力需修改env.json配置文件和user_config.json配置
   "motor_controller_env": {
   },
   "motor_coordinator_env": {
-    "OTEL_SERVICE_NAME": "mindie-motor",
+    "OTEL_SERVICE_NAME": "mindie-motor-coordinator",
     "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true",
     "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"
   },
@@ -156,7 +156,21 @@ python deploy.py --config_dir ../infer_engines/vllm
 python deploy.py --user_config_path ../infer_engines/vllm/user_config.json --env_config_path ../infer_engines/vllm/env.json
 ```
 
-### 部署jaeger
+### 部署 Tracing 后端
+
+#### 方式一：一键可观测性栈（推荐）
+
+如果已使用 pyMotor 可观测性一键栈，Tempo 已作为 Tracing 后端随栈启动，无需单独部署。  
+详见 [`examples/features/observability/stack/README.md`](../../../examples/features/observability/stack/README.md)。
+
+OTLP 端点已由栈提供：
+
+- HTTP：`http://<obs-host>:4318/v1/traces`
+- gRPC：`http://<obs-host>:4317`
+
+将 `user_config.json` 中的 `endpoint` 配置为上述地址即可。
+
+#### 方式二：独立 Jaeger
 
 参考[jaeger文档](https://www.jaegertracing.io/docs/2.14/)
 下载好可执行文件后，在服务器上执行以下命令即可。也可采用docker容器方式，具体参考[jaeger官网](https://www.jaegertracing.io/download/)
