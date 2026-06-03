@@ -170,7 +170,9 @@ python3 grafana/scripts/build-profiling-dashboard.py \
 
 ## 5. Trace 与 Profiling 数据接入（pyMotor 侧）
 
-要让 Tempo / profiling 面板有数据，需在 pyMotor 侧开启上报。
+要让 Tempo / profiling 面板有数据，需在 pyMotor 侧开启上报；**需要在拉起栈之前完成的 pyMotor 配置清单见 [SERVICE_GUIDE.md §1.4](SERVICE_GUIDE.md)**。本节为操作要点速查。
+
+> 基础指标（指标总览 / KV 缓存）无需改 pyMotor 配置即可生效；当前方案不使用 Controller metrics 接口，相关配置可忽略。
 
 ### 5.1 Tracing
 

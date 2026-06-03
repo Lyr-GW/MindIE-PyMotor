@@ -49,6 +49,55 @@ cp -n .env.example .env   # launch.sh 在无 .env 时也会自动从 .env.exampl
 | `GRAFANA_PORT` / `PROMETHEUS_PORT` / `TEMPO_QUERY_PORT` / `OTEL_GRPC_PORT` / `OTEL_HTTP_PORT` / `LOKI_PORT` | 主机侧服务端口 |
 | `MOTOR_PORT_FORWARD_BASE` | Docker 需要 PodIP 桥接转发时使用的起始主机端口（默认 `19000`） |
 
+### 1.4 需要调整 pyMotor 配置才能生效的能力（重要，请提前配置）
+
+部分观测能力需要在 **pyMotor 侧**（`env.json` / `user_config.json`，或引擎运行环境）提前配置，否则观测栈拉起后对应看板会无数据。请在拉起栈**之前**对照下表完成配置：
+
+| 观测能力 | 是否需改 pyMotor 配置 | 需要的配置 |
+|----------|----------------------|-----------|
+| Coordinator 基础指标（指标总览 / KV 缓存的请求数、KV、吞吐、延迟等） | **否** | Coordinator 默认在管理端口暴露 `/metrics`、`/instance/metrics`，无需额外配置；只需保证该端口可被观测机或主机端口转发访问 |
+| Engine / vLLM 指标 | **否**（默认开启） | Engine 在管理端口（默认 `10001`）暴露 `/metrics`；保证端口可达即可 |
+| Tracing（Tempo 链路） | **是** | 见下方「1.4.1 Tracing 接入」 |
+| 引擎性能剖析（`vllm_profiling_*`） | **是** | 需安装并开启 `ms_service_metric`，见下方「1.4.2 Profiling 接入」 |
+
+> 说明：当前方案**不使用 Controller 的 metrics 接口**，因此 Controller observability 相关配置（如 `observability_enable`、`1027` 端口）无需调整，可忽略。
+
+#### 1.4.1 Tracing 接入（让 Tempo 链路看板有数据）
+
+需修改 deploy 使用的 `env.json` 与 `user_config.json`（`<obs-host>` 为观测栈所在主机 IP），随后用 `deploy.py` 重新部署生效：
+
+- `env.json`：在 `motor_coordinator_env` / `motor_engine_prefill_env` / `motor_engine_decode_env` 下新增：
+  - `OTEL_SERVICE_NAME`（建议 `mindie-motor-coordinator` / `vllm-server-p` / `vllm-server-d`）
+  - `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`
+  - `OTEL_EXPORTER_OTLP_TRACES_INSECURE=true`
+- `user_config.json`：
+  - `motor_coordinator_config.tracer_config.endpoint = http://<obs-host>:4318/v1/traces`
+  - `motor_engine_prefill_config.engine_config.otlp-traces-endpoint = http://<obs-host>:4318/v1/traces`
+  - `motor_engine_decode_config.engine_config.otlp-traces-endpoint = http://<obs-host>:4318/v1/traces`
+
+> `4318` 为栈内 OTel Collector 的 OTLP HTTP 端口。完整片段见 `config/tracing.example.json`，详细部署见 `docs/zh/user_guide/tracing_deployment.md`。
+
+#### 1.4.2 Profiling 接入（让「引擎性能剖析」看板有数据）
+
+「引擎性能剖析」看板依赖 `ms_service_metric` 暴露的 `vllm_profiling_*` 指标，需在 **Engine 侧**：
+
+1. 安装 `ms_service_metric`（随 MindIE / 引擎环境提供）。
+2. Engine 启动**前**设置多进程指标目录：
+
+   ```bash
+   export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics
+   mkdir -p "$PROMETHEUS_MULTIPROC_DIR"
+   ```
+
+3. Engine ready **后**开启采集：
+
+   ```bash
+   ms-service-metric on
+   ms-service-metric status
+   ```
+
+未执行上述步骤时，`vllm_profiling_*` 指标不会产生，「引擎性能剖析」看板将无数据。
+
 ---
 
 ## 2. 准备镜像（联网拉取）
