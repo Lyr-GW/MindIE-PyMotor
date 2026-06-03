@@ -120,8 +120,24 @@ export PROMETHEUS_CONFIG_FILE OTEL_CONFIG_FILE
 start_host_helpers
 
 ensure_compose_images() {
+  # Preserve runtime paths set above (minimal/full); .env must not override them.
+  local saved_grafana_prov="${GRAFANA_PROVISIONING_DIR:-}"
+  local saved_prom_config="${PROMETHEUS_CONFIG_FILE:-}"
+  local saved_otel_config="${OTEL_CONFIG_FILE:-}"
   # shellcheck disable=SC1091
   [[ -f .env ]] && source .env
+  if [[ -n "${saved_grafana_prov}" ]]; then
+    GRAFANA_PROVISIONING_DIR="${saved_grafana_prov}"
+    export GRAFANA_PROVISIONING_DIR
+  fi
+  if [[ -n "${saved_prom_config}" ]]; then
+    PROMETHEUS_CONFIG_FILE="${saved_prom_config}"
+    export PROMETHEUS_CONFIG_FILE
+  fi
+  if [[ -n "${saved_otel_config}" ]]; then
+    OTEL_CONFIG_FILE="${saved_otel_config}"
+    export OTEL_CONFIG_FILE
+  fi
   local prefix="${REGISTRY_PREFIX:-}"
   local gv="${GRAFANA_VERSION:-11.3.0}"
   local grafana_img="${prefix}grafana/grafana:${gv}"
