@@ -314,8 +314,6 @@ install_otel_collector
 install_grafana
 prepare_configs
 
-"${SCRIPT_DIR}/run-controller-proxy-host.sh" --env-file "${ENV_FILE}" || true
-
 mkdir -p "${DATA_DIR}/tempo" "${DATA_DIR}/prometheus" "${DATA_DIR}/grafana"
 
 start_component "tempo" \

@@ -13,7 +13,7 @@ PR202 在 `examples/features/observability/stack/` 提供：
 - 一键发现（`scripts/discover-targets.py`）+ 启动（`launch.sh` / `start.sh`）
 - Docker Compose 栈：Prometheus、Grafana、Tempo、OTel Collector
 - 三个 Grafana 看板：指标总览、KV 缓存、引擎性能剖析
-- Controller metrics 经主机 `controller-proxy` 与 Coordinator PodIP 端口转发接入
+- Coordinator / Engine / vLLM 指标经自动发现与主机 PodIP 端口转发接入
 
 **联调修复**（见 Checklist）解决代理环境下 kubectl / compose build / Grafana 数据源 / vllm Pod 发现四类问题。
 
@@ -28,7 +28,6 @@ PR202 在 `examples/features/observability/stack/` 提供：
 | `start.sh` | Compose 启动、`ensure_compose_images`、端口转发脚本 |
 | `docker-compose.yml` | 服务定义；Grafana 使用上游镜像且禁用容器内代理 |
 | `scripts/run-k8s-port-forwards-host.sh` | 主机侧 PodIP → localhost 转发 |
-| `scripts/run-controller-proxy-host.sh` | Controller `/observability/metrics` 代理 |
 
 ---
 

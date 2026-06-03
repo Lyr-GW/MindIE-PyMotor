@@ -26,7 +26,6 @@ DEFAULT_GRAFANA_PORT = 3000
 DEFAULT_TEMPO_PORT = 3200
 DEFAULT_OTLP_GRPC_PORT = 4317
 DEFAULT_OTLP_HTTP_PORT = 4318
-DEFAULT_CONTROLLER_PROXY_PORT = 9106
 DEFAULT_PORT_FORWARD_BASE = 19000
 
 ENGINE_POD_RE = re.compile(
@@ -72,7 +71,6 @@ class DiscoveryResult:
     mode: str
     runtime: str
     coordinator_target: str
-    controller_proxy_target: str
     engine_targets: List[Dict[str, Any]]
     port_forwards: List[PortForwardSpec]
     warnings: List[str]
@@ -496,11 +494,6 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
     mode = "fallback"
     coordinator_host = node_ip
     coordinator_port = DEFAULT_COORDINATOR_PORT
-    controller_proxy_target = (
-        f"host.docker.internal:{DEFAULT_CONTROLLER_PROXY_PORT}"
-        if runtime == "docker"
-        else f"localhost:{DEFAULT_CONTROLLER_PROXY_PORT}"
-    )
     engine_targets: List[Dict[str, Any]] = []
     port_forwards: List[PortForwardSpec] = []
 
@@ -617,7 +610,6 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
         mode=mode,
         runtime=runtime,
         coordinator_target=coordinator_target,
-        controller_proxy_target=controller_proxy_target,
         engine_targets=engine_targets,
         port_forwards=port_forwards,
         warnings=warnings,
@@ -770,43 +762,12 @@ def _build_prometheus_config(result: DiscoveryResult) -> str:
         )
     )
     lines.append("")
-    lines.extend(
-        _render_job(
-            "motor-controller",
-            [
-                {
-                    "target": result.controller_proxy_target,
-                    "labels": {
-                        "motor_component": "controller",
-                        "cluster": namespace,
-                        "source": "real" if result.mode == "kubernetes" else "local",
-                    },
-                }
-            ],
-            metrics_path="/metrics",
-        )
-    )
-    lines.append("")
     lines.extend(_render_job("ascend-npu-exporter", [{"target": "host.docker.internal:8082"}]))
     lines.append("")
     lines.extend(_render_job("node-exporter", [{"target": "node-exporter:9100"}]))
     lines.append("")
     lines.extend(_render_job("cadvisor", [{"target": "cadvisor:8080"}]))
     return "\n".join(lines) + "\n"
-
-
-def _controller_metrics_url(result: DiscoveryResult) -> str:
-    for spec in result.port_forwards:
-        if _has_keyword(spec.pod_name, COORDINATOR_POD_KEYWORDS):
-            return f"http://127.0.0.1:{spec.local_port}/observability/metrics"
-    host, port = _split_target(result.coordinator_target)
-    if host == "host.docker.internal":
-        for spec in result.port_forwards:
-            if spec.local_port and spec.remote_port == DEFAULT_COORDINATOR_PORT:
-                return f"http://127.0.0.1:{spec.local_port}/observability/metrics"
-    if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
-        return f"http://{host}:{port}/observability/metrics"
-    return f"http://{result.node_ip}:{DEFAULT_COORDINATOR_PORT}/observability/metrics"
 
 
 def _build_env(result: DiscoveryResult) -> str:
@@ -829,8 +790,6 @@ def _build_env(result: DiscoveryResult) -> str:
         f"TEMPO_QUERY_PORT={os.getenv('TEMPO_QUERY_PORT', str(DEFAULT_TEMPO_PORT))}",
         f"OTEL_GRPC_PORT={os.getenv('OTEL_GRPC_PORT', str(DEFAULT_OTLP_GRPC_PORT))}",
         f"OTEL_HTTP_PORT={os.getenv('OTEL_HTTP_PORT', str(DEFAULT_OTLP_HTTP_PORT))}",
-        f"CONTROLLER_PROXY_PORT={DEFAULT_CONTROLLER_PROXY_PORT}",
-        f"CONTROLLER_METRICS_URL={_controller_metrics_url(result)}",
         f"PORT_FORWARD_COUNT={len(result.port_forwards)}",
     ]
     for idx, spec in enumerate(result.port_forwards):

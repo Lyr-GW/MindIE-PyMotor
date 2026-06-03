@@ -75,16 +75,7 @@ prepare_minimal_prometheus() {
   fi
   local output_file="${SCRIPT_DIR}/generated/prometheus-minimal.runtime.yml"
   mkdir -p "${SCRIPT_DIR}/generated"
-  python3 - "${input_file}" "${output_file}" <<'PY'
-from pathlib import Path
-import sys
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-text = src.read_text(encoding="utf-8")
-text = text.replace("controller-metrics-proxy:9106", "host.docker.internal:9106")
-text = text.replace("localhost:9106", "host.docker.internal:9106")
-dst.write_text(text, encoding="utf-8")
-PY
+  cp "${input_file}" "${output_file}"
   PROMETHEUS_CONFIG_FILE="./generated/prometheus-minimal.runtime.yml"
   export PROMETHEUS_CONFIG_FILE
 }
@@ -92,7 +83,6 @@ PY
 start_host_helpers() {
   if [[ -f "${DISCOVERED_ENV}" ]]; then
     "${SCRIPT_DIR}/scripts/run-k8s-port-forwards-host.sh" --env-file "${DISCOVERED_ENV}"
-    "${SCRIPT_DIR}/scripts/run-controller-proxy-host.sh" --env-file "${DISCOVERED_ENV}"
   fi
 }
 

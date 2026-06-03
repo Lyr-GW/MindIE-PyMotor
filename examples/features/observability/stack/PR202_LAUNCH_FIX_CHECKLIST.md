@@ -22,7 +22,7 @@
 
 | 文件 | 变更类型 | 说明 |
 |------|----------|------|
-| `scripts/discover-targets.py` | 修改 | kubectl 免代理、vllm Pod、Coordinator PodIP、Docker 端口转发、Controller URL |
+| `scripts/discover-targets.py` | 修改 | kubectl 免代理、vllm Pod、Coordinator PodIP、Docker 端口转发 |
 | `docker-compose.yml` | 修改 | Grafana 镜像/代理、核心服务 `pull_policy` |
 | `start.sh` | 修改 | 本地镜像 tag、`--pull missing --no-build`、`cp -f` |
 | `PR202_LAUNCH_FIX_CHECKLIST.md` | 新增 | 本文档 |
@@ -36,12 +36,11 @@
 
 - [x] 新增 `ENGINE_POD_RE`、`COORDINATOR_POD_KEYWORDS`、`_PROXY_ENV_KEYS`
 - [x] 新增 `_kubectl_env()`、`_is_engine_pod()`、`_infer_engine_identity_from_pod()`、`_discover_coordinator_pod()`
-- [x] 新增 `_register_docker_port_forward()`、`_controller_metrics_url()`
+- [x] 新增 `_register_docker_port_forward()`
 - [x] 修改 `_run_kubectl_json()`、`_is_kubectl_ready()` 使用 `_kubectl_env()`
 - [x] 修改 `_discover_engine_targets_from_pods()` 使用 vllm Pod 匹配
 - [x] 修改 `_apply_docker_gateway()` 为 Coordinator 增加端口转发
 - [x] 修改 `_discover()` Coordinator 发现逻辑
-- [x] 修改 `_build_env()` 中 `CONTROLLER_METRICS_URL` 生成方式
 
 ### 3.2 `docker-compose.yml`
 

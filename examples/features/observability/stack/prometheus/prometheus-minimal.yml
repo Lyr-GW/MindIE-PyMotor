@@ -24,16 +24,6 @@ scrape_configs:
           cluster: example-namespace
           source: real
 
-  - job_name: motor-controller
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - "host.docker.internal:9106"
-        labels:
-          motor_component: controller
-          cluster: example-namespace
-          source: real
-
   - job_name: motor-engine
     metrics_path: /metrics
     honor_labels: true
