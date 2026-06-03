@@ -2,7 +2,7 @@
 
 # PR202 可观测性栈 · 合入指导
 
-本文档说明 PR202（MR !202）可观测性一键栈的合入范围、评审要点与验收步骤。日常使用说明见 [README.md](README.md)。
+本文档说明 PR202（MR !202）可观测性一键栈的合入范围、评审要点与验收步骤。日常使用说明见 [README.md](README.md)。**PR #20 联调拉起**见 [PR20_LAUNCH_GUIDE.md](PR20_LAUNCH_GUIDE.md)。
 
 ---
 

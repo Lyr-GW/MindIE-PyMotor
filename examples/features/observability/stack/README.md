@@ -1,6 +1,6 @@
 # pyMotor 可观测性一键栈（PR202）
 
-合入与联调说明：[PR202_CHANGE_GUIDE.md](PR202_CHANGE_GUIDE.md) · [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)
+合入与联调说明：[PR20_LAUNCH_GUIDE.md](PR20_LAUNCH_GUIDE.md)（PR #20 拉起指导）· [PR202_CHANGE_GUIDE.md](PR202_CHANGE_GUIDE.md) · [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)
 
 目标：在已部署 pyMotor 的节点上，通过一条命令自动发现真实接口并启动观测栈，浏览器可直接查看 metrics / tracing / profiling 页面。
 
