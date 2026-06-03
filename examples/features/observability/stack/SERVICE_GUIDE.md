@@ -2,7 +2,7 @@
 
 本指导面向需要在已部署 pyMotor 的节点上拉起 / 停止可观测性栈（Prometheus + Grafana + Tempo + OTel Collector + Loki）的使用者，提供可逐步复现的完整操作步骤。
 
-> 配套文档：Grafana 页面设计与看板指标扩展见 [GRAFANA_GUIDE.md](GRAFANA_GUIDE.md)。
+> 配套文档：Grafana 页面设计与看板指标扩展见 [GRAFANA_GUIDE.md](GRAFANA_GUIDE.md)；Tempo 无数据排障见 [TRACING_TROUBLESHOOTING.md](TRACING_TROUBLESHOOTING.md)。
 
 整体流程：
 
@@ -64,18 +64,131 @@ cp -n .env.example .env   # launch.sh 在无 .env 时也会自动从 .env.exampl
 
 #### 1.4.1 Tracing 接入（让 Tempo 链路看板有数据）
 
-需修改 deploy 使用的 `env.json` 与 `user_config.json`（`<obs-host>` 为观测栈所在主机 IP），随后用 `deploy.py` 重新部署生效：
+> 完整排障见 [TRACING_TROUBLESHOOTING.md](TRACING_TROUBLESHOOTING.md)。
 
-- `env.json`：在 `motor_coordinator_env` / `motor_engine_prefill_env` / `motor_engine_decode_env` 下新增：
-  - `OTEL_SERVICE_NAME`（建议 `mindie-motor-coordinator` / `vllm-server-p` / `vllm-server-d`）
-  - `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf`
-  - `OTEL_EXPORTER_OTLP_TRACES_INSECURE=true`
-- `user_config.json`：
-  - `motor_coordinator_config.tracer_config.endpoint = http://<obs-host>:4318/v1/traces`
-  - `motor_engine_prefill_config.engine_config.otlp-traces-endpoint = http://<obs-host>:4318/v1/traces`
-  - `motor_engine_decode_config.engine_config.otlp-traces-endpoint = http://<obs-host>:4318/v1/traces`
+**重要**：观测栈本身（Collector → Tempo）与 pyMotor 业务 Trace 是**两个独立环节**。栈内通路修好后，`verify-tracing.sh` 能产生测试 trace；**真实推理请求**仍需在 pyMotor 侧配置 `tracer_config.endpoint` 并重新部署，否则 Coordinator 使用 `NoOpTracerProvider`，不会上报任何 span。
 
-> `4318` 为栈内 OTel Collector 的 OTLP HTTP 端口。完整片段见 `config/tracing.example.json`，详细部署见 `docs/zh/user_guide/tracing_deployment.md`。
+##### 前置：确认观测栈 Tracing 通路已通
+
+```bash
+cd examples/features/observability/stack
+docker compose up -d otel-collector tempo
+./scripts/verify-tracing.sh
+# 期望输出：OK — trace visible in Tempo (service.name=pymotor-tracing-verify)
+```
+
+若失败，先检查 OTel Collector 是否被主机 HTTP 代理污染（见 [TRACING_TROUBLESHOOTING.md §3](TRACING_TROUBLESHOOTING.md)）：
+
+```bash
+docker inspect pymotor-otel-collector --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -i proxy
+# HTTP_PROXY= 应为空，NO_PROXY 含 tempo
+```
+
+##### 端口说明（易错）
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `OTEL_HTTP_PORT` | `4318` | pyMotor **HTTP OTLP 上报端口**，在栈 `.env` 中配置 |
+| `OTEL_GRPC_PORT` | `4317` | gRPC OTLP 端口（`verify-tracing.sh` 使用） |
+
+若 `.env` 中修改了 `OTEL_HTTP_PORT`（例如 `14318`），pyMotor 的 `tracer_config.endpoint` **必须使用相同端口**，不能沿用文档默认的 `4318`。`launch.sh` 发现脚本会将 `OTLP_HTTP_ENDPOINT` 写入 `generated/discovered.env`，可直接参考：
+
+```bash
+grep OTLP_HTTP_ENDPOINT generated/discovered.env
+```
+
+##### pyMotor 配置（deploy 使用的 `user_config.json` / `env.json`）
+
+将 `<obs-host>` 替换为观测栈所在主机 IP（或 `generated/discovered.env` 中的 `OBS_HOST`），`<otel-http-port>` 替换为 `.env` 中 `OTEL_HTTP_PORT`（默认 `4318`）。
+
+**`user_config.json`：**
+
+```json
+{
+  "motor_coordinator_config": {
+    "tracer_config": {
+      "endpoint": "http://<obs-host>:<otel-http-port>/v1/traces",
+      "root_sampling_rate": 1.0,
+      "remote_parent_sampled": 1.0,
+      "remote_parent_not_sampled": 1.0,
+      "local_parent_sampled": 1.0,
+      "local_parent_not_sampled": 1.0
+    }
+  },
+  "motor_engine_prefill_config": {
+    "engine_config": {
+      "otlp-traces-endpoint": "http://<obs-host>:<otel-http-port>/v1/traces"
+    }
+  },
+  "motor_engine_decode_config": {
+    "engine_config": {
+      "otlp-traces-endpoint": "http://<obs-host>:<otel-http-port>/v1/traces"
+    }
+  }
+}
+```
+
+**`env.json`（Coordinator / Prefill Engine / Decode Engine 三个模块均需配置）：**
+
+```json
+{
+  "OTEL_SERVICE_NAME": "mindie-motor-coordinator",
+  "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+  "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true"
+}
+```
+
+Engine 模块建议分别设置 `OTEL_SERVICE_NAME` 为 `vllm-server-p`、`vllm-server-d`。
+
+完整片段见 `config/tracing.example.json`；上游说明见 `docs/zh/user_guide/tracing_deployment.md`。
+
+##### 重新部署（必须）
+
+仅修改配置文件**不会生效**，须用 `deploy.py` 重启 Pod：
+
+```bash
+cd examples/deployer
+python deploy.py --config_dir <你的配置目录>
+```
+
+##### 部署后验证
+
+**1）Coordinator 日志** — 确认 Tracing 已启用：
+
+```text
+TracerManager init.(enable:True,endpoint:http://<obs-host>:<otel-http-port>/v1/traces,protocol:http/protobuf)
+```
+
+若仍为 `enable:False,endpoint:`，说明 `tracer_config.endpoint` 未生效，检查 deploy 使用的配置路径是否正确。
+
+**2）发一笔推理请求**，然后在 Grafana 查看：
+
+- Explore → Tempo → **Search**（非 TraceQL）
+- 时间范围：Last 15 minutes
+- 按 `service.name = mindie-motor-coordinator`（或你设置的 `OTEL_SERVICE_NAME`）搜索
+
+**3）Tempo API 快速检查：**
+
+```bash
+curl -sG 'http://127.0.0.1:3200/api/search' --data-urlencode 'limit=20' | grep -E 'mindie-motor-coordinator|vllm-server'
+```
+
+##### 当前状态对照
+
+| 观测栈 verify-tracing | pyMotor tracer_config | Tempo 中可见 |
+|----------------------|----------------------|-------------|
+| OK | 未配置 / 未 deploy | 仅 `pymotor-tracing-verify` |
+| OK | 已配置且已 deploy | 业务服务名 + 测试服务 |
+| FAIL | — | 先修栈内通路（代理 / Collector） |
+
+##### 注意事项
+
+| 项 | 说明 |
+|----|------|
+| 端口 | 以 `.env` 的 `OTEL_HTTP_PORT` 为准，与 pyMotor endpoint 必须一致 |
+| 仅改配置不 deploy | 不会生效，必须 `deploy.py` 重启 Pod |
+| 采样率 | 默认 `1.0`；当前无 trace 多为 endpoint 为空（完全未上报），不是采样问题 |
+| 历史请求 | 未开启 tracing 期间的请求无法补录 |
 
 #### 1.4.2 Profiling 接入（让「引擎性能剖析」看板有数据）
 
@@ -171,7 +284,7 @@ docker compose up -d --pull missing --no-build
 |------|-------------------|------|
 | `kubectl` / `discover-targets.py` | **建议关闭** | 发现脚本内 `_kubectl_env()` 会剔除代理，避免 API Server 经代理超时；也可先 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY` |
 | `docker pull` / `compose pull` / `up --pull missing` | **需要时开启** | 拉镜像时 Docker 客户端继承**当前 shell** 代理 |
-| Grafana / Prometheus 等容器内 | **已禁用** | Compose 已为 Grafana 清空 `HTTP_PROXY`，`NO_PROXY` 含 `prometheus,tempo`，访问栈内数据源不走外网代理 |
+| Grafana / Prometheus / OTel Collector 等容器内 | **已禁用** | Compose 已为 Grafana、otel-collector 清空 `HTTP_PROXY`，`NO_PROXY` 含 `prometheus,tempo,otel-collector` |
 
 ### 2.3 推荐拉取流程（代理环境 · 首次拉起）
 
@@ -205,7 +318,7 @@ MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 | **目标发现**（`discover-targets.py` / `kubectl`） | 关闭 shell 代理；脚本内已对 kubectl 剔除代理变量 | **否** |
 | **Docker 拉镜像**（`docker compose pull` / `launch.sh` → `start.sh`） | 在**启动前**对当前 shell `source` 代理脚本或 `export HTTP_PROXY=...` | **需要外网 registry 时是** |
 | **Native 下载二进制**（`start-native.sh` / `launch.sh --native`） | `.env` 中设置 `PROXY_SH`，或启动前 export 同名环境变量 | **需要访问 GitHub / dl.grafana.com 时是** |
-| **容器内访问 Prometheus / Tempo** | 无需配置；Compose 已清空 Grafana 的 `HTTP_PROXY` 并设置 `NO_PROXY` | **否**（已内置） |
+| **容器内访问 Prometheus / Tempo / OTel Collector** | 无需配置；Compose 已清空 Grafana 与 otel-collector 的 `HTTP_PROXY` 并设置 `NO_PROXY` | **否**（已内置） |
 
 #### 2.4.2 `PROXY_SH`（Native runtime 专用）
 
@@ -367,7 +480,7 @@ launch.sh
 - **Node IP**：`--node-ip` / `MOTOR_NODE_IP` → Coordinator Pod `hostIP` → Kubernetes Node `InternalIP`。
 - **Coordinator**：自动发现 observability NodePort（默认服务端口 `1027`），生成 `/metrics` 及 `type=instance|role|dp|node` 等指标端点。
 - **Engine**：优先 Engine metrics NodePort；无 NodePort 时回退 PodIP + `MOTOR_ENGINE_MGMT_PORT`（默认 `10001`），识别 `vllm-p0` / `vllm-d0` 等命名并推断 `pd_role` 与 `instance_id`。
-- **Tracing**：写入 `OBS_HOST`、`OTLP_HTTP_ENDPOINT=http://<obs-host>:4318/v1/traces`、`OTLP_GRPC_ENDPOINT=http://<obs-host>:4317`。
+- **Tracing**：写入 `OBS_HOST`、`OTLP_HTTP_ENDPOINT=http://<obs-host>:<OTEL_HTTP_PORT>/v1/traces`、`OTLP_GRPC_ENDPOINT=http://<obs-host>:<OTEL_GRPC_PORT>`（端口读取 `.env` 或环境变量，默认 `4318` / `4317`）。
 
 ### 3.7 默认端口
 
@@ -377,7 +490,7 @@ launch.sh
 | Prometheus | `9090` | 指标查询与 targets |
 | Tempo | `3200` | Trace 查询 API |
 | OTel Collector gRPC | `4317` | OTLP gRPC 上报 |
-| OTel Collector HTTP | `4318` | OTLP HTTP `/v1/traces` |
+| OTel Collector HTTP | `4318`（`.env` 中 `OTEL_HTTP_PORT` 可改） | OTLP HTTP `/v1/traces`，pyMotor 上报须与此端口一致 |
 | Loki（仅 full） | `3100` | 日志数据源 |
 | Coordinator observability | `1027` | Coordinator typed metrics |
 | Engine management metrics | `10001` | Engine `/metrics` |
@@ -404,7 +517,14 @@ curl -sG http://localhost:9090/api/v1/query \
 - Prometheus Targets 中 `motor-coordinator`、`motor-engine` 应为 **UP**。
 - 页面布局与看板指标扩展详见 [GRAFANA_GUIDE.md](GRAFANA_GUIDE.md)。
 
-### 4.3 发现产物（排障用）
+### 4.4 Tracing 通路验证
+
+```bash
+./scripts/verify-tracing.sh
+# OK 表示 Collector → Tempo 通路正常；业务 trace 仍需 §1.4.1 pyMotor 配置
+```
+
+### 4.5 发现产物（排障用）
 
 | 文件 | 内容 |
 |------|------|
@@ -441,7 +561,9 @@ cd examples/features/observability/stack
 | `kubectl is unavailable` / `kubectl` 超时 | `source proxy` 后 kubectl 经 HTTP 代理访问 API Server 超时。发现阶段 `unset` 代理（脚本内已对 kubectl 清代理），并确认 `MOTOR_NAMESPACE` 正确。 |
 | `docker pull` / `compose pull` 超时 | 外网 registry 需代理。拉镜像前 `source` 代理脚本；或内网预拉镜像后设 `OBS_COMPOSE_PULL=never`。 |
 | `docker compose up --build` 失败 | 默认不应 build Grafana。确认未设置 `OBS_COMPOSE_BUILD=1`，使用上游 `grafana/grafana` 镜像。 |
-| Grafana 看板 500 / 504 | Grafana 容器继承了 `HTTP_PROXY`，访问 `prometheus:9090` / `tempo:3200` 走外网代理超时。确认镜像与 Compose 为最新，容器内 `HTTP_PROXY` 为空（`docker exec pymotor-grafana printenv HTTP_PROXY` 应为空）。 |
+| Grafana 看板 500 / 504 | Grafana 或 otel-collector 容器继承了 `HTTP_PROXY`，访问栈内服务走外网代理超时。确认 Compose 为最新，容器内 `HTTP_PROXY` 为空。 |
+| Tempo 无 trace / 仅 `pymotor-tracing-verify` | 栈通路正常但 pyMotor 未配置 Tracing，或 endpoint 端口与 `OTEL_HTTP_PORT` 不一致。见 [§1.4.1](#141-tracing-接入让-tempo-链路看板有数据) 与 [TRACING_TROUBLESHOOTING.md](TRACING_TROUBLESHOOTING.md)。 |
+| `verify-tracing.sh` 失败 | 检查 `docker compose logs otel-collector` 是否有代理超时；确认 otel-collector 的 `NO_PROXY` 含 `tempo`。 |
 | Dashboard 无曲线 / No Data | Prometheus target 指向的节点 IP 不可达，或未识别 `vllm-p0`/`vllm-d0` Pod，或 namespace / Pod IP 变化后未重建转发。重新 `./launch.sh` 发现；切换环境先 `./stop.sh`。 |
 | `motor-coordinator` / `motor-engine` 为 DOWN | 观测机到 Pod 网段不通，或 NodePort 不可达。检查 `generated/discovered.env` 的 `PORT_FORWARD_*` 与主机 `tcp-forward.py` 是否生效。 |
 | 无 Docker 环境 | 使用 `./launch.sh --native` 走原生二进制 runtime。 |

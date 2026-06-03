@@ -186,11 +186,16 @@ python3 grafana/scripts/build-profiling-dashboard.py \
 
 ### 5.1 Tracing
 
-pyMotor 建议配置（`<obs-host>` 为观测主机，参考 `config/tracing.example.json`）：
+pyMotor 建议配置（`<obs-host>` 为观测主机，`<otel-http-port>` 为栈 `.env` 中 `OTEL_HTTP_PORT`，默认 `4318`；参考 `config/tracing.example.json` 与 [SERVICE_GUIDE.md §1.4.1](SERVICE_GUIDE.md)）：
 
-- Coordinator：`tracer_config.endpoint = http://<obs-host>:4318/v1/traces`
-- Engine：`engine_config.otlp-traces-endpoint = http://<obs-host>:4318/v1/traces`
+- Coordinator：`tracer_config.endpoint = http://<obs-host>:<otel-http-port>/v1/traces`
+- Engine：`engine_config.otlp-traces-endpoint = http://<obs-host>:<otel-http-port>/v1/traces`
 - `OTEL_SERVICE_NAME` 建议：`mindie-motor-coordinator`、`vllm-server-p`、`vllm-server-d`
+- 修改后须 `deploy.py` 重新部署；Coordinator 日志应出现 `TracerManager init.(enable:True,...)`
+
+栈内通路验证：`./scripts/verify-tracing.sh`（仅验证 Collector → Tempo，不含业务 trace）。
+
+Tempo 无数据排障：[TRACING_TROUBLESHOOTING.md](TRACING_TROUBLESHOOTING.md)。
 
 在 Grafana **Explore** 选 Tempo 时，若默认 Query type 为 TraceQL，可切到 **Search**，或在 TraceQL 输入 `{}` 后执行搜索。
 

@@ -62,8 +62,8 @@ provider.shutdown()
 print(f"[verify-tracing] span exported to grpc://{endpoint}")
 PY
 
-echo "[verify-tracing] waiting for Tempo ingest..."
-sleep 3
+echo "[verify-tracing] waiting for Tempo ingest (batch export)..."
+sleep 8
 
 SEARCH_URL="http://${OTEL_HOST}:${TEMPO_PORT}/api/search?limit=20"
 echo "[verify-tracing] querying Tempo: ${SEARCH_URL}"
