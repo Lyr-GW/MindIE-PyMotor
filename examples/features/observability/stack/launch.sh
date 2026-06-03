@@ -38,6 +38,13 @@ Environment:
   MOTOR_ENGINE_MGMT_PORT
   OBS_HOST
   PROXY_SH
+
+Proxy / image pull (see README.md §1.1):
+  - discover-targets.py clears proxy for kubectl (do not rely on proxy for API Server).
+  - start.sh uses compose --pull missing: pull only when image is absent locally;
+    docker pull inherits current shell proxy — source proxy before launch if registry needs it.
+  - Grafana container clears HTTP_PROXY for in-stack datasources (prometheus/tempo).
+  - OBS_COMPOSE_PULL=never|missing|always  OBS_COMPOSE_BUILD=0|1
 EOF
 }
 

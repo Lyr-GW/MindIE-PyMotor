@@ -1,5 +1,7 @@
 # pyMotor 可观测性一键栈（PR202）
 
+合入与联调说明：[PR202_CHANGE_GUIDE.md](PR202_CHANGE_GUIDE.md) · [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)
+
 目标：在已部署 pyMotor 的节点上，通过一条命令自动发现真实接口并启动观测栈，浏览器可直接查看 metrics / tracing / profiling 页面。
 
 ## 1. 推荐启动方式（唯一入口）
@@ -37,6 +39,39 @@ export OBS_HOST=<obs-host>
 export PROXY_SH=/mnt/l00957062/proxy.sh
 ```
 
+### 1.1 代理环境与镜像拉取
+
+`start.sh` 默认执行 `docker compose up -d --pull missing`：**本地已有镜像则不拉取，缺失时才 `docker pull`**（可用 `OBS_COMPOSE_PULL=never|always|missing` 覆盖）。
+
+在需要 HTTP 代理才能访问外网 registry 的环境中，建议按下面分工操作（与 [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md) 第五节一致）：
+
+| 阶段 | 是否启用主机 `HTTP_PROXY` | 说明 |
+|------|---------------------------|------|
+| `kubectl` / `discover-targets.py` | **否** | 脚本内 `_kubectl_env()` 会去掉代理，避免 API Server 经代理超时；也可在拉起前 `unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY` |
+| 首次缺镜像、`docker pull` / `compose pull` | **是** | `--pull missing` 触发拉取时，Docker 客户端继承**当前 shell** 的代理；可先 `source` 代理脚本再执行 `launch.sh` 或 `docker compose pull` |
+| Grafana / Prometheus 等容器内 | **否** | `docker-compose.yml` 已为 Grafana 清空 `HTTP_PROXY` 并设置 `NO_PROXY`（含 `prometheus,tempo`），避免访问栈内数据源走外网代理 |
+
+**推荐流程（代理环境、首次拉起）**
+
+```bash
+cd examples/features/observability/stack
+
+# 1) 若本地尚无镜像：在代理下预拉（可选，也可交给 launch 时 --pull missing）
+source /path/to/proxy.sh    # 或 export PROXY_SH 后由你方脚本 source
+docker compose pull         # 仅需做一次；本地已有则跳过
+
+# 2) 发现与启动：可不保留代理（发现脚本会清 kubectl 代理；保留代理时仅 pull 会走代理）
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY  # 可选
+MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
+```
+
+**仅本地已有镜像、禁止任何拉取**（离线 / 联调）：
+
+```bash
+export OBS_COMPOSE_PULL=never
+MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
+```
+
 ## 2. 脚本职责
 
 - `launch.sh`：用户入口，执行目标发现 + 启动；Docker 失败自动回退 native。
@@ -65,6 +100,7 @@ export PROXY_SH=/mnt/l00957062/proxy.sh
 - Engine：
   - 优先使用 Engine metrics NodePort
   - 若无 NodePort，回退 PodIP + `MOTOR_ENGINE_MGMT_PORT`（默认 `10001`）
+  - 识别 `vllm-p0` / `vllm-d0` 等 Pod 命名（见 `ENGINE_POD_RE`）
   - 自动推断 `pd_role` 与 `instance_id`（`p0/p1/d0`）
   - Engine job 启用 `honor_labels: true`
 - Tracing：
