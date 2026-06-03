@@ -24,7 +24,7 @@
 |------|----------|------|
 | `scripts/discover-targets.py` | 修改 | kubectl 免代理、vllm Pod、Coordinator PodIP、Docker 端口转发、Controller URL |
 | `docker-compose.yml` | 修改 | Grafana 镜像/代理、核心服务 `pull_policy` |
-| `start.sh` | 修改 | 本地镜像 tag、`--pull never --no-build`、`cp -f` |
+| `start.sh` | 修改 | 本地镜像 tag、`--pull missing --no-build`、`cp -f` |
 | `PR202_LAUNCH_FIX_CHECKLIST.md` | 新增 | 本文档 |
 | `PR202_CHANGE_GUIDE.md` | 修改 | 文首增加指向本 Checklist 的链接 |
 
@@ -53,7 +53,7 @@
 
 - [x] `prepare_minimal_provisioning`：`cp` → `cp -f`
 - [x] 新增 `ensure_compose_images()` 与 `COMPOSE_UP_ARGS` 逻辑
-- [x] `docker compose up` 默认 `--pull never --no-build`
+- [x] `docker compose up` 默认 `--pull missing --no-build`（本地无镜像时才拉取）
 
 ### 3.4 `PR202_CHANGE_GUIDE.md`
 
