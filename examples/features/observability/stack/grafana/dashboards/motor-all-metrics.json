@@ -290,7 +290,7 @@
       },
       "targets": [
         {
-          "expr": "sum(vllm:num_requests_running{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
+          "expr": "sum(vllm:num_requests_running{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -327,7 +327,7 @@
       },
       "targets": [
         {
-          "expr": "sum(vllm:num_requests_waiting{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
+          "expr": "sum(vllm:num_requests_waiting{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -364,7 +364,7 @@
       },
       "targets": [
         {
-          "expr": "max(vllm:kv_cache_usage_perc{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
+          "expr": "max(vllm:kv_cache_usage_perc{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "refId": "A"
         }
       ],
@@ -418,7 +418,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(vllm:request_success_total{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
+          "expr": "sum(increase(vllm:request_success_total{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
           "refId": "A"
         }
       ],
@@ -465,7 +465,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (vllm:num_requests_running{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
+          "expr": "sum by (pd_role) (vllm:num_requests_running{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "legendFormat": "{{pd_role}}",
           "refId": "A"
         }
@@ -512,7 +512,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (instance_id, pd_role) (vllm:num_requests_running{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
+          "expr": "sum by (instance_id, pd_role) (vllm:num_requests_running{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"})",
           "legendFormat": "{{pd_role}}/{{instance_id}}",
           "refId": "A"
         }
@@ -598,7 +598,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (finished_reason) (increase(vllm:request_success_total{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
+          "expr": "sum by (finished_reason) (increase(vllm:request_success_total{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m]))",
           "legendFormat": "{{finished_reason}}",
           "refId": "A",
           "instant": true
@@ -637,7 +637,7 @@
       },
       "targets": [
         {
-          "expr": "vllm:kv_cache_usage_perc{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}",
+          "expr": "vllm:kv_cache_usage_perc{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}",
           "legendFormat": "{{pd_role}}/{{instance_id}}",
           "refId": "A"
         }
@@ -692,7 +692,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (rate(vllm:prompt_tokens_total{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
+          "expr": "sum by (pd_role) (rate(vllm:prompt_tokens_total{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
           "legendFormat": "prompt {{pd_role}}",
           "refId": "A"
         }
@@ -737,7 +737,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (pd_role) (rate(vllm:generation_tokens_total{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
+          "expr": "sum by (pd_role) (rate(vllm:generation_tokens_total{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
           "legendFormat": "gen {{pd_role}}",
           "refId": "A"
         }
@@ -783,17 +783,17 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p50 {{pd_role}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p95 {{pd_role}}",
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.99, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
+          "expr": "histogram_quantile(0.99, sum by (le, pd_role) (rate(vllm:e2e_request_latency_seconds_bucket{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p99 {{pd_role}}",
           "refId": "C"
         }
@@ -835,12 +835,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p50 {{pd_role}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, pd_role) (rate(vllm:time_to_first_token_seconds_bucket{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", model_name=~\"$model_name\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[5m])))",
           "legendFormat": "p95 {{pd_role}}",
           "refId": "B"
         }
@@ -893,7 +893,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (handler) (rate(http_request_duration_seconds_count{cluster=~\"$cluster\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
+          "expr": "sum by (handler) (rate(http_request_duration_seconds_count{cluster=~\"$cluster\", motor_metric_scope=~\"$motor_metric_scope\", role=~\"$role\", pd_role=~\"$pd_role\", instance_id=~\"$instance_id\", dp_rank=~\"$dp_rank\", pod_ip=~\"$pod_ip\"}[1m]))",
           "legendFormat": "{{handler}}",
           "refId": "A"
         }

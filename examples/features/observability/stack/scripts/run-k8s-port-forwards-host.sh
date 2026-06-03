@@ -172,8 +172,17 @@ mapfile -t local_ports < <(desired_specs | awk -F'|' '{print $4}' | sort -u)
 stop_existing
 cleanup_orphans_for_ports "${local_ports[@]}"
 : >"${PID_FILE}"
+start_failed=0
 while IFS= read -r spec; do
   [[ -z "${spec}" ]] && continue
-  start_one "${spec}"
+  if ! start_one "${spec}"; then
+    start_failed=1
+  fi
 done <"${DESIRED_FILE}"
+
+if [[ "${start_failed}" -eq 1 ]]; then
+  rm -f "${META_FILE}"
+  echo "[port-forward] one or more forwards failed; META not updated (will retry on next run)." >&2
+  exit 1
+fi
 cp "${DESIRED_FILE}" "${META_FILE}"

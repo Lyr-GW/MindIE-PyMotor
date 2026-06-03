@@ -158,6 +158,7 @@ DOCKER_RC=$?
 set -e
 
 if [[ "${DOCKER_RC}" -ne 0 ]]; then
-  echo "[launch] Docker startup failed (exit=${DOCKER_RC}), fallback to native runtime."
+  echo "[launch] Docker startup failed (exit=${DOCKER_RC}), cleaning partial Docker stack before native fallback."
+  ./stop.sh || true
   run_native
 fi

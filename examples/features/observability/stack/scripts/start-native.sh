@@ -52,8 +52,8 @@ elif [[ -f "${STACK_DIR}/.env.example" ]]; then
 fi
 load_dotenv "${ENV_FILE}"
 
-PROXY_SH="${PROXY_SH:-/mnt/l00957062/proxy.sh}"
-if [[ -f "${PROXY_SH}" ]]; then
+PROXY_SH="${PROXY_SH:-}"
+if [[ -n "${PROXY_SH}" && -f "${PROXY_SH}" ]]; then
   load_dotenv "${PROXY_SH}"
   echo "[native] loaded proxy config: ${PROXY_SH}"
 fi

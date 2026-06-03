@@ -5,6 +5,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 cd "${SCRIPT_DIR}"
+. "${SCRIPT_DIR}/scripts/load-dotenv.sh"
 
 "${SCRIPT_DIR}/scripts/stop-k8s-port-forwards-host.sh" || true
 
@@ -13,9 +14,34 @@ if [[ "${1:-}" == "--purge" ]]; then
   PURGE=1
 fi
 
+if [[ -f .env ]]; then
+  load_dotenv .env
+fi
+
+STACK_MODE="${OBS_STACK_MODE:-full}"
+WITH_MOCK="${OBS_WITH_MOCK:-0}"
+PROFILES="${OBS_COMPOSE_PROFILES:-}"
+
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 if "${DOCKER_BIN}" compose version >/dev/null 2>&1; then
-  ARGS=(compose --profile npu down)
+  PROFILE_ARGS=()
+  if [[ "${STACK_MODE}" == "full" ]]; then
+    PROFILE_ARGS+=(--profile full)
+  fi
+  if [[ "${WITH_MOCK}" -eq 1 ]]; then
+    PROFILE_ARGS+=(--profile mock)
+  fi
+  if [[ -n "${PROFILES}" ]]; then
+    IFS=',' read -r -a profiles_arr <<<"${PROFILES}"
+    for p in "${profiles_arr[@]}"; do
+      [[ -z "${p}" ]] && continue
+      PROFILE_ARGS+=(--profile "${p}")
+    done
+  fi
+  # Ascend NPU exporter uses profile npu; include it so down matches typical up.
+  PROFILE_ARGS+=(--profile npu)
+
+  ARGS=(compose "${PROFILE_ARGS[@]}" down)
   if [[ "${PURGE}" -eq 1 ]]; then
     ARGS+=(-v)
   fi

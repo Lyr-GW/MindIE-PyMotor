@@ -43,7 +43,7 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "query": "label_values(motor_kv_cache_hit_rate{source=~\"$source\"}, instance_id)",
+        "query": "label_values(vllm:kv_cache_usage_perc{source=~\"$source\"}, instance_id)",
         "refresh": 2,
         "includeAll": true,
         "multi": true,

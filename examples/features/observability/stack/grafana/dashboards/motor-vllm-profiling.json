@@ -691,7 +691,7 @@
           "refId": "C"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm_profiling_output_processor_duration_bucket{source=~\"$source\", role=~\"$role\", cluster=~\"$cluster\", job=~\"$job\", pd_role=~\"$pd_role\", phase=~\"$phase\", dp_rank=~\"$dp\", instance_id=~\"$instance_id\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(vllm_profiling_output_processor:duration_bucket{source=~\"$source\", role=~\"$role\", cluster=~\"$cluster\", job=~\"$job\", pd_role=~\"$pd_role\", phase=~\"$phase\", dp_rank=~\"$dp\", instance_id=~\"$instance_id\"}[5m])))",
           "legendFormat": "output_processor",
           "refId": "D"
         }

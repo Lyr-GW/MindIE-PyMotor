@@ -41,6 +41,7 @@ scrape_configs:
           - "host.docker.internal:1027"
         labels:
           motor_component: coordinator
+          motor_metric_scope: role
           role: prefill
           pd_role: prefill
           cluster: example-namespace
@@ -52,6 +53,7 @@ scrape_configs:
           - "host.docker.internal:1027"
         labels:
           motor_component: coordinator
+          motor_metric_scope: role
           role: decode
           pd_role: decode
           cluster: example-namespace
