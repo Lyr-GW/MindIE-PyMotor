@@ -248,7 +248,7 @@ MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 |------|------|
 | Native 下载 Prometheus/Grafana 超时 | 检查 `PROXY_SH` 路径、代理是否可达；`cat "$PROXY_SH"` 确认含 `https_proxy` |
 | `kubectl` / 发现超时 | `unset` 全部代理后再 `./launch.sh`；勿对 API Server 走 HTTP 代理 |
-| Grafana 看板 500 / 504 | 容器内代理问题，见本文 [§6](#6-常见问题) 与 `docker-compose.yml` 中 Grafana 的 `NO_PROXY` |
+| Grafana 看板 500 / 504 | 容器内代理问题，见本文 [§6](#6-常见问题总结) 与 `docker-compose.yml` 中 Grafana 的 `NO_PROXY` |
 | `.env` 里 `PROXY_SH` 指向不存在文件 | 保持为空即可；错误路径不会加载，但 native 下载可能失败 |
 
 ---
