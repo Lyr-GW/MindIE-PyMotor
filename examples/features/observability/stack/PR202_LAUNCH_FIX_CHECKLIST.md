@@ -100,11 +100,26 @@ MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
 
 ### 5.4 代理分工
 
-| 场景 | 是否 `source proxy` |
-|------|---------------------|
-| `kubectl` / `discover-targets.py` | 否 |
-| `docker pull` / `buildx` | 是（仅拉镜像时） |
-| Grafana / Prometheus 容器内 | 否 |
+`start.sh` 默认 `docker compose up --pull missing`：**本地有镜像不拉，缺镜像才 `docker pull`**。
+
+| 场景 | 是否 `source proxy` | 说明 |
+|------|---------------------|------|
+| `kubectl` / `discover-targets.py` | **否** | `discover-targets.py` 内 `_kubectl_env()` 剔除代理；避免 API Server 经 HTTP 代理超时 |
+| 首次缺镜像、`docker pull` / `compose pull` | **是** | `--pull missing` 触发拉取时，Docker 客户端使用**当前 shell** 代理；可先 `source proxy` 再 `./launch.sh`，或先 `docker compose pull` |
+| Grafana / Prometheus 容器内 | **否** | Compose 为 Grafana 清空 `HTTP_PROXY` 并配置 `NO_PROXY`（`prometheus,tempo` 等），栈内数据源不走外网代理 |
+| 离线 / 镜像已齐 | **否** | 设置 `OBS_COMPOSE_PULL=never` 禁止拉取 |
+
+**代理环境首次拉起示例**
+
+```bash
+cd examples/features/observability/stack
+source /path/to/proxy.sh          # 仅当需要拉镜像时
+docker compose pull               # 可选；也可直接 launch，由 --pull missing 拉取
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY   # 可选，发现阶段更稳妥
+MOTOR_NAMESPACE=<namespace> ./launch.sh --minimal
+```
+
+日常说明见 [README.md §1.1](README.md#11-代理环境与镜像拉取)。
 
 ---
 

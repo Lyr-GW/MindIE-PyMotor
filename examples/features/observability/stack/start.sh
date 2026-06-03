@@ -151,7 +151,8 @@ ensure_compose_images() {
 
 ensure_compose_images
 
-# missing: 本地已有镜像则不拉，缺失时才 pull（与 docker-compose pull_policy: if_not_present 一致）
+# missing: 本地已有镜像则不拉，缺失时才 pull（与 docker-compose pull_policy: if_not_present 一致）。
+# 代理环境：首次 pull 继承当前 shell 的 HTTP_PROXY，需拉镜像时可先 source proxy；详见 README.md §1.1。
 # 可覆盖：OBS_COMPOSE_PULL=never|always|missing
 COMPOSE_PULL="${OBS_COMPOSE_PULL:-missing}"
 COMPOSE_UP_ARGS=(up -d --pull "${COMPOSE_PULL}")

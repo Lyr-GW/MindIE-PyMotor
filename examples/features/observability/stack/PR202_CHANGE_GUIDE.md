@@ -43,7 +43,18 @@ PR202 在 `examples/features/observability/stack/` 提供：
 
 ---
 
-## 4. 验收（minimal）
+## 4. 代理环境拉起
+
+与 [README.md §1.1](README.md#11-代理环境与镜像拉取)、[Checklist §5.4](PR202_LAUNCH_FIX_CHECKLIST.md#54-代理分工) 一致：
+
+- **发现阶段**：不依赖主机代理（`discover-targets.py` 对 kubectl 清代理）。
+- **缺镜像时**：`start.sh` 使用 `--pull missing`，首次拉取会走 Docker 客户端；需在拉镜像前 `source` 代理，或先 `docker compose pull`。
+- **容器内**：Grafana 等已禁用继承的主机代理，访问 `prometheus` / `tempo` 等栈内服务不走外网代理。
+- **离线**：`OBS_COMPOSE_PULL=never`。
+
+---
+
+## 5. 验收（minimal）
 
 ```bash
 cd examples/features/observability/stack
@@ -58,7 +69,7 @@ Grafana：http://localhost:3000，`source=real`，`cluster=<ns>`，曲线可见�
 
 ---
 
-## 5. 与 GitCode MR !202 的关系
+## 6. 与 GitCode MR !202 的关系
 
 - GitHub / 本仓库 feature 分支可推送到 `pr202/observability-launch-fix` 供 GitCode 合入
 - 联调细节与问题根因见 [PR202_LAUNCH_FIX_CHECKLIST.md](PR202_LAUNCH_FIX_CHECKLIST.md)
