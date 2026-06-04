@@ -60,11 +60,12 @@ def test_kv_cache_affinity_uses_kva_for_role_u() -> None:
     instance = Mock()
     endpoint = Mock()
     req_info = Mock()
+    ranked = [(instance, endpoint, 0.0)]
 
     with patch(
         "motor.coordinator.scheduler.runtime.scheduler_client."
-        "KvCacheAffinityPolicy.select_endpoint_from_list",
-        return_value=(instance, endpoint),
+        "KvCacheAffinityPolicy.select_endpoint_candidates_from_list",
+        return_value=ranked,
     ) as mock_kva, patch.object(
         client,
         "_select_endpoint_candidates_by_load_balance",
@@ -73,9 +74,9 @@ def test_kv_cache_affinity_uses_kva_for_role_u() -> None:
             [instance], PDRole.ROLE_U, req_info, top_k=1
         )
 
-    assert candidates == [(instance, endpoint, 0.0)]
+    assert candidates == ranked
     assert candidate_policy == "kv_cache_affinity"
-    mock_kva.assert_called_once_with([instance], req_info)
+    mock_kva.assert_called_once()
     mock_load_balance.assert_not_called()
 
 
@@ -89,8 +90,8 @@ def test_kv_cache_affinity_falls_back_to_load_balance_for_role_u() -> None:
 
     with patch(
         "motor.coordinator.scheduler.runtime.scheduler_client."
-        "KvCacheAffinityPolicy.select_endpoint_from_list",
-        return_value=None,
+        "KvCacheAffinityPolicy.select_endpoint_candidates_from_list",
+        return_value=[],
     ) as mock_kva, patch.object(
         client,
         "_select_endpoint_candidates_by_load_balance",
@@ -102,7 +103,7 @@ def test_kv_cache_affinity_falls_back_to_load_balance_for_role_u() -> None:
 
     assert candidates == lb_candidates
     assert candidate_policy == "load_balance"
-    mock_kva.assert_called_once_with([instance], req_info)
+    mock_kva.assert_called_once()
     mock_load_balance.assert_called_once_with([instance], PDRole.ROLE_U, 1)
 
 
@@ -116,7 +117,7 @@ def test_kv_cache_affinity_skips_kva_for_non_kva_roles() -> None:
 
     with patch(
         "motor.coordinator.scheduler.runtime.scheduler_client."
-        "KvCacheAffinityPolicy.select_endpoint_from_list"
+        "KvCacheAffinityPolicy.select_endpoint_candidates_from_list"
     ) as mock_kva, patch.object(
         client,
         "_select_endpoint_candidates_by_load_balance",

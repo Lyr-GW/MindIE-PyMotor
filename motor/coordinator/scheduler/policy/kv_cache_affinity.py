@@ -175,8 +175,6 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             req_info.token_ids = encoded_ids
         except Exception as e:  # pragma: no cover - req_info may be immutable in some callers
             logger.debug("Could not cache token_ids on req_info: %s", e)
-        return encoded_ids
-
         # Visibility for the validated invariant: tools, when present, MUST inflate
         # the encoded token sequence. Operators can grep this line to verify
         # function-call requests are being tokenised correctly.
@@ -186,12 +184,12 @@ class KvCacheAffinityPolicy(BaseSchedulingPolicy):
             len(tools or []),
             len(encoded_ids or []),
         )
+        return encoded_ids
 
-        rsp = ConductorApiClient.query_conductor(instances, encoded_ids)
-        tenant = rsp.get(TENANT_ID, None)
-        if tenant is None:
-            logger.warning(f"tenant is none")
-            return None
+    @staticmethod
+    def _conductor_block_size() -> int:
+        """
+        Configured KV block size (tokens per block); 0 when unknown so the fast path stays off.
 
         Used to skip the conductor round-trip for prompts shorter than one block (which can never
         hit a cached prefix). Defensive on purpose: any config hiccup returns 0, which disables the
@@ -468,14 +466,14 @@ class TokenizerManager(ThreadSafeSingleton):
             tokenize=False,
         )
         return self.tokenizer.encode(prompt)
+
     def _safe_fallback_encode(
         self, messages: list, tools: list | None = None
     ) -> list[int]:
         """Last-resort tokenize that NEVER drops ``tools``.
 
         Tries the tools-aware standard call once more; if that also fails,
-        returns ``[]`` so :meth:`KvCacheAffinityPolicy.select_endpoint_from_list`
-        can surface a None and let the upper scheduler fall back to LB.
+        returns ``[]`` so the affinity candidate path can fall back to load balance.
         Returning a partially-correct token list (e.g. messages without tools)
         would silently mislead conductor's longest_matched and is far worse
         than failing closed.
