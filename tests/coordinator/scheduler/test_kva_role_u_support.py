@@ -16,6 +16,7 @@ def _build_instance(role: PDRole) -> Mock:
     instance.role = role
     endpoint = Mock()
     instance.endpoints = {"pod-0": {0: endpoint}}
+    instance.get_all_endpoints.return_value = (endpoint,)
     return instance
 
 

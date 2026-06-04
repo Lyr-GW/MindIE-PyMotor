@@ -1384,19 +1384,22 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
         mock_tokenizer.apply_chat_template.side_effect = _apply
         return manager
 
+    @patch.object(KvCacheAffinityPolicy, "_conductor_block_size", return_value=16)
     @patch(
         "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
     )
-    def test_query_conductor_receives_tokens_including_tools(self, mock_query) -> None:
+    def test_query_conductor_receives_tokens_including_tools(
+        self, mock_query, _mock_block_size
+    ) -> None:
         ids_with_tools = list(range(20))
         ids_without_tools = list(range(5))
         self._stub_tokenizer_manager(ids_with_tools, ids_without_tools)
 
         instance = Mock()
         instance.id = 1
-        ep = Mock()
-        ep.id = 0
+        ep = _make_endpoint(0)
         instance.endpoints = {"pod-0": {0: ep}}
+        instance.get_all_endpoints.return_value = (ep,)
 
         mock_query.return_value = {
             TENANT_ID: {
@@ -1424,17 +1427,22 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
         self.assertEqual(sent_ids, ids_with_tools)
         self.assertGreater(len(sent_ids), len(ids_without_tools))
 
+    @patch.object(KvCacheAffinityPolicy, "_conductor_block_size", return_value=0)
     @patch(
         "motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor"
     )
-    def test_tokenize_total_failure_falls_back_to_empty_ids(self, mock_query) -> None:
-        """If both tokenize attempts fail, encoded_ids must be [] and conductor still queried with []."""
+    def test_tokenize_total_failure_falls_back_to_empty_ids(
+        self, mock_query, _mock_block_size
+    ) -> None:
+        """If both tokenize attempts fail, encoded_ids must be [] and conductor queried with []."""
         manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
         mock_tokenizer.apply_chat_template.side_effect = RuntimeError("boom")
 
         instance = Mock()
         instance.id = 1
-        instance.endpoints = {"pod-0": {0: Mock(id=0)}}
+        ep = _make_endpoint(0)
+        instance.endpoints = {"pod-0": {0: ep}}
+        instance.get_all_endpoints.return_value = (ep,)
         mock_query.return_value = {}
 
         req_info = Mock()
@@ -1444,5 +1452,6 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
         }
         result = KvCacheAffinityPolicy.select_endpoint_from_list([instance], req_info)
         self.assertIsNone(result)
+        mock_query.assert_called_once()
         sent_instances, sent_ids = mock_query.call_args[0]
         self.assertEqual(sent_ids, [])
