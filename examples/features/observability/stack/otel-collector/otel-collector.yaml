@@ -1,0 +1,52 @@
+# OpenTelemetry Collector configuration.
+# Receives OTLP traces and logs from pymotor components and routes them to
+# Tempo (traces) and Loki (logs). pymotor coordinator/engine 只需将
+# OTEL_EXPORTER_OTLP_TRACES_ENDPOINT 指向 :4317 即可接入。
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 1024
+    timeout: 5s
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: pymotor-observability-local
+        action: upsert
+  # 把 trace_id/span_id 提升为 Loki label 以便 derived fields 跳转
+  attributes/loki:
+    actions:
+      - key: loki.format
+        value: json
+        action: insert
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlp/tempo, debug]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource, attributes/loki]
+      exporters: [loki, debug]
+  telemetry:
+    logs:
+      level: info

@@ -1,0 +1,149 @@
+# Prometheus configuration for pymotor observability stack.
+#
+# Notes:
+#   * pymotor 相关 job 的 targets 为示例占位符，请按实际部署修改，
+#     或使用 file_sd_configs 维护本地 target 列表（勿提交真实 IP/NodePort）。
+#   * scrape_interval 设置为 5s，与 pymotor coordinator 默认 metrics 缓存
+#     (prometheus_metrics_config.reuse_time=3) 接近，避免过度采集。
+#   * Dashboard 常用标签：cluster / motor_metric_scope / role / pd_role / instance_id
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  # 重要：保留 vllm:* 等指标名中的冒号 (`:`)。
+  # 该选项要求 Prometheus 启动时同时带 --enable-feature=utf8-names
+  # (见 docker-compose.yml 中 prometheus service 的 command)
+  metric_name_validation_scheme: utf8
+  external_labels:
+    monitor: motor-observability
+
+scrape_configs:
+  # -----------------------------------------------------------------------
+  # Prometheus 自身
+  # -----------------------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - "localhost:9090"
+
+  # -----------------------------------------------------------------------
+  # Ascend NPU exporter (profile: npu-real)
+  # 仅在昇腾节点启用 (docker compose --profile npu-real up)
+  # -----------------------------------------------------------------------
+  - job_name: ascend-npu-exporter
+    static_configs:
+      - targets:
+          - "host.docker.internal:8082"
+        labels:
+          source: real
+
+  # -----------------------------------------------------------------------
+  # node-exporter / cAdvisor
+  # -----------------------------------------------------------------------
+  - job_name: node-exporter
+    static_configs:
+      - targets:
+          - "node-exporter:9100"
+
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - "cadvisor:8080"
+
+  # -----------------------------------------------------------------------
+  # pymotor coordinator / engine / controller
+  # 这些目标在大多数环境里不可达；保留为示例，使用者按实际部署修改 targets。
+  # 端口规则参考 motor/config/coordinator.py / controller.py。
+  # -----------------------------------------------------------------------
+  - job_name: motor-coordinator
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # 默认 Coordinator 管理端口，参考 motor_coordinator_config.api_config
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          source: real
+
+  - job_name: motor-coordinator-instance
+    metrics_path: /instance/metrics
+    static_configs:
+      - targets:
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          source: real
+
+  - job_name: motor-coordinator-role-prefill
+    metrics_path: /metrics?type=role&role=prefill
+    static_configs:
+      - targets:
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          motor_metric_scope: role
+          role: prefill
+          pd_role: prefill
+          source: real
+
+  - job_name: motor-coordinator-role-decode
+    metrics_path: /metrics?type=role&role=decode
+    static_configs:
+      - targets:
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          motor_metric_scope: role
+          role: decode
+          pd_role: decode
+          source: real
+
+  # -----------------------------------------------------------------------
+  # pymotor Engine — honor_labels: true 保留应用侧原生标签，
+  # 静态标签 (role / pd_role / instance_id) 可被应用侧同名标签覆盖。
+  # 按实际部署为每个 engine target 配置 labels，或使用 file_sd_configs。
+  # -----------------------------------------------------------------------
+  - job_name: motor-engine
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # 实际目标由用户根据 EngineServer mgmt_port 填写，可在 .env / compose
+          # 中追加 host:port，相同 job 内多 target 即可。
+          - "host.docker.internal:8001"
+        labels:
+          motor_component: engine
+          source: real
+    # 示例：file_sd_configs（targets 文件本地维护，勿提交）
+    # file_sd_configs:
+    #   - files:
+    #       - /etc/prometheus/targets/engine.json
+    #     refresh_interval: 30s
+
+  # -----------------------------------------------------------------------
+  # vLLM profiling 指标 (ms_service_metric, vllm_profiling_*)
+  # 由 ms_service_metric hook 注册进 vLLM prometheus registry，与 vllm:* 同端点。
+  #
+  # pymotor engine_server 部署：通常已随 motor-engine job 一并采集，无需本 job。
+  # 独立 vllm serve 部署：启用本 job 并填写 targets。
+  # -----------------------------------------------------------------------
+  - job_name: vllm-profiling
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # 替换为实际 vLLM serve 节点（OpenAI API server 端口）
+          - "host.docker.internal:8000"
+        labels:
+          motor_component: vllm
+          source: real
+
+  # -----------------------------------------------------------------------
+  # Controller — 经 controller-metrics-proxy 解包 JSON 信封
+  # -----------------------------------------------------------------------
+  - job_name: motor-controller
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "controller-metrics-proxy:9106"
+        labels:
+          motor_component: controller
+          source: real
