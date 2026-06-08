@@ -25,33 +25,49 @@ Provides one‑click PD-separated deployment, flexibly adapts to multiple infere
 
 ### Tag Specification
 
-Tags follow the format:
+Official pre-built image tags follow this format:
 
 ```text
-<MotorVersion>-<ProductSeries>-<PythonVersion>-<OperatingSystem>-<Architecture>
+<MotorVersion>-vllm-ascend-<vllm-ascend-version>-<ProductSeries>-<PythonVersion>-<OperatingSystem>-lts
 ```
 
 | Field | Example Value | Description |
 |---|---|---|
 | `MotorVersion` | `3.0.0` | Motor version number |
+| `vllm-ascend version` | `v0.18.0` | Base inference engine (vllm-ascend) version |
 | `ProductSeries` | `800I-A2`, `800I-A3`, `300I-Duo` | Target Atlas product series |
-| `OperatingSystem` | `ubuntu22.04`, `openeuler24.03` | Base operating system |
-| `PythonVersion` | `py3.10`, `py3.11`, `py3.12` | Python version |
-| `Architecture` | `x86_64`, `aarch64` | Architecture type |
+| `PythonVersion` | `py3.11` | Python version |
+| `OperatingSystem` | `Ubuntu24.04-lts` | Base OS and distribution identifier |
 
 ### Image Registry Address
 
-MindIE-Motor images are hosted on Huawei Cloud SWR:
+Official MindIE-Motor images are hosted on Quay:
 
 ```text
-swr.cn-south-1.myhuaweicloud.com/
+quay.io/ascend/mindie-motor
 ```
 
-**Full image example:**
+**Pull examples:**
+
+```bash
+# Atlas 800I A2
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts
+
+# Atlas 800I A3
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A3-py3.11-Ubuntu24.04-lts
+```
+
+> For faster downloads, replace `quay.io` with `quay.nju.edu.cn`.
+
+**Locally built image tag example (`build_image.sh` defaults):**
 
 ```text
-swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
+mindie-pymotor:0.1.0-800I-A2-py3.11-Ubuntu24.04-x86_64
 ```
+
+> Note: Images built locally via `build_image.sh` use a different naming scheme. The
+> OS field comes from the `SYSTEM` environment variable (default `Ubuntu24.04`),
+> with an architecture suffix appended.
 
 ### Build Parameters
 
@@ -64,7 +80,7 @@ sensible defaults). Override them on the command line as needed.
 | DEVICE | Atlas device model | No | `910` | 310 / 910 / A3 |
 | ARCH | System architecture | No | `$(uname -m)` | x86_64 / aarch64 |
 | PYMOTOR_VERSION | MindIE-PyMotor version number | No | `0.1.0` | 0.1.0 |
-| VLLM_ASCEND_VERSION | vllm-ascend base image version/branch | No | `main` | v0.13.0 / main / v0.14.0rc1 / releases-v0.13.0 |
+| VLLM_ASCEND_VERSION | vllm-ascend base image version/branch | No | `main` | v0.18.0 / v0.13.0 / main |
 | IMAGE_VERSION | Version tag for the final built image | No | `${PYMOTOR_VERSION}` | v1.0.0 |
 
 ---
@@ -79,6 +95,18 @@ sensible defaults). Override them on the command line as needed.
 - Docker is installed on the host.
 
 ---
+
+### Pull MindIE-Motor Image
+
+Pull a pre-built image from the official registry :
+
+```bash
+# Atlas 800I A2
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts
+
+# Atlas 800I A3
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A3-py3.11-Ubuntu24.04-lts
+```
 
 ### Build MindIE-Motor Image
 
@@ -175,11 +203,83 @@ What the build does, in order:
 
 ### Run MindIE-Motor Container
 
+Make sure Atlas drivers are installed on the host and `/dev/davinci*` device nodes
+are available before running.
+
+#### Minimal verification command
+
+Use this to confirm the image starts and can access NPUs (replace `IMAGE_NAME` with
+your actual tag):
+
+```bash
+IMAGE_NAME="quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts"
+
+docker run --rm -it \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  --device=/dev/davinci0 \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/:ro \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /var/log/npu/:/usr/slog \
+  "${IMAGE_NAME}" \
+  bash -c "npu-smi info && python -c 'import motor; print(\"motor ok\")'"
+```
+
+#### Start an inference service
+
+A full deployment requires `boot.sh`, `user_config.json`, and related files mounted
+into the container. See the [docker-only single-container deployment
+guide](../docs/zh/developer_guide/docker_only/single_container_docker_only.md) for the
+end-to-end workflow.
+
+```bash
+CONFIGMAP_PATH="/path/to/configmap"   # absolute path; must contain boot.sh, user_config.json, etc.
+IMAGE_NAME="quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts"
+
+docker run -u root --rm --name mindie-motor \
+  -e ASCEND_RUNTIME_OPTIONS=NODRV \
+  -e CONFIGMAP_PATH="${CONFIGMAP_PATH}" \
+  -e CONFIG_PATH=/usr/local/Ascend/pyMotor/conf \
+  -e ROLE=SINGLE_CONTAINER \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  --device=/dev/davinci0 \
+  --device=/dev/davinci1 \
+  -p 1025:1025 \
+  -p 1026:1026 \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/ \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+  -v /usr/local/sbin:/usr/local/sbin \
+  -v /var/log/npu/:/usr/slog \
+  -v /mnt:/mnt \
+  -v "${CONFIGMAP_PATH}:${CONFIGMAP_PATH}" \
+  "${IMAGE_NAME}" \
+  bash -c 'export POD_IP=$(grep $(hostname) /etc/hosts | cut -f1) && source ${CONFIGMAP_PATH}/boot.sh'
+```
+
+Common parameters:
+
+| Parameter / env var | Description |
+|---|---|
+| `--device=/dev/davinci{N}` | Map NPU devices; add `davinci0`, `davinci1`, etc. as needed |
+| `--device=/dev/davinci_manager`, etc. | Ascend management devices; usually required for inference |
+| `-v /usr/local/Ascend/driver:...` | Mount the host Ascend driver directory |
+| `-v ${CONFIGMAP_PATH}:...` | Mount the startup scripts and config directory |
+| `-p <host>:<container>` | Expose API ports; must match `user_config.json` |
+| `ASCEND_RUNTIME_OPTIONS=NODRV` | Reuse the host driver; no in-container driver install |
+| `CONFIGMAP_PATH` | In-container path to startup scripts; must match the mount |
+| `CONFIG_PATH` | Motor config directory; default `/usr/local/Ascend/pyMotor/conf` |
+| `ROLE` | Deployment role; use `SINGLE_CONTAINER` for single-container PD separation |
+
 ### How to Extend
 
 ```bash
 # Use MindIE-PyMotor image as base, add user software
-FROM quay.io/ascend/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
+FROM quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts
 
 RUN apt update -y && \
     apt install gcc ...

@@ -25,33 +25,47 @@
 
 ### Tag 规范
 
-Tag 遵循以下格式：
+官方预构建镜像 Tag 遵循以下格式：
 
 ```text
-<Motor版本>-<产品系列>-<python版本>-<操作系统>-<架构类型>
+<Motor版本>-vllm-ascend-<vllm-ascend版本>-<产品系列>-<python版本>-<操作系统>-lts
 ```
 
 | 字段 | 示例值 | 说明 |
 |---|---|---|
 | `Motor版本` | `3.0.0` | Motor 版本号 |
+| `vllm-ascend版本` | `v0.18.0` | 基础推理引擎 vllm-ascend 版本 |
 | `产品系列` | `800I-A2`、`800I-A3`、`300I-Duo` | 目标昇腾产品系列 |
-| `操作系统` | `ubuntu22.04`、`openeuler24.03` | 基础操作系统 |
-| `python版本` | `py3.10`、`py3.11`、`py3.12` | Python 版本 |
-| `架构类型` | `x86_64`、`aarch64` | 架构类型 |
+| `python版本` | `py3.11` | Python 版本 |
+| `操作系统` | `Ubuntu24.04-lts` | 基础操作系统及发行版标识 |
 
 ### 镜像仓库地址
 
-MindIE-Motor 镜像托管在华为云 SWR 镜像仓库：
+MindIE-Motor 官方镜像托管在 Quay 仓库：
 
 ```text
-swr.cn-south-1.myhuaweicloud.com/
+quay.io/ascend/mindie-motor
 ```
 
-**完整镜像示例：**
+**拉取示例：**
+
+```bash
+# Atlas 800I A2（昇腾 910B）
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts
+
+# Atlas 800I A3（昇腾 A3）
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A3-py3.11-Ubuntu24.04-lts
+```
+
+> 为提高下载速度，可将 `quay.io` 替换为 `quay.nju.edu.cn`。
+
+**本地构建镜像 Tag 示例（`build_image.sh` 默认参数）：**
 
 ```text
-swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
+mindie-pymotor:0.1.0-800I-A2-py3.11-Ubuntu24.04-x86_64
 ```
+
+> 注：本地通过 `build_image.sh` 构建的镜像命名规则与官方预构建镜像不同；操作系统字段取自 `SYSTEM` 环境变量（默认 `Ubuntu24.04`），并附带架构后缀。
 
 ### 构建参数
 
@@ -64,7 +78,7 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 | DEVICE | 昇腾设备型号 | 否 | `910b` | 310p / 910b / 910c |
 | ARCH | 系统架构 | 否 | `$(uname -m)` | x86_64 / aarch64 |
 | PYMOTOR_VERSION | MindIE-PyMotor 版本号 | 否 | `0.1.0` | 0.1.0 |
-| VLLM_ASCEND_VERSION | vllm-ascend 基础镜像版本/分支 | 否 | `main` | v0.13.0 / main / v0.14.0rc1 / releases-v0.13.0 |
+| VLLM_ASCEND_VERSION | vllm-ascend 基础镜像版本/分支 | 否 | `main` | v0.18.0 / v0.13.0 / main |
 | IMAGE_VERSION | 最终构建镜像的版本标识 | 否 | `${PYMOTOR_VERSION}` | v1.0.0 |
 
 ---
@@ -79,6 +93,18 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 - 宿主机上已经安装好Docker。
 
 ---
+
+### 拉取 MindIE-Motor 镜像
+
+从官方仓库拉取预构建镜像（按目标硬件与 vllm-ascend 版本选择对应 Tag）：
+
+```bash
+# Atlas 800I A2（昇腾 910B，build_image.sh 默认 DEVICE=910b）
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts
+
+# Atlas 800I A3（昇腾 A3）
+docker pull quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A3-py3.11-Ubuntu24.04-lts
+```
 
 ### 构建 MindIE-Motor 镜像
 
@@ -172,11 +198,78 @@ echo "构建完成，镜像 tag: ${IMAGE_TAG}"
 
 ### 运行 MindIE-Motor 容器
 
+运行前请确认宿主机已安装昇腾驱动，且 `/dev/davinci*` 等设备节点可用。
+
+#### 最小验证命令
+
+以下命令可验证镜像能否正常启动并访问 NPU（将 `IMAGE_NAME` 替换为实际镜像 tag）：
+
+```bash
+IMAGE_NAME="quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts"
+
+docker run --rm -it \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  --device=/dev/davinci0 \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro \
+  -v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/:ro \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro \
+  -v /var/log/npu/:/usr/slog \
+  "${IMAGE_NAME}" \
+  bash -c "npu-smi info && python -c 'import motor; print(\"motor ok\")'"
+```
+
+#### 启动推理服务
+
+实际部署需提前准备 `boot.sh`、`user_config.json` 等配置文件，并挂载到容器内。完整端到端流程见 [docker-only 单容器部署指南](../docs/zh/developer_guide/docker_only/single_container_docker_only.md)。
+
+```bash
+CONFIGMAP_PATH="/path/to/configmap"   # 绝对路径，目录内需含 boot.sh、user_config.json 等
+IMAGE_NAME="quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts"
+
+docker run -u root --rm --name mindie-motor \
+  -e ASCEND_RUNTIME_OPTIONS=NODRV \
+  -e CONFIGMAP_PATH="${CONFIGMAP_PATH}" \
+  -e CONFIG_PATH=/usr/local/Ascend/pyMotor/conf \
+  -e ROLE=SINGLE_CONTAINER \
+  --device=/dev/davinci_manager \
+  --device=/dev/devmm_svm \
+  --device=/dev/hisi_hdc \
+  --device=/dev/davinci0 \
+  --device=/dev/davinci1 \
+  -p 1025:1025 \
+  -p 1026:1026 \
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+  -v /usr/local/Ascend/add-ons/:/usr/local/Ascend/add-ons/ \
+  -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+  -v /usr/local/sbin:/usr/local/sbin \
+  -v /var/log/npu/:/usr/slog \
+  -v /mnt:/mnt \
+  -v "${CONFIGMAP_PATH}:${CONFIGMAP_PATH}" \
+  "${IMAGE_NAME}" \
+  bash -c 'export POD_IP=$(grep $(hostname) /etc/hosts | cut -f1) && source ${CONFIGMAP_PATH}/boot.sh'
+```
+
+常用参数说明：
+
+| 参数 / 环境变量 | 说明 |
+|---|---|
+| `--device=/dev/davinci{N}` | 映射 NPU 设备，按实际卡数追加 `davinci0`、`davinci1` 等 |
+| `--device=/dev/davinci_manager` 等 | 昇腾管理设备，运行推理时通常必填 |
+| `-v /usr/local/Ascend/driver:...` | 挂载宿主机昇腾驱动目录 |
+| `-v ${CONFIGMAP_PATH}:...` | 挂载启动脚本与配置文件目录 |
+| `-p <host>:<container>` | 暴露 API 端口，需与 `user_config.json` 中端口配置一致 |
+| `ASCEND_RUNTIME_OPTIONS=NODRV` | 复用宿主机驱动，无需在容器内重复安装 |
+| `CONFIGMAP_PATH` | 容器内启动脚本路径，需与挂载目录保持一致 |
+| `CONFIG_PATH` | Motor 配置文件目录，默认 `/usr/local/Ascend/pyMotor/conf` |
+| `ROLE` | 部署角色；单容器 PD 分离场景取 `SINGLE_CONTAINER` |
+
 ### 如何二次开发
 
 ```bash
 # 以 MindIE-PyMotor 镜像为基础镜像，叠加用户软件
-FROM quay.io/ascend/mindie-pymotor:3.0.0-800I-A2-ubuntu22.04-py3.11
+FROM quay.io/ascend/mindie-motor:3.0.0-vllm-ascend-v0.18.0-800I-A2-py3.11-Ubuntu24.04-lts
 
 RUN apt update -y && \
     apt install gcc ...
