@@ -110,3 +110,8 @@ venv.bak/
 
 # deployer
 deployer/output/*
+
+# observability stack runtime artifacts
+examples/features/observability/stack/generated/
+examples/features/observability/stack/.native-runtime/
+examples/features/observability/stack/.env
