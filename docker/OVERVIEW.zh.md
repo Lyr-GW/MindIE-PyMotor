@@ -61,7 +61,7 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 | 变量 | 说明 | 是否必填 | 默认值 | 示例值 |
 |------|------|----------|--------|--------|
 | SYSTEM | 服务器操作系统及版本 | 否 | `Ubuntu24.04` | Ubuntu24.04 / openEuler24.03 |
-| DEVICE | 昇腾设备型号 | 否 | `910b` | 310p / 910b / A3 |
+| DEVICE | 昇腾设备型号 | 否 | `910b` | 310p / 910b / 910c |
 | ARCH | 系统架构 | 否 | `$(uname -m)` | x86_64 / aarch64 |
 | PYMOTOR_VERSION | MindIE-PyMotor 版本号 | 否 | `0.1.0` | 0.1.0 |
 | VLLM_ASCEND_VERSION | vllm-ascend 基础镜像版本/分支 | 否 | `main` | v0.13.0 / main / v0.14.0rc1 / releases-v0.13.0 |
@@ -92,7 +92,7 @@ swr.cn-south-1.myhuaweicloud.com/mindie-pymotor/mindie-pymotor:3.0.0-800I-A2-ubu
 bash docker/build_image.sh
 
 # 通过环境变量覆盖默认值
-SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
+SYSTEM=openEuler24.03 DEVICE=910c VLLM_ASCEND_VERSION=v0.13.0 \
     bash docker/build_image.sh
 ```
 
@@ -104,12 +104,12 @@ SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
 # 在仓库根目录执行：
 #   bash docker/build_image.sh
 # 通过环境变量覆盖默认值，例如：
-#   SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
+#   SYSTEM=openEuler24.03 DEVICE=910c VLLM_ASCEND_VERSION=v0.13.0 \
 #       bash docker/build_image.sh
 set -euo pipefail
 
 SYSTEM=${SYSTEM:-Ubuntu24.04}                       # Ubuntu24.04 / openEuler24.03
-DEVICE=${DEVICE:-910b}                              # 310p / 910b / A3
+DEVICE=${DEVICE:-910b}                              # 310p / 910b / 910c
 ARCH=${ARCH:-$(uname -m)}                           # x86_64 / aarch64
 PYMOTOR_VERSION=${PYMOTOR_VERSION:-0.1.0}           # MindIE-PyMotor 版本号
 VLLM_ASCEND_VERSION=${VLLM_ASCEND_VERSION:-main}    # vllm-ascend 基础镜像 tag 前缀
@@ -118,7 +118,7 @@ IMAGE_VERSION=${IMAGE_VERSION:-${PYMOTOR_VERSION}}  # 产物镜像的版本标�
 case "${DEVICE}" in
     310p) PRODUCT=300I-Duo ;;
     910b) PRODUCT=800I-A2 ;;
-    A3)   PRODUCT=800I-A3 ;;
+    910c) PRODUCT=800I-A3 ;;
     *) echo "不支持的 DEVICE: ${DEVICE}" >&2; exit 1 ;;
 esac
 
@@ -127,8 +127,8 @@ case "${SYSTEM}_${DEVICE}" in
     openEuler24.03_310p) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-310p-openeuler ;;
     Ubuntu24.04_910b)    BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION} ;;
     openEuler24.03_910b) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-openeuler ;;
-    Ubuntu24.04_A3)      BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3 ;;
-    openEuler24.03_A3)   BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3-openeuler ;;
+    Ubuntu24.04_910c)    BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3 ;;
+    openEuler24.03_910c) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3-openeuler ;;
     *) echo "不支持的 SYSTEM/DEVICE 组合: ${SYSTEM}/${DEVICE}" >&2; exit 1 ;;
 esac
 

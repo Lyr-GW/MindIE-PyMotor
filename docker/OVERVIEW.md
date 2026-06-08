@@ -94,7 +94,7 @@ A ready-to-use helper script is provided at `docker/build_image.sh`. From the
 bash docker/build_image.sh
 
 # Override defaults via environment variables
-SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
+SYSTEM=openEuler24.03 DEVICE=910c VLLM_ASCEND_VERSION=v0.13.0 \
     bash docker/build_image.sh
 ```
 
@@ -106,12 +106,12 @@ The script's contents are reproduced below for reference:
 # Run from the repository root:
 #   bash docker/build_image.sh
 # Override defaults via environment variables, e.g.:
-#   SYSTEM=openEuler24.03 DEVICE=A3 VLLM_ASCEND_VERSION=v0.13.0 \
+#   SYSTEM=openEuler24.03 DEVICE=910c VLLM_ASCEND_VERSION=v0.13.0 \
 #       bash docker/build_image.sh
 set -euo pipefail
 
 SYSTEM=${SYSTEM:-Ubuntu24.04}                       # Ubuntu24.04 / openEuler24.03
-DEVICE=${DEVICE:-910b}                              # 310p / 910b / A3
+DEVICE=${DEVICE:-910b}                              # 310p / 910b / 910c
 ARCH=${ARCH:-$(uname -m)}                           # x86_64 / aarch64
 PYMOTOR_VERSION=${PYMOTOR_VERSION:-0.1.0}           # MindIE-PyMotor version
 VLLM_ASCEND_VERSION=${VLLM_ASCEND_VERSION:-main}    # vllm-ascend base image tag prefix
@@ -120,7 +120,7 @@ IMAGE_VERSION=${IMAGE_VERSION:-${PYMOTOR_VERSION}}  # Tag of the produced image
 case "${DEVICE}" in
     310p) PRODUCT=300I-Duo ;;
     910b) PRODUCT=800I-A2 ;;
-    A3)   PRODUCT=800I-A3 ;;
+    910c) PRODUCT=800I-A3 ;;
     *) echo "Unsupported DEVICE: ${DEVICE}" >&2; exit 1 ;;
 esac
 
@@ -129,8 +129,8 @@ case "${SYSTEM}_${DEVICE}" in
     openEuler24.03_310p) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-310p-openeuler ;;
     Ubuntu24.04_910b)    BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION} ;;
     openEuler24.03_910b) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-openeuler ;;
-    Ubuntu24.04_A3)      BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3 ;;
-    openEuler24.03_A3)   BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3-openeuler ;;
+    Ubuntu24.04_910c)    BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3 ;;
+    openEuler24.03_910c) BASE_IMAGE_TAG=${VLLM_ASCEND_VERSION}-a3-openeuler ;;
     *) echo "Unsupported SYSTEM/DEVICE combo: ${SYSTEM}/${DEVICE}" >&2; exit 1 ;;
 esac
 
