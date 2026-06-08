@@ -2,8 +2,10 @@ name: Sync to Gitcode
 
 on:
   push:
-    branches:
-      - '**'
+    branches-ignore:
+      # 上游镜像分支：仅承载 Ascend 官方代码，不触发 GitCode 同步
+      - 'sync/**'
+      - 'mirror/**'
   workflow_dispatch: {}
 
 # GitHub-Actions-only files that have no meaning on Gitcode. Their commits
@@ -17,6 +19,7 @@ env:
   GITCODE_STRIP_PATHS: |
     .github/workflows/sync-to-gitcode.yml
     .github/workflows/pull-from-upstream.yml
+    .github/workflows/sync-from-github-upstream.yml
     scripts/sync-helpers.sh
 
   # Identity used when rewriting commit author/committer of feature branches
