@@ -15,7 +15,7 @@ OBS_HOST_INPUT="${OBS_HOST:-}"
 FORCE_NATIVE=0
 DISCOVER_ONLY=0
 DRY_RUN=0
-STACK_MODE="${OBS_STACK_MODE:-full}"
+STACK_MODE="${OBS_STACK_MODE:-minimal}"
 
 usage() {
   cat <<'EOF'
@@ -25,8 +25,8 @@ Options:
   --namespace <namespace>     Kubernetes namespace / job_id
   --node-ip <node-ip>         Node IP used for NodePort access
   --user-config <path>        pyMotor user_config.json path
-  --minimal                   Start minimal Docker stack (Prometheus/Grafana/Tempo/OTel)
-  --full                      Start full Docker stack (adds Loki/node-exporter/cAdvisor)
+  --minimal                   Start core stack with Loki (default)
+  --full                      Add node-exporter/cAdvisor infra exporters
   --discover-only             Only run discovery, do not start stack
   --dry-run                   Run discovery and print generated Prometheus config
   --native                    Skip Docker Compose and run native runtime
