@@ -8,6 +8,7 @@ cd "${SCRIPT_DIR}"
 . "${SCRIPT_DIR}/scripts/load-dotenv.sh"
 
 "${SCRIPT_DIR}/scripts/stop-k8s-port-forwards-host.sh" || true
+"${SCRIPT_DIR}/scripts/loki-native.sh" stop || true
 
 PURGE=0
 if [[ "${1:-}" == "--purge" ]]; then
@@ -18,7 +19,7 @@ if [[ -f .env ]]; then
   load_dotenv .env
 fi
 
-STACK_MODE="${OBS_STACK_MODE:-full}"
+STACK_MODE="${OBS_STACK_MODE:-minimal}"
 WITH_MOCK="${OBS_WITH_MOCK:-0}"
 PROFILES="${OBS_COMPOSE_PROFILES:-}"
 
@@ -38,7 +39,6 @@ if "${DOCKER_BIN}" compose version >/dev/null 2>&1; then
       PROFILE_ARGS+=(--profile "${p}")
     done
   fi
-  # Ascend NPU exporter uses profile npu; include it so down matches typical up.
   PROFILE_ARGS+=(--profile npu)
 
   ARGS=(compose "${PROFILE_ARGS[@]}" down)
@@ -76,6 +76,7 @@ fi
 if [[ "${PURGE}" -eq 1 ]]; then
   echo "[stop] purge native runtime data."
   rm -rf "${RUNTIME_DIR:?}/data" "${RUNTIME_DIR:?}/logs" "${RUNTIME_DIR:?}/run"
+  rm -rf "${SCRIPT_DIR}/generated/loki-data"
 fi
 
 echo "[stop] done."
