@@ -111,6 +111,17 @@ def set_engine_node_selector(deployment_data, deploy_config, node_type):
     apply_node_selector_by_hardware(pod_spec, hardware_type)
 
 
+def set_engine_mindie_role_node_selector(deployment_data, node_type, instance_index):
+    """Pin each P/D instance to nodes labeled mindie-role=prefillN or decodeN."""
+    pod_spec = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC]
+    pod_spec[C.NODE_SELECTOR] = pod_spec.get(C.NODE_SELECTOR, {})
+    if node_type == C.NODE_TYPE_D:
+        role_label = f"decode{int(instance_index)}"
+    else:
+        role_label = f"prefill{int(instance_index)}"
+    pod_spec[C.NODE_SELECTOR][C.MINDIE_ROLE] = role_label
+
+
 def set_weight_mount(pod_spec, container, weight_mount_path):
     volume_found = False
     for volume in pod_spec.get(C.VOLUMES, []):
@@ -160,6 +171,8 @@ def modify_engine_yaml(deployment_data, user_config, index, node_type):
     set_engine_replicas(deployment_data, deploy_config, node_type)
     set_engine_npu(container, deploy_config, node_type)
     set_engine_node_selector(deployment_data, deploy_config, node_type)
+    if deploy_config.get(C.ENABLE_MINDIE_ROLE_NODE_SELECTOR):
+        set_engine_mindie_role_node_selector(deployment_data, node_type, index)
     set_engine_weight_mount(deployment_data, container, deploy_config)
     modify_log_mount(deployment_data, user_config, deployment_data[C.METADATA][C.NAME])
 

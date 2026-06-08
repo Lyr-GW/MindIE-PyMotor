@@ -38,6 +38,7 @@
 | hardware_type | string | 硬件类型：`800I_A2` 或 `800I_A3` |
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 model_path 需与此挂载路径一致，如 `"/mnt/weight/"` |
 | deploy_mode | string | 部署方式。可选：`infer_service_set`（默认，基于 InferServiceSet CRD，生成单个 infer_service.yaml 由 CRD controller 拉起各 pod）、`multi_deployment`（传统方式，生成 controller、coordinator、engine_*、kv_pool 等多个独立 YAML 分别 apply）、`single_container`（单容器方式，P/D 合并运行）。不配置时默认为 `infer_service_set`。CRD 方式尚未完成 RAS 能力与池化能力的适配验证；若需 RAS（可靠性、可用性、可服务性）或 KV 池化能力，请设置为 `multi_deployment` |
+| enable_mindie_role_node_selector | bool | 可选，默认 `false`。为 `true` 且 `deploy_mode` 为 `multi_deployment` 时，为每个 P/D 实例的 engine Deployment 自动写入 `nodeSelector.mindie-role`（P 实例为 `prefill0`、`prefill1`…，D 实例为 `decode0`、`decode1`…）。使用前需在对应 K8s 节点上打好同名标签，否则 Pod 可能无法调度。 |
 | tls_config | object | 可选；TLS 相关配置，含 infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config 四类，结构见 [PD 分离服务部署](./pd_disaggregation_deployment.md#tls_config可选) |
 
 ---
