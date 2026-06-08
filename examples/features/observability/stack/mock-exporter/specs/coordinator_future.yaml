@@ -1,0 +1,80 @@
+# Coordinator 级 SLI 指标（pymotor 当前未实现，对标 NVIDIA Dynamo dynamo_frontend_*）
+# 待应用侧补齐后直接复用同名同标签 schema，mock 端无需修改 Dashboard
+# 命名前缀 motor_coordinator_，标签 model + pd_role
+metrics:
+  - name: motor_coordinator_requests_total
+    type: counter
+    help: Total LLM requests handled by motor coordinator.
+    labels: [model, pd_role]
+    label_values:
+      pd_role: [prefill, decode]
+    value:
+      mode: counter_rate
+      rate_per_sec: 0.5
+
+  - name: motor_coordinator_time_to_first_token_seconds
+    type: histogram
+    help: Time to first token at coordinator level.
+    labels: [model]
+    buckets: [0.001, 0.005, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0, 20.0, 40.0, 80.0]
+    value:
+      mode: histogram_lognormal
+      mu: -2.0       # 中位 ~135ms（含网络）
+      sigma: 0.8
+      rate_per_sec: 0.5
+
+  - name: motor_coordinator_inter_token_latency_seconds
+    type: histogram
+    help: Inter-token latency at coordinator level.
+    labels: [model]
+    buckets: [0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0]
+    value:
+      mode: histogram_lognormal
+      mu: -3.4
+      sigma: 0.5
+      rate_per_sec: 32.0
+
+  - name: motor_coordinator_request_duration_seconds
+    type: histogram
+    help: End-to-end LLM request duration at coordinator level.
+    labels: [model]
+    buckets: [0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 7680.0]
+    value:
+      mode: histogram_lognormal
+      mu: 0.8       # 中位 ~2.2s
+      sigma: 0.5
+      rate_per_sec: 0.5
+
+  - name: motor_coordinator_input_sequence_tokens
+    type: histogram
+    help: Input sequence length in tokens at coordinator level.
+    labels: [model]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0]
+    value:
+      mode: histogram_lognormal
+      mu: 4.5
+      sigma: 1.0
+      rate_per_sec: 0.5
+
+  - name: motor_coordinator_output_sequence_tokens
+    type: histogram
+    help: Output sequence length in tokens at coordinator level.
+    labels: [model]
+    buckets: [1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 20000.0]
+    value:
+      mode: histogram_lognormal
+      mu: 4.5
+      sigma: 1.0
+      rate_per_sec: 0.5
+
+  - name: motor_coordinator_active_requests
+    type: gauge
+    help: Number of requests currently in-flight at coordinator.
+    labels: [model]
+    value:
+      mode: gauge_sin
+      base: 6.0
+      amp: 5.0
+      period_sec: 60
+      noise: 1.0
+      clamp: [0, 128]

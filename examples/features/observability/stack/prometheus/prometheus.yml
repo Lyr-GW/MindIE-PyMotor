@@ -1,0 +1,124 @@
+# Prometheus configuration for pymotor observability stack.
+#
+# Notes:
+#   * 所有 pymotor 相关 job 通过环境变量替换实际目标地址，由 docker-compose.yml
+#     在启动时通过 PROMETHEUS_EXTRA_HOSTS 等机制注入。
+#   * mock-exporter job 通过 relabel_configs 注入 source="mock" 标签，便于
+#     Dashboard 通过 $source variable 切换 mock/real 视图。
+#   * scrape_interval 设置为 5s，与 pymotor coordinator 默认 metrics 缓存
+#     (prometheus_metrics_config.reuse_time=3) 接近，避免过度采集。
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  # 重要：保留 vllm:* 等指标名中的冒号 (`:`)。
+  # 该选项要求 Prometheus 启动时同时带 --enable-feature=utf8-names
+  # (见 docker-compose.yml 中 prometheus service 的 command)
+  metric_name_validation_scheme: utf8
+  external_labels:
+    monitor: motor-observability
+
+scrape_configs:
+  # -----------------------------------------------------------------------
+  # Prometheus 自身
+  # -----------------------------------------------------------------------
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - "localhost:9090"
+
+  # -----------------------------------------------------------------------
+  # Mock exporter
+  # 不带 source 标签 -> 由 prometheus relabel 强制注入 source="mock"
+  # -----------------------------------------------------------------------
+  - job_name: motor-metrics-mock
+    static_configs:
+      - targets:
+          - "motor-metrics-mock:9105"
+        labels:
+          # 用 source 标签区分真假数据；Dashboard 用 $source 变量切换。
+          source: mock
+    # 显式 relabel 保证即使 static_configs.labels 被覆盖，source=mock 不丢
+    relabel_configs:
+      - target_label: source
+        replacement: mock
+
+  # -----------------------------------------------------------------------
+  # Ascend NPU exporter (profile: npu-real)
+  # 仅在昇腾节点启用 (docker compose --profile npu-real up)
+  # -----------------------------------------------------------------------
+  - job_name: ascend-npu-exporter
+    static_configs:
+      - targets:
+          - "host.docker.internal:8082"
+        labels:
+          source: real
+
+  # -----------------------------------------------------------------------
+  # node-exporter / cAdvisor
+  # -----------------------------------------------------------------------
+  - job_name: node-exporter
+    static_configs:
+      - targets:
+          - "node-exporter:9100"
+
+  - job_name: cadvisor
+    static_configs:
+      - targets:
+          - "cadvisor:8080"
+
+  # -----------------------------------------------------------------------
+  # pymotor coordinator / engine / controller
+  # 这些目标在大多数环境里不可达；保留为示例，使用者按实际部署修改 targets。
+  # 端口规则参考 motor/config/coordinator.py / controller.py。
+  # -----------------------------------------------------------------------
+  - job_name: motor-coordinator
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # 默认 Coordinator 管理端口，参考 motor_coordinator_config.api_config
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          source: real
+
+  - job_name: motor-coordinator-instance
+    metrics_path: /instance/metrics
+    static_configs:
+      - targets:
+          - "host.docker.internal:1026"
+        labels:
+          motor_component: coordinator
+          source: real
+
+  - job_name: motor-engine-prefill
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          # 实际目标由用户根据 EngineServer mgmt_port 填写，可在 .env / compose
+          # 中追加 host:port，相同 job 内多 target 即可。
+          - "host.docker.internal:8001"
+        labels:
+          motor_component: engine
+          pd_role: prefill
+          source: real
+
+  - job_name: motor-engine-decode
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "host.docker.internal:8002"
+        labels:
+          motor_component: engine
+          pd_role: decode
+          source: real
+
+  - job_name: motor-controller
+    metrics_path: /observability/metrics
+    static_configs:
+      - targets:
+          # 默认 Controller observability API 端口 1027
+          - "host.docker.internal:1027"
+        labels:
+          motor_component: controller
+          source: real

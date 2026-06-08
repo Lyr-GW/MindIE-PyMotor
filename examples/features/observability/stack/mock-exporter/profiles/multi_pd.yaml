@@ -1,0 +1,21 @@
+# Multi PD profile: 4P + 4D 拓扑
+deploy:
+  job_id: mindie-motor
+  p_instances_num: 4
+  d_instances_num: 4
+  single_p_instance_pod_num: 1
+  single_d_instance_pod_num: 1
+  p_pod_npu_num: 16
+  d_pod_npu_num: 16
+  hardware_type: 800I_A3
+
+models:
+  - "/job/model/Qwen2.5-7B-Instruct"
+
+specs:
+  - motor
+  - http
+  - vllm
+  - coordinator_future
+  - kv_future
+  - npu

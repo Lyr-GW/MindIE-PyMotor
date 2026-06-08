@@ -1,0 +1,164 @@
+# Ascend NPU 指标
+# 1:1 复刻华为 mind-cluster npu-exporter (https://gitcode.com/Ascend/mind-cluster)
+# 参考: https://www.hiascend.com/document/detail/zh/mindcluster/600/clustersched/reference/api/dlug_api_004.html
+# 标签: id, model_name(npu型号), pcie_bus_info, vdie_id, container_name, pod_name, namespace
+metrics:
+  - name: npu_chip_info_utilization
+    type: gauge
+    help: the ai core utilization of the npu chip
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 55.0
+      amp: 30.0
+      period_sec: 120
+      noise: 5.0
+      clamp: [0.0, 100.0]
+
+  - name: npu_chip_info_vector_utilization
+    type: gauge
+    help: the vector core utilization of the npu chip
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 35.0
+      amp: 25.0
+      period_sec: 180
+      noise: 5.0
+      clamp: [0.0, 100.0]
+
+  - name: npu_chip_info_aicore_current_freq
+    type: gauge
+    help: the npu ai core current frequency, unit is 'MHz'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 1600.0
+      amp: 100.0
+      period_sec: 300
+      noise: 20.0
+      clamp: [800.0, 1900.0]
+
+  - name: npu_chip_info_temperature
+    type: gauge
+    help: the npu temperature, unit is 'C'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 55.0
+      amp: 12.0
+      period_sec: 360
+      noise: 2.0
+      clamp: [30.0, 95.0]
+
+  - name: npu_chip_info_power
+    type: gauge
+    help: the npu power dissipation, unit is 'W' (910/310 chip power, 310P board power)
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 180.0
+      amp: 80.0
+      period_sec: 120
+      noise: 10.0
+      clamp: [40.0, 400.0]
+
+  - name: npu_chip_info_voltage
+    type: gauge
+    help: the npu voltage, unit is 'V'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 0.85
+      amp: 0.05
+      period_sec: 300
+      noise: 0.01
+      clamp: [0.7, 1.0]
+
+  - name: npu_chip_info_used_memory
+    type: gauge
+    help: the used hbm memory of npu, unit is 'MB'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_npu_used_memory_mb   # 与 total_memory 联动，比例 0.3~0.95
+
+  - name: npu_chip_info_total_memory
+    type: gauge
+    help: the total hbm memory of npu, unit is 'MB'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_npu_total_memory_mb
+
+  - name: npu_chip_info_health_status
+    type: gauge
+    help: the npu health status, 1 is healthy, 0 otherwise
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: constant
+      value: 1.0
+
+  - name: npu_chip_info_network_status
+    type: gauge
+    help: the npu network health status (Atlas training series only)
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: constant
+      value: 1.0
+
+  - name: npu_chip_info_link_status
+    type: gauge
+    help: the npu network interface link status (Atlas training series only)
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: constant
+      value: 1.0
+
+  - name: npu_chip_info_bandwidth_rx
+    type: gauge
+    help: the npu interface receive speed, unit is 'MB/s'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 1200.0
+      amp: 800.0
+      period_sec: 60
+      noise: 100.0
+      clamp: [0.0, 25000.0]
+
+  - name: npu_chip_info_bandwidth_tx
+    type: gauge
+    help: the npu interface transmit speed, unit is 'MB/s'
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: gauge_sin
+      base: 1100.0
+      amp: 700.0
+      period_sec: 60
+      noise: 100.0
+      clamp: [0.0, 25000.0]
+
+  - name: npu_chip_info_error_code
+    type: gauge
+    help: the npu error code, 0 means no error
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: constant
+      value: 0.0
+
+  - name: npu_chip_info_name
+    type: info_gauge
+    help: the npu chip name with id
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace, chip_name]
+    label_values:
+      chip_name: ["Ascend910B4"]
+    value:
+      mode: constant
+      value: 1.0
+
+  - name: npu_container_info
+    type: info_gauge
+    help: the npu container info
+    labels: [id, model_name, pcie_bus_info, vdie_id, container_name, pod_name, namespace]
+    value:
+      mode: constant
+      value: 1.0
