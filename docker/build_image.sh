@@ -53,6 +53,7 @@ echo "Building ${IMAGE_TAG} from quay.nju.edu.cn/ascend/vllm-ascend:${BASE_IMAGE
 docker build \
     --network=host \
     --build-arg "BASE_IMAGE_TAG=${BASE_IMAGE_TAG}" \
+    --build-arg "AGREEMENT_VERSION=${IMAGE_VERSION}" \
     -t "${IMAGE_TAG}" \
     -f docker/Dockerfile \
     .
