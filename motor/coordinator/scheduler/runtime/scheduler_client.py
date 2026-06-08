@@ -361,6 +361,8 @@ OnInstanceChangeNotify = Callable[[int | None], Awaitable[None]]
 
 # ZMQ PUB does not queue; SUB must be ready before PUB sends. Short delay after connect.
 _INSTANCE_PUB_SUB_SETTLE_MS = 150
+# Roles that should use kv_cache_affinity scheduling.
+_KVA_SELECT_ROLES = frozenset({PDRole.ROLE_P, PDRole.ROLE_U})
 
 
 class _InstancePushSubscriber:
@@ -859,7 +861,7 @@ class AsyncSchedulerClient:
                 return self._select_endpoint_for_instance(selected_instance)
             logger.warning("load_balance failed, falling back to round-robin")
         elif st == "kv_cache_affinity":
-            if role is PDRole.ROLE_P:
+            if role in _KVA_SELECT_ROLES:
                 selected = KvCacheAffinityPolicy.select_endpoint_from_list(instances, req_info)
                 if selected is not None:
                     return selected
@@ -870,8 +872,12 @@ class AsyncSchedulerClient:
                 logger.warning("load_balance also failed, falling back to round-robin")
             else:
                 selected_instance = self._select_instance_and_endpoint_by_load_balance(instances, role)
-            if selected_instance is not None:
-                return self._select_endpoint_for_instance(selected_instance)
+                if selected_instance is not None:
+                    return self._select_endpoint_for_instance(selected_instance)
+                logger.warning(
+                    "load_balance failed for role %s (not eligible for kv_cache_affinity), falling back to round-robin",
+                    role,
+                )
             logger.warning("kv_cache_affinity failed, falling back to round-robin")
         # Round-robin path: default policy or load_balance fallback
         if role not in self._instance_rr_counters:
