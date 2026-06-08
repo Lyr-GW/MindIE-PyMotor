@@ -1,0 +1,135 @@
+name: Sync from GitHub Upstream (Ascend)
+
+# 将 GitHub 官方主仓 master 定期同步到专用分支 sync/upstream-master。
+# 该分支仅承载上游代码，不含 GitCode 同步等 GitHub-only 基础设施；
+# master 及功能分支继续保留 sync-to-gitcode 等 Action。
+#
+# 分支职责：
+#   sync/upstream-master  → 纯上游镜像（本 workflow 维护）
+#   master                → 开发 + GitCode 同步 Action（sync-to-gitcode 维护）
+
+on:
+  schedule:
+    # 每天 UTC 02:00（北京时间 10:00）检查上游更新
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_branch:
+        description: 'GitHub 上游分支 (Ascend/MindIE-PyMotor)'
+        required: true
+        default: 'master'
+        type: string
+      target_branch:
+        description: '同步目标分支 (本仓库)'
+        required: true
+        default: 'sync/upstream-master'
+        type: string
+      sync_mode:
+        description: '同步方式：ff-only 仅快进；reset 强制与上游一致'
+        required: true
+        default: 'ff-only'
+        type: choice
+        options:
+          - ff-only
+          - reset
+
+permissions:
+  contents: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_BRANCH: ${{ github.event.inputs.upstream_branch || 'master' }}
+      TARGET_BRANCH: ${{ github.event.inputs.target_branch || 'sync/upstream-master' }}
+      SYNC_MODE: ${{ github.event.inputs.sync_mode || 'ff-only' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch GitHub upstream
+        run: |
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/Ascend/MindIE-PyMotor.git
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          echo "Fetched upstream/${UPSTREAM_BRANCH}"
+
+      - name: Prepare target branch
+        id: prepare
+        run: |
+          set -euo pipefail
+          UPSTREAM_HEAD=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
+
+          if git ls-remote --heads origin "${TARGET_BRANCH}" | grep -q .; then
+            git fetch origin "${TARGET_BRANCH}"
+            git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+          else
+            git checkout -B "${TARGET_BRANCH}" "${UPSTREAM_HEAD}"
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+            echo "🆕 目标分支 ${TARGET_BRANCH} 不存在，已从 upstream/${UPSTREAM_BRANCH} 初始化"
+          fi
+
+          echo "upstream_head=${UPSTREAM_HEAD}" >> "${GITHUB_OUTPUT}"
+          echo "target_head=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Compare with upstream
+        id: diff
+        run: |
+          set -euo pipefail
+          UPSTREAM_HEAD="${{ steps.prepare.outputs.upstream_head }}"
+          TARGET_HEAD="${{ steps.prepare.outputs.target_head }}"
+
+          if [ "${UPSTREAM_HEAD}" = "${TARGET_HEAD}" ]; then
+            echo "status=up_to_date" >> "${GITHUB_OUTPUT}"
+            echo "✅ 目标分支已与 upstream/${UPSTREAM_BRANCH} 一致"
+          elif git merge-base --is-ancestor "${TARGET_HEAD}" "${UPSTREAM_HEAD}"; then
+            BEHIND=$(git rev-list --count "${TARGET_HEAD}..${UPSTREAM_HEAD}")
+            echo "status=behind" >> "${GITHUB_OUTPUT}"
+            echo "behind_count=${BEHIND}" >> "${GITHUB_OUTPUT}"
+            echo "📊 上游领先 ${BEHIND} 个提交"
+          else
+            AHEAD=$(git rev-list --count "${UPSTREAM_HEAD}..${TARGET_HEAD}")
+            BEHIND=$(git rev-list --count "${TARGET_HEAD}..${UPSTREAM_HEAD}")
+            echo "status=diverged" >> "${GITHUB_OUTPUT}"
+            echo "ahead_count=${AHEAD}" >> "${GITHUB_OUTPUT}"
+            echo "behind_count=${BEHIND}" >> "${GITHUB_OUTPUT}"
+            echo "⚠️ 目标分支与 upstream 已分叉 (领先 ${AHEAD} / 落后 ${BEHIND})"
+          fi
+
+      - name: Sync branch (ff-only)
+        if: steps.diff.outputs.status == 'behind' && env.SYNC_MODE == 'ff-only'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge --ff-only "upstream/${UPSTREAM_BRANCH}"
+          echo "✅ 已快进合并 upstream/${UPSTREAM_BRANCH}"
+
+      - name: Sync branch (reset)
+        if: steps.diff.outputs.status == 'diverged' && env.SYNC_MODE == 'reset'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git reset --hard "upstream/${UPSTREAM_BRANCH}"
+          echo "✅ 已 reset 到 upstream/${UPSTREAM_BRANCH}"
+
+      - name: Push synced branch
+        if: |
+          steps.prepare.outputs.exists == 'false' ||
+          steps.diff.outputs.status == 'behind' ||
+          (steps.diff.outputs.status == 'diverged' && env.SYNC_MODE == 'reset')
+        run: |
+          set -euo pipefail
+          git push origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          echo "✅ 已推送 ${TARGET_BRANCH} → GitHub"
+
+      - name: Report divergence (manual reset required)
+        if: steps.diff.outputs.status == 'diverged' && env.SYNC_MODE != 'reset'
+        run: |
+          echo "::warning::分支 ${TARGET_BRANCH} 与 upstream 分叉，定时任务默认不覆盖本地提交。"
+          echo "如需强制与上游一致，请手动运行本 workflow 并选择 sync_mode=reset。"

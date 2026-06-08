@@ -1,8 +1,19 @@
 name: Pull from Upstream (Ascend)
 
+# 手动从上游拉取更新到 GitHub 分支。
+# 默认源为 GitHub 官方仓；也可选择 GitCode 业务仓。
+
 on:
   workflow_dispatch:
     inputs:
+      upstream_source:
+        description: '上游来源'
+        required: true
+        default: 'github'
+        type: choice
+        options:
+          - github
+          - gitcode
       upstream_branch:
         description: '要从上游拉取的分支名'
         required: true
@@ -14,9 +25,16 @@ on:
         default: 'master'
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   pull-upstream:
     runs-on: ubuntu-latest
+    env:
+      UPSTREAM_SOURCE: ${{ github.event.inputs.upstream_source }}
+      UPSTREAM_BRANCH: ${{ github.event.inputs.upstream_branch }}
+      TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,26 +44,33 @@ jobs:
 
       - name: Fetch upstream
         run: |
-          git remote add upstream https://gitcode.com/Ascend/MindIE-PyMotor.git
-          git fetch upstream ${{ github.event.inputs.upstream_branch }}
-          echo "Fetched upstream/${{ github.event.inputs.upstream_branch }}"
+          set -euo pipefail
+          git remote remove upstream 2>/dev/null || true
+          if [ "${UPSTREAM_SOURCE}" = "gitcode" ]; then
+            git remote add upstream https://gitcode.com/Ascend/MindIE-PyMotor.git
+          else
+            git remote add upstream https://github.com/Ascend/MindIE-PyMotor.git
+          fi
+          git fetch upstream "${UPSTREAM_BRANCH}"
+          echo "Fetched upstream/${UPSTREAM_BRANCH} from ${UPSTREAM_SOURCE}"
 
       - name: Diff stats
         id: diff
         run: |
-          UPSTREAM_HEAD=$(git rev-parse upstream/${{ github.event.inputs.upstream_branch }})
+          set -euo pipefail
+          UPSTREAM_HEAD=$(git rev-parse "upstream/${UPSTREAM_BRANCH}")
           TARGET_HEAD=$(git rev-parse HEAD)
 
-          echo "upstream_head=${UPSTREAM_HEAD}" >> $GITHUB_OUTPUT
-          echo "target_head=${TARGET_HEAD}" >> $GITHUB_OUTPUT
+          echo "upstream_head=${UPSTREAM_HEAD}" >> "${GITHUB_OUTPUT}"
+          echo "target_head=${TARGET_HEAD}" >> "${GITHUB_OUTPUT}"
 
-          if git merge-base --is-ancestor ${UPSTREAM_HEAD} ${TARGET_HEAD}; then
-            echo "status=up_to_date" >> $GITHUB_OUTPUT
+          if git merge-base --is-ancestor "${UPSTREAM_HEAD}" "${TARGET_HEAD}"; then
+            echo "status=up_to_date" >> "${GITHUB_OUTPUT}"
             echo "⚠️ 目标分支已包含上游所有提交，无需同步"
           else
-            echo "status=behind" >> $GITHUB_OUTPUT
-            BEHIND=$(git rev-list --count ${TARGET_HEAD}..${UPSTREAM_HEAD})
-            echo "behind_count=${BEHIND}" >> $GITHUB_OUTPUT
+            echo "status=behind" >> "${GITHUB_OUTPUT}"
+            BEHIND=$(git rev-list --count "${TARGET_HEAD}..${UPSTREAM_HEAD}")
+            echo "behind_count=${BEHIND}" >> "${GITHUB_OUTPUT}"
             echo "📊 上游领先 ${BEHIND} 个提交"
           fi
 
@@ -53,38 +78,38 @@ jobs:
         if: steps.diff.outputs.status == 'behind'
         id: merge
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          if git merge upstream/${{ github.event.inputs.upstream_branch }} --no-edit; then
-            echo "merged=true" >> $GITHUB_OUTPUT
+          if git merge "upstream/${UPSTREAM_BRANCH}" --no-edit; then
+            echo "merged=true" >> "${GITHUB_OUTPUT}"
             echo "✅ 合并成功，无冲突"
           else
-            echo "merged=false" >> $GITHUB_OUTPUT
+            echo "merged=false" >> "${GITHUB_OUTPUT}"
             echo "⚠️ 存在合并冲突，请手动解决"
-            # 记录冲突文件
             git diff --name-only --diff-filter=U > /tmp/conflict-files.txt
-            echo "conflict_files=$(cat /tmp/conflict-files.txt | tr '\n' ' ')" >> $GITHUB_OUTPUT
+            echo "conflict_files=$(tr '\n' ' ' < /tmp/conflict-files.txt)" >> "${GITHUB_OUTPUT}"
           fi
 
       - name: Push merged result
         if: steps.diff.outputs.status == 'behind' && steps.merge.outputs.merged == 'true'
         run: |
-          git push origin ${{ github.event.inputs.target_branch }}
+          set -euo pipefail
+          git push origin "${TARGET_BRANCH}"
           echo "✅ 已推送到 GitHub"
 
       - name: Report conflict
         if: steps.diff.outputs.status == 'behind' && steps.merge.outputs.merged == 'false'
         run: |
           echo "🚨 合并冲突！冲突文件: ${{ steps.merge.outputs.conflict_files }}"
-          echo "上游: upstream/${{ github.event.inputs.upstream_branch }}"
-          echo "目标: ${{ github.event.inputs.target_branch }}"
+          echo "上游: upstream/${UPSTREAM_BRANCH} (${UPSTREAM_SOURCE})"
+          echo "目标: ${TARGET_BRANCH}"
           echo ""
           echo "请手动解决冲突："
-          echo "  git checkout ${{ github.event.inputs.target_branch }}"
-          echo "  git pull origin ${{ github.event.inputs.target_branch }}"
-          echo "  git merge upstream/${{ github.event.inputs.upstream_branch }}"
+          echo "  git checkout ${TARGET_BRANCH}"
+          echo "  git pull origin ${TARGET_BRANCH}"
+          echo "  git merge upstream/${UPSTREAM_BRANCH}"
           echo "  # 解决冲突后:"
-          echo "  git push origin ${{ github.event.inputs.target_branch }}"
-          # 放弃未完成的合并
+          echo "  git push origin ${TARGET_BRANCH}"
           git merge --abort || true

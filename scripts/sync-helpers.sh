@@ -3,10 +3,15 @@
 # GitCode 同步辅助脚本
 # 用法: source scripts/sync-helpers.sh
 #
+# 分支职责:
+#   sync/upstream-master  → 纯上游镜像 (GitHub Actions: sync-from-github-upstream.yml)
+#   master                → 开发主分支 + GitCode 同步 Action (sync-to-gitcode.yml)
+#
 # 远程仓库说明:
 #   origin   → gitcode.com/Ascend/MindIE-PyMotor       (业务上游仓)
 #   own      → gitcode.com/LinWei100/MindIE-PyMotor     (个人 Gitcode 镜像)
 #   github   → github.com/Lyr-GW/MindIE-PyMotor         (主要开发仓)
+#   upstream → github.com/Ascend/MindIE-PyMotor        (GitHub 官方上游)
 #
 
 set -euo pipefail
@@ -93,6 +98,66 @@ sync-push-github() {
     git push github --tags
 
     echo -e "${GREEN}✓ 推送完成${NC}"
+}
+
+# ─── sync-pull-github-upstream: 从 GitHub 官方上游拉取到 sync/upstream-master ─
+sync-pull-github-upstream() {
+    cd "$REPO_DIR"
+
+    local upstream_branch="${1:-master}"
+    local target_branch="${2:-sync/upstream-master}"
+
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  从 GitHub 官方上游拉取更新${NC}"
+    echo -e "${CYAN}  upstream: github.com/Ascend/MindIE-PyMotor/${upstream_branch}${NC}"
+    echo -e "${CYAN}  目标分支: ${target_branch}${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+    if ! git remote get-url upstream &>/dev/null; then
+        git remote add upstream https://github.com/Ascend/MindIE-PyMotor.git
+    fi
+
+    echo -e "\n${YELLOW}↻ Fetch upstream/${upstream_branch}...${NC}"
+    git fetch upstream "$upstream_branch"
+
+    local upstream_head
+    upstream_head=$(git rev-parse "upstream/${upstream_branch}")
+
+    if git show-ref --verify --quiet "refs/heads/${target_branch}"; then
+        git checkout "$target_branch"
+    else
+        echo -e "${YELLOW}🆕 创建分支 ${target_branch}${NC}"
+        git checkout -B "$target_branch" "$upstream_head"
+    fi
+
+    local behind
+    behind=$(git rev-list --count HEAD.."upstream/${upstream_branch}" 2>/dev/null || echo "0")
+    if [ "$behind" -eq 0 ]; then
+        echo -e "${GREEN}✓ ${target_branch} 已是最新${NC}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}📊 上游领先 ${behind} 个提交${NC}"
+    git log --oneline HEAD.."upstream/${upstream_branch}" | head -20
+    echo ""
+
+    read -r -p "是否快进合并到 ${target_branch}? [y/N] " confirm
+    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+        if git merge --ff-only "upstream/${upstream_branch}"; then
+            echo -e "${GREEN}✓ 快进合并成功${NC}"
+            read -r -p "是否推送到 GitHub (github remote)? [y/N] " push_confirm
+            if [ "$push_confirm" = "y" ] || [ "$push_confirm" = "Y" ]; then
+                git push github "$target_branch"
+                echo -e "${GREEN}✓ 已推送到 GitHub${NC}"
+            fi
+        else
+            echo -e "${RED}✗ 无法快进合并（分支已分叉）。如需强制对齐上游:${NC}"
+            echo "  git reset --hard upstream/${upstream_branch}"
+            echo "  git push github ${target_branch} --force-with-lease"
+        fi
+    else
+        echo -e "${YELLOW}已取消${NC}"
+    fi
 }
 
 # ─── sync-pull-upstream: 从 Ascend 上游拉取更新 ────────────────
@@ -256,7 +321,9 @@ sync-help() {
     echo "  sync-status          查看所有远程同步状态"
     echo "  sync-push            推送当前分支到 Gitcode 个人仓 (own)"
     echo "  sync-push-github     推送当前分支到 GitHub"
-    echo "  sync-pull-upstream   [上游分支] [目标分支]  从 Ascend 上游拉取更新"
+    echo "  sync-pull-github-upstream [上游分支] [目标分支]"
+    echo "                       从 GitHub 官方上游同步到 sync/upstream-master"
+    echo "  sync-pull-upstream   [上游分支] [目标分支]  从 Ascend GitCode 上游拉取更新"
     echo "  sync-setup-token     配置 Gitcode Personal Access Token"
     echo "  sync-setup-github-token  配置 GitHub Personal Access Token"
     echo "  sync-help            显示此帮助"
