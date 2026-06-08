@@ -8,7 +8,10 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 import argparse
+import configparser
 import os
+import subprocess
+import tempfile
 
 import lib.constant as C
 from lib.utils import logger, read_json, set_env_to_shell, get_deploy_paths
@@ -32,7 +35,9 @@ from lib.generator.infer_service import (
 from lib.generator.mf_store import generate_yaml_mf_store
 from lib.config_validator import (
     validate_deploy_mode_consistency, validate_deploy_mode_value,
-    validate_only_instance_changed, resolve_config_paths
+    validate_only_instance_changed, resolve_config_paths, validate_pd_hybrid_config,
+    validate_pd_hybrid_infer_service_template,
+    validate_node_selectors,
 )
 
 
@@ -44,6 +49,11 @@ def handle_update_config(user_config):
                                 "Please deploy once before updating configmap.")
 
     baseline_deploy = baseline_config[C.MOTOR_DEPLOY_CONFIG]
+    if deploy_config.get(C.HYBRID_INSTANCES_NUM) != baseline_deploy.get(C.HYBRID_INSTANCES_NUM):
+        raise ValueError(
+            f"{C.HYBRID_INSTANCES_NUM} in user_config differs from the deployed baseline. "
+            "Use --update_instance_num to scale instances instead of --update_config."
+        )
     if (deploy_config.get(C.P_INSTANCES_NUM) != baseline_deploy.get(C.P_INSTANCES_NUM)
             or deploy_config.get(C.D_INSTANCES_NUM) != baseline_deploy.get(C.D_INSTANCES_NUM)):
         raise ValueError(
@@ -54,7 +64,12 @@ def handle_update_config(user_config):
     validate_deploy_mode_consistency(deploy_config, baseline_deploy)
     validate_update_config_whitelist(user_config, baseline_config)
 
-    create_motor_config_configmap(deploy_config[C.CONFIG_JOB_ID])
+    effective_mode = resolve_deploy_mode_for_services(baseline_deploy)
+    create_motor_config_configmap(
+        deploy_config[C.CONFIG_JOB_ID],
+        user_config=user_config,
+        effective_deploy_mode=effective_mode,
+    )
     logger.info("Configmap refreshed.")
 
 
@@ -67,7 +82,14 @@ def handle_update_instance_num(user_config):
     validate_only_instance_changed(user_config, baseline_config)
 
     baseline_deploy = baseline_config.get(C.MOTOR_DEPLOY_CONFIG, {})
-    deploy_mode_arg = baseline_deploy.get(C.DEPLOY_MODE_CONFIG_KEY, C.DEPLOY_MODE_INFER_SERVICE_SET)
+    deploy_mode_arg = resolve_deploy_mode_for_services(baseline_deploy)
+    current_deploy = deploy_config
+    current_deploy_mode = resolve_deploy_mode_for_services(current_deploy)
+    if current_deploy_mode != deploy_mode_arg:
+        raise ValueError(
+            f"Resolved deploy_mode from user_config ({current_deploy_mode}) differs from "
+            f"cluster baseline ({deploy_mode_arg}). Only instance counts may change for scaling."
+        )
     validate_deploy_mode_value(deploy_mode_arg)
 
     update_kv_pool_enabled_flag(user_config)
@@ -90,7 +112,9 @@ def handle_update_instance_num(user_config):
     else:
         generate_yaml_engine(paths["engine_input_yaml"], paths["engine_output_yaml"], user_config)
 
-    exec_all_kubectl_multi(deploy_config, baseline_config, deploy_mode_arg)
+    exec_all_kubectl_multi(
+        deploy_config, baseline_config, deploy_mode_arg, user_config=user_config
+    )
     logger.info("instance num update end.")
 
 
@@ -120,7 +144,9 @@ def deploy_services_multi_yaml(paths, user_config, dry_run=False):
             paths["mf_store_input_yaml"], paths["mf_store_output_yaml"], user_config
         )
     if not dry_run:
-        exec_all_kubectl_multi(deploy_config, None, C.DEPLOY_MODE_MULTI_DEPLOYMENT_YAML)
+        exec_all_kubectl_multi(
+            deploy_config, None, C.DEPLOY_MODE_MULTI_DEPLOYMENT_YAML, user_config=user_config
+        )
 
 
 def deploy_services_infer_service_set(paths, user_config, dry_run=False):
@@ -137,7 +163,10 @@ def deploy_services_infer_service_set(paths, user_config, dry_run=False):
         infer_input, paths["infer_service_output_yaml"], user_config
     )
     if not dry_run:
-        exec_all_kubectl_multi(deploy_config, None, C.DEPLOY_MODE_INFER_SERVICE_SET)
+        deploy_mode_arg = resolve_deploy_mode_for_services(deploy_config)
+        exec_all_kubectl_multi(
+            deploy_config, None, deploy_mode_arg, user_config=user_config
+        )
 
 
 def deploy_services_single_container(paths, user_config, dry_run=False):
@@ -157,7 +186,9 @@ def update_shell_add_kv_patch():
     end_str = "# patch_end"
     multi_connector_path = "/usr/local/python3.11.10/lib/python3.11/site-packages\
 /vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py"
-    patch_path = "/tmp/motor/examples/deployer/patch/kv_vllm_multi_connector.patch"
+    patch_path = os.path.join(
+        tempfile.gettempdir(), "motor", "examples", "deployer", "patch", "kv_vllm_multi_connector.patch"
+    )
 
     with open(C.BOOT_SHELL_PATH, 'r') as f:
         lines = f.readlines()
@@ -179,7 +210,11 @@ def update_shell_add_kv_patch():
         f.writelines(new_lines)
 
 
-def deploy_services(user_config, env_config_path, dry_run=False):
+def resolve_deploy_mode_for_services(deploy_config):
+    return get_deploy_mode_from_config(deploy_config)
+
+
+def deploy_services(user_config, env_config_path, dry_run=False, auto_log_collect=False):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     update_kv_pool_enabled_flag(user_config)
     update_kv_conductor_enabled_flag(user_config)
@@ -187,7 +222,7 @@ def deploy_services(user_config, env_config_path, dry_run=False):
 
     update_engine_base_name(user_config)
 
-    deploy_mode_arg = get_deploy_mode_from_config(deploy_config)
+    deploy_mode_arg = resolve_deploy_mode_for_services(deploy_config)
     if not dry_run:
         set_env_to_shell(user_config, env_config_path, deploy_mode_arg)
     else:
@@ -195,6 +230,9 @@ def deploy_services(user_config, env_config_path, dry_run=False):
 
     if k8s_utils.g_kv_pool_enabled and k8s_utils.g_kv_conductor_enabled:
         update_shell_add_kv_patch()
+
+    if deploy_mode_arg != C.DEPLOY_MODE_SINGLE_CONTAINER and not dry_run:
+        validate_node_selectors(deploy_config)
 
     k8s_utils.g_generate_yaml_list = []
     paths = get_deploy_paths()
@@ -209,7 +247,46 @@ def deploy_services(user_config, env_config_path, dry_run=False):
     if dry_run:
         logger.info("all deploy end (dry-run: kubectl apply skipped).")
     else:
+        if auto_log_collect:
+            _start_log_collection(deploy_config)
         logger.info("all deploy end.")
+
+
+def _start_log_collection(deploy_config):
+    job_id = deploy_config.get(C.CONFIG_JOB_ID, "")
+    if not job_id:
+        logger.warning("job_id not found in deploy config, skip log collection.")
+        return
+
+    deployer_dir = os.path.dirname(os.path.abspath(__file__))
+    ini_path = os.path.join(deployer_dir, "log_collect", "log_config.ini")
+    if not os.path.exists(ini_path):
+        logger.warning("log_config.ini not found at %s, skip log collection.", ini_path)
+        return
+
+    config = configparser.ConfigParser()
+    config.read(ini_path)
+    config.set("LogSetting", "name_space", job_id)
+    with open(ini_path, "w") as f:
+        config.write(f)
+    logger.info("Updated log_config.ini: name_space = %s", job_id)
+
+    show_log_path = os.path.join(deployer_dir, "show_log.sh")
+    result = subprocess.run(
+        ["/bin/bash", show_log_path],
+        cwd=deployer_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        logger.warning(
+            "show_log.sh exited with code %s: %s",
+            result.returncode,
+            (result.stderr or result.stdout or "").strip(),
+        )
+        return
+    logger.info("Log collection started via show_log.sh")
 
 
 def parse_arguments():
@@ -248,6 +325,11 @@ def parse_arguments():
         action="store_true",
         help="Generate YAML only: skip set_env_to_shell and kubectl apply (normal deploy path only)",
     )
+    parser.add_argument(
+        "--auto_log_collect",
+        action="store_true",
+        help="Automatically start log collection after deployment",
+    )
     return parser.parse_args()
 
 
@@ -261,6 +343,12 @@ def main():
     set_user_config_path(user_config_path)
     os.makedirs(C.OUTPUT_ROOT_PATH, exist_ok=True)
     user_config = read_json(user_config_path)
+    if C.HYBRID_INSTANCES_NUM in user_config.get(C.MOTOR_DEPLOY_CONFIG, {}):
+        validate_pd_hybrid_config(user_config)
+        paths = get_deploy_paths()
+        validate_pd_hybrid_infer_service_template(
+            user_config, paths["infer_service_input_yaml"]
+        )
     validate_instance_nums(user_config)
 
     if args.update_config:
@@ -270,7 +358,7 @@ def main():
         handle_update_instance_num(user_config)
         return
 
-    deploy_services(user_config, env_config_path, dry_run=args.dry_run)
+    deploy_services(user_config, env_config_path, dry_run=args.dry_run, auto_log_collect=args.auto_log_collect)
 
 
 if __name__ == "__main__":

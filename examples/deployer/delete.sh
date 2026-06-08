@@ -26,15 +26,16 @@ YAML_DIR=./output_yamls
 
 for yaml_file in "$YAML_DIR"/*.yaml; do
     if [ -f "$yaml_file" ]; then
-        kubectl delete -f "$yaml_file" -n "$NAMESPACE"
+        kubectl delete -f "$yaml_file"
     fi
 done
 
 # keep the same with yaml_template/engine_template.yaml terminationGracePeriodSeconds: 10
 for ((i=10; i>=1; i--)); do
-    echo "Waiting for pods to terminate gracefully... ${i}s remaining"
+    printf "\r\033[KWaiting for pods to terminate gracefully... %2ds remaining" "$i"
     sleep 1
 done
+echo ""
 
 # Terminating is not a status.phase value; stuck terminating pods have metadata.deletionTimestamp set.
 kubectl get pods -n "$NAMESPACE" -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}' | while read -r pod; do
@@ -45,17 +46,23 @@ done
 sed -i '/^# patch_begin/,/^# patch_end/d' ./startup/boot.sh
 sed -i '/^function set_controller_env()/,/^}/d' ./startup/roles/controller.sh
 sed -i '/^function set_coordinator_env()/,/^}/d' ./startup/roles/coordinator.sh
+sed -i '/^function set_union_env()/,/^}/d' ./startup/roles/engine.sh
+sed -i '/^function set_encode_env()/,/^}/d' ./startup/roles/engine.sh
 sed -i '/^function set_prefill_env()/,/^}/d' ./startup/roles/engine.sh
 sed -i '/^function set_decode_env()/,/^}/d' ./startup/roles/engine.sh
+sed -i '/^function set_union_env()/,/^}/d' ./startup/roles/engine.sh
 sed -i '/^function set_common_env()/,/^}/d' ./startup/common.sh
 sed -i '/^function set_kv_pool_env()/,/^}/d' ./startup/roles/kv_pool.sh
 sed -i '/^function set_kv_conductor_env()/,/^}/d' ./startup/roles/kv_conductor.sh
 sed -i '/^function set_controller_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
 sed -i '/^function set_coordinator_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
+sed -i '/^function set_encode_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
 sed -i '/^function set_prefill_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
 sed -i '/^function set_decode_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
+sed -i '/^function set_union_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
 sed -i '/^function set_kv_pool_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
 sed -i '/^function set_kv_conductor_env()/,/^}/d' ./startup/roles/all_combine_in_single_container.sh
+sed -i '/^function set_mf_store_env()/,/^}/d' ./startup/roles/mf_store.sh
 sed -i '/./,$!d' ./startup/common.sh
 
 echo "Delete completed."

@@ -195,7 +195,7 @@ examples/
 | d_pod_npu_num | int | 单个 D 实例 Pod 占用的 NPU 卡数 |
 | image_name | string | 填写本文档 [2. 准备镜像](#准备镜像) 中准备/加载的推理镜像名（需包含 MindIE-PyMotor 与 vLLM 等运行环境） |
 | job_id | string | 部署任务名，同时作为 K8s 命名空间使用，如 `mindie-motor` |
-| hardware_type | string | 硬件类型：`800I_A2` 或 `800I_A3` |
+| hardware_type | string | 硬件类型：<br>A2: 800I_A2<br>A3: 800I_A3<br>A5: 850-Atlas-8p-8 |
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 model_path 需与此挂载路径一致，如 `"/mnt/weight/"` |
 | tls_config | object | 可选；TLS 相关配置，完整结构与示例见 4.6 |
 
@@ -244,27 +244,35 @@ examples/
 
 ### motor_engine_prefill_config / motor_engine_decode_config（P/D 引擎）
 
-两者结构类似，均需指定 `engine_type`、`model_config`、`engine_config`。
+两者结构类似，均需指定 `engine_type` 和 `engine_config`，模型信息与并行策略直接配置在 `engine_config` 中。
+
+**`engine_config` 与引擎原生配置等价**：其中的键名与所选引擎启动命令（如 vLLM 的 `vllm serve`、SGLang 的 `python -m sglang.launch_server`）的 CLI 参数一一对应——去掉 `--` 前缀后以 JSON 键写入即可（连字符 `-` 与下划线 `_` 两种形式均可，与引擎官方文档保持一致）。PyMotor 启动 Engine Server 时会将 `engine_config` 还原为引擎命令行参数，因此可直接复用引擎文档中的参数说明；原先 `model_config` 中的模型信息与 `parallel_config` 中的并行策略，现均直接写入 `engine_config`。
+
+**从命令行迁移到 JSON**：若已有可运行的引擎启动命令，可将 `--key value` 逐条映射为 `"key": value` 写入 `engine_config`。例如 vLLM：
+
+| 命令行参数 | `engine_config` 键值 |
+|------------|----------------------|
+| `--model /mnt/weight/qwen3_8B` | `"model": "/mnt/weight/qwen3_8B"` |
+| `--served-model-name qwen3-8B` | `"served_model_name": "qwen3-8B"` |
+| `--tensor-parallel-size 2` | `"tensor_parallel_size": 2` |
+| `--enforce-eager` | `"enforce-eager": true` |
+
+也可使用 [engine_config 命令行转换工具](../cli_to_engine_config_guide.md) 批量完成上述映射。
 
 #### 配置示例（Qwen3-8B，MooncakeLayerwiseConnector）
 
 ```json
 "motor_engine_prefill_config": {
   "engine_type": "vllm",
-  "model_config": {
-    "model_name": "qwen3-8B",
-    "model_path": "/mnt/weight/qwen3_8B",
-    "npu_mem_utils": 0.9,
-    "prefill_parallel_config": {
-      "dp_size": 2,
-      "tp_size": 2,
-      "pp_size": 1,
-      "enable_ep": false,
-      "dp_rpc_port": 9000,
-      "world_size": 4
-    }
-  },
   "engine_config": {
+    "served_model_name": "qwen3-8B",
+    "model": "/mnt/weight/qwen3_8B",
+    "gpu_memory_utilization": 0.9,
+    "data_parallel_size": 2,
+    "tensor_parallel_size": 2,
+    "pipeline_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "data_parallel_rpc_port": 9000,
     "enforce-eager": true,
     "max_model_len": 2048,
     "kv_transfer_config": {
@@ -275,27 +283,21 @@ examples/
       "kv_port": "20001",
       "engine_id": "0",
       "kv_rank": 0,
-      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
       "kv_connector_extra_config": {}
     }
   }
 },
 "motor_engine_decode_config": {
   "engine_type": "vllm",
-  "model_config": {
-    "model_name": "qwen3-8B",
-    "model_path": "/mnt/weight/qwen3_8B",
-    "npu_mem_utils": 0.9,
-    "decode_parallel_config": {
-      "dp_size": 2,
-      "tp_size": 2,
-      "pp_size": 1,
-      "enable_ep": false,
-      "dp_rpc_port": 9000,
-      "world_size": 4
-    }
-  },
   "engine_config": {
+    "served_model_name": "qwen3-8B",
+    "model": "/mnt/weight/qwen3_8B",
+    "gpu_memory_utilization": 0.9,
+    "data_parallel_size": 2,
+    "tensor_parallel_size": 2,
+    "pipeline_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "data_parallel_rpc_port": 9000,
     "max_model_len": 2048,
     "kv_transfer_config": { ... }
   }
@@ -309,33 +311,26 @@ examples/
 | 配置项 | 类型 | 说明 |
 |--------|------|------|
 | engine_type | string | 引擎类型，如 `vllm` |
-| model_config | object | 模型相关配置，见下表 |
-| engine_config | object | 引擎相关配置，含 KV 传输与引擎原生参数 |
+| engine_config | object | 引擎相关配置，含模型信息、并行策略、KV 传输与引擎原生参数 |
 
-#### model_config 配置项
+#### engine_config 配置项（模型与并行策略）
 
-| 配置项 | 类型 | 说明 |
-|--------|------|------|
-| model_name | string | 模型名称，如 qwen3-8B |
-| model_path | string | 容器内模型权重路径，需与 weight_mount_path 挂载后一致，如 /mnt/weight/qwen3_8B |
-| npu_mem_utils | float | NPU 内存使用占比上限，0～1，如 0.9 |
-| prefill_parallel_config | object | prefill 侧配置（仅在 prefill 中出现），见下表 |
-| decode_parallel_config | object | decode 侧配置（仅在 decode 中出现），见下表 |
-
-#### prefill_parallel_config / decode_parallel_config 配置项
+模型信息与并行策略直接配置在 `engine_config` 下，使用引擎原生参数名：
 
 | 配置项 | 类型 | 说明 |
 |--------|------|------|
-| dp_size | int | 数据并行大小 |
-| tp_size | int | 张量并行大小 |
-| pp_size | int | 流水并行大小 |
-| enable_ep | bool | 是否启用 EP |
-| dp_rpc_port | int | DP 侧 RPC 端口 |
-| world_size | int | 总卡数，vLLM等于dp_size \* tp_size \* pp_size，SGLang根据是否开启enable-dp-attention而不同，开启后不需要乘dp_size |
+| served_model_name | string | 模型名称，如 qwen3-8B |
+| model | string | 容器内模型权重路径，需与 weight_mount_path 挂载后一致，如 /mnt/weight/qwen3_8B |
+| gpu_memory_utilization | float | NPU 内存使用占比上限，0～1，如 0.9 |
+| data_parallel_size | int | 数据并行大小 |
+| tensor_parallel_size | int | 张量并行大小 |
+| pipeline_parallel_size | int | 流水并行大小 |
+| enable_expert_parallel | bool | 是否启用 EP |
+| data_parallel_rpc_port | int | DP 侧 RPC 端口 |
 
-#### engine_config 配置项
+#### engine_config 其它配置项
 
-**engine_config** 下涵盖的配置包括：**kv_transfer_config**（KV 传输，其内可含 **kv_connector_extra_config** 等）、以及引擎原生参数。除下文单独说明的 `kv_transfer_config` 结构外，其余项（含 `kv_connector_extra_config` 中子字段及其它键）均按所选用引擎（如 vLLM）的原生参数直接填写即可，参见对应引擎文档。
+**engine_config** 下除模型与并行策略外，还涵盖：**kv_transfer_config**（KV 传输，其内可含 **kv_connector_extra_config** 等）、以及引擎原生参数。除下文单独说明的 `kv_transfer_config` 结构外，其余项（含 `kv_connector_extra_config` 中子字段及其它键）均按所选用引擎（如 vLLM）的原生参数直接填写即可，参见对应引擎文档。
 
 | 配置项 | 类型 | 说明 |
 |--------|------|------|
@@ -353,7 +348,6 @@ examples/
 | kv_port | string | KV 端口 |
 | engine_id | string | 引擎 ID |
 | kv_rank | int | KV rank |
-| kv_connector_module_path | string | 连接器模块路径 |
 | kv_connector_extra_config | object | 额外配置，见下表 |
 
 #### kv_connector_extra_config 配置项
@@ -372,7 +366,7 @@ prefill / decode 子字段：
 
 > **说明**
 > 
->- `kv_connector_extra_config` 中 prefill/decode 的 dp_size、tp_size 一般无需手动填写，Motor 在拉起服务时会根据 `prefill_parallel_config` / `decode_parallel_config` 自动刷新。
+>- `kv_connector_extra_config` 中 prefill/decode 的 dp_size、tp_size 一般无需手动填写，Motor 在拉起服务时会根据 `data_parallel_size` / `tensor_parallel_size` 自动刷新。
 >- 若需使用 KV 池化等能力，请改用 MultiConnector，并参考 [KV 池化部署指南](../KV_pool_deployment_guide.md) 修改 `user_config.json`，并与 `deploy.py` 配合使用。
 
 ### kv_cache_pool_config（可选）
@@ -576,6 +570,7 @@ python3 deploy.py --user_config_path ../infer_engines/vllm/user_config.json --en
 - `--env_config_path` 或 `--env`：环境配置文件路径，需与 `--config` 同时指定
 - `--update_config`：仅刷新 ConfigMap（motor-config），不重新 apply Deployment
 - `--update_instance_num`：根据配置扩缩容实例数量
+- `--auto_log_collect`：部署完成后自动启动日志收集（`name_space` 会自动设置为 `job_id`）
 
 `--update_config` 仅支持修改**白名单内**的配置项；脚本会将当前 `user_config.json` 与集群中已部署的 `motor-config` 基线配置进行逐项比对，若存在非白名单字段变更将直接报错并拒绝更新。当前白名单范围主要包括以下几类：
 
@@ -631,6 +626,8 @@ Pod 状态为 Running 仅表示已成功调度并启动，是否业务就绪仍�
 **查看日志与排查问题**：
 
 可以通过以下三种方式查看集群日志或进行排查：
+
+> **提示**：如果在执行 `deploy.py` 时使用了 `--auto_log_collect` 参数，部署完成后日志采集已在后台自动启动，无需再手动执行 `show_log.sh`。
 
 **方式一：推荐使用 `show_log.sh` 工具进行统一采集**
 

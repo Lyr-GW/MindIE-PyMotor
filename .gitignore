@@ -1,3 +1,7 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -110,3 +114,8 @@ venv.bak/
 
 # deployer
 deployer/output/*
+
+# observability stack runtime artifacts
+examples/features/observability/stack/generated/
+examples/features/observability/stack/.native-runtime/
+examples/features/observability/stack/.env

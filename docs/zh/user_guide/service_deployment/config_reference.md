@@ -12,10 +12,13 @@
 "motor_deploy_config": {
   "p_instances_num": 1,
   "d_instances_num": 1,
+  "hybrid_instances_num": 1,
   "single_p_instance_pod_num": 1,
   "single_d_instance_pod_num": 1,
+  "single_hybrid_instance_pod_num": 1,
   "p_pod_npu_num": 16,
   "d_pod_npu_num": 16,
+  "hybrid_pod_npu_num": 2,
   "image_name": "",
   "job_id": "mindie-motor",
   "hardware_type": "800I_A3",
@@ -29,13 +32,16 @@
 |--------|------|------|
 | p_instances_num | int | P 实例个数，≥1 且 ≤16 |
 | d_instances_num | int | D 实例个数，≥1 且 ≤16 |
+| hybrid_instances_num | int | PD 混部 union 实例个数，≥1 且 ≤16；PD 混部扩缩容时修改该字段 |
 | single_p_instance_pod_num | int | 单个 P 实例对应的 Pod 数，≥1 |
 | single_d_instance_pod_num | int | 单个 D 实例对应的 Pod 数，≥1 |
+| single_hybrid_instance_pod_num | int | 单个 PD 混部 union 实例对应的 Pod 数，≥1 |
 | p_pod_npu_num | int | 单个 P 实例 Pod 占用的 NPU 卡数，每个 Pod 最大 16 卡 |
 | d_pod_npu_num | int | 单个 D 实例 Pod 占用的 NPU 卡数，每个 Pod 最大 16 卡 |
+| hybrid_pod_npu_num | int | 单个 PD 混部 union Pod 占用的 NPU 卡数，每个 Pod 最大 16 卡 |
 | image_name | string | 推理镜像名（需包含 MindIE-PyMotor 与 vLLM 等运行环境），与 [PD 分离服务部署](./pd_disaggregation_deployment.md#准备镜像) 中准备/加载的镜像名一致 |
 | job_id | string | 部署任务名，同时作为 K8s 命名空间使用，如 `mindie-motor` |
-| hardware_type | string | 硬件类型：`800I_A2` 或 `800I_A3` |
+| hardware_type | string | 硬件类型：<br>A2: 800I_A2<br>A3: 800I_A3<br>A5: 850-Atlas-8p-8|
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 model_path 需与此挂载路径一致，如 `"/mnt/weight/"` |
 | deploy_mode | string | 部署方式。可选：`infer_service_set`（默认，基于 InferServiceSet CRD，生成单个 infer_service.yaml 由 CRD controller 拉起各 pod）、`multi_deployment`（传统方式，生成 controller、coordinator、engine_*、kv_pool 等多个独立 YAML 分别 apply）、`single_container`（单容器方式，P/D 合并运行）。不配置时默认为 `infer_service_set`。CRD 方式尚未完成 RAS 能力与池化能力的适配验证；若需 RAS（可靠性、可用性、可服务性）或 KV 池化能力，请设置为 `multi_deployment` |
 | tls_config | object | 可选；TLS 相关配置，含 infer_tls_config、mgmt_tls_config、etcd_tls_config、grpc_tls_config 四类，结构见 [PD 分离服务部署](./pd_disaggregation_deployment.md#tls_config可选) |
@@ -123,7 +129,7 @@
 | instance_assembler_check_internal | int | 轮询实例组装状态的间隔（秒）。默认：`1` |
 | instance_assembler_cmd_send_internal | int | 向实例下发组装命令的间隔（秒）。默认：`1` |
 | instance_manager_check_internal | int | 实例状态巡检间隔（秒）。默认：`1` |
-| instance_heartbeat_timeout | int | 超过该时长未收到实例心跳则判定异常（秒）。默认：`5` |
+| instance_heartbeat_timeout | int | 超过该时长未收到实例心跳则判定异常（秒）。默认：`10` |
 | instance_expired_timeout | int | 实例空闲超过该时长则被清理（秒）。默认：`300` |
 | send_cmd_retry_times | int | 向实例下发命令失败时的重试次数。默认：`3` |
 
@@ -132,7 +138,7 @@
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
 | event_consumer_sleep_interval | float | 事件队列轮询间隔，即每次处理事件后的等待时间（秒）。默认：`1.0` |
-| coordinator_heartbeat_interval | float | Controller 与 Coordinator 间心跳上报间隔（秒）。默认：`5.0` |
+| coordinator_heartbeat_interval | float | Controller 与 Coordinator 间心跳上报间隔（秒）。默认：`10.0` |
 
 ### 2.6 fault_tolerance_config
 
@@ -141,7 +147,7 @@
 | enable_fault_tolerance | bool | 是否启用故障自愈（高级 RAS）。可选：`true` / `false`。默认：`false` |
 | strategy_center_check_internal | int | 策略中心轮询间隔（秒）。默认：`1` |
 | enable_scale_p2d | bool | 是否启用 P2D 弹性扩缩容。可选：`true` / `false`。默认：`false` |
-| enable_lingqu_network_recover | bool | 是否启用灵衢网络故障恢复。可选：`true` / `false`。默认：`false` |
+| enable_token_reinference | bool | 是否启用Token Reinference 故障恢复。可选：`true` / `false`。默认：`false` |
 
 ### 2.7 standby_config
 
@@ -237,7 +243,7 @@
 
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
-| deploy_mode | string | 部署模式。<ul><li>pd_separate：PD分离部署方式；</li><li>cdp_separate：CDP部署方式；</li><li>cpcd_separate：CPCD部署方式。</li></ul>默认：pd_separate |
+| deploy_mode | string | 部署模式。<ul><li>pd_separate：PD分离部署方式；</li><li>single_node：PD 混部或单节点完整推理方式；</li><li>cdp_separate：CDP部署方式；</li><li>cpcd_separate：CPCD部署方式。</li></ul>默认：pd_separate |
 | scheduler_type | string | 调度类型。<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询。</li></ul>默认：load_balance |
 
 ### 3.5 infer_tls_config / mgmt_tls_config / etcd_tls_config
@@ -373,7 +379,7 @@
     "role": "both",
     "model_name": "",
     "hardware_type": "800I-A3",
-    "heartbeat_interval_seconds": 1,
+    "heartbeat_interval_seconds": 3,
     "device_num": 0,
     "parallel_config": {
       "dp_size": 1,
@@ -433,8 +439,8 @@
 | job_name | string/null | 任务/作业名，多由环境或 deploy 注入。默认：Env.job_name 或 null |
 | role | string | 本节点角色。可选：`prefill`（仅预填）、`decode`（仅解码）、`both`（预填+解码）。默认：`both` |
 | model_name | string | 模型名称，PD 部署时多由 user_config 注入。默认：`""` |
-| hardware_type | string | 硬件型号，如 `800I-A3`。默认：`800I-A3` |
-| heartbeat_interval_seconds | int | 向 Controller 上报心跳的间隔（秒）。默认：`1` |
+| hardware_type | string | 硬件类型：<br>A2: 800I_A2<br>A3: 800I_A3<br>A5: 850-Atlas-8p-8 |
+| heartbeat_interval_seconds | int | 向 Controller 上报心跳的间隔（秒）。默认：`3` |
 | device_num | int | NPU 设备数量，多由 HCCL 配置推导。默认：`0` |
 | parallel_config | object | 并行维度配置，见下表。默认：各维度 1，world_size 由系统根据各维度自动计算 |
 
@@ -459,3 +465,68 @@
 | log_file | string/null | 日志输出文件路径；为 null 时输出到标准输出。默认：`null` |
 | log_format | string | 日志格式模板，支持 Python logging 占位符。默认：`%(asctime)s  [%(levelname)s][%(name)s][%(filename)s:%(lineno)d]  %(message)s` |
 | log_date_format | string | 日志日期格式。默认：`%Y-%m-%d %H:%M:%S` |
+
+---
+
+## 5. motor_engine_union_config（PD 混部引擎）
+
+`motor_engine_union_config` 用于 PD 混部场景，配置同一类 union Engine Server 实例。其结构与 `motor_engine_prefill_config` / `motor_engine_decode_config` 类似，但不区分 P/D 两套引擎配置，也无需配置 `kv_transfer_config` 的 producer/consumer 角色。示例可参考 `examples/infer_engines/vllm/pd_hybrid/user_config.json`。
+
+**配置示例**：
+
+```json
+"motor_engine_union_config": {
+  "engine_type": "vllm",
+  "engine_config": {
+    "served_model_name": "qwen3-8B",
+    "model": "/mnt/weight/qwen3_8B",
+    "gpu_memory_utilization": 0.9,
+    "data_parallel_size": 1,
+    "tensor_parallel_size": 1,
+    "pipeline_parallel_size": 1,
+    "enable_expert_parallel": false,
+    "data_parallel_rpc_port": 9000,
+    "enforce-eager": true,
+    "max_model_len": 2048
+  }
+}
+```
+
+| 配置项 | 类型 | 说明 |
+|--------|------|------------------|
+| engine_type | string | 引擎类型，如 `vllm` |
+| engine_config | object | 引擎相关配置，含模型信息、并行策略和引擎原生参数 |
+| engine_config.served_model_name | string | 对外服务的模型名称 |
+| engine_config.model | string | 容器内模型权重路径，需与 `motor_deploy_config.weight_mount_path` 挂载后一致 |
+| engine_config.gpu_memory_utilization | float | NPU 内存使用占比上限，0～1 |
+| engine_config.data_parallel_size | int | 数据并行大小 |
+| engine_config.tensor_parallel_size | int | 张量并行大小 |
+| engine_config.pipeline_parallel_size | int | 流水并行大小 |
+| engine_config.enable_expert_parallel | bool | 是否启用 EP |
+| engine_config.data_parallel_rpc_port | int | DP 侧 RPC 端口 |
+| engine_config.max_model_len | int | 最大模型上下文长度 |
+| 其它键 | - | 引擎原生参数，按所选用引擎文档直接填写 |
+
+---
+
+## 6. env.json 补充说明（PD 混部）
+
+PD 混部场景下，union Engine Server 的环境变量配置在 `env.json` 的 `motor_engine_union_env` 中。示例可参考 `examples/infer_engines/vllm/pd_hybrid/env.json`。
+
+**配置示例**：
+
+```json
+"motor_engine_union_env": {
+  "HCCL_BUFFSIZE": 200,
+  "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+  "HCCL_OP_EXPANSION_MODE": "AIV",
+  "OMP_PROC_BIND": "false",
+  "OMP_NUM_THREADS": 100,
+  "ASCEND_BUFFER_POOL": "0:0"
+}
+```
+
+| 配置项 | 说明 |
+|--------|------|
+| motor_common_env | 所有组件共用环境变量，如 CANN 安装路径、日志根目录 |
+| motor_engine_union_env | PD 混部 union 实例的 NPU、HCCL、OMP 等环境变量，可按机型与模型进行调优 |

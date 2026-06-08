@@ -34,12 +34,11 @@ from motor.config.config_utils import (
     INFER_TLS_CONFIG,
     ETCD_TLS_CONFIG,
 )
+from motor.config.resolver import ConfigResolver
 
 FILE_ENCODING = "utf-8"
 
 AIGW = "aigw"
-MODEL_CONFIG = "model_config"
-MODEL_NAME = "model_name"
 ENGINE_CONFIG = "engine_config"
 MAX_MODEL_LEN = "max_model_len"
 AIGW_ID = "id"
@@ -66,17 +65,21 @@ ROLE_HEARTBEAT_STALE_SEC = 5.0
 
 def _default_skip_paths() -> set[str]:
     return {
-        "/", "/startup", "/readiness", "/liveness", "/metrics",
-        "/instances/refresh", "/docs", "/redoc", "/openapi.json", "/favicon.ico"
+        "/",
+        "/startup",
+        "/readiness",
+        "/liveness",
+        "/metrics",
+        "/instances/refresh",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/favicon.ico",
     }
 
 
 def _default_rate_limit_skip_paths() -> list[str]:
-    return [
-        "/liveness", "/readiness", "/metrics",
-        "/docs", "/redoc", "/openapi.json",
-        "/favicon.ico", "/startup"
-    ]
+    return ["/liveness", "/readiness", "/metrics", "/docs", "/redoc", "/openapi.json", "/favicon.ico", "/startup"]
 
 
 class DeployMode(Enum):
@@ -112,10 +115,37 @@ class SchedulerType(Enum):
             return None
 
 
+# Sub-strategy selected by SchedulerConfig.kv_affinity_mode when scheduler_type=kv_cache_affinity.
+#   "unified"    - single score fusing affinity and live load (default).
+#   "load_gated" - keep the N least-loaded endpoints, then pick the longest cached prefix.
+KV_AFFINITY_MODE_UNIFIED = "unified"
+KV_AFFINITY_MODE_LOAD_GATED = "load_gated"
+KV_AFFINITY_MODES = (KV_AFFINITY_MODE_UNIFIED, KV_AFFINITY_MODE_LOAD_GATED)
+
+
 @dataclass
 class SchedulerConfig:
     deploy_mode: DeployMode = field(default=DeployMode.PD_SEPARATE)
     scheduler_type: SchedulerType = field(default=SchedulerType.LOAD_BALANCE)
+    # Weight of the instance average workload in endpoint-first load balancing.
+    # 0 means pure global endpoint minimum; small values preserve instance pressure awareness.
+    endpoint_instance_score_weight: float = 0.05
+    # --- kv_cache_affinity tunables (affinity + load) ---
+    # Which kv_cache_affinity sub-strategy to use (see KV_AFFINITY_MODES):
+    #   "unified"    - single score fusing affinity and live load, pick the minimum (default).
+    #   "load_gated" - keep the N least-loaded endpoints, then pick the longest cached prefix.
+    kv_affinity_mode: str = KV_AFFINITY_MODE_UNIFIED
+    # Weight of an endpoint's live workload in the "unified" score. 1.0 puts load on equal footing
+    # with the affinity-discounted prefill cost; 0 makes the unified score affinity-only (longest
+    # prefix wins, load-blind).
+    kv_affinity_load_weight: float = 1.0
+    # How much a cached prefix discounts prefill work (default 1.0).
+    kv_affinity_overlap_credit: float = 1.0
+    # Weight of the (affinity-discounted) prefill cost in the unified score (default 1.0).
+    kv_affinity_prefill_load_scale: float = 1.0
+    # Number of least-loaded endpoints kept by the "load_gated" mode before the affinity
+    # tie-break. Only used when kv_affinity_mode="load_gated"; 0 (default) falls back to 2.
+    kv_affinity_load_gate_topn: int = 0
 
 
 @dataclass
@@ -123,6 +153,8 @@ class PrometheusMetricsConfig:
     """Prometheus metrics configuration class"""
 
     reuse_time: int = 3
+    pool_metrics_enable: bool = False
+    pool_metrics_endpoint: str = ""
 
 
 @dataclass
@@ -193,6 +225,7 @@ class InferenceWorkersConfig:
 @dataclass
 class SchedulerProcessConfig:
     """Scheduler process configuration (default only; not user-configurable in first version)."""
+
     ipc_dir: str = ""  # Base dir for IPC sockets; empty => /tmp. Used to avoid hardcoded /tmp in containers.
     timeout: float = 5.0  # Client request timeout (seconds)
     reconnect_interval: float = 5.0  # Client reconnect interval (seconds)
@@ -219,6 +252,8 @@ class RateLimitConfig:
     """Rate limiting configuration class"""
 
     enable_rate_limit: bool = False
+    provider: str = "simple"
+
     max_requests: int = 1000
     window_size: int = 60
     scope: str = "global"
@@ -226,6 +261,7 @@ class RateLimitConfig:
     error_message: str = "too many requests, please try again later"
     error_status_code: int = 429
 
+    olc_config_path: str = ""
 
 @dataclass
 class ApiConfig:
@@ -234,8 +270,13 @@ class ApiConfig:
     # coordinator API configuration
     coordinator_api_host: str = field(default_factory=lambda: Env.pod_ip or '127.0.0.1')
     coordinator_api_dns: str = field(default_factory=lambda: Env.coordinator_service or '127.0.0.1')
+    coordinator_api_infer_dns: str = field(default_factory=lambda:
+        Env.coordinator_infer_service or Env.coordinator_service or '127.0.0.1')
+    coordinator_api_obs_dns: str = field(default_factory=lambda:
+        Env.coordinator_obs_service or Env.coordinator_service or '127.0.0.1')
     coordinator_api_infer_port: int = 1025
     coordinator_api_mgmt_port: int = 1026
+    coordinator_obs_port: int = 1027
 
 
 @dataclass
@@ -244,11 +285,15 @@ class DeployConfig:
 
     p_instances_num: int = 1
     d_instances_num: int = 1
+    hybrid_instances_num: Optional[int] = None
+    single_hybrid_instance_pod_num: Optional[int] = None
+    hybrid_pod_npu_num: Optional[int] = None
 
 
 @dataclass
 class TracerConfig:
     """Tracer configuration class"""
+
     endpoint: str = ""
     root_sampling_rate: float = 1.0
     remote_parent_sampled: float = 1.0
@@ -335,7 +380,7 @@ class CoordinatorConfig:
                         else:
                             cfg = raw
                         tls_configs = [MGMT_TLS_CONFIG, INFER_TLS_CONFIG, ETCD_TLS_CONFIG]
-                        _update_tls_config(tls_configs, cfg, raw)   
+                        _update_tls_config(tls_configs, cfg, raw)
                         _update_instances_num(cfg, raw)
                         _update_prefill_kv_event_config(cfg, raw)
         except json.JSONDecodeError as e:
@@ -371,7 +416,7 @@ class CoordinatorConfig:
 
             scheduler_handlers = {
                 'deploy_mode': lambda obj, key, value: set_enum_field(obj, key, value, DeployMode),
-                'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType)
+                'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType),
             }
 
             # Enrich AIGW fields from user_config if present
@@ -379,7 +424,8 @@ class CoordinatorConfig:
                 try:
                     prefill = user_config_data[ConfigKey.MOTOR_ENGINE_PREFILL.value]
                     decode = user_config_data[ConfigKey.MOTOR_ENGINE_DECODE.value]
-                    cfg[AIGW][AIGW_ID] = prefill[MODEL_CONFIG][MODEL_NAME]
+                    prefill_resolver = ConfigResolver(prefill)
+                    cfg[AIGW][AIGW_ID] = prefill_resolver.get_model_name("")
                     cfg[AIGW][AIGW_OBJECT] = AIGW_OBJECT_MODEL
                     cfg[AIGW][AIGW_OWNED_BY] = AIGW_OWNED_BY_MOTOR
                     cfg[AIGW][AIGW_P_MAX_SEQLEN] = prefill[ENGINE_CONFIG][MAX_MODEL_LEN]
@@ -489,6 +535,7 @@ class CoordinatorConfig:
         # Validate HTTP configuration
         self._validate_port_range(self.api_config.coordinator_api_infer_port, "coordinator_api_infer_port")
         self._validate_port_range(self.api_config.coordinator_api_mgmt_port, "coordinator_api_mgmt_port")
+        self._validate_port_range(self.api_config.coordinator_obs_port, "coordinator_obs_port")
         if self.inference_workers_config.worker_metaserver_base_port != 0:
             self._validate_port_range(
                 self.inference_workers_config.worker_metaserver_base_port,
@@ -509,6 +556,38 @@ class CoordinatorConfig:
                     f"num_workers({iwc.num_workers}) - 1 = {last_port} exceeds max port 65535"
                 )
 
+        # Validate scheduler score configuration
+        self._validate_positive_number(
+            self.scheduler_config.endpoint_instance_score_weight,
+            "endpoint_instance_score_weight",
+            allow_zero=True,
+        )
+        self._validate_positive_number(
+            self.scheduler_config.kv_affinity_load_weight,
+            "kv_affinity_load_weight",
+            allow_zero=True,
+        )
+        self._validate_positive_number(
+            self.scheduler_config.kv_affinity_overlap_credit,
+            "kv_affinity_overlap_credit",
+            allow_zero=True,
+        )
+        self._validate_positive_number(
+            self.scheduler_config.kv_affinity_prefill_load_scale,
+            "kv_affinity_prefill_load_scale",
+            allow_zero=True,
+        )
+        self._validate_positive_number(
+            self.scheduler_config.kv_affinity_load_gate_topn,
+            "kv_affinity_load_gate_topn",
+            allow_zero=True,
+        )
+        if self.scheduler_config.kv_affinity_mode not in KV_AFFINITY_MODES:
+            self._errors.append(
+                f"kv_affinity_mode must be one of {KV_AFFINITY_MODES}, "
+                f"got {self.scheduler_config.kv_affinity_mode!r}"
+            )
+
         # Validate host address
         self._validate_ip_or_hostname(self.api_config.coordinator_api_host, "coordinator_api_host")
 
@@ -519,18 +598,35 @@ class CoordinatorConfig:
         if not (100 <= self.rate_limit_config.error_status_code <= 599):
             self._errors.append("error_status_code must be in range 100-599")
 
+        if self.rate_limit_config.provider not in ("simple", "olc"):
+            self._errors.append(
+                f"rate_limit_config.provider must be 'simple' or 'olc', "
+                f"got '{self.rate_limit_config.provider}'"
+            )
+
+        if self.rate_limit_config.enable_rate_limit and self.rate_limit_config.provider == "olc":
+            if not self.rate_limit_config.olc_config_path:
+                self._errors.append(
+                    "rate_limit_config.olc_config_path is required when provider is 'olc'"
+                )
+            elif not os.path.isdir(self.rate_limit_config.olc_config_path):
+                self._errors.append(
+                    f"rate_limit_config.olc_config_path does not exist: "
+                    f"{self.rate_limit_config.olc_config_path}"
+                )
+
         # Validate Prometheus metrics configuration
         self._validate_positive_number(self.prometheus_metrics_config.reuse_time, "reuse_time")
 
         # Validate standby configuration
-        self._validate_positive_number(self.standby_config.master_standby_check_interval,
-                                       "master_standby_check_interval")
+        self._validate_positive_number(
+            self.standby_config.master_standby_check_interval, "master_standby_check_interval"
+        )
         self._validate_positive_number(self.standby_config.master_lock_ttl, "master_lock_ttl")
-        self._validate_positive_number(self.standby_config.master_lock_retry_interval,
-                                       "master_lock_retry_interval")
-        self._validate_positive_number(self.standby_config.master_lock_max_failures,
-                                       "master_lock_max_failures",
-                                       allow_zero=True)
+        self._validate_positive_number(self.standby_config.master_lock_retry_interval, "master_lock_retry_interval")
+        self._validate_positive_number(
+            self.standby_config.master_lock_max_failures, "master_lock_max_failures", allow_zero=True
+        )
 
         # Validate master lock key path
         self._validate_endpoint_path(self.standby_config.master_lock_key, "master_lock_key")
@@ -653,13 +749,25 @@ class CoordinatorConfig:
         master_standby_check_interval = self.standby_config.master_standby_check_interval
         master_lock_ttl = self.standby_config.master_lock_ttl
         master_lock_key = self.standby_config.master_lock_key
+        deploy_summary = (
+            f"    ├─ p_instances_num:     {self.deploy_config.p_instances_num}\n"
+            f"    └─ d_instances_num:     {self.deploy_config.d_instances_num}\n"
+        )
+        if self.deploy_config.hybrid_instances_num is not None:
+            deploy_summary = (
+                f"    ├─ p_instances_num: {self.deploy_config.p_instances_num}\n"
+                f"    ├─ d_instances_num: {self.deploy_config.d_instances_num}\n"
+                f"    ├─ hybrid_instances_num: {self.deploy_config.hybrid_instances_num}\n"
+                f"    ├─ single_hybrid_instance_pod_num: "
+                f"{self.deploy_config.single_hybrid_instance_pod_num}\n"
+                f"    └─ hybrid_pod_npu_num: {self.deploy_config.hybrid_pod_npu_num}\n"
+            )
         return (
             f"{separator}\n"
             f"{title}\n"
             f"{separator}\n"
             "  Deploy Configuration:\n"
-            f"    ├─ p_instances_num:     {self.deploy_config.p_instances_num}\n"
-            f"    └─ d_instances_num:     {self.deploy_config.d_instances_num}\n"
+            f"{deploy_summary}"
             "  Logging Configuration:\n"
             f"    ├─ Log Level:           {self.logging_config.log_level}\n"
             f"    ├─ Log File:            {self.logging_config.host_log_dir}\n"
@@ -669,11 +777,20 @@ class CoordinatorConfig:
             f"    ├─ HTTP Pod IP:         {self.api_config.coordinator_api_host}\n"
             f"    ├─ HTTP Pod DNS:         {self.api_config.coordinator_api_dns}\n"
             f"    ├─ Inference Port:      {self.api_config.coordinator_api_infer_port}\n"
-            f"    └─ Management Port:     {self.api_config.coordinator_api_mgmt_port}\n"
+            f"    ├─ Management Port:     {self.api_config.coordinator_api_mgmt_port}\n"
+            f"    └─ Observability Port:  {self.api_config.coordinator_obs_port}\n"
             "\n"
             "  Scheduler Configuration:\n"
             f"    ├─ Deploy Mode:               {self.scheduler_config.deploy_mode.value}\n"
-            f"    └─ Scheduler Type:            {self.scheduler_config.scheduler_type.value}\n"
+            f"    ├─ Scheduler Type:            {self.scheduler_config.scheduler_type.value}\n"
+            f"    ├─ Endpoint Instance Weight:  "
+            f"{self.scheduler_config.endpoint_instance_score_weight}\n"
+            f"    ├─ KV Affinity Mode:          "
+            f"{self.scheduler_config.kv_affinity_mode}\n"
+            f"    ├─ KV Affinity Load Weight:   "
+            f"{self.scheduler_config.kv_affinity_load_weight}\n"
+            f"    └─ KV Affinity Load Gate TopN:"
+            f"{self.scheduler_config.kv_affinity_load_gate_topn}\n"
             "\n"
             "  Multiprocess (Inference Workers):\n"
             f"    ├─ Num Workers:               {self.inference_workers_config.num_workers}\n"
@@ -703,12 +820,7 @@ class CoordinatorConfig:
             f"{separator}"
         )
 
-    def _validate_positive_number(
-        self,
-        value: float | int,
-        field_name: str,
-        allow_zero: bool = False
-    ) -> None:
+    def _validate_positive_number(self, value: float | int, field_name: str, allow_zero: bool = False) -> None:
         """Validate that a number is positive (optionally allow zero)"""
         if allow_zero and value < 0:
             self._errors.append(f"{field_name} cannot be negative")
@@ -735,8 +847,7 @@ class CoordinatorConfig:
 
         # If not IP, validate as hostname (basic validation)
         if not re.match(
-            r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$',
-            value
+            r'^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$', value
         ):
             self._errors.append(f"{field_name} must be a valid IP address or hostname")
 

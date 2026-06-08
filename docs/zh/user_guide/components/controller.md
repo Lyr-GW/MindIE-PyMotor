@@ -40,13 +40,24 @@ Controller 进程入口为 `motor/controller/main.py`。启动时加载 `Control
 | 方法 | 路径 | 处理逻辑要点 |
 |------|------|----------------|
 | `POST` | `/controller/heartbeat` | 解析 `HeartbeatMsg`，`InstanceManager().handle_heartbeat` |
-| `POST` | `/controller/register` | 解析 `RegisterMsg`，`InstanceAssembler().register` |
+| `POST` | `/controller/register` | 解析 `RegisterMsg`（含 `nnodes` 字段，用于跨节点 PCP 场景），`InstanceAssembler().register` |
 | `POST` | `/controller/reregister` | 解析 `ReregisterMsg`，`InstanceAssembler().reregister` |
 | `POST` | `/controller/terminate_instance` | 解析 `TerminateInstanceMsg`，向各 Node Manager 下发 stop 等 |
 | `GET` | `/startup`、`/readiness`、`/liveness` | 探针类接口（实现见同文件内对应 handler） |
 | `POST` | `/observability/add_alarm` | 上报告警记录 |
 
 另有一套 **Observability** 独立 FastAPI 应用（端口 `observability_api_port`），在 `observability_enable` 为真时提供如 inventory、metrics、alarms 等路由；未启用时相关接口返回「Observability is not enabled.」类错误（见 `observability_enabled_required`）。
+
+### Observability 应用路由
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/observability/inventory` | 获取服务库存信息 |
+| `GET` | `/observability/metrics` | 获取监控指标（**已弃用**，请使用 Coordinator 的 `/metrics` 接口） |
+| `GET` | `/observability/alarms` | 获取告警信息，支持 `source_id` 查询参数过滤 |
+
+> [!WARNING] 已弃用
+> `GET /observability/metrics` 已弃用，将在后续版本移除。请改为直接访问 Coordinator 的 `GET /metrics?type={type}&role={role}` 接口。Coordinator 的地址和端口见 [Coordinator 指标查询接口](../../api_reference/management_and_monitoring_interfaces.md#指标查询接口)。
 
 ## 使用样例
 
@@ -56,6 +67,16 @@ python -m motor.controller.main --config /path/to/controller_config.json
 ```
 
 非交互环境下主循环可能阻塞在 `select`/`wait`；退出可通过 SIGINT/SIGTERM（`signal_handler`）或交互输入 `stop`。
+
+### RegisterMsg 字段
+
+`POST /controller/register` 请求体（`RegisterMsg`）新增字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `nnodes` | int | 1 | 跨节点 PCP 期望节点数，来自 `engine_config` 中的 `nnodes` 配置。**仅在 `nnodes > 1` 时启用跨节点 PCP 组装逻辑，此时就绪条件从 `total_endpoints == dp_size` 切换为 `node_managers_count >= nnodes`**。 |
+
+`nnodes=1` 时行为与既有逻辑完全一致（向后兼容）。
 
 ## 报错与日志
 

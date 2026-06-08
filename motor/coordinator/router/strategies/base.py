@@ -43,6 +43,7 @@ from motor.coordinator.domain.request_manager import RequestManager
 import motor.coordinator.router.recompute as recompute_common
 from motor.coordinator.router.workload import WorkloadActionHandler
 from motor.coordinator.tracer.tracing import TracerManager
+from motor.coordinator.domain.scheduling import InstanceReadiness
 
 logger = get_logger(__name__)
 
@@ -51,6 +52,22 @@ _SCHEDULING_LOG_SAMPLE_RATE = 100  # ~1% sampling at high QPS
 
 def _should_log_scheduling_sample(req_id: str) -> bool:
     return hash(req_id) % _SCHEDULING_LOG_SAMPLE_RATE == 0
+
+
+def _scheduling_state_for_role(role: PDRole) -> ReqState:
+    if role == PDRole.ROLE_E:
+        return ReqState.E_SCHEDULING
+    if role == PDRole.ROLE_P:
+        return ReqState.P_SCHEDULING
+    return ReqState.D_SCHEDULING
+
+
+def _allocated_state_for_role(role: PDRole) -> ReqState:
+    if role == PDRole.ROLE_E:
+        return ReqState.E_ALLOCATED
+    if role == PDRole.ROLE_P:
+        return ReqState.P_ALLOCATED
+    return ReqState.D_ALLOCATED
 
 
 class RequestLoggerAdapter(logging.LoggerAdapter):
@@ -120,11 +137,10 @@ class BaseRouter(ABC):
     @staticmethod
     def _select_endpoint_from_instance(instance: Instance) -> Endpoint | None:
         if instance and instance.endpoints:
-            for endpoints_dict in instance.endpoints.values():
-                for endpoint in endpoints_dict.values():
-                    status_val = endpoint.status.value if hasattr(endpoint.status, "value") else str(endpoint.status)
-                    if status_val == "normal":
-                        return endpoint
+            for endpoint in instance.get_all_endpoints():
+                status_val = endpoint.status.value if hasattr(endpoint.status, "value") else str(endpoint.status)
+                if status_val == "normal":
+                    return endpoint
         return None
 
     @staticmethod
@@ -144,9 +160,11 @@ class BaseRouter(ABC):
             p_req["kv_transfer_params"] = kv_transfer_params
         p_req[OpenAIField.STREAM] = False
         p_req[OpenAIField.MAX_TOKENS] = 1
+        if OpenAIField.MAX_COMPLETION_TOKENS in p_req:
+            p_req[OpenAIField.MAX_COMPLETION_TOKENS] = 1
         if set_min_tokens:
-            p_req["min_tokens"] = 1
-        p_req.pop("stream_options", None)
+            p_req[OpenAIField.MIN_TOKENS] = 1
+        p_req.pop(OpenAIField.STREAM_OPTIONS, None)
         return p_req
 
     @contextlib.contextmanager
@@ -225,7 +243,7 @@ class BaseRouter(ABC):
 
     async def prepare_resource(self, role: PDRole) -> ScheduledResource:
         """Select instance + allocate workload (one RPC), record in RequestManager, retry on failure."""
-        self.req_info.update_state(ReqState.P_SCHEDULING if role == PDRole.ROLE_P else ReqState.D_SCHEDULING)
+        self.req_info.update_state(_scheduling_state_for_role(role))
 
         last_exception = None
         t0_prepare = time.perf_counter()
@@ -243,20 +261,27 @@ class BaseRouter(ABC):
                     )
 
                 if result is None:
-                    raise ValueError(f"No instance available for role {role} or allocate failed")
+                    msg = f"No instance available for role {role} or allocate failed"
+                    raise ValueError(msg)
 
                 ins, endpoint, allocate_workload = result
                 if not ins or not endpoint:
-                    raise ValueError(f"Invalid scheduler result: {result}")
+                    msg = f"Invalid scheduler result: {result}"
+                    raise ValueError(msg)
 
                 if not await self._request_manager.add_req_workload(
                     self.req_info.req_id, role, allocate_workload
                 ):
-                    raise RuntimeError(f"Request {self.req_info.req_id} already allocated for role {role}")
+                    await self._rollback_allocated_workload(
+                        ins,
+                        endpoint,
+                        role,
+                        allocate_workload,
+                    )
+                    msg = f"Request {self.req_info.req_id} already allocated for role {role}"
+                    raise RuntimeError(msg)
 
-                self.req_info.update_state(
-                    ReqState.P_ALLOCATED if role == PDRole.ROLE_P else ReqState.D_ALLOCATED
-                )
+                self.req_info.update_state(_allocated_state_for_role(role))
 
                 elapsed_prepare_ms = (time.perf_counter() - t0_prepare) * 1000
                 if _should_log_scheduling_sample(self.req_info.req_id):
@@ -274,9 +299,10 @@ class BaseRouter(ABC):
                 
             except Exception as e:
                 last_exception = e
+                exc_info_flag = (attempt == 0)
                 self.logger.warning(
                     "Scheduling attempt %d/%d failed for role %s: %s",
-                    attempt + 1, self.config.exception_config.max_retry, role, e
+                    attempt + 1, self.config.exception_config.max_retry, role, e, exc_info=exc_info_flag
                 )
                 
                 if attempt < self.config.exception_config.max_retry - 1:
@@ -295,6 +321,35 @@ class BaseRouter(ABC):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=error_detail
         )
+
+    async def _rollback_allocated_workload(
+        self,
+        instance: Instance,
+        endpoint: Endpoint,
+        role: PDRole,
+        allocate_workload: Workload,
+    ) -> bool:
+        """Undo a scheduler allocation if local request workload bookkeeping fails."""
+        rollback_workload = Workload(
+            active_kv_cache=-allocate_workload.active_kv_cache,
+            active_tokens=-allocate_workload.active_tokens,
+        )
+        params = UpdateWorkloadParams(
+            instance_id=instance.id,
+            endpoint_id=endpoint.id,
+            role=role,
+            req_id=self.req_info.req_id,
+            workload_action=WorkloadAction.RELEASE_TOKENS,
+            workload_change=rollback_workload,
+        )
+        with CancelScope(shield=True):
+            success = await self._scheduler.update_workload(params)
+        if not success:
+            self.logger.warning(
+                "Failed to rollback allocated workload instance_id=%s endpoint_id=%s role=%s",
+                instance.id, endpoint.id, role,
+            )
+        return success
 
     async def forward_stream_request(self,
                                      req_data: dict,
@@ -410,10 +465,11 @@ class BaseRouter(ABC):
             is_meta=self.is_meta
         )
         t0_forward = time.perf_counter()
-        response = await client.post(f"/{self.req_info.api}",
-                                        json=engine_req,
-                                        headers=headers,
-                                        timeout=timeout)
+        url = f"/{self.req_info.api}"
+        response = await client.post(url,
+                                    json=engine_req,
+                                    headers=headers,
+                                    timeout=timeout)
         trace_obj.add_trace_event(f"Post ok: {response.status_code}", is_meta=self.is_meta)
         elapsed_forward_ms = (time.perf_counter() - t0_forward) * 1000
         if _should_log_scheduling_sample(self.req_info.req_id):
@@ -443,6 +499,92 @@ class BaseRouter(ABC):
 
     async def release_kv(self, resource: ScheduledResource):
         return await self._update_workload(resource, WorkloadAction.RELEASE_KV)
+
+    async def do_encode(self):
+        if not await self._check_can_encode():
+            return
+        trace_obj = self.req_info.trace_obj
+        headers = trace_obj.get_trace_headers_dict(self.is_meta)
+        trace_context = TracerManager().extract_trace_context(headers)
+        with TracerManager().tracer.start_as_current_span("CDP_Encode", context=trace_context) as span:
+            self.is_meta = True
+            trace_obj.meta_span = span
+            trace_obj.meta_trace_headers = TracerManager().inject_trace_context()
+            trace_obj.set_trace_attribute("requestId", self.req_info.req_id, is_meta=True)
+
+            req_data = self.req_info.req_data.copy()
+            max_retry = self.config.exception_config.transport_retry_limit
+            for attempt in range(max_retry):
+                req_data[OpenAIField.STREAM] = False
+                req_data[OpenAIField.MAX_TOKENS] = 1
+                req_data[OpenAIField.MIN_TOKENS] = 1
+                if OpenAIField.MAX_COMPLETION_TOKENS in req_data:
+                    req_data[OpenAIField.MAX_COMPLETION_TOKENS] = 1
+                if OpenAIField.STREAM_OPTIONS in req_data:
+                    del req_data[OpenAIField.STREAM_OPTIONS]
+
+                try:
+                    async with self._manage_resource_context(PDRole.ROLE_E, self.release_tokens) as resource, \
+                            self._manage_client_context(resource) as client:
+
+                        cancel_scope = CancelScope()
+                        self.req_info.set_cancel_scope(cancel_scope, PDRole.ROLE_E)
+                        with cancel_scope:
+                            await self.forward_request(
+                                    req_data, client, self.config.exception_config.infer_timeout
+                                )
+                            break
+                except asyncio.CancelledError:
+                    self.logger.info("The non streaming request was terminated because of "
+                                    "infer timeout or client disconnect.")
+                    self.req_info.cancel_scope()
+                    raise
+                except HTTPException:
+                    self.req_info.cancel_scope()
+                    raise
+                except Exception as e:
+                    last_error_str = self._log_cdp_decode_retry_error(
+                        "post Decode", attempt, max_retry, e, last_error_str
+                    )
+                    self.req_info.cancel_scope()
+                    trace_obj.set_trace_exception(e)
+
+                    if attempt < max_retry - 1:
+                        wait_time = self.config.exception_config.retry_delay * (2 ** attempt)
+                        self.logger.info("Retrying non-streaming request in %.2f seconds...", wait_time)
+                        await asyncio.sleep(wait_time)
+                        continue
+
+                    self.req_info.update_state(ReqState.EXCEPTION)
+                    raise e
+
+    async def _check_can_encode(self) -> bool:
+        messages = self.req_info.req_data.get("messages")
+        if not messages:
+            return False
+        is_multimodal = False
+        for msg in messages:
+            if not isinstance(msg.get("content"), list):
+                continue
+
+            for content_item in msg["content"]:
+                content_type = content_item.get("type")
+                if not content_type:
+                    continue
+
+                if content_type == "image_url" or content_type == "video_url":
+                    is_multimodal = True
+                    break
+
+        if not is_multimodal:
+            return False
+
+        instance_readiness = await self._scheduler.has_required_instances()
+        if instance_readiness != InstanceReadiness.REQUIRED_MET_EPD and \
+           instance_readiness != InstanceReadiness.ENCODE_PREFILL:
+            return False
+        
+        return True
 
     def _check_recompute_limit(self, retry_count: int, rmax: int) -> None:
         if recompute_common.recompute_limit_reached(retry_count, rmax):
@@ -495,7 +637,7 @@ class BaseRouter(ABC):
             resource,
             self.req_info.req_id,
             action,
-            self.req_info.req_len,
+            self.req_info,
         )
         if workload_change is None or role is None:
             return False

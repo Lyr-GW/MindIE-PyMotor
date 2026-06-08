@@ -20,6 +20,8 @@ from motor.config.coordinator import CoordinatorConfig
 
 TENANT_ID = "default"
 logger = get_logger(__name__)
+# 需要向 Conductor 注册 kv-events 的角色集合
+_KVA_ROLES = frozenset({PDRole.ROLE_P, PDRole.ROLE_U})
 
 
 class ConductorApiClient():
@@ -37,11 +39,10 @@ class ConductorApiClient():
         logger.info("register_kv_instance started.")
 
         for instance in instances:
-            if instance.role != PDRole.ROLE_P:
+            if instance.role not in _KVA_ROLES:
                 continue
-            for endpoint in instance.endpoints.values():
-                for ep in endpoint.values():
-                    ConductorApiClient().register_post(instance, ep)
+            for ep in instance.get_all_endpoints():
+                ConductorApiClient().register_post(instance, ep)
 
     @staticmethod
     def unregister_kv_instance(
@@ -55,11 +56,10 @@ class ConductorApiClient():
         logger.info("unregister_kv_instance started.")
 
         for instance in instances:
-            if instance.role != PDRole.ROLE_P:
+            if instance.role not in _KVA_ROLES:
                 continue
-            for endpoint in instance.endpoints.values():
-                for ep in endpoint.values():
-                    ConductorApiClient().unregister_post(instance, ep)
+            for ep in instance.get_all_endpoints():
+                ConductorApiClient().unregister_post(instance, ep)
 
     @classmethod
     def register_post(
