@@ -1,5 +1,5 @@
 # Grafana datasource provisioning for minimal mode.
-# Loki + Trace<->Log 联动与 full 模式对齐；start.sh 在 native Loki 回退时会渲染 Loki URL。
+# Loki + Trace<->Log 联动与 full 模式对齐。
 apiVersion: 1
 
 datasources:

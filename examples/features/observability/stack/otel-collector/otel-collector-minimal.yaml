@@ -3,7 +3,7 @@
 #   traces → Tempo
 #   logs   → Loki
 #
-# start.sh 在 native Loki 回退时会生成 otel-collector-minimal.runtime.yaml 并替换 endpoint。
+# start.sh ensure_loki_image() 会在 Hub 拉取失败时本地 build Loki 镜像。
 
 receivers:
   otlp:

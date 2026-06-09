@@ -8,7 +8,6 @@ cd "${SCRIPT_DIR}"
 . "${SCRIPT_DIR}/scripts/load-dotenv.sh"
 
 "${SCRIPT_DIR}/scripts/stop-k8s-port-forwards-host.sh" || true
-"${SCRIPT_DIR}/scripts/loki-native.sh" stop || true
 
 PURGE=0
 if [[ "${1:-}" == "--purge" ]]; then
@@ -76,7 +75,6 @@ fi
 if [[ "${PURGE}" -eq 1 ]]; then
   echo "[stop] purge native runtime data."
   rm -rf "${RUNTIME_DIR:?}/data" "${RUNTIME_DIR:?}/logs" "${RUNTIME_DIR:?}/run"
-  rm -rf "${SCRIPT_DIR}/generated/loki-data"
 fi
 
 echo "[stop] done."

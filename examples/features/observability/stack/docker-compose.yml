@@ -73,7 +73,7 @@ services:
   # Core: Loki (logs)
   # ---------------------------------------------------------------
   loki:
-    image: ${REGISTRY_PREFIX:-}grafana/loki:${LOKI_VERSION:-3.3.0}
+    image: ${LOKI_IMAGE:-grafana/loki:3.3.0}
     pull_policy: if_not_present
     container_name: pymotor-loki
     restart: unless-stopped

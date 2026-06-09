@@ -46,6 +46,7 @@ Proxy (see SERVICE_GUIDE.md §2.4):
   - Native runtime: set PROXY_SH=/path/to/dotenv in .env (optional; default empty).
   - Grafana container: HTTP_PROXY cleared for in-stack prometheus/tempo.
   - OBS_COMPOSE_PULL=never|missing|always  OBS_COMPOSE_BUILD=0|1
+  - OBS_FORCE_NATIVE_FALLBACK=1  only then fall back to full native runtime on Docker failure
 EOF
 }
 
@@ -144,6 +145,39 @@ run_native() {
     --prometheus-file "./generated/prometheus.yml"
 }
 
+check_core_stack() {
+  local docker_bin="${DOCKER_BIN:-docker}"
+  local missing=()
+  local core_containers=(
+    pymotor-prometheus
+    pymotor-grafana
+    pymotor-tempo
+    pymotor-loki
+    pymotor-otel-collector
+  )
+
+  for name in "${core_containers[@]}"; do
+    if ! "${docker_bin}" inspect -f '{{.State.Running}}' "${name}" 2>/dev/null | grep -qx 'true'; then
+      missing+=("${name}")
+    fi
+  done
+
+  if ((${#missing[@]} > 0)); then
+    echo "[launch] core stack unhealthy; not running containers: ${missing[*]}" >&2
+    return 1
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "http://127.0.0.1:${LOKI_PORT:-3100}/ready" >/dev/null 2>&1 || {
+      echo "[launch] Loki readiness check failed on :${LOKI_PORT:-3100}" >&2
+      return 1
+    }
+  fi
+
+  echo "[launch] core stack healthy (includes pymotor-loki)"
+  return 0
+}
+
 if [[ "${FORCE_NATIVE}" -eq 1 ]]; then
   run_native
   exit 0
@@ -158,7 +192,23 @@ DOCKER_RC=$?
 set -e
 
 if [[ "${DOCKER_RC}" -ne 0 ]]; then
-  echo "[launch] Docker startup failed (exit=${DOCKER_RC}), cleaning partial Docker stack before native fallback."
-  ./stop.sh || true
-  run_native
+  if [[ "${OBS_FORCE_NATIVE_FALLBACK:-0}" == "1" ]]; then
+    echo "[launch] Docker startup failed (exit=${DOCKER_RC}); OBS_FORCE_NATIVE_FALLBACK=1, switching to native runtime."
+    ./stop.sh || true
+    run_native
+    exit 0
+  fi
+  echo "[launch] Docker startup failed (exit=${DOCKER_RC}). Set OBS_FORCE_NATIVE_FALLBACK=1 to fall back to native runtime." >&2
+  exit "${DOCKER_RC}"
+fi
+
+if ! check_core_stack; then
+  if [[ "${OBS_FORCE_NATIVE_FALLBACK:-0}" == "1" ]]; then
+    echo "[launch] core stack check failed; OBS_FORCE_NATIVE_FALLBACK=1, switching to native runtime."
+    ./stop.sh || true
+    run_native
+    exit 0
+  fi
+  echo "[launch] core stack check failed. Set OBS_FORCE_NATIVE_FALLBACK=1 to fall back to native runtime." >&2
+  exit 1
 fi
