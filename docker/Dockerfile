@@ -17,7 +17,7 @@
 ARG BASE_IMAGE_TAG=main
 FROM quay.nju.edu.cn/ascend/vllm-ascend:${BASE_IMAGE_TAG}
 
-ARG AGREEMENT_VERSION=0.1.0
+ARG IMAGE_VERSION=0.1.0
 ARG PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
 ARG PIP_TRUSTED_HOST=repo.huaweicloud.com
 
@@ -54,7 +54,7 @@ RUN set -eux; \
 WORKDIR /workspace
 
 COPY docker/agreement.txt /workspace/agreement.txt
-RUN sed -i "1s|__VERSION__|${AGREEMENT_VERSION}|" /workspace/agreement.txt
+RUN sed -i "1s|__VERSION__|${IMAGE_VERSION}|" /workspace/agreement.txt
 
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
