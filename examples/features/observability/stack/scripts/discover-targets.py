@@ -86,9 +86,7 @@ class DiscoveryResult:
 
 def _run_kubectl_json(args: Sequence[str]) -> Dict[str, Any]:
     cmd = ["kubectl", *args, "-o", "json"]
-    output = subprocess.run(
-        cmd, check=True, capture_output=True, text=True, env=_kubectl_env()
-    )
+    output = subprocess.run(cmd, check=True, capture_output=True, text=True, env=_kubectl_env())
     return json.loads(output.stdout)
 
 
@@ -283,11 +281,7 @@ def _match_nodeport_for_service(
         service_port = int(port.get("port") or 0)
         target_port = str(port.get("targetPort", ""))
         name = str(port.get("name", ""))
-        if (
-            service_port == expected_port
-            or target_port == str(expected_port)
-            or _has_keyword(name, allow_keywords)
-        ):
+        if service_port == expected_port or target_port == str(expected_port) or _has_keyword(name, allow_keywords):
             return int(node_port)
     return None
 
@@ -549,9 +543,7 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
 
         except subprocess.CalledProcessError as exc:
             if _has_explicit_namespace(args):
-                raise RuntimeError(
-                    f"kubernetes discovery failed for explicit namespace '{namespace}': {exc}"
-                ) from exc
+                raise RuntimeError(f"kubernetes discovery failed for explicit namespace '{namespace}': {exc}") from exc
             warnings.append(f"kubernetes discovery failed: {exc}. fallback to static defaults.")
             mode = "fallback"
             engine_targets = []

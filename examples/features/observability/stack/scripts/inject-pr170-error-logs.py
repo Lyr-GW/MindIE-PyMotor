@@ -108,8 +108,7 @@ def push_otlp_trace(
                                         "key": "error.message",
                                         "value": {
                                             "stringValue": (
-                                                "error message: upstream engine unavailable "
-                                                f"for request {request_id}"
+                                                f"error message: upstream engine unavailable for request {request_id}"
                                             )
                                         },
                                     },
@@ -172,10 +171,7 @@ def main() -> int:
         print(f"[inject] Loki push failed: {exc}", file=sys.stderr)
         return 1
 
-    print(
-        f"[inject] pushed {len(lines)} log lines to Loki "
-        f"trace_id={trace_id} x_request_id={request_id}"
-    )
+    print(f"[inject] pushed {len(lines)} log lines to Loki trace_id={trace_id} x_request_id={request_id}")
     print('[inject] Explore query: {service_name=~"motor-.*"} |= "Possible causes:"')
 
     if args.mode == "both":
