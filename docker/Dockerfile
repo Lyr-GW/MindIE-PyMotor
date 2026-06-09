@@ -56,4 +56,8 @@ WORKDIR /workspace
 COPY docker/agreement.txt /workspace/agreement.txt
 RUN sed -i "1s|__VERSION__|${AGREEMENT_VERSION}|" /workspace/agreement.txt
 
-CMD ["sh", "-c", "cat /workspace/agreement.txt && exec bash"]
+COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["/bin/bash"]
