@@ -78,7 +78,7 @@ docker/mindie-motor-vllm/<tag>/Dockerfile
 | `3.0.0-800I-A3-py3.11-openEuler24.03-lts-aarch64` | [Dockerfile](./mindie-motor-vllm/3.0.0-800I-A3-py3.11-openEuler24.03-lts-aarch64/Dockerfile) |
 | `3.0.0-800I-A3-py3.11-openEuler24.03-lts-x86_64` | [Dockerfile](./mindie-motor-vllm/3.0.0-800I-A3-py3.11-openEuler24.03-lts-x86_64/Dockerfile) |
 
-每个 Dockerfile 均已内置对应的基础镜像（vllm-ascend v0.18.0 系列）、目标平台与镜像 Tag，无需额外脚本或环境变量选择。
+每个 Dockerfile 均已内置对应的基础镜像（vllm-ascend v0.18.0 系列）、目标平台、镜像 Tag、入口脚本与使用协议，无需额外脚本、外部 docker 文件或环境变量选择。
 
 ---
 
@@ -115,7 +115,7 @@ docker build --network=host \
 2. 把当前源码复制到镜像内的 `/opt/MindIE-PyMotor`。
 3. 安装依赖、编译并安装 `motor` wheel 包。
 4. 编译并安装 `ccae_reporter` 可观测组件。
-5. 配置容器入口脚本与使用协议。
+5. 在 Dockerfile 内联生成容器入口脚本与使用协议。
 
 ### 运行 MindIE-Motor 容器
 

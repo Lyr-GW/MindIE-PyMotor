@@ -78,7 +78,7 @@ docker/mindie-motor-vllm/<tag>/Dockerfile
 | `3.0.0-800I-A3-py3.11-openEuler24.03-lts-aarch64` | [Dockerfile](./mindie-motor-vllm/3.0.0-800I-A3-py3.11-openEuler24.03-lts-aarch64/Dockerfile) |
 | `3.0.0-800I-A3-py3.11-openEuler24.03-lts-x86_64` | [Dockerfile](./mindie-motor-vllm/3.0.0-800I-A3-py3.11-openEuler24.03-lts-x86_64/Dockerfile) |
 
-Each Dockerfile embeds the matching vllm-ascend base image (v0.18.0 series), target platform, and output image tag. No helper script or environment-variable selection is required.
+Each Dockerfile embeds the matching vllm-ascend base image (v0.18.0 series), target platform, output image tag, entrypoint script, and license agreement. No helper script, external docker files, or environment-variable selection is required.
 
 ---
 
@@ -115,7 +115,7 @@ The build process:
 2. Copies the local source tree into `/opt/MindIE-PyMotor`.
 3. Installs dependencies, compiles, and installs the `motor` wheel.
 4. Builds and installs the `ccae_reporter` observability component.
-5. Configures the entrypoint script and license agreement.
+5. Generates the entrypoint script and license agreement inline within the Dockerfile.
 
 ### Run MindIE-Motor Container
 

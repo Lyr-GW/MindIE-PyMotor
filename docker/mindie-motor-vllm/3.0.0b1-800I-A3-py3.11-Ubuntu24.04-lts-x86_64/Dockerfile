@@ -50,11 +50,42 @@ RUN set -eux; \
 
 WORKDIR /workspace
 
-COPY docker/agreement.txt /workspace/agreement.txt
-RUN sed -i "1s|__VERSION__|${IMAGE_VERSION}|" /workspace/agreement.txt
+RUN printf '%s\n' \
+    "Version: ${IMAGE_VERSION}" \
+    "Container image Copyright (c) 2026, Huawei Technologies Co., Ltd. All rights reserved." \
+    "This container image and its contents are governed by the Huawei Container License Agreement (\"License\"). By pulling and using the container, you accept the terms and conditions of this License." \
+    "A copy of this License is made available in this container at: https://www.hiascend.com/en/legal/ascendhub-download" \
+    "Note: You agree and undertake that when using Huawei or third-party software in this image, you will comply with the license agreement of the corresponding Huawei or third-party software." \
+    > /workspace/agreement.txt
 
-COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+RUN <<'EOF' install -m 755 /dev/stdin /usr/local/bin/docker-entrypoint.sh
+#!/bin/bash
+set -e
+
+# Ascend env scripts exist only inside the runtime image; use source=/dev/null
+# so ShellCheck does not require those paths at lint time.
+load_env_script() {
+    local script="$1"
+    if [ -f "$script" ]; then
+        # shellcheck source=/dev/null
+        . "$script"
+    fi
+}
+
+cat /workspace/agreement.txt
+
+load_env_script /usr/local/Ascend/ascend-toolkit/set_env.sh
+
+shopt -s nullglob
+for set_env in /usr/local/Ascend/cann-*/share/info/ascendnpu-ir/bin/set_env.sh; do
+    load_env_script "$set_env"
+    break
+done
+
+load_env_script /usr/local/Ascend/nnal/atb/set_env.sh
+
+exec "$@"
+EOF
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/bin/bash"]
