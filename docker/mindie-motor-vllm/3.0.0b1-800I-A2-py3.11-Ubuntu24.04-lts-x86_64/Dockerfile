@@ -4,12 +4,15 @@
 #
 # Base image: quay.nju.edu.cn/ascend/vllm-ascend:deepseekv4
 # Target platform: linux/amd64
+# Source repo: https://gitcode.com/Ascend/MindIE-PyMotor.git
+# Source branch: v3.0.0.beta.1
+# Source commit: 51c1e0819caa55ddef7cf58158fb3043cf9a1c34
 #
-# Build from the repository root:
+# Build (no local source required):
 #   docker build --network=host \
 #       --platform=linux/amd64 \
 #       -t mindie-motor-vllm:3.0.0b1-800I-A2-py3.11-Ubuntu24.04-lts-x86_64 \
-#       -f docker/mindie-motor-vllm/3.0.0b1-800I-A2-py3.11-Ubuntu24.04-lts-x86_64/Dockerfile \
+#       -f Dockerfile \
 #       .
 
 FROM quay.nju.edu.cn/ascend/vllm-ascend:deepseekv4
@@ -23,9 +26,24 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-WORKDIR /opt/MindIE-PyMotor
+RUN set -eux; \
+    if ! command -v git >/dev/null 2>&1; then \
+        if command -v apt-get >/dev/null 2>&1; then \
+            apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git; \
+        elif command -v yum >/dev/null 2>&1; then \
+            yum install -y git; \
+        elif command -v dnf >/dev/null 2>&1; then \
+            dnf install -y git; \
+        else \
+            echo "git not found and no supported package manager" >&2; exit 1; \
+        fi; \
+    fi; \
+    git clone --branch v3.0.0.beta.1 https://gitcode.com/Ascend/MindIE-PyMotor.git /opt/MindIE-PyMotor; \
+    cd /opt/MindIE-PyMotor; \
+    git checkout 51c1e0819caa55ddef7cf58158fb3043cf9a1c34; \
+    rm -rf .git
 
-COPY . /opt/MindIE-PyMotor/
+WORKDIR /opt/MindIE-PyMotor
 
 RUN set -eux; \
     pip install --no-cache-dir -r requirements.txt; \

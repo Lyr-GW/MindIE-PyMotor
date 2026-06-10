@@ -95,7 +95,7 @@ docker/mindie-motor-vllm/<tag>/Dockerfile
 
 ### 构建 MindIE-Motor 镜像
 
-在 **仓库根目录** 执行，将 `<tag>` 替换为目标组合：
+每个 Dockerfile 会在构建时自动 clone 指定分支与 commit 的源码，**无需本地源码或构建上下文**。将 `<tag>` 替换为目标组合后执行：
 
 ```bash
 TAG="3.0.0-800I-A2-py3.11-Ubuntu24.04-lts-aarch64"
@@ -107,12 +107,18 @@ docker build --network=host \
     .
 ```
 
-各 Dockerfile 头部注释中已写明对应的 `--platform` 与完整 `docker build` 命令，可直接复制使用。
+各 Dockerfile 头部注释中已写明对应的 `--platform`、源码仓库信息与完整 `docker build` 命令，可直接复制使用。
+
+3.0.0 版本源码映射：
+
+| 镜像版本 | 仓库 | 分支 | Commit |
+|---|---|---|---|
+| `3.0.0` | `https://gitcode.com/Ascend/MindIE-PyMotor.git` | `v3.0.0` | `383d1787ed3fc27aaad2db9cc5506d40c258c279` |
 
 构建过程依次完成：
 
 1. 拉取对应 vllm-ascend 基础镜像。
-2. 把当前源码复制到镜像内的 `/opt/MindIE-PyMotor`。
+2. Clone 指定分支与 commit 的 MindIE-PyMotor 源码到 `/opt/MindIE-PyMotor`。
 3. 安装依赖、编译并安装 `motor` wheel 包。
 4. 编译并安装 `ccae_reporter` 可观测组件。
 5. 在 Dockerfile 内联生成容器入口脚本与使用协议。

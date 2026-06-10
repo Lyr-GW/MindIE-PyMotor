@@ -95,7 +95,7 @@ Each Dockerfile embeds the matching vllm-ascend base image (v0.18.0 series), tar
 
 ### Build MindIE-Motor Image
 
-From the **repository root**, replace `<tag>` with the desired combination:
+Each Dockerfile clones the pinned branch and commit during the build. **No local source tree or build context is required.** Replace `<tag>` with the desired combination:
 
 ```bash
 TAG="3.0.0-800I-A2-py3.11-Ubuntu24.04-lts-aarch64"
@@ -107,12 +107,18 @@ docker build --network=host \
     .
 ```
 
-Each Dockerfile header comment contains the exact `--platform` value and full `docker build` command.
+Each Dockerfile header comment contains the exact `--platform` value, source repository info, and full `docker build` command.
+
+3.0.0 source mapping:
+
+| Image Version | Repository | Branch | Commit |
+|---|---|---|---|
+| `3.0.0` | `https://gitcode.com/Ascend/MindIE-PyMotor.git` | `v3.0.0` | `383d1787ed3fc27aaad2db9cc5506d40c258c279` |
 
 The build process:
 
 1. Pulls the matching vllm-ascend base image.
-2. Copies the local source tree into `/opt/MindIE-PyMotor`.
+2. Clones the pinned MindIE-PyMotor source into `/opt/MindIE-PyMotor`.
 3. Installs dependencies, compiles, and installs the `motor` wheel.
 4. Builds and installs the `ccae_reporter` observability component.
 5. Generates the entrypoint script and license agreement inline within the Dockerfile.
