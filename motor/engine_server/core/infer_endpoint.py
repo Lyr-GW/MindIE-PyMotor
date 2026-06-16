@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from motor.engine_server.core.config import IConfig
 from motor.common.http.cert_util import CertUtil
 from motor.common.logger import get_logger
+from motor.common.utils.net import format_address
 from motor.engine_server.core.endpoint import Endpoint
 
 logger = get_logger(__name__)
@@ -68,7 +69,7 @@ class InferEndpoint(Endpoint):
             self._run_server()
         elif self._server_process and not self._server_process.is_alive():
             self._server_process.start()
-            logger.info(f"InferEndpoint started in process: http://{self.host}:{self.port}")
+            logger.info(f"InferEndpoint started in process: http://{format_address(self.host, self.port)}")
 
     def join(self) -> None:
         self._server_process.join()
@@ -194,9 +195,9 @@ class InferEndpoint(Endpoint):
                 config.ssl = ssl_context
             else:
                 raise RuntimeError("Failed to create ssl context")
-            logger.info(f"InferEndpoint started: https://{self.host}:{self.port}")
+            logger.info(f"InferEndpoint started: https://{format_address(self.host, self.port)}")
         else:
-            logger.info(f"InferEndpoint started: http://{self.host}:{self.port}")
+            logger.info(f"InferEndpoint started: http://{format_address(self.host, self.port)}")
 
         self._server = uvicorn.Server(config)
         if not self._stop_event.is_set():

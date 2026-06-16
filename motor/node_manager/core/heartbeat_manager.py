@@ -17,6 +17,7 @@ from motor.common.resources.endpoint import Endpoint, EndpointStatus
 from motor.common.resources.http_msg_spec import StartCmdMsg, HeartbeatMsg
 from motor.common.http.http_client import SafeHTTPSClient
 from motor.common.logger import get_logger
+from motor.common.utils.net import format_address
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.api_client.controller_api_client import ControllerApiClient
@@ -151,7 +152,7 @@ class HeartbeatManager(ThreadSafeSingleton):
             original_status = item.status
             client = None
             detected_status = None
-            engine_server_base_url = f"{item.ip}:{item.mgmt_port}"
+            engine_server_base_url = format_address(item.ip, item.mgmt_port)
             try:
                 response = EngineServerApiClient.query_status(engine_server_base_url)
                 if isinstance(response, dict) and "status" in response:

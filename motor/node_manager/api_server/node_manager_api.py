@@ -12,6 +12,8 @@
 
 import asyncio
 import json
+import os
+import socket
 import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, status
@@ -19,6 +21,7 @@ from fastapi.responses import Response
 import uvicorn
 
 from motor.common.http.cert_util import CertUtil
+from motor.common.utils.net import detect_family, format_address
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.heartbeat_manager import HeartbeatManager
 from motor.common.logger import get_logger
@@ -136,7 +139,9 @@ class NodeManagerAPI:
         if self._config and self._config.api_config.pod_ip:
             self.host = self._config.api_config.pod_ip
         else:
-            self.host = "0.0.0.0"  # Default host
+            # IPv6 single-stack: when POD_IP env is an IPv6 literal, default to
+            # the v6 wildcard (::) instead of the v4 wildcard (0.0.0.0).
+            self.host = "::" if detect_family(os.getenv("POD_IP", "")) == socket.AF_INET6 else "0.0.0.0"
 
         if self._config:
             self.port = self._config.api_config.node_manager_port
@@ -189,9 +194,9 @@ class NodeManagerAPI:
                 raise RuntimeError("Failed to create SSL context")
             config.ssl = context
 
-            logger.info(f"Node Manager server started: https://{self.host}:{self.port}")
+            logger.info(f"Node Manager server started: https://{format_address(self.host, self.port)}")
         else:
-            logger.info(f"Node Manager server stated: http://{self.host}:{self.port}")
+            logger.info(f"Node Manager server stated: http://{format_address(self.host, self.port)}")
 
         self.server = uvicorn.Server(config)
         try:

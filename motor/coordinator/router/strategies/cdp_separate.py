@@ -18,6 +18,7 @@ from fastapi import HTTPException, status
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from motor.common.resources.instance import PDRole
+from motor.common.utils.net import format_address
 from motor.coordinator.models.constants import CHAT_COMPLETION_PREFIX, COMPLETION_PREFIX, COMPLETION_SUFFIX
 from motor.coordinator.models.constants import REQUEST_ID_KEY
 from motor.coordinator.models.request import ReqState
@@ -358,7 +359,7 @@ class SeparateCDPRouter(BaseRouter):
                 "inference_workers_config so that each Worker has a metaserver port; "
                 "worker_metaserver_port is not set."
             )
-        return f"http://{host}:{worker_port}/v1/metaserver"
+        return f"http://{format_address(host, worker_port)}/v1/metaserver"
 
     def _attach_cdp_decode_kv_params(self, req_data: dict[str, Any]) -> dict[str, Any]:
         """Set kv_transfer_params and return_token_ids on decode req_data (idempotent per leg)."""
