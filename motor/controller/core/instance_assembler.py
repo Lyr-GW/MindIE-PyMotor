@@ -57,6 +57,10 @@ class AssembleInstanceMetadata(BaseModel):
         default=None, description="Instance level ranktable, only use in A2, A3. A5 will be None"
     )
     nnodes: int = Field(default=1, description="Expected PCP cross-node count")
+    snapshot_dp_master_ip: str | None = Field(
+        default=None,
+        description="DP master node IP reported by is_master during snapshot restore registration",
+    )
 
     # Non-serializable field (excluded from serialization)
     lock: Any = Field(default=None, exclude=True)
@@ -327,6 +331,23 @@ class InstanceAssembler(ThreadSafeSingleton):
             logger.info("Pod %s already registered in node_managers, skip duplicate registration.", msg.pod_ip)
             return 0
 
+        if msg.is_master:
+            with metadata.lock:
+                if metadata.snapshot_dp_master_ip and metadata.snapshot_dp_master_ip != msg.pod_ip:
+                    logger.warning(
+                        "Instance %s already has snapshot_dp_master_ip=%s, ignoring conflicting is_master from %s",
+                        msg.job_name,
+                        metadata.snapshot_dp_master_ip,
+                        msg.pod_ip,
+                    )
+                else:
+                    metadata.snapshot_dp_master_ip = msg.pod_ip
+                    logger.info(
+                        "Recorded snapshot_dp_master_ip=%s for instance %s from is_master registration",
+                        msg.pod_ip,
+                        msg.job_name,
+                    )
+
         metadata.instance.add_node_mgr(msg.pod_ip, msg.nm_port, msg.device_num)
         pod_endpoints = self._build_endpoints(msg, metadata)
         metadata.instance.add_endpoints(msg.pod_ip, pod_endpoints)
@@ -567,29 +588,26 @@ class InstanceAssembler(ThreadSafeSingleton):
     def _send_start_command(self, metadata: AssembleInstanceMetadata) -> bool:
         is_succeed = True
 
-        # Master DP IP = first registered node (node_rank=0).
+        # If current is cold start instance, Master DP IP = first registered node (node_rank=0).
         # get_all_endpoints() filters headless slaves, confirming it's the master.
-        master_dp_ip = None
+
+        # If current is snapshot restored instance, Master DP IP = registered node with is_master=True
+        master_dp_ip = metadata.snapshot_dp_master_ip
         node_managers = metadata.instance.get_node_managers()
-        if node_managers:
+        if master_dp_ip:
+            logger.info(
+                "Using snapshot_dp_master_ip=%s as master_dp_ip for instance %s",
+                master_dp_ip,
+                metadata.instance.job_name,
+            )
+        elif node_managers:
             master_dp_ip = node_managers[0].pod_ip
 
         if not master_dp_ip:
             logger.error("Failed to find master DP address for instance %s", metadata.instance.job_name)
             return False
 
-        d2d_peer_ips = (
-            self._collect_d2d_peer_ips(metadata) if self._is_d2d_enabled_for_role(metadata.instance.role) else None
-        )
-        if not d2d_peer_ips:
-            d2d_peer_ips = None
-        if d2d_peer_ips:
-            logger.info(
-                "Collected %d D2D peer IPs for instance %s: %s",
-                len(d2d_peer_ips),
-                metadata.instance.job_name,
-                d2d_peer_ips,
-            )
+        d2d_enabled = self._is_d2d_enabled_for_role(metadata.instance.role)
 
         # node_rank within PCP group = registration_index % nnodes.
         # Re-registration not handled here — _start_commmand_sender skips re-registered instances.
@@ -598,6 +616,18 @@ class InstanceAssembler(ThreadSafeSingleton):
             endpoints = metadata.instance.get_endpoints(node_mgr.pod_ip)
             if not endpoints:
                 continue
+
+            d2d_peer_ips = None
+            if d2d_enabled:
+                endpoint_list = list(endpoints.values())
+                d2d_peer_ips = self._collect_d2d_peer_ips(metadata, endpoint_list)
+                if d2d_peer_ips:
+                    logger.info(
+                        "Collected D2D peer IPs for instance %s node %s: %s",
+                        metadata.instance.job_name,
+                        node_mgr.pod_ip,
+                        d2d_peer_ips,
+                    )
 
             start_cmd_msg = StartCmdMsg(
                 job_name=metadata.instance.job_name,
@@ -667,26 +697,35 @@ class InstanceAssembler(ThreadSafeSingleton):
         self._d2d_enabled_cache[role] = enabled
         return enabled
 
-    def _collect_d2d_peer_ips(self, metadata: AssembleInstanceMetadata) -> list[str]:
-        """Collect IPs of peer instances with the same role for D2D weight transfer.
+    def _collect_d2d_peer_ips(
+        self, metadata: AssembleInstanceMetadata, endpoint_list: list[Endpoint]
+    ) -> list[str] | None:
+        """Collect D2D peer entries for engines on one pod.
 
-        Queries ACTIVE instances from InstanceManager only. A peer must be inference-ready
-        (ElasticServer serving weights) before it is used as a D2D source.
-        Self is excluded by job_name.
-
-        Operational note: scale followers after seed instances reach ACTIVE, otherwise
-        no peer IPs are collected and the new instance enters seed mode.
+        Returns encoded endpoint.id:ip list (e.g. ["0:10.0.0.1", "1:10.0.0.3"]) so NM can
+        route each entry to the matching engine. Port/device binding is in vllm_config.
         """
-        peer_ips = []
+        if not endpoint_list:
+            return None
+
+        ep_ids = {ep.id for ep in endpoint_list}
         role = metadata.instance.role
         own_job_name = metadata.instance.job_name
 
+        grouped: dict[int, set[str]] = {ep_id: set() for ep_id in ep_ids}
         for inst in InstanceManager().get_instances({InsStatus.ACTIVE}):
-            if inst.role == role and inst.job_name != own_job_name:
-                for ep in inst.get_all_endpoints():
-                    peer_ips.append(ep.ip)
+            if inst.role != role or inst.job_name == own_job_name:
+                continue
+            for ep in inst.get_all_endpoints(include_headless=True):
+                if ep.id in ep_ids:
+                    grouped[ep.id].add(ep.ip)
 
-        return list(set(peer_ips))
+        encoded: list[str] = []
+        for ep in endpoint_list:
+            for ip in grouped.get(ep.id, set()):
+                encoded.append(f"{ep.id}:{ip}")
+
+        return encoded if encoded else None
 
     def _instances_assembler_loop(self) -> None:
         # Check all instances in assembling, if one instance is ready,
