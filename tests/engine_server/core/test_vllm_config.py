@@ -8,25 +8,10 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import sys
-from unittest.mock import MagicMock
+import json
 
-# Mock vllm before importing VLLMConfig (vllm is not available in test environment)
-mock_vllm = MagicMock()
-mock_vllm.entrypoints = MagicMock()
-mock_vllm.entrypoints.openai = MagicMock()
-mock_vllm.entrypoints.openai.cli_args = MagicMock()
-mock_vllm.entrypoints.openai.cli_args.make_arg_parser = MagicMock()
-mock_vllm.entrypoints.openai.cli_args.validate_parsed_serve_args = MagicMock()
-sys.modules['vllm'] = mock_vllm
-sys.modules['vllm.entrypoints'] = mock_vllm.entrypoints
-sys.modules['vllm.entrypoints.openai'] = mock_vllm.entrypoints.openai
-sys.modules['vllm.entrypoints.openai.cli_args'] = mock_vllm.entrypoints.openai.cli_args
-sys.modules['vllm.utils'] = MagicMock()
-sys.modules['vllm.utils.argparse_utils'] = MagicMock()
-
-from motor.engine_server.core.vllm.vllm_config import VLLMConfig  # noqa: E402
-from motor.config.endpoint import EndpointConfig, DeployConfig, ModelConfig, EngineConfig, ParallelConfig  # noqa: E402
+from motor.config.endpoint import DeployConfig, EndpointConfig, EngineConfig, ModelConfig, ParallelConfig
+from motor.engine_server.core.vllm.vllm_config import VLLMConfig
 
 
 def _make_endpoint_config(
@@ -204,8 +189,6 @@ def test_pcp_params_with_master_port_dash_variant():
 
 def test_mooncake_kv_port_offset_per_dp_rank():
     """Multi-endpoint: Mooncake ZMQ base port is offset by dp_rank * tp_size."""
-    import json
-
     endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
     endpoint_config.role = "prefill"
     endpoint_config.dp_rank = 1
@@ -229,8 +212,6 @@ def test_mooncake_kv_port_offset_per_dp_rank():
 
 def test_mooncake_kv_port_not_offset_in_single_endpoint_mode():
     """Single-endpoint: keep base kv_port for vLLM internal DP Mooncake communication."""
-    import json
-
     endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
     endpoint_config.role = "prefill"
     endpoint_config.dp_rank = 1
