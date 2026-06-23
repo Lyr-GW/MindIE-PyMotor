@@ -198,7 +198,7 @@ class TestEngineManager:
         assert isinstance(msg, ReregisterMsg)
         assert msg.job_name == "test_job"
         assert msg.instance_id == 1
-        assert msg.enable_multi_endpoints is True
+        assert msg.enable_multi_endpoints is False
         assert len(msg.endpoints) == 2
 
     def test_gen_reregister_msg_failure_no_endpoints(self, engine_manager):

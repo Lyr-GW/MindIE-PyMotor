@@ -81,7 +81,7 @@ class BaseConfigResolver:
     def get_npu_mem_utils(self, default: float = 0.9) -> float:
         return self.get("npu_mem_utils", default)
 
-    def get_enable_multi_endpoints(self, default: bool = True) -> bool:
+    def get_enable_multi_endpoints(self, default: bool = False) -> bool:
         """Get enable_multi_endpoints, defaulting per engine type."""
         return bool(self._engine_cfg.get("enable_multi_endpoints", default))
 
@@ -186,7 +186,7 @@ class BaseConfigResolver:
         """
         import json as _json
 
-        with open(config_path, 'r') as f:
+        with open(config_path, 'r', encoding='utf-8') as f:
             raw = _json.load(f)
         section = raw.get(section_key, {})
         return ConfigResolver(section)
@@ -265,8 +265,8 @@ class SGLangConfigResolver(BaseConfigResolver):
         "pp_size": ("pp-size", "pp_size"),
     }
 
-    def get_enable_multi_endpoints(self, default: bool = True) -> bool:
-        return bool(self._engine_cfg.get("enable_multi_endpoints", False))
+    def get_enable_multi_endpoints(self, default: bool = False) -> bool:
+        return bool(self._engine_cfg.get("enable_multi_endpoints", default))
 
     def _resolve_engine_parallel_keys(self) -> dict[str, Any]:
         result = super()._resolve_engine_parallel_keys()

@@ -258,7 +258,7 @@ def test_sglang_parallel_key_variants(key, expected):
 
 def test_vllm_enable_multi_endpoints_default():
     resolver = ConfigResolver(_vllm_section())
-    assert resolver.get_enable_multi_endpoints() is True
+    assert resolver.get_enable_multi_endpoints() is False
 
 
 def test_vllm_enable_multi_endpoints_explicit():

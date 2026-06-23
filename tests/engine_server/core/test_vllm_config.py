@@ -25,8 +25,8 @@ sys.modules['vllm.entrypoints.openai.cli_args'] = mock_vllm.entrypoints.openai.c
 sys.modules['vllm.utils'] = MagicMock()
 sys.modules['vllm.utils.argparse_utils'] = MagicMock()
 
-from motor.engine_server.core.vllm.vllm_config import VLLMConfig
-from motor.config.endpoint import EndpointConfig, DeployConfig, ModelConfig, EngineConfig, ParallelConfig
+from motor.engine_server.core.vllm.vllm_config import VLLMConfig  # noqa: E402
+from motor.config.endpoint import EndpointConfig, DeployConfig, ModelConfig, EngineConfig, ParallelConfig  # noqa: E402
 
 
 def _make_endpoint_config(
@@ -203,12 +203,13 @@ def test_pcp_params_with_master_port_dash_variant():
 
 
 def test_mooncake_kv_port_offset_per_dp_rank():
-    """Mooncake ZMQ base port is offset by dp_rank * tp_size."""
+    """Multi-endpoint: Mooncake ZMQ base port is offset by dp_rank * tp_size."""
     import json
 
     endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
     endpoint_config.role = "prefill"
     endpoint_config.dp_rank = 1
+    endpoint_config.deploy_config.enable_multi_endpoints = True
     endpoint_config.deploy_config.engine_config.set(
         "kv_transfer_config",
         {
@@ -226,6 +227,31 @@ def test_mooncake_kv_port_offset_per_dp_rank():
     assert kv_config["kv_connector_extra_config"]["decode"]["dp_size"] == 1
 
 
+def test_mooncake_kv_port_not_offset_in_single_endpoint_mode():
+    """Single-endpoint: keep base kv_port for vLLM internal DP Mooncake communication."""
+    import json
+
+    endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
+    endpoint_config.role = "prefill"
+    endpoint_config.dp_rank = 1
+    endpoint_config.deploy_config.enable_multi_endpoints = False
+    endpoint_config.deploy_config.engine_config.set(
+        "kv_transfer_config",
+        {
+            "kv_connector": "MooncakeLayerwiseConnector",
+            "kv_port": "30001",
+            "kv_connector_extra_config": {},
+        },
+    )
+    config = VLLMConfig(endpoint_config=endpoint_config)
+    config.initialize()
+    kv_config = json.loads(config.kv_transfer_config)
+
+    assert kv_config["kv_port"] == "30001"
+    assert kv_config["kv_connector_extra_config"]["prefill"]["dp_size"] == 2
+    assert kv_config["kv_connector_extra_config"]["decode"]["dp_size"] == 2
+
+
 def test_multi_endpoint_uses_local_dp_one_without_external_lb():
     """Multi-endpoint: vLLM runs dp_size=1 per process; Motor owns DP sharding."""
     endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
@@ -240,6 +266,22 @@ def test_multi_endpoint_uses_local_dp_one_without_external_lb():
     assert flattened["data_parallel_size"] == 1
     assert "data_parallel_address" not in flattened
     assert "data_parallel_rank" not in flattened
+
+
+def test_default_keeps_vllm_external_dp_when_unset():
+    """Missing enable_multi_endpoints defaults to legacy external data parallel."""
+    endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
+    endpoint_config.role = "prefill"
+    endpoint_config.dp_rank = 1
+    config = VLLMConfig(endpoint_config=endpoint_config)
+    config.initialize()
+    flattened = config._flatten_config()
+
+    assert endpoint_config.deploy_config.enable_multi_endpoints is False
+    assert config.data_parallel_address == "192.168.1.1"
+    assert flattened["data_parallel_size"] == 2
+    assert flattened["data_parallel_address"] == "192.168.1.1"
+    assert flattened["data_parallel_rank"] == 1
 
 
 def test_single_endpoint_keeps_vllm_external_dp():

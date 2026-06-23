@@ -68,13 +68,11 @@ class VLLMConfig(IConfig):
     def initialize(self):
         role = self.endpoint_config.role
         parallel_config = self.endpoint_config.deploy_config.get_parallel_config(role)
-        use_multi_endpoints = getattr(
-            self.endpoint_config.deploy_config, "enable_multi_endpoints", True
-        )
+        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", False)
         if parallel_config.dp_size > 1 and not use_multi_endpoints:
             self.data_parallel_address = self.endpoint_config.master_dp_ip
             self.data_parallel_rpc_port = parallel_config.dp_rpc_port
-        if role == constants.PREFILL_ROLE or role == constants.DECODE_ROLE:
+        if role in (constants.PREFILL_ROLE, constants.DECODE_ROLE):
             self._process_kv_transfer_config()
         self._process_d2d_config()
 
@@ -147,9 +145,7 @@ class VLLMConfig(IConfig):
 
         prefill_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
         decode_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_DECODE)
-        use_multi_endpoints = getattr(
-            self.endpoint_config.deploy_config, "enable_multi_endpoints", True
-        )
+        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", False)
 
         if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
             kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG] = {}
@@ -169,12 +165,10 @@ class VLLMConfig(IConfig):
 
         # Multi-endpoint: each EngineServer is one DP shard with local dp_rank=0 in
         # Mooncake workers; offset kv_port so ZMQ handshakes do not collide.
-        if constants.KV_PORT in kv_config:
+        if use_multi_endpoints and constants.KV_PORT in kv_config:
             role_parallel = self.endpoint_config.deploy_config.get_parallel_config(role)
             base_port = int(kv_config[constants.KV_PORT])
-            kv_config[constants.KV_PORT] = str(
-                base_port + self.endpoint_config.dp_rank * role_parallel.tp_size
-            )
+            kv_config[constants.KV_PORT] = str(base_port + self.endpoint_config.dp_rank * role_parallel.tp_size)
 
     def _process_store_connector(self, kv_config):
         role = self.endpoint_config.role
@@ -258,7 +252,7 @@ class VLLMConfig(IConfig):
             flattened.setdefault("prefill_context_parallel_size", parallel_config.pcp_size)
 
         flattened.update({"host": self.endpoint_config.host, "port": self.endpoint_config.port})
-        use_multi_endpoints = getattr(deploy_config, "enable_multi_endpoints", True)
+        use_multi_endpoints = getattr(deploy_config, "enable_multi_endpoints", False)
         if use_multi_endpoints:
             # Each EngineServer is one DP shard; Motor coordinates DP via endpoints.
             flattened["data_parallel_size"] = 1
