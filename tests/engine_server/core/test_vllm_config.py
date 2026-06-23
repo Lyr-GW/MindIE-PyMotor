@@ -59,6 +59,17 @@ def _make_endpoint_config(
     )
 
 
+def _set_min_kv_transfer_config(endpoint_config: EndpointConfig) -> None:
+    endpoint_config.deploy_config.engine_config.set(
+        "kv_transfer_config",
+        {
+            "kv_connector": "MooncakeLayerwiseConnector",
+            "kv_port": "30001",
+            "kv_connector_extra_config": {},
+        },
+    )
+
+
 def test_no_pcp_params_when_nnodes_is_one():
     """When nnodes=1, no PCP params should be added."""
     endpoint_config = _make_endpoint_config(nnodes=1)
@@ -239,6 +250,7 @@ def test_multi_endpoint_uses_local_dp_one_without_external_lb():
     endpoint_config.role = "prefill"
     endpoint_config.dp_rank = 1
     endpoint_config.deploy_config.enable_multi_endpoints = True
+    _set_min_kv_transfer_config(endpoint_config)
     config = VLLMConfig(endpoint_config=endpoint_config)
     config.initialize()
     flattened = config._flatten_config()
@@ -254,6 +266,7 @@ def test_default_keeps_vllm_external_dp_when_unset():
     endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
     endpoint_config.role = "prefill"
     endpoint_config.dp_rank = 1
+    _set_min_kv_transfer_config(endpoint_config)
     config = VLLMConfig(endpoint_config=endpoint_config)
     config.initialize()
     flattened = config._flatten_config()
@@ -271,6 +284,7 @@ def test_single_endpoint_keeps_vllm_external_dp():
     endpoint_config.role = "prefill"
     endpoint_config.dp_rank = 1
     endpoint_config.deploy_config.enable_multi_endpoints = False
+    _set_min_kv_transfer_config(endpoint_config)
     config = VLLMConfig(endpoint_config=endpoint_config)
     config.initialize()
     flattened = config._flatten_config()

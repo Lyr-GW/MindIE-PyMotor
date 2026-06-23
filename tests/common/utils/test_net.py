@@ -132,6 +132,8 @@ class TestSplitAddress:
             "",
             "127.0.0.1",
             "localhost",
+            "::1",
+            "2001:db8::1",
         ],
     )
     def test_split_without_port(self, address):

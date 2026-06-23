@@ -75,6 +75,10 @@ def split_address(address: str) -> tuple[str, str]:
         if not sep:
             return address, ""
         return host_part, port[1:] if port.startswith(':') else ""
+    # Unbracketed IPv6 should be treated as host-only to avoid mis-parsing
+    # the last hextet as a port (for example "2001:db8::1" -> port "1").
+    if address.count(':') > 1 and _is_ipv6_literal(address):
+        return address, ""
     host, sep, port = address.rpartition(':')
     if not sep:
         return address, ""
