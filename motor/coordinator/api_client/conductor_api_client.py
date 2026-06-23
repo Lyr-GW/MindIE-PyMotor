@@ -93,7 +93,9 @@ class ConductorApiClient:
         if prefill_kv_event_config.replay_endpoint != "":
             replay_endpoints = prefill_kv_event_config.replay_endpoint.split("*:")
             if len(replay_endpoints) == 2:
-                replay_endpoint = f"{replay_endpoints[0]}{format_host(endpoint.ip)}:{str(int(replay_endpoints[1]) + endpoint.id)}"
+                replay_endpoint = (
+                    f"{replay_endpoints[0]}{format_host(endpoint.ip)}:{str(int(replay_endpoints[1]) + endpoint.id)}"
+                )
                 register_data["replay_endpoint"] = replay_endpoint
 
         client_args = {

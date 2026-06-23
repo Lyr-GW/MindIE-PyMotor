@@ -22,14 +22,17 @@ from motor.common.http.http_client import (
 
 
 class TestSafeHTTPSClientIPv6:
-    @pytest.mark.parametrize("address,expected_base_url", [
-        ("127.0.0.1:1025", "http://127.0.0.1:1025"),
-        ("localhost:1025", "http://localhost:1025"),
-        ("::1:1025", "http://[::1]:1025"),
-        ("[::1]:1025", "http://[::1]:1025"),
-        ("2001:db8::1:1025", "http://[2001:db8::1]:1025"),
-        ("[2001:db8::1]:1025", "http://[2001:db8::1]:1025"),
-    ])
+    @pytest.mark.parametrize(
+        "address,expected_base_url",
+        [
+            ("127.0.0.1:1025", "http://127.0.0.1:1025"),
+            ("localhost:1025", "http://localhost:1025"),
+            ("::1:1025", "http://[::1]:1025"),
+            ("[::1]:1025", "http://[::1]:1025"),
+            ("2001:db8::1:1025", "http://[2001:db8::1]:1025"),
+            ("[2001:db8::1]:1025", "http://[2001:db8::1]:1025"),
+        ],
+    )
     def test_base_url_normalized(self, address, expected_base_url):
         client = SafeHTTPSClient(address=address)
         try:
@@ -39,25 +42,30 @@ class TestSafeHTTPSClientIPv6:
 
 
 class TestAsyncSafeHTTPSClientIPv6:
-    @pytest.mark.parametrize("address,expected_base_url", [
-        ("127.0.0.1:1025", "http://127.0.0.1:1025"),
-        ("[::1]:1025", "http://[::1]:1025"),
-        ("::1:1025", "http://[::1]:1025"),
-        ("2001:db8::1:1025", "http://[2001:db8::1]:1025"),
-    ])
+    @pytest.mark.parametrize(
+        "address,expected_base_url",
+        [
+            ("127.0.0.1:1025", "http://127.0.0.1:1025"),
+            ("[::1]:1025", "http://[::1]:1025"),
+            ("::1:1025", "http://[::1]:1025"),
+            ("2001:db8::1:1025", "http://[2001:db8::1]:1025"),
+        ],
+    )
     def test_base_url_normalized(self, address, expected_base_url):
         client = AsyncSafeHTTPSClient.create_client(address=address)
         try:
             assert str(client.base_url).rstrip('/') == expected_base_url
         finally:
             import asyncio
+
             asyncio.get_event_loop().run_until_complete(client.aclose())
 
 
 class TestHTTPClientPoolKeyNormalization:
     def test_pool_key_unified_for_ipv6_literal(self):
         """('::1', 1025) and ('[::1]', 1025) must produce the same pool_key
-        so that bracketed and bare IPv6 inputs share the same cached client."""
+        so that bracketed and bare IPv6 inputs share the same cached client.
+        """
         pool = HTTPClientPool()
         key_bare = pool._get_pool_key("::1", "1025")
         key_bracketed = pool._get_pool_key("[::1]", "1025")

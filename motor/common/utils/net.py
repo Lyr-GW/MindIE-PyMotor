@@ -32,14 +32,12 @@ def _strip_brackets(host: str) -> str:
 
 def _is_ipv6_literal(host: str) -> bool:
     try:
-        return isinstance(
-            ipaddress.ip_address(_strip_brackets(host)), ipaddress.IPv6Address
-        )
+        return isinstance(ipaddress.ip_address(_strip_brackets(host)), ipaddress.IPv6Address)
     except ValueError:
         return False
 
 
-def detect_family(host: str) -> socket.AddressFamily:
+def detect_family(host: str) -> int:
     """Pick AF_INET6 only when ``host`` is an IPv6 literal.
 
     Non-literal hosts (domain names, ``localhost``, empty string) default to

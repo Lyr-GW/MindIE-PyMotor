@@ -34,6 +34,7 @@ def _normalize_address(address: str) -> str:
     host, port = split_address(address)
     return format_address(host, port) if port else address
 
+
 logger = get_logger(__name__)
 
 Canceller = Callable[[str], None]
