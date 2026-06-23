@@ -151,7 +151,7 @@ class Instance(BaseModel):
     role: str = Field(..., description="Instance role")
     status: InsStatus = Field(default=InsStatus.INITIAL, description="Instance status")
     parallel_config: ParallelConfig | None = Field(None, description="Parallel configuration")
-    enable_multi_endpoints: bool = Field(default=False, description="Whether to enable multi-endpoints mode")
+    enable_multi_endpoints: bool = Field(default=True, description="Whether to enable multi-endpoints mode")
     node_managers: list[NodeManagerInfo] = Field(default_factory=list, description="List of node manager info")
     endpoints: dict[str, dict[int, Endpoint]] = Field(
         default_factory=dict, description="Mapping of endpoints by pod IP"

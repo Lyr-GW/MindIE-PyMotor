@@ -261,23 +261,6 @@ def test_multi_endpoint_uses_local_dp_one_without_external_lb():
     assert "data_parallel_rank" not in flattened
 
 
-def test_default_keeps_vllm_external_dp_when_unset():
-    """Missing enable_multi_endpoints defaults to legacy external data parallel."""
-    endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)
-    endpoint_config.role = "prefill"
-    endpoint_config.dp_rank = 1
-    _set_min_kv_transfer_config(endpoint_config)
-    config = VLLMConfig(endpoint_config=endpoint_config)
-    config.initialize()
-    flattened = config._flatten_config()
-
-    assert endpoint_config.deploy_config.enable_multi_endpoints is False
-    assert config.data_parallel_address == "192.168.1.1"
-    assert flattened["data_parallel_size"] == 2
-    assert flattened["data_parallel_address"] == "192.168.1.1"
-    assert flattened["data_parallel_rank"] == 1
-
-
 def test_single_endpoint_keeps_vllm_external_dp():
     """Non-multi-endpoint with dp>1 still enables vLLM external data parallel."""
     endpoint_config = _make_endpoint_config(dp_size=2, tp_size=8)

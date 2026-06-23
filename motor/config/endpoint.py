@@ -129,7 +129,7 @@ class DeployConfig:
     infer_tls_config: TLSConfig | None
     dispatch_profile: str | None = None
     health_check_config: HealthCheckConfig = field(default_factory=HealthCheckConfig)
-    enable_multi_endpoints: bool = False
+    enable_multi_endpoints: bool = True
 
     @classmethod
     def load(cls, file_path: str | Path, role: str | None = None) -> "DeployConfig":

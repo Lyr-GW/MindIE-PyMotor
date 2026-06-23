@@ -459,7 +459,7 @@ class TestRouterCDPSeparation:
                 return mock_instance_d, mock_endpoint_d
             return None, None
 
-        async def mock_select_and_allocate(self, role, req_info):
+        async def mock_select_and_allocate(self, role, req_info, *, target_instance_id=None):
             if role == PDRole.ROLE_P:
                 return mock_instance_p, mock_endpoint_p, Workload(active_kv_cache=1, active_tokens=1)
             if role == PDRole.ROLE_D:

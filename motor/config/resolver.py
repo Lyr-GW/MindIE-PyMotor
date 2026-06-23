@@ -37,8 +37,9 @@ class BaseConfigResolver:
     _warned_conflict_keys: set[str] = set()
 
     def __init__(self, engine_section: dict[str, Any]):
-        raw_model = engine_section.get("model_config") or {}
-        raw_engine = engine_section.get("engine_config") or {}
+        self._section: dict[str, Any] = normalize_keys(engine_section)
+        raw_model = self._section.get("model_config") or {}
+        raw_engine = self._section.get("engine_config") or {}
         self._model_cfg: dict[str, Any] = normalize_keys(raw_model)
         self._engine_cfg: dict[str, Any] = normalize_keys(raw_engine)
 
@@ -81,8 +82,10 @@ class BaseConfigResolver:
     def get_npu_mem_utils(self, default: float = 0.9) -> float:
         return self.get("npu_mem_utils", default)
 
-    def get_enable_multi_endpoints(self, default: bool = False) -> bool:
-        """Get enable_multi_endpoints, defaulting per engine type."""
+    def get_enable_multi_endpoints(self, default: bool = True) -> bool:
+        """Get enable_multi_endpoints from the engine section (top-level or engine_config)."""
+        if "enable_multi_endpoints" in self._section:
+            return bool(self._section["enable_multi_endpoints"])
         return bool(self._engine_cfg.get("enable_multi_endpoints", default))
 
     # ------------------------------------------------------------------
@@ -265,8 +268,8 @@ class SGLangConfigResolver(BaseConfigResolver):
         "pp_size": ("pp-size", "pp_size"),
     }
 
-    def get_enable_multi_endpoints(self, default: bool = False) -> bool:
-        return bool(self._engine_cfg.get("enable_multi_endpoints", default))
+    def get_enable_multi_endpoints(self, default: bool = True) -> bool:
+        return super().get_enable_multi_endpoints(default=default)
 
     def _resolve_engine_parallel_keys(self) -> dict[str, Any]:
         result = super()._resolve_engine_parallel_keys()

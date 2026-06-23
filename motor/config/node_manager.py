@@ -120,7 +120,7 @@ class BasicConfig:
     # Parallel configuration
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     # Multi-endpoints configuration
-    enable_multi_endpoints: bool = False
+    enable_multi_endpoints: bool = True
     # Cross-node PCP configuration
     nnodes: int = 1
 

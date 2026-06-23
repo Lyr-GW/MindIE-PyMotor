@@ -141,6 +141,16 @@ class TestSplitAddress:
         assert host == address
         assert port == ""
 
+    @pytest.mark.parametrize(
+        "address,expected",
+        [
+            ("::1:1025", ("::1", "1025")),
+            ("2001:db8::1:1025", ("2001:db8::1", "1025")),
+        ],
+    )
+    def test_split_unbracketed_ipv6_with_port(self, address, expected):
+        assert split_address(address) == expected
+
     def test_round_trip_ipv4(self):
         assert split_address(format_address("10.0.0.1", 1025)) == ("10.0.0.1", "1025")
 

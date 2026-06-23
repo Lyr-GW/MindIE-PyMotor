@@ -68,7 +68,7 @@ class VLLMConfig(IConfig):
     def initialize(self):
         role = self.endpoint_config.role
         parallel_config = self.endpoint_config.deploy_config.get_parallel_config(role)
-        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", False)
+        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", True)
         if parallel_config.dp_size > 1 and not use_multi_endpoints:
             self.data_parallel_address = self.endpoint_config.master_dp_ip
             self.data_parallel_rpc_port = parallel_config.dp_rpc_port
@@ -145,7 +145,7 @@ class VLLMConfig(IConfig):
 
         prefill_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
         decode_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_DECODE)
-        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", False)
+        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", True)
 
         if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
             kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG] = {}
@@ -252,7 +252,7 @@ class VLLMConfig(IConfig):
             flattened.setdefault("prefill_context_parallel_size", parallel_config.pcp_size)
 
         flattened.update({"host": self.endpoint_config.host, "port": self.endpoint_config.port})
-        use_multi_endpoints = getattr(deploy_config, "enable_multi_endpoints", False)
+        use_multi_endpoints = getattr(deploy_config, "enable_multi_endpoints", True)
         if use_multi_endpoints:
             # Each EngineServer is one DP shard; Motor coordinates DP via endpoints.
             flattened["data_parallel_size"] = 1
