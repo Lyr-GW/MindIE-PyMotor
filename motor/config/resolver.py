@@ -268,7 +268,7 @@ class SGLangConfigResolver(BaseConfigResolver):
         "pp_size": ("pp-size", "pp_size"),
     }
 
-    def get_enable_multi_endpoints(self, default: bool = True) -> bool:
+    def get_enable_multi_endpoints(self, default: bool = False) -> bool:
         return super().get_enable_multi_endpoints(default=default)
 
     def _resolve_engine_parallel_keys(self) -> dict[str, Any]:
