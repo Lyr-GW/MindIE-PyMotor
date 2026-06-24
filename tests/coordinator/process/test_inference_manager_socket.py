@@ -42,3 +42,11 @@ class TestCreateSharedSocket:
             assert sock.family == socket.AF_INET6
         finally:
             sock.close()
+
+    def test_bracketed_ipv6_host_binds_after_stripping_brackets(self):
+        sock = create_shared_socket("[::1]", 0)
+        assert sock is not None
+        try:
+            assert sock.family == socket.AF_INET6
+        finally:
+            sock.close()

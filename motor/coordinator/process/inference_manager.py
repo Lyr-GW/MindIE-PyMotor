@@ -36,6 +36,12 @@ from motor.coordinator.scheduler.policy.kv_cache_affinity import TokenizerManage
 logger = get_logger(__name__)
 
 
+def _socket_host(host: str) -> str:
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
 def run_inference_worker_proc(
     listen_address: tuple[str, int],
     sock: socket.socket,
@@ -300,7 +306,8 @@ def create_shared_socket(host: str, port: int) -> socket.socket | None:
     Returns:
         Socket that can be shared between processes, or None if not supported
     """
-    sock = socket.socket(detect_family(host), socket.SOCK_STREAM)
+    bind_host = _socket_host(host)
+    sock = socket.socket(detect_family(bind_host), socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     # SO_REUSEPORT allows multiple processes to bind to the same port (coordinator is Linux-only).
@@ -312,7 +319,7 @@ def create_shared_socket(host: str, port: int) -> socket.socket | None:
         return None
 
     try:
-        sock.bind((host, port))
+        sock.bind((bind_host, port))
         sock.listen(128)  # Backlog
         logger.info(f"Created shared socket on {format_address(host, port)}")
         return sock

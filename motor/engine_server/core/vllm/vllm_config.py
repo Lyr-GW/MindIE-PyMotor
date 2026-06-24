@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from motor.config.endpoint import EndpointConfig
 from motor.engine_server.core.config import IConfig
 from motor.common.logger import get_logger
+from motor.common.utils.net import format_address
 from motor.engine_server.constants import constants
 
 logger = get_logger(__name__)
@@ -68,8 +69,7 @@ class VLLMConfig(IConfig):
     def initialize(self):
         role = self.endpoint_config.role
         parallel_config = self.endpoint_config.deploy_config.get_parallel_config(role)
-        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", True)
-        if parallel_config.dp_size > 1 and not use_multi_endpoints:
+        if parallel_config.dp_size > 1:
             self.data_parallel_address = self.endpoint_config.master_dp_ip
             self.data_parallel_rpc_port = parallel_config.dp_rpc_port
         if role in (constants.PREFILL_ROLE, constants.DECODE_ROLE):
@@ -145,30 +145,20 @@ class VLLMConfig(IConfig):
 
         prefill_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_PREFILL)
         decode_parallel = self.endpoint_config.deploy_config.get_parallel_config(constants.KV_DECODE)
-        use_multi_endpoints = getattr(self.endpoint_config.deploy_config, "enable_multi_endpoints", True)
 
         if constants.KV_CONNECTOR_EXTRA_CONFIG not in kv_config:
             kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG] = {}
 
-        prefill_dp = 1 if use_multi_endpoints else prefill_parallel.dp_size
-        decode_dp = 1 if use_multi_endpoints else decode_parallel.dp_size
         kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_PREFILL] = {
-            constants.DP_SIZE: prefill_dp,
+            constants.DP_SIZE: prefill_parallel.dp_size,
             constants.TP_SIZE: prefill_parallel.tp_size,
             constants.PP_SIZE: prefill_parallel.pp_size,
         }
         kv_config[constants.KV_CONNECTOR_EXTRA_CONFIG][constants.KV_DECODE] = {
-            constants.DP_SIZE: decode_dp,
+            constants.DP_SIZE: decode_parallel.dp_size,
             constants.TP_SIZE: decode_parallel.tp_size,
             constants.PP_SIZE: decode_parallel.pp_size,
         }
-
-        # Multi-endpoint: each EngineServer is one DP shard with local dp_rank=0 in
-        # Mooncake workers; offset kv_port so ZMQ handshakes do not collide.
-        if use_multi_endpoints and constants.KV_PORT in kv_config:
-            role_parallel = self.endpoint_config.deploy_config.get_parallel_config(role)
-            base_port = int(kv_config[constants.KV_PORT])
-            kv_config[constants.KV_PORT] = str(base_port + self.endpoint_config.dp_rank * role_parallel.tp_size)
 
     def _process_store_connector(self, kv_config):
         role = self.endpoint_config.role
@@ -214,7 +204,10 @@ class VLLMConfig(IConfig):
         dp_rank = self.endpoint_config.dp_rank
         offset = dp_rank * local_world_size
         self._d2d_source = [
-            {"device_id": offset + rank, "sources": [f"{ip}:{int(listen_port) + offset + rank}" for ip in peer_ips]}
+            {
+                "device_id": offset + rank,
+                "sources": [format_address(ip, int(listen_port) + offset + rank) for ip in peer_ips],
+            }
             for rank in range(local_world_size)
         ]
         logger.info("D2D peer SOURCE: %s", self._d2d_source)
@@ -252,11 +245,7 @@ class VLLMConfig(IConfig):
             flattened.setdefault("prefill_context_parallel_size", parallel_config.pcp_size)
 
         flattened.update({"host": self.endpoint_config.host, "port": self.endpoint_config.port})
-        use_multi_endpoints = getattr(deploy_config, "enable_multi_endpoints", True)
-        if use_multi_endpoints:
-            # Each EngineServer is one DP shard; Motor coordinates DP via endpoints.
-            flattened["data_parallel_size"] = 1
-        elif self.data_parallel_address is not None:
+        if self.data_parallel_address is not None:
             flattened["data_parallel_address"] = self.data_parallel_address
             flattened["data_parallel_rpc_port"] = self.data_parallel_rpc_port
             flattened["data_parallel_rank"] = self.endpoint_config.dp_rank
