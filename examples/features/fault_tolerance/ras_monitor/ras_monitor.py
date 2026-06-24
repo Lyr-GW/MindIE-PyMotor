@@ -3,6 +3,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import getpass
 import json
+import shutil
 import subprocess
 import time
 import logging
@@ -27,6 +28,7 @@ logging.basicConfig(
 )
 
 TEST_METRIC_NAME = "request_success_total"
+_DEPLOY_NOSTEP_SUPPORTED = None
 
 
 @dataclass
@@ -39,9 +41,56 @@ class CheckParams:
     namespace: str
 
 
+def resolve_model_name(engine_section, default="Unknown"):
+    """Resolve model_name from engine_config (native) or model_config (legacy).
+
+    Self-contained for independent release; does not depend on lib.utils.
+    """
+    engine_config = engine_section.get("engine_config", {})
+    engine_type = engine_section.get("engine_type", "vllm")
+    if engine_type == "sglang":
+        name = engine_config.get("served-model-name")
+    else:
+        name = engine_config.get("served_model_name")
+    if name:
+        return name
+    model_config = engine_section.get("model_config", {})
+    return model_config.get("model_name", default)
+
+
+def deploy_supports_nostep():
+    """Return True when local deploy.py accepts --nostep (for backward compatibility)."""
+    global _DEPLOY_NOSTEP_SUPPORTED
+    if _DEPLOY_NOSTEP_SUPPORTED is not None:
+        return _DEPLOY_NOSTEP_SUPPORTED
+    result = subprocess.run(
+        [shutil.which("python3"), "deploy.py", "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    help_text = f"{result.stdout or ''}{result.stderr or ''}"
+    _DEPLOY_NOSTEP_SUPPORTED = "--nostep" in help_text
+    if _DEPLOY_NOSTEP_SUPPORTED:
+        logging.info("deploy.py supports --nostep; ras_monitor will skip startup progress bar when calling deploy")
+    else:
+        logging.warning(
+            "deploy.py does not support --nostep (older version); "
+            "startup progress bar may appear when deploy is invoked"
+        )
+    return _DEPLOY_NOSTEP_SUPPORTED
+
+
+def build_deploy_cmd(boot_args, *extra_args):
+    cmd = ["python3", "deploy.py"] + list(boot_args) + list(extra_args)
+    if deploy_supports_nostep() and "--nostep" not in cmd:
+        cmd.append("--nostep")
+    return cmd
+
+
 def kubectl_get_pods_info():
-    return subprocess.run(  # nosec B607
-        ["kubectl", "get", "pods", "-A", "-owide"], capture_output=True, text=True, check=True
+    return subprocess.run(
+        [shutil.which("kubectl"), "get", "pods", "-A", "-owide"], capture_output=True, text=True, check=True
     ).stdout
 
 
@@ -273,10 +322,10 @@ def get_metrics_values(http_pool_manager, params: CheckParams, *metric_names) ->
 def restart_service(namespace: str, boot_args):
     # graceful exit
     logging.info("Start to retain logs and restart service")
-    subprocess.run(["bash", "show_log.sh"], check=False)  # nosec B607
+    subprocess.run([shutil.which("bash"), "show_log.sh"], check=False)
     if not os.path.exists(os.path.join(os.getcwd(), "delete.sh")):
         raise RuntimeError("delete.sh not found, couldn't exit gracefully!!!")
-    subprocess.run(["bash", "delete.sh", namespace], check=False)  # nosec B607
+    subprocess.run([shutil.which("bash"), "delete.sh", namespace], check=False)
     while True:
         if not is_mindie_service_detected(namespace):
             logging.info("Delete mindie subprocess successfully!")
@@ -285,7 +334,7 @@ def restart_service(namespace: str, boot_args):
         time.sleep(10)
 
     # restart service
-    subprocess.run(["python3", "deploy.py"] + boot_args, check=False)
+    subprocess.run(build_deploy_cmd(boot_args), check=False)
     if is_mindie_service_detected(namespace):
         logging.info("Restart service successfully!")
 
@@ -312,8 +361,6 @@ def main():
         logging.info("Sending requests to Coordinator without ssl!")
         http_pool_manager = urllib3.PoolManager(cert_reqs="CERT_NONE", timeout=http_timeout, retries=False)
     user_config = fetch_user_config(user_config_path)
-    from lib.utils import resolve_model_name
-
     prefill_section = user_config.get("motor_engine_prefill_config", {})
     model_name = resolve_model_name(prefill_section)
 
@@ -322,7 +369,7 @@ def main():
         metric_port = coordinator_api_config["coordinator_api_mgmt_port"]
         infer_port = coordinator_api_config["coordinator_api_infer_port"]
     except Exception:
-        metric_port = 1026
+        metric_port = 1027
         infer_port = 1025
 
     params = CheckParams(
@@ -349,7 +396,7 @@ def main():
         f"{params.coordinator_manage_port}"
     )
 
-    test_deploy = subprocess.run(["python3", "deploy.py"] + boot_args + ["--dry-run"], check=False)
+    test_deploy = subprocess.run(build_deploy_cmd(boot_args, "--dry-run"), check=False)
     if test_deploy.returncode:
         logging.error(f"Deploy config failed! Please check boot_args: {boot_args}")
         sys.exit(1)
