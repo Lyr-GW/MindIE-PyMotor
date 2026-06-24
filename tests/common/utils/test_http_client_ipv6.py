@@ -12,6 +12,8 @@
 
 """IPv6-literal handling for SafeHTTPSClient / AsyncSafeHTTPSClient / HTTPClientPool."""
 
+import asyncio
+
 import pytest
 
 from motor.common.http.http_client import (
@@ -56,9 +58,7 @@ class TestAsyncSafeHTTPSClientIPv6:
         try:
             assert str(client.base_url).rstrip('/') == expected_base_url
         finally:
-            import asyncio
-
-            asyncio.get_event_loop().run_until_complete(client.aclose())
+            asyncio.run(client.aclose())
 
 
 class TestHTTPClientPoolKeyNormalization:

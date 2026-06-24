@@ -243,7 +243,7 @@ class SimInference:
             virtual_request["kv_transfer_params"] = {
                 "do_remote_decode": False,
                 "do_remote_prefill": True,
-                "metaserver": f"http://{build_endpoint(self.args.host, self.args.port)}/v1/metaserver",
+                "metaserver": f"http://{format_address(self.args.host, self.args.port)}/v1/metaserver",
                 "do_virtual": True,
             }
 
