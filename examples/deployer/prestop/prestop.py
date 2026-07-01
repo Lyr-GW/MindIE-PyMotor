@@ -29,7 +29,7 @@ import subprocess
 import sys
 import time
 
-from motor.common.utils.net import format_address
+from net import format_address
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)

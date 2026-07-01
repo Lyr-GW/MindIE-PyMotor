@@ -338,6 +338,7 @@ def create_motor_config_configmap(job_id, user_config=None, effective_deploy_mod
         f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/kv_conductor.sh "
         f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/mf_store.sh "
         f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/all_combine_in_single_container.sh "
+        "--from-file=./net.py "
         "--from-file=./probe/probe.sh "
         "--from-file=./probe/probe.py "
         "--from-file=./prestop/prestop.sh "

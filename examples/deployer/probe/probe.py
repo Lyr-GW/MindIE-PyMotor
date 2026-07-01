@@ -18,7 +18,7 @@ from enum import Enum
 
 import httpx
 
-from motor.common.utils.net import format_address
+from net import format_address
 
 MOTOR_DEPLOY_CONFIG = "motor_deploy_config"
 TLS_CONFIG = "tls_config"
