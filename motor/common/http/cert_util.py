@@ -702,7 +702,6 @@ class CertUtil:
             context.load_cert_chain(
                 certfile=config[TLS_CERT], keyfile=config[TLS_KEY], password=password.decode(UTF8_ENCODING)
             )
-            clear_passwd(password)
 
             # Dynamically add attributes, save certificate path information
             context.cert_file = config.get(TLS_CERT, "")
