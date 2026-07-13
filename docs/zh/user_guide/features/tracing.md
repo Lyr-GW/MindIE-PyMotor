@@ -102,15 +102,19 @@ pyMotor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将�
 
 1. 配置示例
 
+   以下为可直接使用的推荐配置，仅需将`xx.xx.xx.xx`替换为实际链路追踪后端（如Jaeger）所在地址，其余字段可直接沿用。
+
    `env.json`需在`motor_coordinator_env`、`motor_engine_prefill_env`、`motor_engine_decode_env`下新增：
 
    ```json
    {
-     "OTEL_SERVICE_NAME": "xxxxxx 服务名称，按模块区分",
-     "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "xxxxxx 是否使用非安全协议，true/false",
-     "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "xxxxxx 上报协议，grpc/http/protobuf"
+     "OTEL_SERVICE_NAME": "mindie-motor",
+     "OTEL_EXPORTER_OTLP_TRACES_INSECURE": "true",
+     "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"
    }
    ```
+
+   `motor_engine_prefill_env`、`motor_engine_decode_env`下的`OTEL_SERVICE_NAME`建议分别设置为`vllm-server-p`、`vllm-server-d`以区分模块，其余两项与上述保持一致。
 
    `user_config.json`需在`motor_coordinator_config`下新增`tracer_config`，并在`motor_engine_prefill_config`、`motor_engine_decode_config`的`engine_config`下新增`otlp-traces-endpoint`：
 
@@ -118,7 +122,7 @@ pyMotor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将�
    {
      "motor_coordinator_config": {
        "tracer_config": {
-         "endpoint": "xxxxxx 链路追踪后端OTLP接入地址",
+         "endpoint": "http://xx.xx.xx.xx:4318/v1/traces",
          "root_sampling_rate": 1.0,
          "remote_parent_sampled": 1.0,
          "remote_parent_not_sampled": 1.0,
@@ -128,16 +132,18 @@ pyMotor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将�
      },
      "motor_engine_prefill_config": {
        "engine_config": {
-         "otlp-traces-endpoint": "xxxxxx 链路追踪后端OTLP接入地址"
+         "otlp-traces-endpoint": "http://xx.xx.xx.xx:4318/v1/traces"
        }
      },
      "motor_engine_decode_config": {
        "engine_config": {
-         "otlp-traces-endpoint": "xxxxxx 链路追踪后端OTLP接入地址"
+         "otlp-traces-endpoint": "http://xx.xx.xx.xx:4318/v1/traces"
        }
      }
    }
    ```
+
+   若`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`设置为`grpc`，上述三处地址需相应改为`grpc://xx.xx.xx.xx:4317`格式。
 
 2. 参数说明
 
