@@ -90,8 +90,8 @@ pyMotor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completi
    {
      "motor_coordinator_config": {
        "rate_limit_config": {
-         "enable_rate_limit": "xxxxxx 是否开启限流，true/false",
-         "provider": "xxxxxx 限流提供者，simple/olc",
+         "enable_rate_limit": true,
+         "provider": "simple",
          "max_requests": 1000,
          "window_size": 60,
          "scope": "global",
@@ -153,7 +153,7 @@ pyMotor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completi
 
 需要特别注意：Coordinator 推理面支持以 `inference_workers_config.num_workers`（默认 `4`）启动多个推理 Worker 进程，**每个 Worker 进程各自持有独立的令牌桶**，互不共享状态。因此集群实际可承受的总吞吐上限约为 `max_requests × num_workers`，而非单一的 `max_requests`，配置阈值时应结合部署的 Worker 进程数一并考虑。
 
-当令牌余量降至 `max_requests` 的 85% 以下时，会上报一次拥堵告警事件（`ReqCongestionEvent`，`reason_id=DEALING_WITH_CONGESTION`）；待余量恢复到 75% 以上时会上报一次恢复事件，可结合监控告警观察系统的限流触发情况。
+当令牌桶已用额度（`max_requests - 剩余令牌`）升至 `max_requests` 的 85% 及以上时，会上报一次拥堵告警事件（`ReqCongestionEvent`，`reason_id=DEALING_WITH_CONGESTION`）；待已用额度回落到 75% 以下时会上报一次恢复事件，可结合监控告警观察系统的限流触发情况。
 
 限流检查逻辑内置了失败兜底（fail-open）：若限流器本身发生异常，请求会被默认放行，不会因限流模块故障导致服务整体不可用。
 
