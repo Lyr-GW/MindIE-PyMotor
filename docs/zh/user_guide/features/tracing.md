@@ -55,11 +55,11 @@ pyMotor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将�
      "motor_coordinator_config": {
        "tracer_config": {
          "endpoint": "http://xx.xx.xx.xx:4318/v1/traces",
-         "root_sampling_rate": 1,
-         "remote_parent_sampled": 1,
-         "remote_parent_not_sampled": 1,
-         "local_parent_sampled": 1,
-         "local_parent_not_sampled": 1
+         "root_sampling_rate": 1.0,
+         "remote_parent_sampled": 1.0,
+         "remote_parent_not_sampled": 1.0,
+         "local_parent_sampled": 1.0,
+         "local_parent_not_sampled": 1.0
        }
      },
      "motor_engine_prefill_config": {
