@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 #
 # MindIE is licensed under both the Mulan PSL v2 and the Apache License, Version 2.0.
@@ -23,7 +21,7 @@
 
 import time
 import threading
-from typing import Dict, Any, Optional
+from typing import Any
 from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,10 +30,10 @@ DEFAULT_REQ_CONGESTION_TRIGGER_RATIO = 0.85
 DEFAULT_REQ_CONGESTION_CLEAR_RATIO = 0.75
 
 
-class TokenBucket:    
+class TokenBucket:
     def __init__(self, capacity: int, refill_rate: float):
         """
-        
+
         Args:
             capacity: Bucket capacity (maximum number of tokens)
             refill_rate: Token refill rate (tokens per second)
@@ -45,13 +43,13 @@ class TokenBucket:
         self.tokens = capacity
         self.last_refill = time.time()
         self._lock = threading.Lock()
-    
+
     def try_consume(self, tokens: int = 1) -> bool:
         """
-        
+
         Args:
             tokens: Number of tokens to consume
-            
+
         Returns:
             bool: Whether successfully consumed tokens
         """
@@ -61,13 +59,13 @@ class TokenBucket:
             tokens_to_add = elapsed * self.refill_rate
             self.tokens = min(self.capacity, self.tokens + tokens_to_add)
             self.last_refill = now
-            
+
             # Check if there are enough tokens
             if self.tokens >= tokens:
                 self.tokens -= tokens
                 return True
             return False
-    
+
     def get_available_tokens(self) -> int:
         """Get current available token count"""
         with self._lock:
@@ -79,39 +77,32 @@ class TokenBucket:
 
 
 class SimpleRateLimiter:
-    
-    def __init__(self, 
-                 max_requests: int = 100,
-                 window_size: int = 60):
+    def __init__(self, max_requests: int = 100, window_size: int = 60):
         """
-        
+
         Args:
             max_requests: Maximum number of requests in time window
             window_size: Time window size (seconds)
         """
         self.max_requests = max_requests
         self.window_size = window_size
-        
+
         # Calculate token bucket parameters
         self.capacity = max_requests  # Bucket capacity equals maximum requests
         self.refill_rate = max_requests / window_size  # Tokens added per second
         self._congestion_alarm_sent = False
-        
+
         # Use single global token bucket
-        self._bucket = TokenBucket(
-            capacity=self.capacity,
-            refill_rate=self.refill_rate
-        )
-        
+        self._bucket = TokenBucket(capacity=self.capacity, refill_rate=self.refill_rate)
+
         logger.info(f"Initialized global rate limiter: max_requests={max_requests}, window_size={window_size}s")
 
-
-    def is_allowed(self, request_data: Optional[Dict[str, Any]] = None) -> tuple[bool, Dict[str, Any]]:
+    def is_allowed(self, request_data: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
         """
-        
+
         Args:
             request_data: Request data (optional)
-            
+
         Returns:
             tuple: (whether allowed, rate limiting info)
         """
@@ -119,6 +110,8 @@ class SimpleRateLimiter:
             # Try to consume one token
             allowed = self._bucket.try_consume()
             available = self._bucket.get_available_tokens()
+            # Token-bucket used capacity as a proxy for current request pressure.
+            used = self.max_requests - available
 
             req_congestion_trigger_threshold = int(self.max_requests * DEFAULT_REQ_CONGESTION_TRIGGER_RATIO)
             req_congestion_clear_threshold = int(self.max_requests * DEFAULT_REQ_CONGESTION_CLEAR_RATIO)
@@ -127,26 +120,28 @@ class SimpleRateLimiter:
             from motor.coordinator.api_client.controller_api_client import ControllerApiClient
 
             additional_information = ""
-            if not self._congestion_alarm_sent and available >= req_congestion_trigger_threshold:
+            if not self._congestion_alarm_sent and used >= req_congestion_trigger_threshold:
                 self._congestion_alarm_sent = True
                 additional_information = (
-                    f"The current number of inference requests in the system is{available},"
-                    f"which is greater than the configured maximum number of requests {self.max_requests}*85%."
+                    f"The current number of inference requests in the system is {used}, "
+                    f"which is greater than or equal to the configured maximum number of requests "
+                    f"{self.max_requests}*85%."
                 )
                 event = ReqCongestionEvent(
                     reason_id=RequestCongestionReason.DEALING_WITH_CONGESTION,
-                    additional_information=additional_information
+                    additional_information=additional_information,
                 )
                 ControllerApiClient.report_alarms(event.model_dump())
-            elif self._congestion_alarm_sent and available < req_congestion_clear_threshold:
+            elif self._congestion_alarm_sent and used < req_congestion_clear_threshold:
                 self._congestion_alarm_sent = False
                 additional_information = (
-                    f"The current number of inference requests in the system is {available},"
-                    f"which is less than the configured maximum number of requests {self.max_requests}*75%."
-                )           
+                    f"The current number of inference requests in the system is {used}, "
+                    f"which is less than the configured maximum number of requests "
+                    f"{self.max_requests}*75%."
+                )
                 event = ReqCongestionEvent(
                     reason_id=RequestCongestionReason.DEALING_WITH_CONGESTION,
-                    additional_information=additional_information
+                    additional_information=additional_information,
                 )
                 ControllerApiClient.report_alarms(event.model_dump())
 
@@ -157,20 +152,15 @@ class SimpleRateLimiter:
                 "limit": self.max_requests,
                 "window_size": self.window_size,
                 "scope": "global",
-                "timestamp": time.time()
+                "timestamp": time.time(),
             }
-            
+
             if not allowed:
                 logger.warning(f"Request globally rate limited: available: {available}/{self.max_requests}")
-            
+
             return allowed, limit_info
-            
+
         except Exception as e:
             logger.error(f"Rate limiting check failed: {e}")
             # Allow request by default when error occurs
-            return True, {
-                "error": str(e),
-                "allowed": True,
-                "timestamp": time.time()
-            }
-    
+            return True, {"error": str(e), "allowed": True, "timestamp": time.time()}
