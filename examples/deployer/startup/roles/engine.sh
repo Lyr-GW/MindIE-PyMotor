@@ -58,9 +58,16 @@ elif [ "$ROLE" = "union" ]; then
     set_union_env
 fi
 
-# Assign a distinct logical superpod ID per physical node so cross-node
-# traffic (especially multi-node decode) is forced onto RoCE.
-set_logic_superpod_id_per_node
+# Only when inter-node HCCS is disabled: assign per-node logic SuperPod ID
+# so cross-node traffic (esp. multi-node decode) is forced onto RoCE.
+# When HCCS remains available, skip so pods can stay in one SuperPod.
+if [ "${HCCL_INTER_HCCS_DISABLE:-}" = "TRUE" ] || \
+   [ "${HCCL_INTER_HCCS_DISABLE:-}" = "true" ] || \
+   [ "${HCCL_INTER_HCCS_DISABLE:-}" = "1" ]; then
+    set_logic_superpod_id_per_node
+else
+    echo "Skip set_logic_superpod_id_per_node (HCCL_INTER_HCCS_DISABLE=${HCCL_INTER_HCCS_DISABLE:-unset}; keep HCCS SuperPod)"
+fi
 
 python3 -m motor.node_manager.main &
 pid=$!

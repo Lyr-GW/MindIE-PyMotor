@@ -147,49 +147,15 @@ setup_jemalloc() {
     fi
 }
 
-# Derive a per-physical-node HCCL_LOGIC_SUPERPOD_ID so that:
-# - pods on the same node (same ID) can still use HCCS/intra-node fabric
-# - pods on different nodes (different IDs) are forced onto inter-node RoCE
-# Prefer NODE_NAME, then HOST_IP (injected by K8s), then HOSTNAME/ROLE.
-# Do NOT hardcode this in env.json — all decode pods would share one ID.
+# Same physical node → same HCCL_LOGIC_SUPERPOD_ID (intra-node fabric OK);
+# different node names → different IDs (force inter-node RoCE).
+# Prefer NODE_NAME, then HOST_IP, then HOSTNAME. Do not hardcode in env.json.
 set_logic_superpod_id_per_node() {
-    local key=""
-    local id=""
-
-    if [ -n "${NODE_NAME:-}" ]; then
-        key="NODE_NAME=${NODE_NAME}"
-        if [[ "${NODE_NAME}" =~ ([0-9]+)$ ]]; then
-            id="${BASH_REMATCH[1]}"
-        fi
-    fi
-
-    if [ -z "${id}" ] && [ -n "${HOST_IP:-}" ]; then
-        key="HOST_IP=${HOST_IP}"
-        # IPv4: use the last octet. IPv6 / other: stable hash into [0, 65535].
-        if [[ "${HOST_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.([0-9]+)$ ]]; then
-            id="${BASH_REMATCH[1]}"
-        else
-            id=$(printf '%s' "${HOST_IP}" | cksum | awk '{print $1 % 65536}')
-        fi
-    fi
-
-    if [ -z "${id}" ]; then
-        key="HOSTNAME=${HOSTNAME:-unknown},ROLE=${ROLE:-unknown}"
-        local ordinal=0
-        if [[ "${HOSTNAME:-}" =~ -([0-9]+)$ ]]; then
-            ordinal="${BASH_REMATCH[1]}"
-        fi
-        case "${ROLE:-}" in
-            prefill) id=$((10 + ordinal)) ;;
-            decode)  id=$((20 + ordinal)) ;;
-            encode)  id=$((30 + ordinal)) ;;
-            union)   id=$((40 + ordinal)) ;;
-            *)       id=$(printf '%s' "${HOSTNAME:-unknown}" | cksum | awk '{print $1 % 65536}') ;;
-        esac
-    fi
-
+    local key="${NODE_NAME:-${HOST_IP:-${HOSTNAME:-unknown}}}"
+    local id
+    id=$(printf '%s' "${key}" | cksum | awk '{print $1 % 65536}')
     export HCCL_LOGIC_SUPERPOD_ID="${id}"
-    echo "HCCL_LOGIC_SUPERPOD_ID=${HCCL_LOGIC_SUPERPOD_ID} (derived from ${key}; different IDs force inter-node RoCE)"
+    echo "HCCL_LOGIC_SUPERPOD_ID=${HCCL_LOGIC_SUPERPOD_ID} (from ${key}; different node names → different IDs)"
 }
 
 USER_CONFIG_FILE="$CONFIGMAP_PATH/user_config.json"
