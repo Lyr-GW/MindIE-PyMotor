@@ -58,6 +58,10 @@ elif [ "$ROLE" = "union" ]; then
     set_union_env
 fi
 
+# Assign a distinct logical superpod ID per physical node so cross-node
+# traffic (especially multi-node decode) is forced onto RoCE.
+set_logic_superpod_id_per_node
+
 python3 -m motor.node_manager.main &
 pid=$!
 echo "pull up $ROLE instance"
