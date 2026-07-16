@@ -99,6 +99,32 @@ def _default_rate_limit_skip_paths() -> list[str]:
     ]
 
 
+def _merge_kv_store_metrics_config(cfg: dict, raw: dict) -> None:
+    """Populate ``prometheus_metrics_config`` defaults from ``kv_cache_store_config``.
+
+    Only fills fields that are NOT already explicitly set in the prometheus config.
+    Called during ``CoordinatorConfig.from_json()``, before the dict is applied to
+    the dataclass.
+    """
+    kv = raw.get("kv_cache_store_config", {}) if isinstance(raw, dict) else {}
+    if not isinstance(kv, dict) or not kv:
+        return
+    pm = cfg.setdefault("prometheus_metrics_config", {})
+    pm.setdefault("kv_store_backend", kv.get("backend", ""))
+    pm.setdefault(
+        "kv_store_service",
+        kv.get("service", "") or os.getenv("KVS_MASTER_SERVICE", ""),
+    )
+    pm.setdefault("kv_store_metrics_port", kv.get("metrics_port", 0) or int(os.getenv("KV_STORE_METRICS_PORT", "0")))
+    pm.setdefault(
+        "kv_store_metrics_endpoint",
+        os.getenv("KV_STORE_METRICS_URL", ""),
+    )
+    if not pm.get("enable_kv_store_metrics"):
+        # Auto-enable when an explicit kv_cache_store_config is present
+        pm["enable_kv_store_metrics"] = True
+
+
 class SchedulerType(Enum):
     LOAD_BALANCE = "load_balance"
     ROUND_ROBIN = "round_robin"
@@ -151,8 +177,12 @@ class PrometheusMetricsConfig:
     """Prometheus metrics configuration class"""
 
     reuse_time: int = 3
-    pool_metrics_enable: bool = False
-    pool_metrics_endpoint: str = ""
+    # --- KV store metrics (auto-populated from kv_cache_store_config) ---
+    enable_kv_store_metrics: bool = False
+    kv_store_metrics_endpoint: str = ""
+    kv_store_backend: str = ""  # e.g. "memcache", "mooncake"
+    kv_store_service: str = ""  # default falls back to $KVS_MASTER_SERVICE
+    kv_store_metrics_port: int = 0  # 0 → auto: 50088 (mooncake) / 50090 (default)
 
 
 @dataclass
@@ -408,6 +438,7 @@ class CoordinatorConfig:
                         _update_tls_config(tls_configs, cfg, raw)
                         _update_instances_num(cfg, raw)
                         _update_prefill_kv_event_config(cfg, raw)
+                        _merge_kv_store_metrics_config(cfg, raw)
         except (json.JSONDecodeError, Exception) as e:
             log_json_config_load_error(json_path, e)
 
@@ -771,17 +802,17 @@ class CoordinatorConfig:
         master_lock_ttl = self.standby_config.master_lock_ttl
         master_lock_key = self.standby_config.master_lock_key
         deploy_summary = (
-            f"    ?? p_instances_num:     {self.deploy_config.p_instances_num}\n"
-            f"    ?? d_instances_num:     {self.deploy_config.d_instances_num}\n"
+            f"    ├─ p_instances_num:     {self.deploy_config.p_instances_num}\n"
+            f"    └─ d_instances_num:     {self.deploy_config.d_instances_num}\n"
         )
         if self.deploy_config.hybrid_instances_num is not None:
             deploy_summary = (
-                f"    ?? p_instances_num: {self.deploy_config.p_instances_num}\n"
-                f"    ?? d_instances_num: {self.deploy_config.d_instances_num}\n"
-                f"    ?? hybrid_instances_num: {self.deploy_config.hybrid_instances_num}\n"
-                f"    ?? single_hybrid_instance_pod_num: "
+                f"    ├─ p_instances_num:        {self.deploy_config.p_instances_num}\n"
+                f"    ├─ d_instances_num:        {self.deploy_config.d_instances_num}\n"
+                f"    ├─ hybrid_instances_num:   {self.deploy_config.hybrid_instances_num}\n"
+                f"    ├─ single_hybrid_instance_pod_num: "
                 f"{self.deploy_config.single_hybrid_instance_pod_num}\n"
-                f"    ?? hybrid_pod_npu_num: {self.deploy_config.hybrid_pod_npu_num}\n"
+                f"    └─ hybrid_pod_npu_num:     {self.deploy_config.hybrid_pod_npu_num}\n"
             )
         return (
             f"{separator}\n"
@@ -790,51 +821,47 @@ class CoordinatorConfig:
             "  Deploy Configuration:\n"
             f"{deploy_summary}"
             "  Logging Configuration:\n"
-            f"    ?? Log Level:           {self.logging_config.log_level}\n"
-            f"    ?? Log File:            {self.logging_config.host_log_dir}\n"
-            f"    ?? Log Max Line Length: {self.logging_config.log_max_line_length}\n"
+            f"    ├─ Log Level:           {self.logging_config.log_level}\n"
+            f"    ├─ Log File:            {self.logging_config.host_log_dir}\n"
+            f"    └─ Log Max Line Length: {self.logging_config.log_max_line_length}\n"
             "\n"
             "  Network Configuration:\n"
-            f"    ?? HTTP Pod IP:         {self.api_config.coordinator_api_host}\n"
-            f"    ?? HTTP Pod DNS:         {self.api_config.coordinator_api_dns}\n"
-            f"    ?? Inference Port:      {self.api_config.coordinator_api_infer_port}\n"
-            f"    ?? Management Port:     {self.api_config.coordinator_api_mgmt_port}\n"
-            f"    ?? Observability Port:  {self.api_config.coordinator_obs_port}\n"
+            f"    ├─ HTTP Pod IP:         {self.api_config.coordinator_api_host}\n"
+            f"    ├─ HTTP Pod DNS:        {self.api_config.coordinator_api_dns}\n"
+            f"    ├─ Inference Port:      {self.api_config.coordinator_api_infer_port}\n"
+            f"    ├─ Management Port:     {self.api_config.coordinator_api_mgmt_port}\n"
+            f"    └─ Observability Port:  {self.api_config.coordinator_obs_port}\n"
             "\n"
             "  Scheduler Configuration:\n"
-            f"    ├─ Scheduler Type:            {self.scheduler_config.scheduler_type.value}\n"
-            f"    ├─ Endpoint Instance Weight:  "
-            f"{self.scheduler_config.endpoint_instance_score_weight}\n"
-            f"    ?? KV Affinity Mode:          "
-            f"{self.scheduler_config.kv_affinity_mode}\n"
-            f"    ?? KV Affinity Load Weight:   "
-            f"{self.scheduler_config.kv_affinity_load_weight}\n"
-            f"    ?? KV Affinity Load Gate TopN:"
-            f"{self.scheduler_config.kv_affinity_load_gate_topn}\n"
+            f"    ├─ Scheduler Type:             {self.scheduler_config.scheduler_type.value}\n"
+            f"    ├─ Endpoint Instance Weight:   {self.scheduler_config.endpoint_instance_score_weight}\n"
+            f"    ├─ KV Affinity Mode:           {self.scheduler_config.kv_affinity_mode}\n"
+            f"    ├─ KV Affinity Load Weight:    {self.scheduler_config.kv_affinity_load_weight}\n"
+            f"    └─ KV Affinity Load Gate TopN: {self.scheduler_config.kv_affinity_load_gate_topn}\n"
             "\n"
             "  Multiprocess (Inference Workers):\n"
-            f"    └─ Num Workers:               {self.inference_workers_config.num_workers}\n"
+            f"    └─ Num Workers: {self.inference_workers_config.num_workers}\n"
             "\n"
             "  Security:\n"
-            f"    ?? Infer TLS:           {'Enabled' if self.infer_tls_config.enable_tls else 'Disabled'}\n"
-            f"    ?? Management TLS:      {'Enabled' if self.mgmt_tls_config.enable_tls else 'Disabled'}\n"
-            f"    ?? Etcd TLS:            {'Enabled' if self.etcd_tls_config.enable_tls else 'Disabled'}\n"
-            f"    ?? API Key Auth:        {'Enabled' if self.api_key_config.enable_api_key else 'Disabled'}\n"
-            f"    ?? Rate Limiting:       {'Enabled' if self.rate_limit_config.enable_rate_limit else 'Disabled'}\n"
+            f"    ├─ Infer TLS:           {'Enabled' if self.infer_tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ Management TLS:      {'Enabled' if self.mgmt_tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ Etcd TLS:            {'Enabled' if self.etcd_tls_config.enable_tls else 'Disabled'}\n"
+            f"    ├─ API Key Auth:        {'Enabled' if self.api_key_config.enable_api_key else 'Disabled'}\n"
+            f"    └─ Rate Limiting:       {'Enabled' if self.rate_limit_config.enable_rate_limit else 'Disabled'}\n"
             "\n"
             "  High Availability:\n"
-            f"    ?? ETCD:\n"
-            f"    ?   ?? Persistence:       {'Enabled' if self.etcd_config.enable_etcd_persistence else 'Disabled'}\n"
-            f"    ?   ?? Host:              {etcd_host}\n"
-            f"    ?   ?? Port:              {etcd_port}\n"
-            f"    ?   ?? Timeout:           {etcd_timeout} seconds\n"
-            f"    ?? Master/Standby:      {'Enabled' if self.standby_config.enable_master_standby else 'Disabled'}\n"
-            f"        ?? Check Interval:   {master_standby_check_interval} seconds\n"
-            f"        ?? Lock TTL:         {master_lock_ttl} seconds\n"
-            f"        ?? Lock Key:         {master_lock_key}\n"
+            f"    ├─ ETCD:\n"
+            f"    │   ├─ Persistence:       {'Enabled' if self.etcd_config.enable_etcd_persistence else 'Disabled'}\n"
+            f"    │   ├─ Host:              {etcd_host}\n"
+            f"    │   ├─ Port:              {etcd_port}\n"
+            f"    │   └─ Timeout:           {etcd_timeout} seconds\n"
+            f"    └─ Master/Standby:      {'Enabled' if self.standby_config.enable_master_standby else 'Disabled'}\n"
+            f"        ├─ Check Interval:   {master_standby_check_interval} seconds\n"
+            f"        ├─ Lock TTL:         {master_lock_ttl} seconds\n"
+            f"        └─ Lock Key:         {master_lock_key}\n"
             "\n"
             "  Configuration:\n"
-            f"    ?? Config Path:         {self.config_path or 'Not set'}\n"
+            f"    └─ Config Path: {self.config_path or 'Not set'}\n"
             f"{separator}"
         )
 

@@ -24,8 +24,11 @@ g_kv_conductor_service = "kv-conductor"
 g_kv_store_enabled = False
 g_kv_conductor_enabled = False
 g_kv_cache_store_port = C.DEFAULT_KV_CACHE_STORE_PORT
+g_kv_store_backend = C.DEFAULT_KV_STORE_BACKEND
 g_mmc_config_store_port = C.DEFAULT_MMC_CONFIG_STORE_PORT
+g_mmc_metrics_port = C.DEFAULT_MMC_METRICS_PORT
 g_mmc_local_service_mode = ""  # 空 → 由 common.sh 按硬件默认
+g_mmc_dram_size = ""  # 空 → daemon 使用默认 10GB
 g_engine_base_name = "mindie-server"
 g_generate_yaml_list = []
 g_user_config_path = None
@@ -37,6 +40,20 @@ g_engine_type = "vllm"
 def set_user_config_path(path):
     global g_user_config_path
     g_user_config_path = path
+
+
+def build_kv_store_env_items():
+    """Return KV-store env items that cannot be derived from config."""
+    items = [
+        {C.NAME: C.ENV_KVS_MASTER_SERVICE, C.VALUE: g_kv_store_service},
+        {C.NAME: C.ENV_KV_STORE_BACKEND, C.VALUE: g_kv_store_backend},
+    ]
+    if g_kv_store_backend == C.MMC_STORE_BACKEND:
+        # memcache C++ layer reads this env var directly at engine startup
+        items.append(
+            {C.NAME: C.ENV_MMC_LOCAL_CONFIG_PATH, C.VALUE: C.DEFAULT_MMC_LOCAL_CONFIG_PATH},
+        )
+    return items
 
 
 def set_controller_service(service_name):
@@ -220,29 +237,79 @@ def _get_kubectl_path():
     return kubectl
 
 
-def get_accelerator_type_from_cluster():
-    """Resolve accelerator-type from the first cluster node that has the label via kubectl."""
-    if C.ACCELERATOR_TYPE in _g_accelerator_type_cache:
-        return _g_accelerator_type_cache[C.ACCELERATOR_TYPE]
-
+def _get_cluster_nodes(label_selector):
     kubectl = _get_kubectl_path()
-    out = run_cmd_get_output([kubectl, "get", "nodes", "-o", "json"])
-    nodes = json.loads(out).get("items", [])
+    out = run_cmd_get_output([kubectl, "get", "nodes", "-l", label_selector, "-o", "json"])
+    return json.loads(out).get("items", [])
 
+
+def _collect_node_accelerator_types(nodes):
+    accelerator_types = set()
     for node in nodes:
         labels = node.get("metadata", {}).get("labels", {})
         accelerator_type = labels.get(C.ACCELERATOR_TYPE)
         if accelerator_type:
-            logger.info(
-                "Resolved %s=%s from node %s",
-                C.ACCELERATOR_TYPE,
-                accelerator_type,
-                node.get("metadata", {}).get("name", "<unknown>"),
-            )
-            _g_accelerator_type_cache[C.ACCELERATOR_TYPE] = accelerator_type
-            return accelerator_type
+            accelerator_types.add(accelerator_type)
+    return accelerator_types
 
-    raise RuntimeError(f"No node in cluster has label {C.ACCELERATOR_TYPE}")
+
+def _matches_hardware_generation(accelerator_type, hardware_type):
+    if hardware_type in C.HARDWARE_TYPE_A2:
+        return "910b" in accelerator_type.lower()
+    if hardware_type in C.HARDWARE_TYPE_A3:
+        return "a3" in accelerator_type.lower()
+    return True
+
+
+def _resolve_accelerator_type_from_nodes(nodes, hardware_type):
+    accelerator_types = _collect_node_accelerator_types(nodes)
+    if not accelerator_types:
+        raise RuntimeError(f"Matched nodes for hardware_type={hardware_type} do not have label {C.ACCELERATOR_TYPE}")
+
+    matched_types = {value for value in accelerator_types if _matches_hardware_generation(value, hardware_type)}
+    if not matched_types:
+        raise RuntimeError(
+            f"No {C.ACCELERATOR_TYPE} on cluster matches hardware_type={hardware_type}. "
+            f"Found values: {sorted(accelerator_types)}"
+        )
+    if len(matched_types) == 1:
+        return next(iter(matched_types))
+
+    raise RuntimeError(
+        f"Multiple {C.ACCELERATOR_TYPE} values match hardware_type={hardware_type}: {sorted(matched_types)}"
+    )
+
+
+def get_accelerator_type_from_cluster(hardware_type):
+    """Resolve accelerator-type node label value from cluster nodes via kubectl."""
+    if hardware_type in _g_accelerator_type_cache:
+        return _g_accelerator_type_cache[hardware_type]
+
+    if hardware_type in C.HARDWARE_TYPE_950I_A5:
+        label_selector = f"{C.ACCELERATOR}={C.ACCELERATOR_A5},{C.ACCELERATOR_TYPE}={hardware_type}"
+        nodes = _get_cluster_nodes(label_selector)
+        if not nodes:
+            raise RuntimeError(f"No node in cluster matches {label_selector} for hardware_type={hardware_type}")
+        accelerator_type = hardware_type
+    elif hardware_type in C.HARDWARE_TYPE_A2 or hardware_type in C.HARDWARE_TYPE_A3:
+        nodes = _get_cluster_nodes(f"{C.ACCELERATOR}={C.ACCELERATOR_910}")
+        if not nodes:
+            raise RuntimeError(
+                f"No node in cluster with label {C.ACCELERATOR}={C.ACCELERATOR_910} for hardware_type={hardware_type}"
+            )
+        accelerator_type = _resolve_accelerator_type_from_nodes(nodes, hardware_type)
+    else:
+        known = [*sorted(C.HARDWARE_TYPE_A2), *sorted(C.HARDWARE_TYPE_A3), *C.HARDWARE_TYPE_950I_A5]
+        raise ValueError(f"Unknown hardware_type '{hardware_type}'. Supported values: {known}")
+
+    logger.info(
+        "Resolved %s=%s from cluster for hardware_type=%s",
+        C.ACCELERATOR_TYPE,
+        accelerator_type,
+        hardware_type,
+    )
+    _g_accelerator_type_cache[hardware_type] = accelerator_type
+    return accelerator_type
 
 
 def get_baseline_config_from_configmap(job_id):
@@ -323,6 +390,14 @@ def apply_sp_block_annotation(metadata, sp_block_num, hardware_type):
             del metadata[C.ANNOTATIONS]
         return
     annotations = metadata.setdefault(C.ANNOTATIONS, {})
+    if C.SP_BLOCK in annotations:
+        logger.info(
+            "Skip setting %s annotation to %s because template already configures it as %s",
+            C.SP_BLOCK,
+            sp_block_num,
+            annotations[C.SP_BLOCK],
+        )
+        return
     annotations[C.SP_BLOCK] = str(sp_block_num)
 
 
@@ -386,7 +461,6 @@ def create_motor_config_configmap(job_id, user_config=None, effective_deploy_mod
             f"--from-file=kv_store_backends.memcache.memcache.sh=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/memcache.sh",
             f"--from-file=kv_store_backends.memcache.memcache_meta_service.py=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/memcache_meta_service.py",
             f"--from-file=kv_store_backends.memcache.mmc-local.conf=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/mmc-local.conf",
-            f"--from-file=kv_store_backends.memcache.mmc-local-a2.conf=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/mmc-local-a2.conf",
             f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/kv_conductor.sh",
             f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/mf_store.sh",
             f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/all_combine_in_single_container.sh",

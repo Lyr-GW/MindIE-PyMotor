@@ -4,7 +4,7 @@
 
 ## 功能介绍
 
-pyMotor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将一次请求在Coordinator、Prefill实例、Decode实例间的完整调用链路（各阶段耗时、TTFT/TTOT等关键指标）上报至链路追踪后端（如Jaeger），帮助开发者在PD分离等复杂拓扑下定位性能瓶颈与异常请求。`opentelemetry`相关资料可参考[OpenTelemetry文档](https://opentelemetry.io/zh/docs/)。
+MindIE Motor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将一次请求在Coordinator、Prefill实例、Decode实例间的完整调用链路（各阶段耗时、TTFT/TTOT等关键指标）上报至链路追踪后端（如Jaeger），帮助开发者在PD分离等复杂拓扑下定位性能瓶颈与异常请求。`opentelemetry`相关资料可参考[OpenTelemetry文档](https://opentelemetry.io/zh/docs/)。
 
 ---
 
@@ -168,7 +168,7 @@ pyMotor tracing能力基于三方件`opentelemetry`实现，通过OTLP协议将�
 
 ### 内容一：上报开关与采样策略
 
-pyMotor各模块基于`opentelemetry`的`TracerProvider`实现链路追踪，是否开启由该模块的`endpoint`（Coordinator）/`otlp-traces-endpoint`（Prefill、Decode引擎）配置项决定：地址非空时开启上报，否则退化为NoOp（不产生任何开销）。
+MindIE Motor各模块基于`opentelemetry`的`TracerProvider`实现链路追踪，是否开启由该模块的`endpoint`（Coordinator）/`otlp-traces-endpoint`（Prefill、Decode引擎）配置项决定：地址非空时开启上报，否则退化为NoOp（不产生任何开销）。
 
 采样策略采用`ParentBased`组合采样器，按当前Span的父Span来源与采样状态分为四种场景（远程/本地、已采样/未采样），并叠加根采样率共5个可调参数，均基于`TraceIdRatioBased`按比例采样：
 

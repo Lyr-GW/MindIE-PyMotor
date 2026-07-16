@@ -14,8 +14,6 @@ spec:
       app: mindie-server
   template:
     metadata:
-      annotations:
-        sp-block: "xxxx"
       labels:
         fault-scheduling: grace
         fault-retry-times: "10000"
@@ -66,7 +64,6 @@ spec:
           volumeMounts:
           - name: data
             mountPath: /data
-            readOnly: true
           - name: motor-config
             mountPath: /mnt/configmap
           - name: queue-schedule

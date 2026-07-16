@@ -2,7 +2,7 @@
 
 ## 特性介绍
 
-**ScaleP2D**（Scale Prefill to Decode）是 MindIE PyMotor 在 **PD 分离**（Prefill / Decode 解耦）场景下的一种故障自愈策略。当 **Decode（D）实例** 因 **L4–L6 级硬件故障** 导致部分节点不可用时，系统会 **主动停止若干 Prefill（P）实例**，释放算力与节点资源，为故障 D 实例的恢复或替换腾出容量。
+**ScaleP2D**（Scale Prefill to Decode）是 MindIE Motor 在 **PD 分离**（Prefill / Decode 解耦）场景下的一种故障自愈策略。当 **Decode（D）实例** 因 **L4–L6 级硬件故障** 导致部分节点不可用时，系统会 **主动停止若干 Prefill（P）实例**，释放算力与节点资源，为故障 D 实例的恢复或替换腾出容量。
 
 ## 版本说明
 
@@ -69,7 +69,7 @@ ScaleP2D 恢复大致分为四步：
 }
 ```
 
-详见 [配置参考](../deployment/k8s/config_reference.md#26-fault_tolerance_config)。
+详见 [配置参考](../deployment/k8s/config_reference.md#fault_tolerance_config)。
 
 ### InferServiceSet YAML 配置（CRD 部署）
 
@@ -98,17 +98,17 @@ spec:
 |------|------|----------|------|
 | `priority` | int | 1–32 | 数值越小，调度优先级越高 |
 
-PD 分离场景下，建议 **prefill 的 `priority` 数值大于 decode**（即 decode 优先级更高、prefill 更易被抢占），与 ScaleP2D「优先释放 P 算力」的策略一致。示例：
+PD 分离场景下，建议 **prefill 的 `priority` 数值大于 decode**（即 prefill 优先级最低，更易被抢占），与 ScaleP2D「优先释放 P 算力」的策略一致。示例：
 
 ```yaml
     - name: prefill
       replicas: 4
-      priority: 2          # 优先级低于 decode
+      priority: 2          # 优先级最低
       # ...
 
     - name: decode
       replicas: 4
-      priority: 1          # 优先级高于 prefill
+      priority: 1
       # ...
 ```
 
@@ -129,8 +129,6 @@ PD 分离场景下，建议 **prefill 的 `priority` 数值大于 decode**（即
               app: mindie-server
               # ...
 ```
-
-> **说明：** 以上 YAML 改动仅作用于 `prefill`、`decode` 推理角色；`controller`、`coordinator` 等角色无需修改。
 
 ## 日志与排查
 

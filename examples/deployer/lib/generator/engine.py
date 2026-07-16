@@ -58,14 +58,27 @@ def _append_a5_host_path_volumes(pod_spec, container):
             existing_mount_names.add(volume_name)
 
 
+def apply_a5_dns_config(pod_spec, deploy_config):
+    """Lower ndots so cluster FQDNs resolve directly without corporate search suffixes."""
+    hardware_type = deploy_config.get(C.HARDWARE_TYPE) if deploy_config else None
+    if hardware_type not in C.HARDWARE_TYPE_950I_A5:
+        return
+    pod_spec[C.DNS_CONFIG] = {C.DNS_OPTIONS: [{C.NAME: C.A5_DNS_NDOTS_OPTION, C.VALUE: C.A5_DNS_NDOTS_VALUE}]}
+    logger.info(
+        "Applied A5 dnsConfig %s=%s for hardware_type=%s",
+        C.A5_DNS_NDOTS_OPTION,
+        C.A5_DNS_NDOTS_VALUE,
+        hardware_type,
+    )
+
+
 def apply_a5_engine_pod_config(pod_spec, container, deploy_config):
     """Apply A5-specific pod network and hostPath settings to engine pods."""
     hardware_type = deploy_config.get(C.HARDWARE_TYPE) if deploy_config else None
     if hardware_type not in C.HARDWARE_TYPE_950I_A5:
         return
-    pod_spec[C.HOST_NETWORK] = True
-    pod_spec[C.DNS_POLICY] = C.DNS_POLICY_CLUSTER_FIRST_WITH_HOST_NET
     _append_a5_host_path_volumes(pod_spec, container)
+    apply_a5_dns_config(pod_spec, deploy_config)
     logger.info("Applied A5 engine pod config for hardware_type=%s", hardware_type)
 
 
@@ -106,19 +119,7 @@ def build_engine_env_items(role, deploy_config, job_name, include_kv_store=False
         {C.NAME: C.ENV_COORDINATOR_OBS_SERVICE, C.VALUE: k8s_utils.g_coordinator_obs_service},
     ]
     if include_kv_store and k8s_utils.g_kv_store_enabled:
-        env_items.append({C.NAME: C.ENV_KVS_MASTER_SERVICE, C.VALUE: k8s_utils.g_kv_store_service})
-        env_items.append({C.NAME: C.ENV_KV_CACHE_STORE_PORT, C.VALUE: str(k8s_utils.g_kv_cache_store_port)})
-        env_items.append(
-            {
-                C.NAME: C.ENV_MMC_CONFIG_STORE_URL,
-                C.VALUE: f"tcp://{k8s_utils.g_kv_store_service}:{k8s_utils.g_mmc_config_store_port}",
-            }
-        )
-        env_items.append(
-            {C.NAME: C.ENV_MMC_LOCAL_CONFIG_PATH, C.VALUE: "/usr/local/Ascend/pyMotor/conf/mmc-local.conf"}
-        )
-        if k8s_utils.g_mmc_local_service_mode:
-            env_items.append({C.NAME: C.ENV_MMC_LOCAL_SERVICE_MODE, C.VALUE: k8s_utils.g_mmc_local_service_mode})
+        env_items.extend(k8s_utils.build_kv_store_env_items())
     if k8s_utils.g_mf_store_enabled:
         ascend_mf_store_url = f"tcp://{k8s_utils.g_mf_store_service}:{C.DEFAULT_MF_STORE_PORT}"
         hardware_type = deploy_config.get(C.HARDWARE_TYPE, C.HARDWARE_TYPE_800I_A2)
@@ -197,9 +198,11 @@ def set_engine_npu(container, deploy_config, node_type):
 
 
 def apply_node_selector_by_hardware(pod_spec, hardware_type):
-    pod_spec[C.NODE_SELECTOR][C.ACCELERATOR_TYPE] = k8s_utils.get_accelerator_type_from_cluster()
+    if hardware_type in C.HARDWARE_TYPE_A2 or hardware_type in C.HARDWARE_TYPE_A3:
+        pod_spec[C.NODE_SELECTOR][C.ACCELERATOR] = C.ACCELERATOR_910
     if hardware_type in C.HARDWARE_TYPE_950I_A5:
         pod_spec[C.NODE_SELECTOR][C.ACCELERATOR] = C.ACCELERATOR_A5
+    pod_spec[C.NODE_SELECTOR][C.ACCELERATOR_TYPE] = k8s_utils.get_accelerator_type_from_cluster(hardware_type)
 
 
 def apply_pd_heterogeneous_node_selector(pod_spec, deploy_config, node_type):

@@ -16,8 +16,14 @@ fi
 
 setup_jemalloc
 
+# only A2 and A3 need it, A5 does not need it.
 gen_ranktable_config
-gen_kv_store_config
+
+# set up kv store backend
+case "${KV_STORE_BACKEND:-}" in
+    mooncake) gen_kv_store_config ;;
+    memcache) sync_mmc_local_config ;;
+esac
 
 set_cann_env
 
@@ -27,6 +33,7 @@ fi
 
 apply_shuffle_safetensors_patch
 
+# for SGLang
 set_mf_store_env
 
 # CRD scenario: refresh JOB_NAME with INFER_SERVICE_INDEX and INSTANCE_INDEX injected by CRD
@@ -56,6 +63,17 @@ elif [ "$ROLE" = "prefill" ]; then
     set_prefill_env
 elif [ "$ROLE" = "union" ]; then
     set_union_env
+fi
+
+# Only when inter-node HCCS is disabled: assign per-node logic SuperPod ID
+# so cross-node traffic (esp. multi-node decode) is forced onto RoCE.
+# When HCCS remains available, skip so pods can stay in one SuperPod.
+if [ "${HCCL_INTER_HCCS_DISABLE:-}" = "TRUE" ] || \
+   [ "${HCCL_INTER_HCCS_DISABLE:-}" = "true" ] || \
+   [ "${HCCL_INTER_HCCS_DISABLE:-}" = "1" ]; then
+    set_logic_superpod_id_per_node
+else
+    echo "Skip set_logic_superpod_id_per_node (HCCL_INTER_HCCS_DISABLE=${HCCL_INTER_HCCS_DISABLE:-unset}; keep HCCS SuperPod)"
 fi
 
 python3 -m motor.node_manager.main &

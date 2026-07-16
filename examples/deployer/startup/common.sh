@@ -147,6 +147,17 @@ setup_jemalloc() {
     fi
 }
 
+# Same physical node → same HCCL_LOGIC_SUPERPOD_ID (intra-node fabric OK);
+# different node names → different IDs (force inter-node RoCE).
+# Prefer NODE_NAME, then HOST_IP, then HOSTNAME. Do not hardcode in env.json.
+set_logic_superpod_id_per_node() {
+    local key="${NODE_NAME:-${HOST_IP:-${HOSTNAME:-unknown}}}"
+    local id
+    id=$(printf '%s' "${key}" | cksum | awk '{print $1 % 65536}')
+    export HCCL_LOGIC_SUPERPOD_ID="${id}"
+    echo "HCCL_LOGIC_SUPERPOD_ID=${HCCL_LOGIC_SUPERPOD_ID} (from ${key}; different node names → different IDs)"
+}
+
 USER_CONFIG_FILE="$CONFIGMAP_PATH/user_config.json"
 export USER_CONFIG_PATH="$USER_CONFIG_FILE"
 
@@ -169,57 +180,13 @@ sync_user_config() {
     fi
 }
 
-scan_mmc_dram_size() {
-    # Scan Pod available memory and calculate per-card DRAM size for LocalService
-    # Reserve 20% for system overhead, split the rest evenly across NPUs
-    local npu_num="${NPU_NUM:-8}"
-    if [ "$npu_num" -le 0 ] 2>/dev/null; then
-        echo "10GB"
-        return
-    fi
-    awk -v npu_num="$npu_num" '
-    /MemAvailable/ {
-        gb = $2 / 1024 / 1024;
-        per_card = int(gb * 0.8 / npu_num);
-        if (per_card < 10) per_card = 10;
-        printf "%dGB\n", per_card;
-        found = 1;
-        exit
-    }
-    END {
-        if (!found) {
-            # Fallback: use MemFree if MemAvailable is absent (older kernels)
-            while ((getline < "/proc/meminfo") > 0) {
-                if ($1 == "MemFree:") {
-                    gb = $2 / 1024 / 1024;
-                    per_card = int(gb * 0.8 / npu_num);
-                    if (per_card < 10) per_card = 10;
-                    printf "%dGB\n", per_card;
-                    exit
-                }
-            }
-            # Ultimate fallback
-            printf "10GB\n";
-        }
-    }' /proc/meminfo
-}
-
 sync_mmc_local_config() {
-    # ConfigMap files are symlinks; memcache rejects symlinks, so copy to a real file
+    # ConfigMap files are symlinks; memcache rejects symlinks, so copy to a real file.
+    # dram.size, max.dram.size, and protocol are set at runtime by daemon.py.
     local mmc_dst="$CONFIG_PATH/mmc-local.conf"
 
-    local hw_type
-    hw_type="$(_motor_deploy_hardware_type)"
-
-    # Select the right template based on hardware type (for protocol: rdma vs sdma)
-    local mmc_src_name="kv_store_backends.memcache.mmc-local.conf"   # default: A3/A5
-    case "$hw_type" in
-        800I_A2|800T_A2)
-            mmc_src_name="kv_store_backends.memcache.mmc-local-a2.conf"
-            ;;
-    esac
-
-    local mmc_src="$CONFIGMAP_PATH/$mmc_src_name"
+    # Single unified template — protocol (rdma/sdma) chosen by Python daemon
+    local mmc_src="$CONFIGMAP_PATH/kv_store_backends.memcache.mmc-local.conf"
 
     if [ ! -f "$mmc_src" ]; then
         echo "Warning: mmc local config not found in ConfigMap ($mmc_src)"
@@ -234,7 +201,6 @@ sync_mmc_local_config() {
     export MMC_LOCAL_CONFIG_PATH="$mmc_dst"
 
     # Replace hardcoded DNS name with the actual K8s service FQDN
-    # In infer_service_set mode, the service name gets a -<job>-0-<role> suffix
     if [ -n "$KVS_MASTER_SERVICE" ]; then
         sed -i "s|tcp://[^:]*:|tcp://${KVS_MASTER_SERVICE}:|g" "$mmc_dst"
     fi
@@ -242,34 +208,16 @@ sync_mmc_local_config() {
     # Determine mode: env override (from deployer) → hardware default, export for daemon.py
     local ls_mode="${MMC_LOCAL_SERVICE_MODE:-}"
     if [ -z "$ls_mode" ]; then
+        local hw_type
+        hw_type="$(_motor_deploy_hardware_type)"
         case "$hw_type" in
             800I_A2|800T_A2) ls_mode="inprocess" ;;
             *) ls_mode="standalone" ;;
         esac
     fi
     export MMC_LOCAL_SERVICE_MODE="$ls_mode"
-    echo "MMC_LOCAL_CONFIG_PATH=$MMC_LOCAL_CONFIG_PATH (hw=$hw_type, mode=$ls_mode, template=$mmc_src_name)"
 
-    local dram_size
-    dram_size=$(scan_mmc_dram_size)
-
-    if [ "$ls_mode" = "inprocess" ]; then
-        # In-process: vLLM manages pooling memory, dram.size must be > 0
-        sed -i "/^ock\.mmc\.local_service\.dram\.size = / s/= .*/= ${dram_size}/" "$mmc_dst"
-        echo "MMC inprocess mode: vLLM dram.size=${dram_size}"
-    else
-        # Standalone: vLLM gets dram.size=0GB, separate LS process with scanned DRAM
-        sed -i "/^ock\.mmc\.local_service\.dram\.size = / s/= .*/= 0GB/" "$mmc_dst"
-
-        local mmc_ls_dst="$CONFIG_PATH/mmc-local-ls.conf"
-        cp -f "$mmc_src" "$mmc_ls_dst"
-        if [ -n "$KVS_MASTER_SERVICE" ]; then
-            sed -i "s|tcp://[^:]*:|tcp://${KVS_MASTER_SERVICE}:|g" "$mmc_ls_dst"
-        fi
-        sed -i "/^ock\.mmc\.local_service\.dram\.size = / s/= .*/= ${dram_size}/" "$mmc_ls_dst"
-        chmod 640 "$mmc_ls_dst"
-        echo "MMC standalone mode: vLLM dram.size=0GB, LocalService config=$mmc_ls_dst (dram.size=${dram_size})"
-    fi
+    echo "MMC_LOCAL_CONFIG_PATH=$MMC_LOCAL_CONFIG_PATH (mode=$ls_mode)"
 }
 
 sync_user_config
@@ -297,9 +245,12 @@ else
 fi
 
 set_cann_env() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] set_cann_env start"
+    local _start_ts=$(date +%s)
     export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/common:/usr/local/lib"
     source "$CANN_INSTALL_PATH/ascend-toolkit/set_env.sh"
-    source "$CANN_INSTALL_PATH/nnal/atb/set_env.sh"
+    local _end_ts=$(date +%s)
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] set_cann_env done, elapsed=$((_end_ts - _start_ts))s"
 }
 
 _motor_deploy_hardware_type() {
@@ -329,32 +280,9 @@ is_a5_hardware() {
     esac
 }
 
-sync_mmc_local_config
-
 set_a5_engine_env() {
-    local if_name ip
-    if_name=$(awk '$2 == "00000000" {print $1; exit}' /proc/net/route)
-    ip="${HOST_IP:-$POD_IP}"
-
-    if [ -z "$if_name" ]; then
-        echo "Warning: failed to detect default route interface from /proc/net/route, skip GLOO/TP/HCCL socket ifname env" >&2
-        unset GLOO_SOCKET_IFNAME TP_SOCKET_IFNAME HCCL_SOCKET_IFNAME
-    else
-        export GLOO_SOCKET_IFNAME="$if_name"
-        export TP_SOCKET_IFNAME="$if_name"
-        export HCCL_SOCKET_IFNAME="$if_name"
-    fi
-
-    if [ -z "$ip" ]; then
-        echo "Warning: HOST_IP and POD_IP are both empty, skip HCCL_IF_IP env" >&2
-        unset HCCL_IF_IP
-    else
-        export HCCL_IF_IP="$ip"
-    fi
-
     export PATH="$PATH:/usr/local/go/bin"
     export LD_LIBRARY_PATH="/usr/local/lib:/usr/lib64:/lib64:${LD_LIBRARY_PATH:-}"
-    export ASCEND_LOCAL_COMM_RES_PATH="${ASCEND_LOCAL_COMM_RES_PATH:-/etc/hixlep}"
 }
 
 gen_ranktable_config() {
