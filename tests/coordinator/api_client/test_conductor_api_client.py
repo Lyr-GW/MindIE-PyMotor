@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -149,6 +148,20 @@ class TestBuildRegisterPayload:
         assert payload["instance_id"] == "vllm-union-2"
         assert payload["dp_rank"] == 1
 
+    def test_payload_brackets_ipv6_endpoint(self):
+        cfg = _mock_config(
+            endpoint="tcp://*:5557",
+            replay_endpoint="tcp://*:6667",
+        )
+        inst = _make_instance(inst_id=2, role=PDRole.ROLE_U, model_name="qwen")
+        ep = _make_endpoint(ep_id=1, ip="2001:db8::2")
+
+        with patch.object(ConductorApiClient, "coordinator_config", cfg):
+            payload = ConductorApiClient._build_register_payload(inst, ep)
+
+        assert payload["endpoint"] == "tcp://[2001:db8::2]:5558"
+        assert payload["replay_endpoint"] == "tcp://[2001:db8::2]:6668"
+
     def test_payload_dp_rank_uses_endpoint_id(self):
         """dp_rank is taken from endpoint.id."""
         cfg = _mock_config(endpoint="tcp://*:5557")
@@ -267,6 +280,18 @@ class TestGetRegisteredServices:
             services = ConductorApiClient.get_registered_services()
 
         assert services == [{"InstanceID": "vllm-prefill-1", "DPRank": 0}]
+
+    def test_formats_ipv6_conductor_address(self):
+        cfg = _mock_config(conductor_service="2001:db8::10", http_server_port=13333)
+
+        with (
+            patch.object(ConductorApiClient, "coordinator_config", cfg),
+            patch("motor.coordinator.api_client.conductor_api_client.SafeHTTPSClient") as mock_http,
+        ):
+            mock_http.return_value.__enter__.return_value.get.return_value = {"services": []}
+            ConductorApiClient.get_registered_services()
+
+        mock_http.assert_called_once_with(timeout=2, address="[2001:db8::10]:13333")
 
     def test_returns_empty_when_response_not_dict(self):
         cfg = _mock_config()

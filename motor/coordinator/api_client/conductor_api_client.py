@@ -198,7 +198,7 @@ class ConductorApiClient:
 
         instance_id = conductor_instance_id(instance)
         payload: dict[str, Any] = {
-            "endpoint": f"{kv_endpoints[0]}{endpoint.ip}:{str(int(kv_endpoints[1]) + endpoint.id)}",
+            "endpoint": f"{kv_endpoints[0]}{format_host(endpoint.ip)}:{str(int(kv_endpoints[1]) + endpoint.id)}",
             "type": prefill_kv_event_config.engine_type,
             "modelname": instance.model_name,
             "block_size": prefill_kv_event_config.block_size,
@@ -213,7 +213,7 @@ class ConductorApiClient:
             replay_endpoints = prefill_kv_event_config.replay_endpoint.split("*:")
             if len(replay_endpoints) == 2:
                 payload["replay_endpoint"] = (
-                    f"{replay_endpoints[0]}{endpoint.ip}:{str(int(replay_endpoints[1]) + endpoint.id)}"
+                    f"{replay_endpoints[0]}{format_host(endpoint.ip)}:{str(int(replay_endpoints[1]) + endpoint.id)}"
                 )
 
         return payload
@@ -222,7 +222,9 @@ class ConductorApiClient:
     def get_registered_services(cls) -> list[dict[str, Any]]:
         prefill_kv_event_config = cls.coordinator_config.prefill_kv_event_config
         client_args = {
-            "address": f"{prefill_kv_event_config.conductor_service}:{prefill_kv_event_config.http_server_port}"
+            "address": format_address(
+                prefill_kv_event_config.conductor_service, prefill_kv_event_config.http_server_port
+            )
         }
 
         with SafeHTTPSClient(timeout=2, **client_args) as client:

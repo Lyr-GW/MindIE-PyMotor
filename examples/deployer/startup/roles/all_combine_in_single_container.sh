@@ -52,7 +52,15 @@ case "${KV_STORE_BACKEND:-}" in
     mooncake)
         gen_kv_store_config
         set_kv_store_env
-        ROLE=kv_store mooncake_master --port "$KV_CACHE_STORE_PORT" \
+        if [ -z "${MOONCAKE_MASTER_RPC_ADDRESS:-}" ]; then
+            if [[ "${POD_IP:-}" == *:* ]]; then
+                MOONCAKE_MASTER_RPC_ADDRESS="::"
+            else
+                MOONCAKE_MASTER_RPC_ADDRESS="0.0.0.0"
+            fi
+        fi
+        ROLE=kv_store mooncake_master --rpc_port "$KV_CACHE_STORE_PORT" \
+            --rpc_address "$MOONCAKE_MASTER_RPC_ADDRESS" \
             --eviction_high_watermark_ratio "$KV_STORE_EVICTION_HIGH_WATERMARK_RATIO" \
             --eviction_ratio "$KV_STORE_EVICTION_RATIO" --default_kv_lease_ttl "$DEFAULT_KV_LEASE_TTL" &
         pids+=($!)
