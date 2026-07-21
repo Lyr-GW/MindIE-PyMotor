@@ -4,7 +4,7 @@
 
 ## 功能介绍
 
-pyMotor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completions` 等推理接口）上开启服务限流，通过 FastAPI 中间件对进入的请求进行拦截控制，避免瞬时流量过大导致服务过载；默认基于内置令牌桶（Token Bucket）算法实现全局限流，也可切换为三方过载控制库 [OLC](https://gitcode.com/openFuyao/olc-python) 实现更细粒度（按 URL 等标签）的 QPS/配额/并发限流。
+MindIE Motor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completions` 等推理接口）上开启服务限流，通过 FastAPI 中间件对进入的请求进行拦截控制，避免瞬时流量过大导致服务过载。默认基于内置令牌桶（Token Bucket）算法实现全局限流，也可切换为三方过载控制库 [OLC](https://gitcode.com/openFuyao/olc-python) 实现更细粒度（按 URL 等标签）的 QPS/配额/并发限流。
 
 ---
 
@@ -28,7 +28,13 @@ pyMotor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completi
 
 1. 已预先参考[快速开始](../quick_start.md)完成一次基础服务部署，且该服务正常运行。
 
-2. 修改 `user_config.json` 文件，在 `motor_coordinator_config` 下新增 `rate_limit_config`：
+2. 使用以下命令打开 `user_config.json` 文件。请将 `<配置目录>` 替换为实际部署配置所在目录。
+
+   ```bash
+   vim <配置目录>/user_config.json
+   ```
+
+3. 在 `motor_coordinator_config` 下新增 `rate_limit_config`，修改完成后保存文件。
 
    ```json
    {
@@ -45,7 +51,7 @@ pyMotor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completi
 
    以上配置表示：Coordinator 推理面按全局维度限流，60 秒时间窗口内最多允许 1000 次请求（等效平均 QPS ≈ 16.7），超出部分直接拒绝。
 
-3. 在 `examples/deployer` 目录下执行部署命令：
+4. 在 `examples/deployer` 目录下执行部署命令。
 
    ```bash
    cd examples/deployer
@@ -56,7 +62,7 @@ pyMotor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/completi
    python3 deploy.py --user_config_path ../infer_engines/vllm/user_config.json --env_config_path ../infer_engines/vllm/env.json
    ```
 
-4. 发起推理请求验证限流是否生效。正常情况下响应头会携带以下限流相关信息：
+5. 发起推理请求验证限流是否生效。正常情况下响应头会携带以下限流相关信息。
 
    ```text
    X-RateLimit-Remaining: 999
