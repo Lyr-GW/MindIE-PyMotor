@@ -84,6 +84,45 @@ TEMPO_VERSION="${TEMPO_VERSION:-2.6.1}"
 OTEL_COLLECTOR_VERSION="${OTEL_COLLECTOR_VERSION:-0.115.1}"
 GRAFANA_VERSION="${GRAFANA_VERSION:-11.3.0}"
 
+# Map uname -m to Go release artifact architecture tags.
+case "$(uname -m)" in
+  x86_64|amd64) GO_ARCH="amd64" ;;
+  aarch64|arm64) GO_ARCH="arm64" ;;
+  *)
+    echo "[native] unsupported arch: $(uname -m) (expected x86_64/amd64 or aarch64/arm64)" >&2
+    exit 1
+    ;;
+esac
+echo "[native] host arch: $(uname -m) -> ${GO_ARCH}"
+
+ARCH_MARKER="${RUNTIME_DIR}/.arch"
+
+purge_native_binaries() {
+  rm -rf "${BIN_DIR}"
+  rm -rf "${RUNTIME_DIR}"/grafana-v*
+  rm -f "${RUNTIME_DIR}"/*.tar.gz
+  rm -rf "${RUNTIME_DIR}"/prometheus-*
+  rm -f "${RUNTIME_DIR}/tempo" "${RUNTIME_DIR}/otelcol-contrib"
+  rm -f "${ARCH_MARKER}"
+  mkdir -p "${BIN_DIR}"
+}
+
+ensure_arch_cache() {
+  if [[ -f "${ARCH_MARKER}" ]]; then
+    local cached_arch
+    cached_arch="$(<"${ARCH_MARKER}")"
+    if [[ "${cached_arch}" != "${GO_ARCH}" ]]; then
+      echo "[native] arch changed (${cached_arch} -> ${GO_ARCH}), clearing cached binaries..."
+      purge_native_binaries
+    fi
+  elif [[ -x "${BIN_DIR}/prometheus" || -d "${RUNTIME_DIR}/grafana-v${GRAFANA_VERSION}" ]]; then
+    # Legacy cache without an arch marker must not be reused on a different host.
+    echo "[native] legacy binary cache without arch marker, clearing for ${GO_ARCH}..."
+    purge_native_binaries
+  fi
+  printf '%s\n' "${GO_ARCH}" > "${ARCH_MARKER}"
+}
+
 download_file() {
   local url="$1"
   local out_file="$2"
@@ -104,11 +143,12 @@ install_prometheus() {
   [[ -x "${target}" ]] && return
   local ver="${PROMETHEUS_VERSION#v}"
   local archive="${RUNTIME_DIR}/prometheus-${ver}.tar.gz"
-  local url="https://github.com/prometheus/prometheus/releases/download/${PROMETHEUS_VERSION}/prometheus-${ver}.linux-amd64.tar.gz"
-  echo "[native] downloading Prometheus ${PROMETHEUS_VERSION}..."
+  local prom_arch="linux-${GO_ARCH}"
+  local url="https://github.com/prometheus/prometheus/releases/download/${PROMETHEUS_VERSION}/prometheus-${ver}.${prom_arch}.tar.gz"
+  echo "[native] downloading Prometheus ${PROMETHEUS_VERSION} (${prom_arch})..."
   download_file "${url}" "${archive}"
   tar -xzf "${archive}" -C "${RUNTIME_DIR}"
-  cp "${RUNTIME_DIR}/prometheus-${ver}.linux-amd64/prometheus" "${target}"
+  cp "${RUNTIME_DIR}/prometheus-${ver}.${prom_arch}/prometheus" "${target}"
   chmod +x "${target}"
 }
 
@@ -117,8 +157,9 @@ install_tempo() {
   [[ -x "${target}" ]] && return
   local ver="${TEMPO_VERSION#v}"
   local archive="${RUNTIME_DIR}/tempo-${ver}.tar.gz"
-  local url="https://github.com/grafana/tempo/releases/download/v${ver}/tempo_${ver}_linux_amd64.tar.gz"
-  echo "[native] downloading Tempo ${TEMPO_VERSION}..."
+  local tempo_arch="linux_${GO_ARCH}"
+  local url="https://github.com/grafana/tempo/releases/download/v${ver}/tempo_${ver}_${tempo_arch}.tar.gz"
+  echo "[native] downloading Tempo ${TEMPO_VERSION} (${tempo_arch})..."
   download_file "${url}" "${archive}"
   tar -xzf "${archive}" -C "${RUNTIME_DIR}"
   cp "${RUNTIME_DIR}/tempo" "${target}"
@@ -130,8 +171,9 @@ install_otel_collector() {
   [[ -x "${target}" ]] && return
   local ver="${OTEL_COLLECTOR_VERSION#v}"
   local archive="${RUNTIME_DIR}/otelcol-contrib-${ver}.tar.gz"
-  local url="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${ver}/otelcol-contrib_${ver}_linux_amd64.tar.gz"
-  echo "[native] downloading OTel Collector ${OTEL_COLLECTOR_VERSION}..."
+  local otel_arch="linux_${GO_ARCH}"
+  local url="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${ver}/otelcol-contrib_${ver}_${otel_arch}.tar.gz"
+  echo "[native] downloading OTel Collector ${OTEL_COLLECTOR_VERSION} (${otel_arch})..."
   download_file "${url}" "${archive}"
   tar -xzf "${archive}" -C "${RUNTIME_DIR}"
   cp "${RUNTIME_DIR}/otelcol-contrib" "${target}"
@@ -142,8 +184,9 @@ install_grafana() {
   local grafana_home="${RUNTIME_DIR}/grafana-v${GRAFANA_VERSION}"
   [[ -x "${grafana_home}/bin/grafana" ]] && return
   local archive="${RUNTIME_DIR}/grafana-${GRAFANA_VERSION}.tar.gz"
-  local url="https://dl.grafana.com/oss/release/grafana-${GRAFANA_VERSION}.linux-amd64.tar.gz"
-  echo "[native] downloading Grafana ${GRAFANA_VERSION}..."
+  local grafana_arch="linux-${GO_ARCH}"
+  local url="https://dl.grafana.com/oss/release/grafana-${GRAFANA_VERSION}.${grafana_arch}.tar.gz"
+  echo "[native] downloading Grafana ${GRAFANA_VERSION} (${grafana_arch})..."
   download_file "${url}" "${archive}"
   tar -xzf "${archive}" -C "${RUNTIME_DIR}"
 }
@@ -302,6 +345,7 @@ start_component() {
   echo "[native] started ${name} (pid=${new_pid})"
 }
 
+ensure_arch_cache
 install_prometheus
 install_tempo
 install_otel_collector
