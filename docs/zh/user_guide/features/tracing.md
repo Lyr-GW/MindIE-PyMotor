@@ -194,11 +194,11 @@ MindIE Motor各模块基于`OpenTelemetry`的`TracerProvider`实现链路追踪�
    | **OTEL_EXPORTER_OTLP_TRACES_PROTOCOL** | env.json | string | 上报数据协议，可选`grpc`或`http/protobuf`，缺省默认为`grpc`，需与`endpoint`/`otlp-traces-endpoint`地址格式保持一致。 |
    | **endpoint** | user_config.json（`motor_coordinator_config.tracer_config`） | string | Coordinator侧链路追踪数据的上报地址，开启Tracing能力必填，为空时Coordinator不上报追踪数据。 |
    | otlp-traces-endpoint | user_config.json（engine的`engine_config`） | string | Prefill/Decode引擎侧链路追踪数据的上报地址，填写方法与`endpoint`一致。 |
-   | root_sampling_rate | user_config.json（`tracer_config`） | float | 根采样率，即没有父Span（如请求入口的第一次调用）的采样概率，默认值：`1.0`，表示所有根请求都会被记录，`0.5`表示约半数根请求被记录。 |
-   | remote_parent_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自远程服务且父Span已被采样时，当前Span的采样概率，默认值：`1.0`。 |
-   | remote_parent_not_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自远程服务但父Span未被采样时，当前Span的采样概率，默认值：`1.0`。 |
-   | local_parent_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自本地服务实例且父Span已被采样时，当前Span的采样概率，默认值：`1.0`。 |
-   | local_parent_not_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自本地服务实例但父Span未被采样时，当前Span的采样概率，默认值：`1.0`。 |
+   | root_sampling_rate | user_config.json（`tracer_config`） | float | 根采样率，即没有父Span（如请求入口的第一次调用）的采样概率，默认值：`1.0`，表示所有根请求都会被记录，`0.5`表示约半数根请求被记录。取值范围为`(0, 1]`。 |
+   | remote_parent_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自远程服务且父Span已被采样时，当前Span的采样概率，默认值：`1.0`。取值范围为`(0, 1]`。 |
+   | remote_parent_not_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自远程服务但父Span未被采样时，当前Span的采样概率，默认值：`1.0`。取值范围为`(0, 1]`。 |
+   | local_parent_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自本地服务实例且父Span已被采样时，当前Span的采样概率，默认值：`1.0`。取值范围为`(0, 1]`。 |
+   | local_parent_not_sampled | user_config.json（`tracer_config`） | float | 当前Span的父Span来自本地服务实例但父Span未被采样时，当前Span的采样概率，默认值：`1.0`。取值范围为`(0, 1]`。 |
 
 ---
 
@@ -211,9 +211,9 @@ MindIE Motor各模块基于`OpenTelemetry`的`TracerProvider`实现链路追踪�
    - `env.json`中`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`是否与`endpoint`地址的协议格式一致（`http/protobuf`对应`http://xxx:4318/v1/traces`，`grpc`对应`grpc://xxx:4317`）。
    - 服务器与链路追踪后端之间的网络端口（`4318`/`4317`）是否可达。
 
-2. 报错：`env OTEL_EXPORTER_OTLP_TRACES_PROTOCOL:'xxx' is invalid`
+2. `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`配置错误，Tracing能力未开启。
 
-   表示`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`取值非法，请检查`env.json`中该环境变量的取值，仅支持`grpc`或`http/protobuf`。
+   当`OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`取值非法时，Coordinator会记录`check: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=<配置值> invalid, tracing disabled`信息日志并关闭Tracing能力，不会抛出异常。请检查`env.json`中该环境变量的取值，仅支持`grpc`或`http/protobuf`。
 
 3. 只需要部分模块开启Tracing能力
 
