@@ -48,6 +48,7 @@ from motor.common.http.security_utils import (
 )
 from motor.common.logger import get_logger
 import motor.common.utils.error as cancel_error
+from motor.common.utils.error import RequestCancelledError
 
 logger = get_logger(__name__)
 
@@ -75,7 +76,7 @@ def with_cancellation(handler_func):
 
     Runs the handler and listen_for_disconnect(request) concurrently; when one
     finishes, the other is cancelled. If the handler finishes first, its return
-    value is returned; if the client disconnects first, returns None.
+    value is returned; if the client disconnects first, raises HTTP 499.
     """
 
     @wraps(handler_func)
@@ -94,7 +95,13 @@ def with_cancellation(handler_func):
                 return handler_task.result()
             else:
                 await _cancel_tasks_and_wait(*pending, reason=cancel_error.CLIENT_DISCONNECT)
-                return None
+                logger.info("Client disconnected; cancelling in-flight request with HTTP 499")
+                raise HTTPException(
+                    status_code=499,
+                    detail=sanitize_error_message(cancel_error.CLIENT_DISCONNECT),
+                )
+        except HTTPException:
+            raise
         except (Exception, asyncio.CancelledError):
             await _cancel_tasks_and_wait(handler_task, disconnect_task, reason=cancel_error.DISPATCH_ABORT)
             raise
@@ -102,7 +109,21 @@ def with_cancellation(handler_func):
     return wrapper
 
 
-async def select_router_class(scheduler, req_info: RequestInfo | None = None) -> type["BaseRouter"]:
+def _is_pd_hybrid_deploy(config: CoordinatorConfig | None) -> bool:
+    deploy_config = getattr(config, "deploy_config", None)
+    return getattr(deploy_config, "hybrid_instances_num", None) is not None
+
+
+def _is_pd_separation_fallback_to_hybrid_enabled(config: CoordinatorConfig | None) -> bool:
+    scheduler_config = getattr(config, "scheduler_config", None)
+    return bool(getattr(scheduler_config, "enable_pd_separation_fallback_to_hybrid", True))
+
+
+async def select_router_class(
+    scheduler,
+    req_info: RequestInfo | None = None,
+    config: CoordinatorConfig | None = None,
+) -> type["BaseRouter"]:
     """Select the router implementation from the live instance topology.
 
     Routing is derived from the roles currently present plus whether a P/D pair shares a
@@ -146,6 +167,18 @@ async def select_router_class(scheduler, req_info: RequestInfo | None = None) ->
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="No routable inference topology is currently available: all instances are circuit-broken or absent",
         )
+
+    fallback_enabled = _is_pd_separation_fallback_to_hybrid_enabled(config)
+    is_hybrid_deploy = _is_pd_hybrid_deploy(config)
+    if not fallback_enabled and not is_hybrid_deploy:
+        if has_pd_roles:
+            message = "PD separate service has no compatible P/D pair and fallback to hybrid is disabled"
+        else:
+            message = "PD separate service is unavailable and fallback to hybrid is disabled"
+        if req_info is not None:
+            req_info.trace_obj.set_trace_error_message(message)
+        logger.warning("PD separate service cannot route request because hybrid fallback is disabled: %s", message)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=message)
 
     if PDRole.ROLE_U in roles or PDRole.ROLE_P in roles:
         if has_pd_roles and not has_compatible_pair and PDRole.ROLE_U in roles:
@@ -204,7 +237,7 @@ async def handle_request(
             detail="Scheduler (SchedulingFacade) is required and must be injected by the server",
         )
 
-    router_impl_class = await select_router_class(scheduler, req_info=req_info)
+    router_impl_class = await select_router_class(scheduler, req_info=req_info, config=config)
 
     sampling_manager = getattr(raw_request.app.state, "sampling_manager", None)
     router_impl = router_impl_class(
@@ -230,6 +263,19 @@ async def handle_request(
         req_info.trace_obj.set_trace_error_message(f"Proxy endpoint {req_info.api} failed: {e}")
         logger.warning("Upstream inference transport failed api=%s error=%s", req_info.api, e)
         return render_transport_error(e)
+    except RequestCancelledError as e:
+        req_info.trace_obj.set_trace_error_message(str(e))
+        logger.debug(
+            "Request cancelled api=%s req_id=%s reason=%s",
+            req_info.api,
+            req_info.req_id,
+            e.reason,
+        )
+        safe_error_msg = sanitize_error_message(str(e))
+        # Client disconnect is not a server fault (nginx-style 499).
+        if e.reason == cancel_error.CLIENT_DISCONNECT:
+            raise HTTPException(status_code=499, detail=safe_error_msg) from e
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=safe_error_msg) from e
     except Exception as e:
         req_info.trace_obj.set_trace_error_message(f"Proxy endpoint {req_info.api} failed: {e}")
         logger.error(

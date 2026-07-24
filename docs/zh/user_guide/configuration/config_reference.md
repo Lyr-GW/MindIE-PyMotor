@@ -34,11 +34,11 @@ motor_deploy_config字段为部署与资源相关配置，由deploy.py读取并�
 | single_d_instance_pod_num | int | 单个D实例对应的Pod数，取值范围：大于等于1 |
 | p_pod_npu_num | int | 单个P实例Pod占用的NPU卡数，每个Pod最大为16卡 |
 | d_pod_npu_num | int | 单个D实例Pod占用的NPU卡数，每个Pod最大为16卡 |
-| image_name | string | 推理镜像名（需包含MindIE-PyMotor与vLLM等运行环境），与[PD分离服务部署](./pd_disaggregation_deployment.md#setup-and-image-preparation)中准备/加载的镜像名保持一致 |
+| image_name | string | 推理镜像名（需包含MindIE-PyMotor与vLLM等运行环境），与[PD分离服务部署](../deployment/k8s/pd_disaggregation_deployment.md#setup-and-image-preparation)中准备/加载的镜像名保持一致 |
 | job_id | string | 部署任务名，同时作为K8s命名空间使用，例如"mindie-motor" |
-| hardware_type | string | 硬件类型：<ul><li>Atlas 800I A2 推理服务器：800I_A2</li><li>Atlas 800I A3 超节点服务器：800I_A3</li><li>Atlas 850 Server：850-Atlas-8p-8</li></ul>|
+| hardware_type | string | 硬件类型：<ul><li>Atlas 800I A2 推理服务器：800I_A2</li><li>Atlas 800I A3 超节点服务器：800I_A3</li><li>Atlas 850 Server：850-Atlas-8p-8</li><li>Atlas 850 Server 超节点服务器：850-SuperPod-Atlas-8</li></ul>|
 | weight_mount_path | string | 宿主机上模型权重挂载路径，容器内model_path需与此挂载路径一致，例如 `"/mnt/weight/"` |
-| tls_config | object | 可选；TLS相关配置，包含mgmt_tls_config、infer_tls_config、etcd_tls_config、grpc_tls_config和observability_tls_config五类，结构见[PD分离服务部署](./pd_disaggregation_deployment.md) |
+| tls_config | object | 可选；TLS相关配置，包含mgmt_tls_config、infer_tls_config、etcd_tls_config、grpc_tls_config和observability_tls_config五类，结构见[PD分离服务部署](../deployment/k8s/pd_disaggregation_deployment.md) |
 
 ---
 
@@ -229,6 +229,7 @@ motor_coordinator_config字段配置样例如下所示：
   },
   "scheduler_config": {
     "scheduler_type": "load_balance",
+    "enable_pd_separation_fallback_to_hybrid": true,
     "endpoint_instance_score_weight": 0.05,
     "kv_affinity_mode": "unified",
     "kv_affinity_load_weight": 1.0,
@@ -378,6 +379,7 @@ motor_coordinator_config字段配置样例如下所示：
 | upstream_error_body_max_bytes | int | 向客户端透传引擎 HTTP 错误体的最大字节数，避免返回超大错误响应。默认：`65536` |
 | **scheduler_config字段** |-|-|
 | scheduler_type | string | 调度类型，默认值：load_balance<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询；</li><li>kv_cache_affinity：KV Cache 亲和调度。</li></ul> |
+| enable_pd_separation_fallback_to_hybrid | bool | PD分离场景下，当D实例不可用或P/D实例不满足调度条件时，是否允许降级使用混部路由，默认值为 `true` |
 | endpoint_instance_score_weight | float | endpoint 优先负载均衡时实例平均负载权重。默认：`0.05` |
 | kv_affinity_mode | string | `scheduler_type=kv_cache_affinity` 时的子策略：`unified`（默认）或 `load_gated` |
 | kv_affinity_load_weight | float | unified 模式下 endpoint 实时负载权重。默认：`1.0` |
@@ -586,7 +588,7 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类union E
 
 ## motor_engine_prefill_config/motor_engine_decode_config
 
-motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离部署场景**，这两个字段分别配置Prefill与Decode引擎。两者结构相同，均需指定engine_type与engine_config；可选配置dispatch_profile（PD协同语义）与health_check_config（虚推健康探测，见 [虚推健康探测](../../features/sim_inference.md)）。配置示例如下所示。
+motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离部署场景**，这两个字段分别配置Prefill与Decode引擎。两者结构相同，均需指定engine_type与engine_config；可选配置dispatch_profile（PD协同语义）与health_check_config（虚推健康探测，见 [虚推健康探测](../features/sim_inference.md)）。配置示例如下所示。
 
 ```json
 "motor_engine_prefill_config": {
@@ -768,7 +770,7 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
 | port_allocator_config.remote_check_timeout_seconds |float|远程检测超时时间，默认值：1.0。|
 | port_allocator_config.bind_host |string|绑定主机地址，默认值：0.0.0.0。|
 
-PD模式下P与D**各自独立配置**"health_check_config"；未配置时使用代码默认值。引擎"engine_config"字段说明请参见[motor_engine_prefill_config/motor_engine_decode_config](#motor_engine_prefill_configmotor_engine_decode_config)。
+PD模式下P与D**各自独立配置**"health_check_config"；未配置时使用代码默认值。引擎"engine_config"字段说明请参见[PD 分离服务部署](../deployment/k8s/pd_disaggregation_deployment.md#生成配置文件)。
 
 ### dispatch_profile
 
@@ -780,7 +782,7 @@ PD模式下P与D**各自独立配置**"health_check_config"；未配置时使用
 |--------|------|--------|
 | dispatch_profile | string | P/D 协同语义。默认值：未配时由 kv_connector白名单推断。<br>可选值：<ul><li>handoff：Prefill完成后交给Decode，推导出的capability为prefill_handoff_decode。</li><li>trigger：P/D并发，引擎同步KV，推导出的capability为concurrent_engine_sync。</li></ul>Prefill与Decode**两端须配置相同取值**。 |
 
-vLLM内置识别的kv_connector白名单见[PD 分离特性说明](../../../design/pd_disaggregation.md#vllm-connector-识别白名单)。白名单内connector无需手动配置dispatch_profile。
+vLLM内置识别的kv_connector白名单见[PD 分离特性说明](../../design/pd_disaggregation.md#vllm-connector-识别白名单)。白名单内connector无需手动配置dispatch_profile。
 
 >[!NOTE]说明
 >
@@ -819,16 +821,17 @@ vLLM内置识别的kv_connector白名单见[PD 分离特性说明](../../../desi
 
 ### health_check_config
 
-可选虚推（虚拟推理）健康探测配置，位于 `motor_engine_prefill_config` / `motor_engine_decode_config` 子块，默认关闭。机制说明见 [虚推健康探测](../../features/sim_inference.md)；PD 部署配置示例见 [PD 分离服务部署](./pd_disaggregation_deployment.md#virtual-inference-health-check)。
+可选虚推（虚拟推理）健康探测配置，位于 `motor_engine_prefill_config` / `motor_engine_decode_config` 子块，默认关闭。机制说明见 [虚推健康探测](../features/sim_inference.md)；PD 部署配置示例见 [PD 分离服务部署](../deployment/k8s/pd_disaggregation_deployment.md#virtual-inference-health-check)。
 
 **表7** health_check_config字段参数说明
 
 | 配置项 | 类型 | 说明 |
 |--------|------|--------|
-| enable_virtual_inference | bool | 虚推总开关，默认值：false。<br>取值为 `true` 时，在推理面 `/health` 正常后启动周期性虚推。 |
+| enable_virtual_inference | bool | 虚推总开关，默认值：false。<br>取值为 `true` 时，在推理面 `/health` 正常后启动周期性虚推。**仅支持 vLLM**；SGLang 引擎配置为 `true` 时运行时会自动关闭 |
 | npu_usage_threshold | int | AI Cube 利用率阈值（%），默认值：3。<br>虚推仅在 `0 < npu_usage_threshold <= 100` 时启动；低于该阈值且虚推失败时累计失败次数 |
 | max_failure_count | int | 连续虚推失败次数上限（在累计条件满足后），默认值：6。<br>达到后Engine Server `/status` 返回abnormal。 |
-| health_collector_timeout | int | 推理面 `GET /health` 探测超时（秒），默认值：2。<br>虚推启动的前置条件。 |
+| health_collector_timeout | int | 推理面 `GET /health` 探测超时（秒），默认值：5。 |
+| health_collector_timeout_retry_attempts | int | 推理面 `GET /health` 超时重试次数（含首次），默认值：3。<br>仅在探测超时时重试；连接失败、HTTP 错误等其它异常不重试。 |
 
 ---
 
@@ -862,7 +865,7 @@ PD混部场景下，union Engine Server 的环境变量配置在 `env.json` 的 
 
 该字段加载 `user_config.json` 时由 Coordinator 合并，一般无需手动添加。
 Coordinator 会根据实例角色自动识别 P/D 分离或 union 混部拓扑，并根据引擎 Connector 推导、由 NodeManager 内部上报的 `dispatch_capabilities` 选择并发或 handoff 行为。该字段不支持用户显式配置；自定义 Connector 可在 `motor_engine_prefill_config` / `motor_engine_decode_config` 顶层使用 `dispatch_profile` 声明语义，详情请参见[dispatch_profile](#dispatch_profile)。
-Connector 识别白名单、`MultiConnector` 取 `connectors[0]` 的规则，以及未识别连接器导致路由 503（fail-closed）的处理，详情请参见[PD 分离特性说明](../../../design/pd_disaggregation.md#vllm-connector-识别白名单)与[dispatch_profile](#dispatch_profile)。
+Connector 识别白名单、`MultiConnector` 取 `connectors[0]` 的规则，以及未识别连接器导致路由 503（fail-closed）的处理，详情请参见[PD 分离特性说明](../../design/pd_disaggregation.md#vllm-connector-识别白名单)与[PD 分离服务部署](../deployment/k8s/pd_disaggregation_deployment.md)。
 
 **表9** prefill_kv_event_config说明
 

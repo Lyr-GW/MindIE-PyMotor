@@ -15,13 +15,13 @@ import time
 import threading
 from collections.abc import Callable
 from typing import Any
-from urllib import request as urllib_request
-from urllib.error import URLError
+import requests
 
 from motor.common.resources.dispatch import DispatchPlan
 from motor.common.resources.instance import Instance
 from motor.common.logger import get_logger
 from motor.common.logger.rate_limited_logger import RateLimitedLogger
+from motor.common.utils.net import format_address
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.api_client.engine_server_api_client import EngineServerApiClient
@@ -540,7 +540,7 @@ class MetricsCollector(ThreadSafeSingleton):
                 port = str(cfg.kv_store_metrics_port)
                 if not port or port == "0":
                     port = "50088" if cfg.kv_store_backend == "mooncake" else "50090"
-                endpoint = f"http://{master}:{port}/metrics"
+                endpoint = f"http://{format_address(master, port)}/metrics"
 
         # --- determine enabled ---
         enabled = cfg.enable_kv_store_metrics or bool(cfg.kv_store_backend)
@@ -567,20 +567,18 @@ class MetricsCollector(ThreadSafeSingleton):
             return
         logger.debug("Fetching KV store metrics from %s", endpoint)
         try:
-            with urllib_request.urlopen(endpoint, timeout=5) as resp:
-                status_code = getattr(resp, "status", 200)
-                if status_code != 200:
-                    self._rl.error_window(
-                        "kv_store_metrics.http_error",
-                        f"KV store metrics HTTP {status_code} from {endpoint}",
-                        window_sec=60,
-                        level="WARNING",
-                    )
-                    self._kv_store_metrics_text = ""
-                    return
-                raw = resp.read().decode("utf-8", errors="replace")
-                self._kv_store_metrics_text = _filter_kvstore_metrics(raw, cfg.kv_store_backend)
-        except (URLError, TimeoutError, OSError) as e:
+            resp = requests.get(endpoint, timeout=15)
+            if resp.status_code != 200:
+                self._rl.error_window(
+                    "kv_store_metrics.http_error",
+                    f"KV store metrics HTTP {resp.status_code} from {endpoint}",
+                    window_sec=60,
+                    level="WARNING",
+                )
+                self._kv_store_metrics_text = ""
+                return
+            self._kv_store_metrics_text = _filter_kvstore_metrics(resp.text, cfg.kv_store_backend)
+        except requests.RequestException as e:
             self._rl.error_window(
                 "kv_store_metrics.fetch_failed",
                 f"KV store metrics fetch {endpoint} failed: {e}",
