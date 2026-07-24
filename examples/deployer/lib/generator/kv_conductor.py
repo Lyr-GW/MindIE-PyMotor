@@ -9,7 +9,7 @@
 # See the Mulan PSL v2 for more details.
 
 import lib.constant as C
-from lib.utils import load_yaml, write_yaml, logger
+from lib.utils import apply_node_selector_override, load_yaml, write_yaml, logger
 from lib.generator import k8s_utils
 
 
@@ -41,6 +41,9 @@ def generate_yaml_kv_conductor(input_yaml, output_file, user_config, kv_conducto
     if C.ENV not in container:
         container[C.ENV] = []
 
+    pod_spec = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC]
+    apply_node_selector_override(pod_spec, deploy_config, C.KV_CONDUCTOR_NODE_SELECTOR)
+
     for svc in service_list:
         svc[C.METADATA][C.NAMESPACE] = deploy_config[C.CONFIG_JOB_ID]
 
@@ -55,6 +58,11 @@ def generate_yaml_kv_conductor(input_yaml, output_file, user_config, kv_conducto
     ports[0][C.PORT] = service_port
     ports[0][C.TARGET_PORT] = service_port
 
+    # Inject KV_CONDUCTOR_SERVICE so that coordinator/engine pods can discover
+    # the kv-conductor endpoint for /register and /query calls.
+    kv_conductor_service_name = kv_conductor_config.get("conductor_service", "kv-conductor")
+    kv_conductor_env = [{C.NAME: C.ENV_KV_CONDUCTOR_SERVICE, C.VALUE: kv_conductor_service_name}]
+    container[C.ENV].extend(kv_conductor_env)
     kv_store_env = [{C.NAME: C.ENV_KVS_MASTER_SERVICE, C.VALUE: k8s_utils.g_kv_store_service}]
     container[C.ENV].extend(kv_store_env)
 

@@ -24,12 +24,77 @@ rm -rf dist/
 echo "Generating protobuf files..."
 ./scripts/generate_proto.sh
 
+# Keep motor_version in sync with motor/__init__.py::__version__ (single source of truth).
+# Support both double- and single-quoted __version__ assignments (aligned with setup.py).
+MOTOR_VERSION="$(sed -n 's/^__version__[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' ./motor/__init__.py | head -n1)"
+if [[ -z "${MOTOR_VERSION}" ]]; then
+  MOTOR_VERSION="$(sed -n "s/^__version__[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" ./motor/__init__.py | head -n1)"
+fi
+if [[ -z "${MOTOR_VERSION}" ]]; then
+  echo "Error: failed to read __version__ from ./motor/__init__.py" >&2
+  exit 1
+fi
+
 touch ./motor/version.info
 cat>./motor/version.info<<EOF
-motor_version : 1.0.0
-vllm_version : 0.13.0
-vllm_ascend_version : 0.13.0
+motor_version : ${MOTOR_VERSION}
 EOF
+echo "Using motor_version=${MOTOR_VERSION}"
+
+# --- Conditional kv-conductor build ---
+# Priority:
+#   1. KV_CONDUCTOR_PREBUILT env var — path to a pre-built binary
+#   2. Build from source via cargo (if available) — always rebuilds
+#   3. motor/kv_conductor/bin/kv-conductor already exists (no cargo; manual copy)
+#   4. Skip — wheel built without kv-conductor (optional component)
+#
+# Set SKIP_KV_CONDUCTOR_BUILD=1 to skip cargo build even when cargo is
+# available (use the existing bin/kv-conductor, or skip if none).
+
+KV_CONDUCTOR_DIR="./motor/kv_conductor"
+KV_CONDUCTOR_BIN_DIR="$KV_CONDUCTOR_DIR/bin"
+KV_CONDUCTOR_BIN="$KV_CONDUCTOR_BIN_DIR/kv-conductor"
+
+echo "=== kv-conductor ==="
+
+if [[ -n "${KV_CONDUCTOR_PREBUILT:-}" ]]; then
+    # Mode 1: use user-supplied pre-built binary.
+    if [[ ! -f "$KV_CONDUCTOR_PREBUILT" ]]; then
+        echo "[ERROR] KV_CONDUCTOR_PREBUILT='$KV_CONDUCTOR_PREBUILT' does not exist."
+        exit 1
+    fi
+    mkdir -p "$KV_CONDUCTOR_BIN_DIR"
+    cp "$KV_CONDUCTOR_PREBUILT" "$KV_CONDUCTOR_BIN"
+    chmod +x "$KV_CONDUCTOR_BIN"
+    echo "kv-conductor binary ready (pre-built): $KV_CONDUCTOR_BIN"
+
+elif command -v cargo >/dev/null 2>&1 && [[ "${SKIP_KV_CONDUCTOR_BUILD:-0}" != "1" ]]; then
+    # Mode 2: build from source (always rebuilds when cargo is available).
+    echo "Building kv-conductor from source (cargo build --release)..."
+    (
+        cd "$KV_CONDUCTOR_DIR" || exit 1
+        cargo build --release
+    )
+    mkdir -p "$KV_CONDUCTOR_BIN_DIR"
+    cp "$KV_CONDUCTOR_DIR/target/release/kv-conductor" "$KV_CONDUCTOR_BIN"
+    chmod +x "$KV_CONDUCTOR_BIN"
+    echo "kv-conductor binary ready (cargo-built): $KV_CONDUCTOR_BIN"
+
+elif [[ -f "$KV_CONDUCTOR_BIN" ]]; then
+    # Mode 3: binary already in place (no cargo; e.g. manual copy or CI artifact).
+    echo "kv-conductor binary ready (existing, no rebuild): $KV_CONDUCTOR_BIN"
+
+else
+    # Mode 4: no binary available — skip.
+    rm -rf "$KV_CONDUCTOR_BIN_DIR"
+    echo "[WARNING] kv-conductor binary not found and cargo unavailable."
+    echo "  Options:"
+    echo "    1. KV_CONDUCTOR_PREBUILT=/path/to/kv-conductor bash build.sh"
+    echo "    2. cp /path/to/kv-conductor motor/kv_conductor/bin/ && bash build.sh"
+    echo "    3. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+fi
+
+echo ""
 
 echo "Building wheel package with pip wheel (PEP517)... (VERBOSE=${VERBOSE})"
 

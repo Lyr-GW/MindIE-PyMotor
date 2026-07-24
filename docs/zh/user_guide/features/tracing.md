@@ -4,7 +4,7 @@
 
 ## 功能介绍
 
-MindIE Motor Tracing能力基于三方件`OpenTelemetry`实现，通过OTLP协议将一次请求在Coordinator、Prefill实例、Decode实例间的完整调用链路（各阶段耗时、TTFT/TTOT等关键指标）上报至链路追踪后端（如Jaeger），帮助开发者在PD分离等复杂拓扑下定位性能瓶颈与异常请求。`OpenTelemetry`相关资料可参考[OpenTelemetry文档](https://opentelemetry.io/zh/docs/)。
+MindIE Motor Tracing能力基于第三方组件`OpenTelemetry`实现，通过OTLP协议将一次请求在Coordinator、Prefill实例、Decode实例间的完整调用链路（各阶段耗时、TTFT/TTOT等关键指标）上报至链路追踪后端（如Jaeger），帮助开发者在PD分离等复杂拓扑下定位性能瓶颈与异常请求。`OpenTelemetry`相关资料可参考[OpenTelemetry文档](https://opentelemetry.io/zh/docs/)。
 
 ---
 
