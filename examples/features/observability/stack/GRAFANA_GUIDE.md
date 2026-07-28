@@ -16,7 +16,7 @@
 | 账号 | `motor` | `.env` 的 `GF_SECURITY_ADMIN_USER` |
 | 密码 | `motor` | `.env` 的 `GF_SECURITY_ADMIN_PASSWORD` |
 
-登录后进入 **Dashboards** 即可看到下文的三个内置看板。
+登录后进入 **Dashboards** 即可看到下文的两个内置看板。
 
 ---
 
@@ -40,19 +40,18 @@
 
 ### 2.2 看板（Dashboards）
 
-看板 JSON 位于 `grafana/dashboards/`，由 `grafana/provisioning/dashboards/dashboard-providers.yml` 自动加载（平铺、无文件夹层级，`foldersFromFilesStructure: false`，`updateIntervalSeconds: 30`）。当前仅保留三个：
+看板 JSON 位于 `grafana/dashboards/`，由 `grafana/provisioning/dashboards/dashboard-providers.yml` 自动加载（平铺、无文件夹层级，`foldersFromFilesStructure: false`，`updateIntervalSeconds: 30`）。当前仅保留两个：
 
 | 看板 | UID | 文件 | 内容 |
 |------|-----|------|------|
-| **pyMotor Metrics · 指标总览** | `motor-all-metrics` | `motor-all-metrics.json` | 集群概览、PD Role / Instance 分组、吞吐与延迟 |
-| **KV 缓存** | `motor-kv-cache` | `motor-kv-cache.json` | vLLM KV cache 使用率、prefix cache 命中率 |
-| **引擎性能剖析** | `motor-vllm-profiling` | `motor-vllm-profiling.json` | `vllm_profiling_*` 性能剖析（显存、forward/execute/scheduler 时延等） |
+| **vLLM 监控 · Jiguang 对齐** | `motor-vllm-jiguang` | `motor-vllm-jiguang.json` | 运维总览：服务状态、吞吐与时延、KV Cache、主机和 NPU 资源 |
+| **引擎性能剖析** | `motor-vllm-profiling` | `motor-vllm-profiling.json` | 深度调优：KV 饼图、请求链路和 per-step 细粒度指标 |
 
 > Grafana 容器以 **只读** 方式挂载 `grafana/dashboards`，因此在 UI 上的临时修改不会落盘；要长期保留改动需写回对应 JSON 文件（见第 4 节）。
 
 ### 2.3 看板变量（Template Variables）
 
-以「指标总览」为例，顶部变量用于跨集群 / 角色 / 实例过滤，均为 `query` 类型并基于 Prometheus 标签动态生成：
+以「Jiguang 对齐」为例，顶部变量用于跨集群 / 角色 / 实例过滤，均为 `query` 类型并基于 Prometheus 标签动态生成：
 
 | 变量 | Label |
 |------|-------|
@@ -118,15 +117,14 @@ curl -s http://localhost:9090/api/v1/targets
 4. 选择可视化类型（Time series / Stat / Bar gauge / Pie chart 等），设置标题、单位、阈值。
 5. **Apply** 返回看板，调整面板位置与大小。
 6. 写回源文件以长期保留：点击看板设置（齿轮）→ **JSON Model**，复制完整 JSON，覆盖写入对应文件，例如：
-   - 指标总览 → `grafana/dashboards/motor-all-metrics.json`
-   - KV 缓存 → `grafana/dashboards/motor-kv-cache.json`
+   - Jiguang 对齐 → `grafana/dashboards/motor-vllm-jiguang.json`
    - 引擎性能剖析 → `grafana/dashboards/motor-vllm-profiling.json`
 
    provisioner 每 30s 重新加载挂载目录，刷新页面即可看到生效（容器以只读挂载，必须写回文件才会持久化）。
 
 ### 4.2 方式二：直接编辑看板 JSON 文件
 
-在 `grafana/dashboards/<dashboard>.json` 的 `panels` 数组中追加一个面板对象。可参考「指标总览」中现有 `stat` 面板的最小结构：
+在 `grafana/dashboards/<dashboard>.json` 的 `panels` 数组中追加一个面板对象。可参考「Jiguang 对齐」中现有 `stat` 面板的最小结构：
 
 ```json
 {
@@ -182,7 +180,7 @@ python3 grafana/scripts/build-profiling-dashboard.py \
 
 要让 Tempo / profiling 面板有数据，需在 pyMotor 侧开启上报；**需要在拉起栈之前完成的 pyMotor 配置清单见 [SERVICE_GUIDE.md §1.4](SERVICE_GUIDE.md)**。本节为操作要点速查。
 
-> 基础指标（指标总览 / KV 缓存）无需改 pyMotor 配置即可生效；当前方案不使用 Controller metrics 接口，相关配置可忽略。
+> Jiguang 运维总览中的基础指标无需改 pyMotor 配置即可生效；当前方案不使用 Controller metrics 接口，相关配置可忽略。
 
 ### 5.1 Tracing
 

@@ -273,8 +273,7 @@ providers:
       foldersFromFilesStructure: false
 EOF
 
-  cp "./grafana/dashboards/motor-all-metrics.json" "${GRAFANA_DASHBOARD_DIR}/"
-  cp "./grafana/dashboards/motor-kv-cache.json" "${GRAFANA_DASHBOARD_DIR}/"
+  cp "./grafana/dashboards/motor-vllm-jiguang.json" "${GRAFANA_DASHBOARD_DIR}/"
   cp "./grafana/dashboards/motor-vllm-profiling.json" "${GRAFANA_DASHBOARD_DIR}/"
 }
 
