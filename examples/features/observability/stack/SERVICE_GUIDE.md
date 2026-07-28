@@ -55,7 +55,7 @@ cp -n .env.example .env   # launch.sh 在无 .env 时也会自动从 .env.exampl
 
 | 观测能力 | 是否需改 pyMotor 配置 | 需要的配置 |
 |----------|----------------------|-----------|
-| Coordinator 基础指标（指标总览 / KV 缓存的请求数、KV、吞吐、延迟等） | **否** | Coordinator 默认在管理端口暴露 `/metrics`、`/instance/metrics`，无需额外配置；只需保证该端口可被观测机或主机端口转发访问 |
+| Coordinator 基础指标（Jiguang 运维总览的请求数、KV、吞吐、延迟等） | **否** | Coordinator 默认在管理端口暴露 `/metrics`、`/instance/metrics`，无需额外配置；只需保证该端口可被观测机或主机端口转发访问 |
 | Engine / vLLM 指标 | **否**（默认开启） | Engine 在管理端口（默认 `10001`）暴露 `/metrics`；保证端口可达即可 |
 | Tracing（Tempo 链路） | **是** | 见下方「1.4.1 Tracing 接入」 |
 | 引擎性能剖析（`vllm_profiling_*`） | **是** | 需安装并开启 `ms_service_metric`，见下方「1.4.2 Profiling 接入」 |
