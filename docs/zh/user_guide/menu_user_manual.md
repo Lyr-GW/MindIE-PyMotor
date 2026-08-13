@@ -23,6 +23,7 @@
   - [手动扩缩容](./features/manual_scaling.md)
   - [主备倒换特性](./features/fault_tolerance/standby.md)
   - [Tracing能力部署](./features/tracing.md)
+  - [服务限流特性](./features/rate_limiting.md)
   - [ScaleP2D故障恢复](./features/fault_tolerance/scale_p2d.md)
   - [容器快照](./features/container_snapshot.md)
   - [虚推健康探测](./features/sim_inference.md)
