@@ -186,7 +186,7 @@ P/D 实例出现异常时，重启推理实例，避免实例长时间处于异�
   上述配置表示 60 秒内最多处理 10000 条请求。
 
 - **关闭**：删除 `rate_limit_config` 配置块，或将 `enable_rate_limit` 设为 `false`。
-- **注意**：字段详细说明请参见[motor_coordinator_config](../../configuration/config_reference.md#motor_coordinator_config)中的**rate_limit_config字段**。
+- **注意**：完整配置、原理与排障见[服务限流特性说明](../../features/rate_limiting.md)。字段定义也可参见[motor_coordinator_config](../../configuration/config_reference.md#motor_coordinator_config)中的**rate_limit_config字段**。
 
 ### 虚推健康检查 (Virtual Inference Health Check)
 

@@ -415,7 +415,7 @@ motor_coordinator_config字段配置样例如下所示：
 | key_prefix | string | 头中 Key 的前缀，如`Bearer`。默认值：`Bearer`|
 | skip_paths | array | 不校验 API Key 的路径列表（如 `/metrics`、`/liveness`、`/docs` 等），可自定义 |
 | encryption_algorithm | string | Key 校验使用的加密算法，如 `PBKDF2_SHA256`。默认值：`PBKDF2_SHA256` |
-| **rate_limit_config字段** |-|-|
+| **rate_limit_config字段** | - | 完整配置、原理与排障见[服务限流特性说明](../features/rate_limiting.md) |
 | enable_rate_limit | bool | 是否开启请求限流。可选：`true` / `false`。默认值：`false` |
 | provider |string|限流提供者。simple使用内置令牌桶；OLC使用过载控制库（需额外安装及配置）。|
 | max_requests | int | 限流时间窗口内允许的最大请求数。默认值：`1000` |

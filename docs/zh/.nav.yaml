@@ -37,6 +37,7 @@ nav:
           - 手动扩缩容: user_guide/features/manual_scaling.md
           - 主备倒换: user_guide/features/fault_tolerance/standby.md
           - 链路追踪: user_guide/features/tracing.md
+          - 服务限流: user_guide/features/rate_limiting.md
           - ScaleP2D 故障恢复: user_guide/features/fault_tolerance/scale_p2d.md
           - 容器快照: user_guide/features/container_snapshot.md
           - D2D 权重加载加速: user_guide/features/startup_acceleration.md

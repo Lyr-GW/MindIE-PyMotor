@@ -27,6 +27,7 @@
   - [KV池化能力部署](./features/kv_cache_store/README.md)
   - [KV Cache 亲和性调度](./features/kvcache_affinity.md)
   - [Tracing能力部署](./features/tracing.md)
+  - [服务限流特性](./features/rate_limiting.md)
   - [主备倒换特性](./features/fault_tolerance/standby.md)
   - [手动扩缩容](./features/manual_scaling.md)
   - [日志级别动态调整]()
