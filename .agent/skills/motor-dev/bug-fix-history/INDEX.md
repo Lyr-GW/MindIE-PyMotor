@@ -47,4 +47,5 @@
 
 | 日期 | 模块 | 案例 | 文件 | 关键词 |
 |------|------|------|------|--------|
-| 2026-08-14 | coordinator | 令牌桶空载满桶误报拥堵告警 | `coordinator/rate-limit-congestion-available.md` | rate_limiter, congestion, available, used |
+
+（暂无案例——第一个修复完成后按「新增案例流程」在此追加一行并创建案例文件）

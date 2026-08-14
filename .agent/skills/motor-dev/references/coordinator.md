@@ -206,7 +206,7 @@ Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemo
 | `motor/coordinator/domain/workload_calculator.py` | | Workload demand calculation per role |
 | `motor/coordinator/domain/scheduling_constraint.py` | | Scheduling constraints (incl. precision-probe targeting) |
 | `motor/coordinator/fault_tolerance/` | | Precision sampling / alarm / probe (see Fault Tolerance section) |
-| `motor/coordinator/middleware/` | | `SimpleRateLimitMiddleware` (token bucket). Congestion alarm uses used capacity `max_requests - available` (trigger ≥85%, clear <75%). |
+| `motor/coordinator/middleware/` | | `SimpleRateLimitMiddleware` (token bucket) etc. |
 | `motor/coordinator/tracer/` | | `TracerManager` (OpenTelemetry-style tracing of requests) |
 | `motor/config/coordinator.py` | | `CoordinatorConfig` dataclass with all coordinator ports |
 
