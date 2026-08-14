@@ -133,7 +133,7 @@ MindIE Motor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/com
 | skip_paths | array | 不参与限流统计的路径**前缀**列表（匹配命中即跳过），默认包含 `/liveness`、`/readiness`、`/metrics`、`/docs`、`/redoc`、`/openapi.json`、`/favicon.ico`、`/startup` 等健康检查与文档类接口，可自定义追加。 |
 | error_message | string | 触发限流时返回给客户端的提示文案，默认值：`"too many requests, please try again later"`。 |
 | error_status_code | int | 触发限流时返回的 HTTP 状态码，取值范围 `100`-`599`，默认值：`429`。 |
-| max_request_body_size | float | 请求体大小上限，单位 MB（1 MB = 1024×1024 字节），支持小数（如 `0.5` 表示 0.5 MB），默认值：`0`，即不限制。配置为负数会触发部署校验报错。 |
+| max_request_body_size | float | 请求体大小上限，单位 MB（1 MB = 1024×1024 字节），支持小数（如 `0.5` 表示 0.5 MB）。默认值：`0`，表示不限制。配置为负数会触发部署校验报错，无法启动。 |
 | olc_config_path | string | `provider: "olc"` 时的规则配置目录路径（绝对路径或相对路径）。`provider` 为 `olc` 且开启限流时必填，且目录必须真实存在，否则部署校验会报错。 |
 
 ---
@@ -146,12 +146,12 @@ MindIE Motor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/com
 
 需要特别注意：Coordinator 推理面支持以 `inference_workers_config.num_workers`（默认 `4`）启动多个推理 Worker 进程，每个 Worker 进程独立运行推理服务并各自持有独立的令牌桶，互不共享状态。因此集群实际可承受的总吞吐上限约为 `max_requests × num_workers`，而非单一的 `max_requests`，配置阈值时应结合部署的 Worker 进程数一并考虑。
 
-限流器内置请求拥堵告警，判定依据为限流检查时返回的 `available`（当前剩余令牌数）字段，并与 `max_requests` 的比例阈值比较：
+限流器内置请求拥堵告警，判定依据为令牌桶**已用额度**（`used = max_requests - available`，即容量减去当前剩余令牌数），并与 `max_requests` 的比例阈值比较：
 
-- 当 `available ≥ int(max_requests × 85%)` 时，上报一次拥堵告警事件（`ReqCongestionEvent`，`alarm_id=0xFC001005`，名称 `Coordinator Request Congestion Alarm`，级别 MAJOR，`reason_id=DEALING_WITH_CONGESTION`），告警通过 Controller 接口上报；
-- 当 `available < int(max_requests × 75%)` 时，上报一次恢复事件并复位告警状态。
+- 当 `used ≥ int(max_requests × 85%)` 时，上报一次拥堵告警事件（`ReqCongestionEvent`，`alarm_id=0xFC001005`，名称 `Coordinator Request Congestion Alarm`，级别 MAJOR，`reason_id=DEALING_WITH_CONGESTION`），告警通过 Controller 接口上报；
+- 当 `used < int(max_requests × 75%)` 时，上报一次恢复事件并复位告警状态。
 
-告警状态在单次限流器生命周期内仅记录一次（触发后不会重复上报，需回落到恢复阈值下方后才可再次触发）。
+告警状态在单次限流器生命周期内仅记录一次（触发后不会重复上报，需回落到恢复阈值下方后才可再次触发）。空载或低流量时桶接近满额（`used` 很小），不会误报拥堵。
 
 限流检查逻辑内置了失败兜底（fail-open）：若限流器本身发生异常（`is_allowed` 抛错或中间件处理异常），请求会被默认放行，不会因限流模块故障导致服务整体不可用。
 
@@ -163,7 +163,7 @@ MindIE Motor 支持在 Coordinator 推理面（`/v1/completions`、`/v1/chat/com
 
 ### 内容三：请求体大小限制（max_request_body_size）
 
-`max_request_body_size`（单位 MB，`<= 0` 表示不限制）用于限制请求体大小，该检查在限流检查**之前**执行，被拒绝的请求不会消耗令牌。判定逻辑分两种路径：
+`max_request_body_size`（单位 MB）用于限制请求体大小。默认值 `0` 表示不限制；配置为负数会在部署校验时报错（`max_request_body_size cannot be negative`），服务无法启动。运行时仅当该值大于 `0` 时才执行体大小检查。该检查在限流检查**之前**执行，被拒绝的请求不会消耗令牌。判定逻辑分两种路径：
 
 - 请求带 `Content-Length` 头：直接依据该头判定，超限即拒绝，不预读请求体；
 - 请求无 `Content-Length` 头（如 chunked 传输）：先预读实际请求体并累计字节数，超限即拒绝；未超限时将预读的请求体重放给下游应用。
@@ -221,8 +221,4 @@ Coordinator 支持配置热更新：配置文件变更被监听后，运行中�
 
 7. 请求被返回 `413 request_body_too_large`
 
-   表示请求体大小超过了 `max_request_body_size`（单位 MB，`<= 0` 表示不限制）配置的上限。请调大该配置或精简请求内容。
-
-8. 服务刚启动、流量很小时就出现拥堵告警事件
-
-   当前实现以限流检查时的剩余令牌数 `available` 为判定依据：令牌桶初始为满桶，只要 `available` 不低于 `max_requests × 85%` 即满足拥堵告警的上报条件，因此低流量或空载时反而容易触发。若观察到的告警行为与预期不符，请结合 `available`/`max_requests` 的实际数值与监控告警确认，并可在反馈问题时附上报障信息。
+   表示请求体大小超过了 `max_request_body_size`（单位 MB）配置的上限。默认 `0` 表示不限制；请调大该配置或精简请求内容。负数会在部署校验阶段直接失败，不会进入运行时。

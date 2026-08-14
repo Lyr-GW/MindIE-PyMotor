@@ -153,6 +153,8 @@ class SimpleRateLimiter:
             # Try to consume one token
             allowed = self._bucket.try_consume()
             available = self._bucket.get_available_tokens()
+            # Token-bucket used capacity as a proxy for current request pressure.
+            used = self.max_requests - available
 
             req_congestion_trigger_threshold = int(self.max_requests * DEFAULT_REQ_CONGESTION_TRIGGER_RATIO)
             req_congestion_clear_threshold = int(self.max_requests * DEFAULT_REQ_CONGESTION_CLEAR_RATIO)
@@ -160,22 +162,24 @@ class SimpleRateLimiter:
             from motor.common.alarm.req_congestion_event import ReqCongestionEvent, RequestCongestionReason
             from motor.coordinator.api_client.controller_api_client import ControllerApiClient
 
-            if not self._congestion_alarm_sent and available >= req_congestion_trigger_threshold:
+            if not self._congestion_alarm_sent and used >= req_congestion_trigger_threshold:
                 self._congestion_alarm_sent = True
                 additional_information = (
-                    f"The current number of inference requests in the system is{available},"
-                    f"which is greater than the configured maximum number of requests {self.max_requests}*85%."
+                    f"The current number of inference requests in the system is {used}, "
+                    f"which is greater than or equal to the configured maximum number of requests "
+                    f"{self.max_requests}*85%."
                 )
                 event = ReqCongestionEvent(
                     reason_id=RequestCongestionReason.DEALING_WITH_CONGESTION,
                     additional_information=additional_information,
                 )
                 ControllerApiClient.report_alarms(event.model_dump())
-            elif self._congestion_alarm_sent and available < req_congestion_clear_threshold:
+            elif self._congestion_alarm_sent and used < req_congestion_clear_threshold:
                 self._congestion_alarm_sent = False
                 additional_information = (
-                    f"The current number of inference requests in the system is {available},"
-                    f"which is less than the configured maximum number of requests {self.max_requests}*75%."
+                    f"The current number of inference requests in the system is {used}, "
+                    f"which is less than the configured maximum number of requests "
+                    f"{self.max_requests}*75%."
                 )
                 event = ReqCongestionEvent(
                     reason_id=RequestCongestionReason.DEALING_WITH_CONGESTION,
