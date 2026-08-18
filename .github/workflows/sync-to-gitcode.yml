@@ -1,0 +1,198 @@
+name: Sync to Gitcode
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch: {}
+
+# GitHub-Actions-only files that have no meaning on Gitcode. Their commits
+# would only clutter the Gitcode-side PR diff (and confuse reviewers who
+# don't run GitHub Actions).
+#
+# - On `master`: filter-repo strips them from the rewritten mirror history.
+# - On feature branches: a guard step refuses the sync if a feature commit
+#   touches one of these paths (such changes belong to a master-only PR).
+env:
+  GITCODE_STRIP_PATHS: |
+    .github/workflows/sync-to-gitcode.yml
+    .github/workflows/pull-from-upstream.yml
+    scripts/sync-helpers.sh
+
+  # Identity used when rewriting commit author/committer of feature branches
+  # mirrored to Gitcode. Defaults match the Ascend-side history of LinWei100
+  # so Gitcode displays the correct user. Override either field via repo
+  # secrets `GITCODE_AUTHOR_NAME` / `GITCODE_AUTHOR_EMAIL` if needed.
+  GITCODE_AUTHOR_NAME: ${{ secrets.GITCODE_AUTHOR_NAME != '' && secrets.GITCODE_AUTHOR_NAME || 'LinWei100' }}
+  GITCODE_AUTHOR_EMAIL: ${{ secrets.GITCODE_AUTHOR_EMAIL != '' && secrets.GITCODE_AUTHOR_EMAIL || 'linwei100@huawei.com' }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install git-filter-repo
+        run: |
+          python3 -m pip install --quiet git-filter-repo
+          git filter-repo --version
+
+      - name: Configure git identity (for rebase + amend on feature branches)
+        run: |
+          # Used as committer for rebased commits AND as the new author when we
+          # `git commit --amend --reset-author` each replayed commit below, so
+          # Gitcode shows LinWei100 as both author and committer.
+          git config user.name "${GITCODE_AUTHOR_NAME}"
+          git config user.email "${GITCODE_AUTHOR_EMAIL}"
+
+      # Detect "GitHub-only" feature branches: those whose unique commits
+      # (origin/master..HEAD) modify any path in GITCODE_STRIP_PATHS. Such
+      # branches are by definition not interesting on Gitcode (they tweak
+      # the GitHub Actions sync infrastructure itself), so we skip the
+      # entire sync. Rationale: the alternative (rebase onto Ascend/master)
+      # would always conflict with these paths, and filter-repo'ing them out
+      # would once again rewrite ancestor hashes. A clean skip keeps the
+      # invariant "feature branches mirrored to Gitcode share a base hash
+      # with Ascend/master".
+      - name: Decide sync action for feature branch
+        if: github.ref_name != 'master'
+        id: decide
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          OLD_BASE=$(git merge-base origin/master "${BRANCH}")
+
+          BAD_FILES=()
+          while IFS= read -r p; do
+            [ -z "${p// }" ] && continue
+            if git diff --name-only "${OLD_BASE}" "${BRANCH}" -- "$p" 2>/dev/null | grep -q .; then
+              BAD_FILES+=("$p")
+            fi
+          done <<< "$GITCODE_STRIP_PATHS"
+
+          if [ ${#BAD_FILES[@]} -gt 0 ]; then
+            echo "::notice::Feature branch ${BRANCH} modifies GitHub-only path(s): ${BAD_FILES[*]}. Skipping Gitcode sync (these changes belong to GitHub Actions only)."
+            echo "skip=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "skip=false" >> "${GITHUB_OUTPUT}"
+            echo "OLD_BASE=${OLD_BASE}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      # Replay the feature branch onto Ascend/master so that the resulting
+      # branch shares its base hash with the upstream business master. Without
+      # this step a Gitcode PR (LinWei100:branch → Ascend:master) cannot find
+      # a merge-base because PR #5's filter-repo run rewrote every commit
+      # hash on LinWei100/master, making it diverge from Ascend/master in
+      # hashes despite identical trees.
+      #
+      # Skipped for `master` itself (handled by the dedicated mirror step
+      # below) and for GitHub-only feature branches (decided above).
+      - name: Rebase feature branch onto Ascend/master
+        if: github.ref_name != 'master' && steps.decide.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          OLD_BASE="${{ steps.decide.outputs.OLD_BASE }}"
+
+          git remote add ascend https://gitcode.com/Ascend/MindIE-PyMotor.git
+          if ! git fetch --no-tags ascend master; then
+            echo "::error::Failed to fetch Ascend/master; aborting sync."
+            exit 1
+          fi
+
+          git checkout -B "${BRANCH}"
+
+          NEW_BASE=$(git rev-parse ascend/master)
+          echo "OLD_BASE (merge-base with origin/master): ${OLD_BASE}"
+          echo "NEW_BASE (Ascend/master HEAD):            ${NEW_BASE}"
+          echo "Commits to replay:"
+          git log --oneline "${OLD_BASE}..${BRANCH}" || true
+
+          # `--exec 'git commit --amend --no-edit --reset-author'` runs after
+          # each picked commit is replayed, rewriting both author AND committer
+          # to the current git identity (= GITCODE_AUTHOR_NAME / EMAIL set
+          # earlier). That way Gitcode displays a stable LinWei100 identity on
+          # every mirrored commit instead of "Cursor Agent" / random GitHub
+          # account info.
+          # When Ascend/master advances (e.g. new business commits touching the
+          # same files as a mirrored feature branch), a plain rebase can stop on
+          # conflicts in shared paths like kv_cache_affinity.py. Prefer the
+          # feature replay ("theirs" during rebase) so Gitcode sync keeps moving.
+          if ! git rebase -X theirs --onto ascend/master "${OLD_BASE}" "${BRANCH}" \
+               --exec 'git commit --amend --no-edit --reset-author'; then
+            echo "::error::Rebase of ${BRANCH} onto ascend/master failed (conflict with upstream business commits). Resolve locally and re-push."
+            git rebase --abort || true
+            exit 1
+          fi
+
+          echo "✅ Rebased ${BRANCH} onto ascend/master (${NEW_BASE}) and rewrote author/committer to ${GITCODE_AUTHOR_NAME} <${GITCODE_AUTHOR_EMAIL}>."
+
+      # Master keeps the existing filter-repo behaviour: strip GitHub-only
+      # paths from the mirrored master so Gitcode reviewers don't see them.
+      # NOTE: this rewrites every commit hash on LinWei100/master; that is
+      # intentional and isolated to the mirror — feature branches are no
+      # longer based on LinWei100/master after this PR (they are rebased
+      # onto Ascend/master directly).
+      - name: Strip GitHub-only paths from master (master only)
+        if: github.ref_name == 'master'
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+          git checkout -B "${BRANCH}"
+
+          PATH_ARGS=()
+          PATH_COUNT=0
+          while IFS= read -r p; do
+            [ -z "${p// }" ] && continue
+            PATH_ARGS+=(--path "$p")
+            PATH_COUNT=$((PATH_COUNT + 1))
+          done <<< "$GITCODE_STRIP_PATHS"
+
+          if [ "${PATH_COUNT}" -eq 0 ]; then
+            echo "::notice::No paths to strip; skipping filter-repo."
+            exit 0
+          fi
+          echo "Will strip ${PATH_COUNT} path(s) from ${BRANCH} history."
+
+          # See the original PR #5 design doc for why these flags are needed.
+          git filter-repo \
+            "${PATH_ARGS[@]}" \
+            --invert-paths \
+            --refs "${BRANCH}" \
+            --prune-empty=auto \
+            --force
+
+          echo "Filtered ${PATH_COUNT} path(s) from ${BRANCH} history."
+
+      - name: Push branch to Gitcode
+        if: github.ref_name == 'master' || steps.decide.outputs.skip == 'false'
+        env:
+          GITCODE_TOKEN: ${{ secrets.GITCODE_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${GITHUB_REF_NAME}"
+
+          # filter-repo (master path) deliberately removes the 'origin' remote
+          # to prevent accidental pushes back to GitHub. For feature branches
+          # 'origin' is still present from actions/checkout, but we never push
+          # to it here. Either way, just (re)add a clean gitcode remote.
+          git remote remove gitcode 2>/dev/null || true
+          git remote add gitcode "https://oauth2:${GITCODE_TOKEN}@gitcode.com/LinWei100/MindIE-PyMotor.git"
+          git fetch gitcode 2>/dev/null || true
+
+          # Master mirror is intentionally rewritten; feature branches now
+          # share their base hash with Ascend/master after the rebase step,
+          # but earlier Gitcode tip was likely off-base (filter-repo era), so
+          # we still force-push.
+          git push gitcode "HEAD:refs/heads/${BRANCH}" --force
+          git push gitcode --tags --force || true
+
+          echo "✅ Synced ${BRANCH} → gitcode.com/LinWei100/MindIE-PyMotor"
+
+      - name: Sync skipped (GitHub-only feature branch)
+        if: github.ref_name != 'master' && steps.decide.outputs.skip == 'true'
+        run: |
+          echo "::notice::Feature branch ${GITHUB_REF_NAME} modifies GitHub-only paths; intentionally not pushed to Gitcode."
