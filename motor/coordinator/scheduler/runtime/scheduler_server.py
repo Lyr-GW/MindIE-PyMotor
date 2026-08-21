@@ -37,7 +37,8 @@ from motor.coordinator.domain.circuit_breaker import (
 from motor.coordinator.models.constants import DEFAULT_REQUEST_ID, REQUEST_ID_KEY
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.scheduler.scheduler import Scheduler
-from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
+from motor.coordinator.scheduler import allocate_arbitration
+from motor.coordinator.scheduler.allocate_arbitration import ArbitrationContext
 from motor.coordinator.scheduler.runtime.workload_shm import WorkloadSharedMemoryWriter
 from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
@@ -47,9 +48,7 @@ from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
     SchedulerRequestType,
     SchedulerResponseType,
-    CANDIDATE_POLICY_LOAD_BALANCE,
     CANDIDATE_POLICY_KV_CACHE_AFFINITY,
-    KNOWN_CANDIDATE_POLICIES,
     INSTANCE_CHANGE_TOPIC,
     CIRCUIT_BREAKER_TOPIC,
     pack_send_frames,
@@ -914,6 +913,15 @@ class _SchedulerRequestDispatcher:
                 continue
         return result
 
+    def _arbitration_context(self) -> ArbitrationContext:
+        """Bind this dispatcher's authoritative view into the shared, ZMQ-free arbitration helpers."""
+        return ArbitrationContext(
+            get_available_instances=self._instance_manager.get_available_instances,
+            is_instance_circuit_open=self._is_instance_circuit_open,
+            endpoint_instance_score_weight=self._endpoint_instance_score_weight,
+            is_load_balance_scheduler=self._is_load_balance_scheduler,
+        )
+
     def _select_authoritative_candidate(
         self,
         candidate: tuple[int, int],
@@ -934,32 +942,18 @@ class _SchedulerRequestDispatcher:
         load_weight: float | None = None,
         required_engine_type: str | None = None,
     ) -> tuple[Instance, Endpoint, float] | None:
-        """
-        Select allocation target using SchedulerServer's authoritative workload view.
-
-        Load-balance scans all endpoints cheaply at the current cluster size. KV-cache affinity in
-        unified mode re-ranks EVERY worker-reported endpoint by ``prefill_load_scale*prefill_cost +
-        load_weight*fresh_load`` (a global selection that fuses affinity and the scheduler's fresh
-        load -- the worker already did the affinity math, the scheduler supplies fresh load). Older
-        affinity callers without per-endpoint prefill_cost fall back to "least-loaded among the
-        worker's ranked alternates". Other policies keep the worker-proposed endpoint.
-        """
-        if self._should_scan_global_load_balance(candidate_policy):
-            selected = self._select_global_load_balance_candidate(role, required_engine_type)
-            if selected is not None:
-                return selected
-        if candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY:
-            if affinity_candidates:
-                selected = self._select_affinity_global(
-                    affinity_candidates, role, prefill_load_scale, load_weight, required_engine_type
-                )
-                if selected is not None:
-                    return selected
-            elif len(candidates) > 1:
-                selected = self._select_lowest_load_among_candidates(candidates, role, required_engine_type)
-                if selected is not None:
-                    return selected
-        return self._select_authoritative_candidate(candidate, role, required_engine_type)
+        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
+        return allocate_arbitration.select_authoritative_allocate_candidate(
+            self._arbitration_context(),
+            candidate,
+            candidates,
+            role,
+            candidate_policy,
+            affinity_candidates,
+            prefill_load_scale,
+            load_weight,
+            required_engine_type,
+        )
 
     def _select_affinity_global(
         self,
@@ -969,56 +963,15 @@ class _SchedulerRequestDispatcher:
         load_weight: float | None,
         required_engine_type: str | None = None,
     ) -> tuple[Instance, Endpoint, float] | None:
-        """
-        Global kv_cache_affinity unified selection over EVERY worker-reported endpoint.
-
-        For each candidate, recompute the unified cost with the scheduler's authoritative (fresh)
-        load: ``combined = prefill_load_scale * prefill_cost + load_weight * fresh_load``. Pick the
-        minimum; ties prefer the lower prefill_cost (better affinity). This makes a stale-view burst
-        spread by fresh load while keeping affinity, without the scheduler needing the prompt or a
-        conductor round-trip. The returned score is ``combined`` (the authoritative unified score).
-        """
-        pscale = prefill_load_scale if prefill_load_scale is not None else 1.0
-        lweight = load_weight if load_weight is not None else 1.0
-        best: tuple[Instance, Endpoint, float, float] | None = None  # (..., combined, prefill_cost)
-        for instance_id, endpoint_id, prefill_cost in affinity_candidates:
-            if self._is_instance_circuit_open(instance_id):
-                continue
-            found = self._find_available_instance_endpoint(instance_id, endpoint_id)
-            if found is None:
-                continue
-            instance, endpoint = found
-            if not self._matches_engine_type(instance, required_engine_type):
-                continue
-            try:
-                instance_role = PDRole(instance.role)
-            except ValueError:
-                instance_role = PDRole.ROLE_U
-            if instance_role != role:
-                continue
-            try:
-                load = LoadBalancePolicy.calculate_endpoint_score(
-                    instance,
-                    endpoint,
-                    role=role,
-                    instance_score_weight=self._endpoint_instance_score_weight,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to score affinity candidate instance_id=%s endpoint_id=%s: %s",
-                    instance_id,
-                    endpoint_id,
-                    e,
-                )
-                continue
-            combined = pscale * prefill_cost + lweight * load
-            if best is None:
-                best = (instance, endpoint, combined, prefill_cost)
-            elif combined < best[2] or (combined == best[2] and prefill_cost < best[3]):
-                best = (instance, endpoint, combined, prefill_cost)
-        if best is None:
-            return None
-        return (best[0], best[1], best[2])
+        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
+        return allocate_arbitration.select_affinity_global(
+            self._arbitration_context(),
+            affinity_candidates,
+            role,
+            prefill_load_scale,
+            load_weight,
+            required_engine_type,
+        )
 
     def _select_lowest_load_among_candidates(
         self,
@@ -1026,60 +979,19 @@ class _SchedulerRequestDispatcher:
         role: PDRole,
         required_engine_type: str | None = None,
     ) -> tuple[Instance, Endpoint, float] | None:
-        """
-        Among the worker's affinity-ranked candidates, pick the lowest current endpoint score from
-        the authoritative ledger. The candidate set is already the affinity top-k, so this spreads
-        a burst by fresh load without breaking affinity. Ties keep the earliest (best-affinity) one.
-        """
-        best: tuple[Instance, Endpoint, float] | None = None
-        for cand in candidates:
-            if self._is_instance_circuit_open(cand[0]):
-                continue
-            found = self._find_available_instance_endpoint(*cand)
-            if found is None:
-                continue
-            instance, endpoint = found
-            if not self._matches_engine_type(instance, required_engine_type):
-                continue
-            try:
-                instance_role = PDRole(instance.role)
-            except ValueError:
-                instance_role = PDRole.ROLE_U
-            if instance_role != role:
-                continue
-            try:
-                score = LoadBalancePolicy.calculate_endpoint_score(
-                    instance,
-                    endpoint,
-                    role=role,
-                    instance_score_weight=self._endpoint_instance_score_weight,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to score affinity candidate instance_id=%s endpoint_id=%s: %s",
-                    cand[0],
-                    cand[1],
-                    e,
-                )
-                continue
-            if best is None:
-                best = (instance, endpoint, score)
-            elif score < best[2]:
-                best = (instance, endpoint, score)
-        return best
+        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
+        return allocate_arbitration.select_lowest_load_among_candidates(
+            self._arbitration_context(),
+            candidates,
+            role,
+            required_engine_type,
+        )
 
     def _should_scan_global_load_balance(self, candidate_policy: str | None) -> bool:
         """Return True when candidates were selected by load-balance semantics."""
-        if candidate_policy == CANDIDATE_POLICY_LOAD_BALANCE:
-            return True
-        if candidate_policy in KNOWN_CANDIDATE_POLICIES:
-            return False
-        if candidate_policy is not None:
-            logger.warning(
-                "Unknown allocate candidate_policy=%s; falling back to scheduler_type",
-                candidate_policy,
-            )
-        return self._is_load_balance_scheduler
+        return allocate_arbitration.should_scan_global_load_balance(
+            self._arbitration_context(), candidate_policy
+        )
 
     # ------------------------------------------------------------------
     # Circuit breaker helpers
@@ -1228,27 +1140,10 @@ class _SchedulerRequestDispatcher:
         role: PDRole,
         required_engine_type: str | None = None,
     ) -> tuple[Instance, Endpoint, float] | None:
-        """Select the globally lowest-score endpoint for role from SchedulerServer's local pool.
-
-        Circuit-broken endpoints are filtered so the authoritative re-scan never picks one
-        that the local PUB cache may not yet know about.
-        """
-        instances = [
-            instance
-            for instance in self._instance_manager.get_available_instances(role).values()
-            if self._matches_engine_type(instance, required_engine_type)
-        ]
-        candidates = LoadBalancePolicy.select_endpoint_candidates_from_list(
-            instances,
-            role=role,
-            top_k=1,
-            instance_score_weight=self._endpoint_instance_score_weight,
-            is_blocked=self._is_instance_circuit_open,
+        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
+        return allocate_arbitration.select_global_load_balance_candidate(
+            self._arbitration_context(), role, required_engine_type
         )
-        if not candidates:
-            return None
-        candidate = candidates[0]
-        return (candidate.instance, candidate.endpoint, candidate.score)
 
     def _can_use_worker_top1_fast_path(
         self,
@@ -1284,65 +1179,24 @@ class _SchedulerRequestDispatcher:
         role: PDRole,
         required_engine_type: str | None = None,
     ) -> tuple[Instance, Endpoint, float] | None:
-        """
-        Validate one worker-selected candidate and calculate its current score for observability.
-
-        This is the fast path: when workload_sequence and instance_version match, SchedulerServer
-        only validates the worker-selected endpoint.
-        """
-        instance_id, endpoint_id = candidate
-        if self._is_instance_circuit_open(instance_id):
-            return None
-        found = self._find_available_instance_endpoint(instance_id, endpoint_id)
-        if found is None:
-            return None
-        instance, endpoint = found
-        if not self._matches_engine_type(instance, required_engine_type):
-            return None
-        try:
-            instance_role = PDRole(instance.role)
-        except ValueError:
-            instance_role = PDRole.ROLE_U
-        if instance_role != role:
-            return None
-        try:
-            score = LoadBalancePolicy.calculate_endpoint_score(
-                instance,
-                endpoint,
-                role=role,
-                instance_score_weight=self._endpoint_instance_score_weight,
-            )
-        except Exception as e:
-            logger.warning(
-                "Failed to score fast-path allocate candidate instance_id=%s endpoint_id=%s: %s",
-                instance_id,
-                endpoint_id,
-                e,
-            )
-            return None
-        return (instance, endpoint, score)
+        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
+        return allocate_arbitration.select_valid_candidate(
+            self._arbitration_context(), candidate, role, required_engine_type
+        )
 
     @staticmethod
     def _matches_engine_type(instance: Instance, required_engine_type: str | None) -> bool:
-        if not required_engine_type:
-            return True
-        return str(getattr(instance, "engine_type", "")).strip().lower() == required_engine_type
+        return allocate_arbitration.matches_engine_type(instance, required_engine_type)
 
     def _find_available_instance_endpoint(
         self,
         instance_id: int,
         endpoint_id: int,
     ) -> tuple[Instance, Endpoint] | None:
-        """Find an available instance/endpoint pair in the SchedulerServer local pool."""
-        for role in (PDRole.ROLE_E, PDRole.ROLE_P, PDRole.ROLE_D, PDRole.ROLE_U):
-            instance = self._instance_manager.get_available_instances(role).get(instance_id)
-            if not instance:
-                continue
-            for pod_eps in (instance.endpoints or {}).values():
-                for endpoint in (pod_eps or {}).values():
-                    if endpoint.id == endpoint_id:
-                        return (instance, endpoint)
-        return None
+        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
+        return allocate_arbitration.find_available_instance_endpoint(
+            self._arbitration_context(), instance_id, endpoint_id
+        )
 
 
 # ==================== Transport (ROUTER frontend) ====================
