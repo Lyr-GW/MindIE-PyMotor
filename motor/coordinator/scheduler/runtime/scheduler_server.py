@@ -4,41 +4,36 @@
 # You may obtain a copy of Mulan PSL v2 at:
 #         http://license.coscl.org.cn/MulanPSL2
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
-# WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+# EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
 """
-Async Scheduler standalone process server.
-Uses zmq.asyncio for fully async ZMQ I/O and avoids main-loop serialization bottlenecks.
+Control-plane server owned by the Mgmt process: ZMQ ROUTER + PUB, schema-4 SHM,
+circuit breaker, and precision sampling. Infer Workers CAS-commit on SHM; there
+is no per-request ALLOCATE / UPDATE RPC and no standalone Scheduler process.
+IPC paths remain scheduler_frontend / scheduler_instance_pub (bound by Mgmt).
 """
 
 import asyncio
 import os
 import time
-from collections import OrderedDict
 from typing import Awaitable, Callable
 
 import zmq.asyncio
 import msgspec
 
-from motor.common.resources.endpoint import Endpoint, WorkloadAction, Workload
+from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.http_msg_spec import EventType
 from motor.common.resources.instance import PDRole, Instance
 from motor.common.logger import get_logger
 from motor.config.coordinator import CoordinatorConfig
-from motor.coordinator.domain import (
-    UpdateWorkloadParams,
-)
-from motor.coordinator.domain.workload_calculator import calculate_committed_workload
 from motor.coordinator.domain.circuit_breaker import (
     CircuitBreakerManager,
 )
 from motor.coordinator.models.constants import DEFAULT_REQUEST_ID, REQUEST_ID_KEY
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.scheduler.scheduler import Scheduler
-from motor.coordinator.scheduler import allocate_arbitration
-from motor.coordinator.scheduler.allocate_arbitration import ArbitrationContext
 from motor.coordinator.scheduler.runtime.workload_shm import WorkloadSharedMemoryWriter
 from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
@@ -48,7 +43,6 @@ from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
     SchedulerRequestType,
     SchedulerResponseType,
-    CANDIDATE_POLICY_KV_CACHE_AFFINITY,
     INSTANCE_CHANGE_TOPIC,
     CIRCUIT_BREAKER_TOPIC,
     pack_send_frames,
@@ -69,76 +63,6 @@ _RECOVERY_PROBE_TIMEOUT_SECS = 2.0
 _PROBE_HEALTH_PATH = "/health"
 
 InstanceRefreshCallback = Callable[[EventType, list[Instance]], None | Awaitable[None]]
-
-
-def _create_workload_shared_memory(shared_memory_mod, shm_name: str, shm_size: int):
-    """Create POSIX workload SharedMemory; recover from orphan segment (unclean exit / PID reuse).
-
-    ``mindie_workload_<pid>`` can remain after SIGKILL/OOM; a new process with the same PID then
-    hits FileExistsError on create=True. Unlink the stale name and recreate.
-    """
-    try:
-        return shared_memory_mod.SharedMemory(name=shm_name, create=True, size=shm_size)
-    except FileExistsError:
-        logger.warning(
-            "Workload SHM %s already exists (likely orphan from a prior run or PID reuse); unlinking and recreating",
-            shm_name,
-        )
-        try:
-            stale = shared_memory_mod.SharedMemory(name=shm_name, create=False)
-        except FileNotFoundError:
-            return shared_memory_mod.SharedMemory(name=shm_name, create=True, size=shm_size)
-        try:
-            stale.close()
-            stale.unlink()
-        except Exception as e:
-            logger.error("Failed to unlink stale workload SHM %s: %s", shm_name, e)
-            raise
-        return shared_memory_mod.SharedMemory(name=shm_name, create=True, size=shm_size)
-
-
-# Hot-path scheduling log sampling: ~1% of requests to reduce I/O and CPU at high QPS
-_SCHEDULING_LOG_SAMPLE_RATE = 100
-
-# Upper bound on remembered UPDATE_WORKLOAD operation_ids used for retry de-duplication.
-# The store is a sliding window: once full, the oldest entry is evicted (FIFO), so memory is
-# capped at roughly _MAX * ~200 bytes instead of growing without bound. The cap must exceed the
-# number of distinct operations that can occur between an original request and its retry
-# (~ retry_timeout * peak_throughput); a retry whose id has already been evicted would be applied
-# a second time. No in-repo producer sets operation_id yet, so this stays empty until the
-# idempotency path is wired up.
-_MAX_COMMITTED_UPDATE_WORKLOAD_OPERATIONS = 100_000
-
-# Display string for unknown/hybrid role in logs
-_ROLE_DISPLAY_HYBRID = "hybrid"
-
-# Response data keys for allocate_only / select_and_allocate (avoid duplicate string literals)
-_KEY_INSTANCE = "instance"
-_KEY_ENDPOINT = "endpoint"
-_KEY_SELECTED_SCORE = "selected_score"
-_KEY_WORKLOAD_SEQUENCE = "workload_sequence"
-_KEY_ROLE_WORKLOAD_SEQUENCE = "role_workload_sequence"
-# Allocation demand as a raw float (non-affinity fallback). Affinity recomputes from isl/matched.
-_KEY_WORKLOAD_ACTIVE_TOKENS = "workload_active_tokens"
-_KEY_INSTANCE_VERSION = "instance_version"
-_KEY_FAST_PATH = "fast_path"
-_KEY_CANDIDATE_POLICY = "candidate_policy"
-_KEY_CANDIDATES = "candidates"
-_KEY_COMMITTED_WORKLOAD = "committed_workload"
-_KEY_ISL = "isl"
-_KEY_MATCHED_TOKENS = "matched_tokens"
-# kv_cache_affinity unified global selection: worker sends per-candidate affinity prefill cost
-# plus the two scalars so the scheduler recomputes prefill_load_scale*prefill_cost + load_weight*load.
-_KEY_PREFILL_COST = "prefill_cost"
-_KEY_LOAD_WEIGHT = "load_weight"
-_KEY_PREFILL_LOAD_SCALE = "prefill_load_scale"
-_KEY_REQUIRED_ENGINE_TYPE = "required_engine_type"
-
-
-def _should_log_scheduling_sample(sample_key: str) -> bool:
-    """Return True for ~1/_SCHEDULING_LOG_SAMPLE_RATE of requests (hot-path info sampling)."""
-    return bool(sample_key) and hash(sample_key) % _SCHEDULING_LOG_SAMPLE_RATE == 0
-
 
 # ==================== Serialization (module-level, shared by Server / Broadcaster) ====================
 
@@ -162,8 +86,7 @@ def _instance_from_dict(data: dict) -> Instance | None:
 def _serialize_instance_minimal(instance: Instance | None) -> dict:
     """Serialize minimal fields for select/allocate result (forward and release); reduce ZMQ payload.
 
-    Must keep ``dispatch_capabilities``: ALLOCATE_ONLY responses are rebuilt into Instance on the
-    Worker and used by UnifiedPDRouter._select_coordination_mode (TRIGGER vs HANDOFF).
+    Must keep ``dispatch_capabilities``: Worker rebuilds Instance for UnifiedPDRouter._select_coordination_mode (TRIGGER vs HANDOFF).
     """
     if instance is None:
         return {}
@@ -198,7 +121,8 @@ def _serialize_endpoint_minimal(endpoint: Endpoint | None) -> dict:
 
 class _SchedulerRequestDispatcher:
     """
-    Route by request_type to handlers; holds instance_manager, scheduler, config and callbacks.
+    Control-plane RPC router: GET_AVAILABLE_INSTANCES, circuit-breaker report,
+    and precision sampling. Instance refresh is in-process via apply_refresh.
     """
 
     def __init__(
@@ -220,23 +144,11 @@ class _SchedulerRequestDispatcher:
         self._pub_socket = pub_socket
         self._recovery_timers: dict[int, asyncio.Task] = {}
         self._workload_commit_lock = asyncio.Lock()
-        # Bounded FIFO of committed operation_ids for retry de-dup (oldest evicted when full).
-        self._committed_update_workload_operations: "OrderedDict[str, None]" = OrderedDict()
-        self._endpoint_instance_score_weight = max(
-            0.0,
-            getattr(config.scheduler_config, "endpoint_instance_score_weight", 0.05),
-        )
-        scheduler_type = getattr(config.scheduler_config, "scheduler_type", "")
-        self._is_load_balance_scheduler = getattr(scheduler_type, "value", scheduler_type) == "load_balance"
 
     async def dispatch(self, request: SchedulerRequest) -> SchedulerResponse:
-        """Dispatch request to the appropriate handler (async handlers supported)."""
-        # Scheduler process uses its local InstanceManager for read-only; only Workers use GET_AVAILABLE_INSTANCES here.
+        """Dispatch control-plane request to the appropriate handler."""
         handlers = {
-            SchedulerRequestType.UPDATE_WORKLOAD.value: self._handle_update_workload,
             SchedulerRequestType.GET_AVAILABLE_INSTANCES.value: self._handle_get_available_instances,
-            SchedulerRequestType.REFRESH_INSTANCES.value: self._handle_refresh_instances,
-            SchedulerRequestType.ALLOCATE_ONLY.value: self._handle_allocate_only,
             SchedulerRequestType.CONFIRM_SAMPLE.value: self._handle_confirm_sample,
             SchedulerRequestType.RECORD_PRECISION_RESULT.value: self._handle_record_precision_result,
             SchedulerRequestType.FINISH_PRECISION_ACTION.value: self._handle_finish_precision_action,
@@ -255,104 +167,6 @@ class _SchedulerRequestDispatcher:
             error=f"Unknown request type: {request.request_type}",
         )
 
-    async def _handle_update_workload(self, request: SchedulerRequest) -> SchedulerResponse:
-        instance_id = request.data.get("instance_id")
-        endpoint_id = request.data.get("endpoint_id")
-        role_str = request.data.get("role")
-        req_id = request.data.get("req_id")
-        operation_id = request.data.get("operation_id")
-        workload_action_str = request.data.get("workload_action")
-        workload_change_data = request.data.get("workload_change")
-
-        if instance_id is None or endpoint_id is None:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error="Missing instance_id or endpoint_id in request data",
-            )
-        if not workload_change_data:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error="Missing workload_change in request data",
-            )
-        try:
-            workload_change = Workload.model_validate(workload_change_data)
-        except Exception as e:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error=f"Invalid workload_change format: {e}",
-            )
-        workload_action = WorkloadAction(workload_action_str)
-        role = PDRole(role_str) if role_str else PDRole.ROLE_U
-        params = UpdateWorkloadParams(
-            instance_id=int(instance_id),
-            endpoint_id=int(endpoint_id),
-            role=role,
-            req_id=req_id or "",
-            workload_action=workload_action,
-            workload_change=workload_change,
-            operation_id=str(operation_id) if operation_id else None,
-        )
-        if params.operation_id and params.operation_id in self._committed_update_workload_operations:
-            if self._workload_writer:
-                self._workload_writer.write_single_entry_sync(int(instance_id), int(endpoint_id))
-            logger.info(
-                "UPDATE_WORKLOAD idempotent replay operation_id=%s instance_id=%s endpoint_id=%s "
-                "req_id=%s action=%s scheduler_request_id=%s",
-                params.operation_id,
-                instance_id,
-                endpoint_id,
-                req_id or "",
-                workload_action.value,
-                request.request_id,
-            )
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.SUCCESS,
-                request_id=request.request_id,
-                data={"success": True, "idempotent": True},
-            )
-        success, updated_role, updated_workload = self._scheduler.update_workload_sync(params)
-        if success and params.operation_id:
-            self._remember_committed_operation(params.operation_id)
-        if success:
-            self._write_workload_entry(int(instance_id), int(endpoint_id), updated_role, updated_workload)
-        return SchedulerResponse(
-            response_type=SchedulerResponseType.SUCCESS,
-            request_id=request.request_id,
-            data={"success": success},
-        )
-
-    def _write_workload_entry(
-        self,
-        instance_id: int,
-        endpoint_id: int,
-        role: PDRole | None,
-        workload: Workload | None,
-    ) -> None:
-        """Publish an endpoint's committed workload to SHM.
-
-        A None workload means the scheduling policy does not track workload (no update_workload_sync),
-        so re-read the authoritative absolute from the ledger instead of writing the caller's delta
-        as if it were the endpoint total.
-        """
-        if not self._workload_writer:
-            return
-        if workload is not None:
-            self._workload_writer.write_single_entry_from_workload(instance_id, endpoint_id, role, workload)
-        else:
-            self._workload_writer.write_single_entry_sync(instance_id, endpoint_id)
-
-    def _remember_committed_operation(self, operation_id: str) -> None:
-        """Record a committed operation_id for retry de-dup, evicting the oldest once the cap is hit."""
-        ops = self._committed_update_workload_operations
-        if operation_id in ops:
-            return
-        ops[operation_id] = None
-        if len(ops) > _MAX_COMMITTED_UPDATE_WORKLOAD_OPERATIONS:
-            ops.popitem(last=False)
-
     def _handle_get_available_instances(self, request: SchedulerRequest) -> SchedulerResponse:
         role_str = request.data.get("role")
         role = PDRole(role_str) if role_str else None
@@ -369,23 +183,12 @@ class _SchedulerRequestDispatcher:
             data=data,
         )
 
-    async def _handle_refresh_instances(self, request: SchedulerRequest) -> SchedulerResponse:
-        event_type_str = request.data.get("event_type")
-        instances_data = request.data.get("instances", [])
-        event_type = EventType(event_type_str) if event_type_str else None
-        instances = [_instance_from_dict(d) for d in instances_data]
-        instances = [inst for inst in instances if inst is not None]
-        if not event_type:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error=f"Invalid event type: {event_type_str}",
-            )
+    async def apply_refresh(self, event_type: EventType, instances: list[Instance]) -> bool:
+        """Apply an instance-list change locally: IM + SHM snapshot + PUB (no ZMQ REFRESH)."""
         previously_open_ids: list[int] = []
         async with self._workload_commit_lock:
             changed = await self._instance_manager.refresh_instances(event_type, instances)
             if event_type == EventType.SET:
-                # Snapshot open instances before clearing so workers can be notified.
                 previously_open_ids = self._cb_manager.get_open_instance_ids()
                 self._cb_manager.clear_all()
                 for key, task in list(self._recovery_timers.items()):
@@ -396,8 +199,12 @@ class _SchedulerRequestDispatcher:
                 for inst in instances:
                     self._cb_manager.clear_instance(inst.id)
                     self._cancel_recovery(inst.id)
+                    self._set_blocked(inst.id, False)
             if changed and self._workload_writer:
                 self._workload_writer.write_snapshot()
+            if event_type == EventType.SET:
+                for iid in previously_open_ids:
+                    self._set_blocked(iid, False)
         if changed:
             if self._on_instance_refresh_done:
                 try:
@@ -408,14 +215,21 @@ class _SchedulerRequestDispatcher:
                     logger.warning("Failed to publish instance change: %s", e)
         for iid in previously_open_ids:
             asyncio.create_task(self._publish_circuit_breaker(iid, "closed"))
-        return SchedulerResponse(
-            response_type=SchedulerResponseType.SUCCESS,
-            request_id=request.request_id,
-            data={
-                "message": f"Refreshed {len(instances)} instances",
-                "changed": changed,
-            },
-        )
+        return changed
+
+    def _set_blocked(self, instance_id: int, blocked: bool) -> None:
+        """Mirror circuit-breaker OPEN/CLOSED onto SHM BLOCKED flags (final CAS gate)."""
+        if not self._workload_writer:
+            return
+        try:
+            self._workload_writer.set_blocked(instance_id, blocked)
+        except Exception as e:
+            logger.warning(
+                "Failed to set_blocked instance_id=%d blocked=%s: %s",
+                instance_id,
+                blocked,
+                e,
+            )
 
     async def _handle_confirm_sample(self, request: SchedulerRequest) -> SchedulerResponse:
         """Cross-worker precision sampling exit gate (per PD group, interval in request data)."""
@@ -628,11 +442,13 @@ class _SchedulerRequestDispatcher:
         if event == "failure":
             should_trip, timeout = self._cb_manager.process_failure(instance_id)
             if should_trip:
+                self._set_blocked(instance_id, True)
                 self._schedule_recovery(instance_id, timeout)
                 await self._publish_circuit_breaker(instance_id, "open")
         elif event == "success":
             recovered = self._cb_manager.process_success(instance_id)
             if recovered:
+                self._set_blocked(instance_id, False)
                 self._cancel_recovery(instance_id)
                 await self._publish_circuit_breaker(instance_id, "closed")
         else:
@@ -648,358 +464,9 @@ class _SchedulerRequestDispatcher:
             data={},
         )
 
-    async def _handle_allocate_only(self, request: SchedulerRequest) -> SchedulerResponse:
-        """
-        Worker proposes one endpoint; Scheduler authoritatively commits one workload allocation.
-        """
-        instance_id = request.data.get("instance_id")
-        endpoint_id = request.data.get("endpoint_id")
-        req_id = request.data.get("req_id", "")
-        workload_data = request.data.get("workload")
-        workload_active_tokens = request.data.get(_KEY_WORKLOAD_ACTIVE_TOKENS)
-        role_str = request.data.get("role")
-        worker_workload_sequence = self._parse_optional_int(request.data.get(_KEY_WORKLOAD_SEQUENCE))
-        worker_role_workload_sequence = self._parse_optional_int(request.data.get(_KEY_ROLE_WORKLOAD_SEQUENCE))
-        worker_instance_version = self._parse_optional_int(request.data.get(_KEY_INSTANCE_VERSION))
-        candidate_policy = request.data.get(_KEY_CANDIDATE_POLICY)
-        worker_load_weight = self._parse_optional_float(request.data.get(_KEY_LOAD_WEIGHT))
-        worker_prefill_load_scale = self._parse_optional_float(request.data.get(_KEY_PREFILL_LOAD_SCALE))
-        isl = self._parse_optional_float(request.data.get(_KEY_ISL))
-        required_engine_type = str(request.data.get(_KEY_REQUIRED_ENGINE_TYPE) or "").strip().lower() or None
-
-        if instance_id is None or endpoint_id is None:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error="Missing instance_id or endpoint_id in request data",
-            )
-        if workload_active_tokens is None and not workload_data and isl is None:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error="Missing workload in request data",
-            )
-        try:
-            if workload_active_tokens is not None:
-                worker_demand = Workload(active_tokens=float(workload_active_tokens))
-            elif workload_data:
-                worker_demand = Workload.model_validate(workload_data)
-            else:
-                worker_demand = Workload()
-        except Exception as e:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.ERROR,
-                request_id=request.request_id,
-                error=f"Invalid workload format: {e}",
-            )
-        role = PDRole(role_str) if role_str in ("encode", "prefill", "decode", "union", "both") else PDRole.ROLE_U
-        selected_candidate = self._extract_allocate_candidate(request.data)
-        if selected_candidate is None:
-            logger.warning(
-                "ALLOCATE_ONLY has no valid endpoint req_id=%s instance_id=%s endpoint_id=%s",
-                req_id,
-                instance_id,
-                endpoint_id,
-            )
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.SUCCESS,
-                request_id=request.request_id,
-                data={_KEY_INSTANCE: None, _KEY_ENDPOINT: None},
-            )
-        # Worker-proposed alternates (affinity-ranked, best-first); the authoritative path may
-        # re-pick among them by fresh load. Falls back to the single top-1 for legacy callers.
-        selected_candidates = self._extract_allocate_candidates(request.data) or [selected_candidate]
-        # kv_cache_affinity unified mode: every endpoint with its affinity-discounted prefill cost,
-        # for a global re-rank by the scheduler's fresh load. Empty for other policies/modes.
-        affinity_candidates = self._extract_affinity_candidates(request.data)
-        matched_tokens_map = self._extract_candidate_matched_tokens(request.data)
-        fast_path = self._can_use_worker_top1_fast_path(
-            worker_workload_sequence,
-            worker_role_workload_sequence,
-            worker_instance_version,
-            role,
-        )
-        selected = (
-            self._select_valid_candidate(selected_candidate, role, required_engine_type)
-            if fast_path
-            else self._select_authoritative_allocate_candidate(
-                selected_candidate,
-                selected_candidates,
-                role,
-                candidate_policy,
-                affinity_candidates,
-                worker_prefill_load_scale,
-                worker_load_weight,
-                required_engine_type,
-            )
-        )
-        if fast_path and selected is None:
-            selected = self._select_authoritative_allocate_candidate(
-                selected_candidate,
-                selected_candidates,
-                role,
-                candidate_policy,
-                affinity_candidates,
-                worker_prefill_load_scale,
-                worker_load_weight,
-                required_engine_type,
-            )
-            fast_path = False
-        if selected is None:
-            logger.warning(
-                "ALLOCATE_ONLY endpoint unavailable req_id=%s candidate=%s",
-                req_id,
-                selected_candidate,
-            )
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.SUCCESS,
-                request_id=request.request_id,
-                data={_KEY_INSTANCE: None, _KEY_ENDPOINT: None},
-            )
-        instance, endpoint, selected_score = selected
-        selected_matched = matched_tokens_map.get((instance.id, endpoint.id), 0.0)
-        if (
-            candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY
-            and isl is not None
-            and role in (PDRole.ROLE_P, PDRole.ROLE_U)
-        ):
-            workload = calculate_committed_workload(
-                role,
-                isl,
-                matched_tokens=selected_matched,
-            )
-        else:
-            # Non-affinity path (and non-P/U roles, e.g. pinned decode allocation arriving with
-            # the affinity policy attached): commit the worker-computed demand as-is.
-            workload = worker_demand
-        params = UpdateWorkloadParams(
-            instance_id=instance.id,
-            endpoint_id=endpoint.id,
-            role=role,
-            req_id=req_id,
-            workload_action=WorkloadAction.ALLOCATION,
-            workload_change=workload,
-        )
-        success, updated_role, updated_workload = self._scheduler.update_workload_sync(params)
-        if success:
-            self._write_workload_entry(instance.id, endpoint.id, updated_role, updated_workload)
-
-        if not success:
-            return SchedulerResponse(
-                response_type=SchedulerResponseType.SUCCESS,
-                request_id=request.request_id,
-                data={_KEY_INSTANCE: None, _KEY_ENDPOINT: None},
-            )
-        instance_data = _serialize_instance_minimal(instance) if instance else None
-        endpoint_data = _serialize_endpoint_minimal(endpoint) if endpoint else None
-        if _should_log_scheduling_sample(req_id or request.request_id):
-            logger.info(
-                "ALLOCATE_ONLY req_id=%s ins=%s ep=%s score=%.4f committed=%.2f matched=%.2f fast_path=%s",
-                req_id,
-                instance.id,
-                endpoint.id,
-                selected_score,
-                workload.active_tokens,
-                selected_matched,
-                fast_path,
-            )
-        return SchedulerResponse(
-            response_type=SchedulerResponseType.SUCCESS,
-            request_id=request.request_id,
-            data={
-                _KEY_INSTANCE: instance_data,
-                _KEY_ENDPOINT: endpoint_data,
-                _KEY_SELECTED_SCORE: selected_score,
-                _KEY_FAST_PATH: fast_path,
-                _KEY_COMMITTED_WORKLOAD: workload.model_dump(mode="json"),
-            },
-        )
-
-    @staticmethod
-    def _parse_optional_int(value) -> int | None:
-        """Parse optional integer request field."""
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _parse_optional_float(value) -> float | None:
-        """Parse optional float request field."""
-        if value is None:
-            return None
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _extract_affinity_candidates(data: dict) -> list[tuple[int, int, float]]:
-        """
-        Parse the worker's full kv_cache_affinity unified candidate set: every scored endpoint with
-        its affinity-discounted ``prefill_cost``. Empty when the field is absent (other policies, or
-        load_gated, which omit prefill_cost). Entries missing a numeric prefill_cost are skipped.
-        """
-        raw = data.get(_KEY_CANDIDATES)
-        result: list[tuple[int, int, float]] = []
-        if not isinstance(raw, list):
-            return result
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            instance_id = item.get("instance_id")
-            endpoint_id = item.get("endpoint_id")
-            prefill_cost = item.get(_KEY_PREFILL_COST)
-            if instance_id is None or endpoint_id is None or prefill_cost is None:
-                continue
-            try:
-                result.append((int(instance_id), int(endpoint_id), float(prefill_cost)))
-            except (TypeError, ValueError):
-                continue
-        return result
-
-    @staticmethod
-    def _extract_candidate_matched_tokens(data: dict) -> dict[tuple[int, int], float]:
-        """Parse per-candidate matched_tokens for authoritative ISL-matched commit."""
-        raw = data.get(_KEY_CANDIDATES)
-        result: dict[tuple[int, int], float] = {}
-        if not isinstance(raw, list):
-            return result
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            instance_id = item.get("instance_id")
-            endpoint_id = item.get("endpoint_id")
-            matched = item.get(_KEY_MATCHED_TOKENS)
-            if instance_id is None or endpoint_id is None or matched is None:
-                continue
-            try:
-                result[(int(instance_id), int(endpoint_id))] = float(matched)
-            except (TypeError, ValueError):
-                continue
-        return result
-
-    @staticmethod
-    def _extract_allocate_candidate(data: dict) -> tuple[int, int] | None:
-        """Parse selected endpoint id from top-level request fields."""
-        instance_id = data.get("instance_id")
-        endpoint_id = data.get("endpoint_id")
-        if instance_id is not None and endpoint_id is not None:
-            try:
-                return (int(instance_id), int(endpoint_id))
-            except (TypeError, ValueError):
-                return None
-        return None
-
-    @staticmethod
-    def _extract_allocate_candidates(data: dict) -> list[tuple[int, int]]:
-        """Parse the worker's ranked alternate endpoints (best-first); empty when absent."""
-        raw = data.get(_KEY_CANDIDATES)
-        result: list[tuple[int, int]] = []
-        if not isinstance(raw, list):
-            return result
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            instance_id = item.get("instance_id")
-            endpoint_id = item.get("endpoint_id")
-            if instance_id is None or endpoint_id is None:
-                continue
-            try:
-                result.append((int(instance_id), int(endpoint_id)))
-            except (TypeError, ValueError):
-                continue
-        return result
-
-    def _arbitration_context(self) -> ArbitrationContext:
-        """Bind this dispatcher's authoritative view into the shared, ZMQ-free arbitration helpers."""
-        return ArbitrationContext(
-            get_available_instances=self._instance_manager.get_available_instances,
-            is_instance_circuit_open=self._is_instance_circuit_open,
-            endpoint_instance_score_weight=self._endpoint_instance_score_weight,
-            is_load_balance_scheduler=self._is_load_balance_scheduler,
-        )
-
-    def _select_authoritative_candidate(
-        self,
-        candidate: tuple[int, int],
-        role: PDRole,
-        required_engine_type: str | None = None,
-    ) -> tuple[Instance, Endpoint, float] | None:
-        """Select the best candidate using SchedulerServer's current workload ledger."""
-        return self._select_valid_candidate(candidate, role, required_engine_type)
-
-    def _select_authoritative_allocate_candidate(
-        self,
-        candidate: tuple[int, int],
-        candidates: list[tuple[int, int]],
-        role: PDRole,
-        candidate_policy: str | None,
-        affinity_candidates: list[tuple[int, int, float]] | None = None,
-        prefill_load_scale: float | None = None,
-        load_weight: float | None = None,
-        required_engine_type: str | None = None,
-    ) -> tuple[Instance, Endpoint, float] | None:
-        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
-        return allocate_arbitration.select_authoritative_allocate_candidate(
-            self._arbitration_context(),
-            candidate,
-            candidates,
-            role,
-            candidate_policy,
-            affinity_candidates,
-            prefill_load_scale,
-            load_weight,
-            required_engine_type,
-        )
-
-    def _select_affinity_global(
-        self,
-        affinity_candidates: list[tuple[int, int, float]],
-        role: PDRole,
-        prefill_load_scale: float | None,
-        load_weight: float | None,
-        required_engine_type: str | None = None,
-    ) -> tuple[Instance, Endpoint, float] | None:
-        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
-        return allocate_arbitration.select_affinity_global(
-            self._arbitration_context(),
-            affinity_candidates,
-            role,
-            prefill_load_scale,
-            load_weight,
-            required_engine_type,
-        )
-
-    def _select_lowest_load_among_candidates(
-        self,
-        candidates: list[tuple[int, int]],
-        role: PDRole,
-        required_engine_type: str | None = None,
-    ) -> tuple[Instance, Endpoint, float] | None:
-        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
-        return allocate_arbitration.select_lowest_load_among_candidates(
-            self._arbitration_context(),
-            candidates,
-            role,
-            required_engine_type,
-        )
-
-    def _should_scan_global_load_balance(self, candidate_policy: str | None) -> bool:
-        """Return True when candidates were selected by load-balance semantics."""
-        return allocate_arbitration.should_scan_global_load_balance(
-            self._arbitration_context(), candidate_policy
-        )
-
     # ------------------------------------------------------------------
     # Circuit breaker helpers
     # ------------------------------------------------------------------
-
-    def _is_instance_circuit_open(self, instance_id: int) -> bool:
-        """Check if an instance is currently circuit-broken (blocked from scheduling)."""
-        return self._cb_manager.is_open(instance_id)
 
     def _schedule_recovery(self, instance_id: int, timeout: float) -> None:
         """Schedule an auto-recovery timer for a tripped instance."""
@@ -1027,6 +494,7 @@ class _SchedulerRequestDispatcher:
         try:
             recovered = self._cb_manager.auto_recover(instance_id)
             if recovered:
+                self._set_blocked(instance_id, False)
                 await self._publish_circuit_breaker(instance_id, "closed")
         finally:
             # Only remove our own entry: a concurrent _schedule_recovery may have
@@ -1045,6 +513,7 @@ class _SchedulerRequestDispatcher:
             )
             # Not schedulable: nothing to protect; _auto_recover stops on process_probe_failure() == None.
             self._cb_manager.clear_instance(instance_id)
+            self._set_blocked(instance_id, False)
             await self._publish_circuit_breaker(instance_id, "closed")
             return False
         endpoints = instance.get_all_endpoints()
@@ -1135,72 +604,6 @@ class _SchedulerRequestDispatcher:
                 e,
             )
 
-    def _select_global_load_balance_candidate(
-        self,
-        role: PDRole,
-        required_engine_type: str | None = None,
-    ) -> tuple[Instance, Endpoint, float] | None:
-        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
-        return allocate_arbitration.select_global_load_balance_candidate(
-            self._arbitration_context(), role, required_engine_type
-        )
-
-    def _can_use_worker_top1_fast_path(
-        self,
-        worker_workload_sequence: int | None,
-        worker_role_workload_sequence: int | None,
-        worker_instance_version: int | None,
-        role: PDRole | None,
-    ) -> bool:
-        """Return True when worker selected from the exact SchedulerServer workload view."""
-        if not self._workload_writer:
-            return False
-        scheduler_role_sequence = (
-            self._workload_writer.role_sequence(role)
-            if role is not None and hasattr(self._workload_writer, "role_sequence")
-            else None
-        )
-        if scheduler_role_sequence is not None and worker_role_workload_sequence is not None:
-            return (
-                worker_instance_version is not None
-                and worker_role_workload_sequence == scheduler_role_sequence
-                and worker_instance_version == self._workload_writer.instance_version
-            )
-        return (
-            worker_workload_sequence is not None
-            and worker_instance_version is not None
-            and worker_workload_sequence == self._workload_writer.sequence
-            and worker_instance_version == self._workload_writer.instance_version
-        )
-
-    def _select_valid_candidate(
-        self,
-        candidate: tuple[int, int],
-        role: PDRole,
-        required_engine_type: str | None = None,
-    ) -> tuple[Instance, Endpoint, float] | None:
-        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
-        return allocate_arbitration.select_valid_candidate(
-            self._arbitration_context(), candidate, role, required_engine_type
-        )
-
-    @staticmethod
-    def _matches_engine_type(instance: Instance, required_engine_type: str | None) -> bool:
-        return allocate_arbitration.matches_engine_type(instance, required_engine_type)
-
-    def _find_available_instance_endpoint(
-        self,
-        instance_id: int,
-        endpoint_id: int,
-    ) -> tuple[Instance, Endpoint] | None:
-        """Delegate to the shared ZMQ-free arbitration (see allocate_arbitration)."""
-        return allocate_arbitration.find_available_instance_endpoint(
-            self._arbitration_context(), instance_id, endpoint_id
-        )
-
-
-# ==================== Transport (ROUTER frontend) ====================
-
 
 class _SchedulerFrontendTransport:
     """
@@ -1247,36 +650,36 @@ class _SchedulerFrontendTransport:
 
 class AsyncSchedulerServer:
     """
-    Fully async Scheduler Server (zmq.asyncio).
+    Control plane (ZMQ ROUTER + PUB + schema-4 SHM). Owned by Mgmt; Infer Workers
+    attach to the same IPC addresses and SHM name advertised via GET_AVAILABLE_INSTANCES.
     """
 
     def __init__(
         self,
         config: CoordinatorConfig,
         frontend_address: str = "ipc:///tmp/scheduler_frontend",
+        *,
+        instance_manager: InstanceManager | None = None,
     ):
         """
         Args:
             config: Coordinator config
-            frontend_address: Frontend address (receives API Server process requests, IPC)
+            frontend_address: ROUTER bind address (Worker/Obs DEALER)
+            instance_manager: Injected Mgmt InstanceManager (TYPE_MGMT). If omitted,
+                a new InstanceManager is created (tests / standalone).
         """
         self.config = config
         self.frontend_address = frontend_address
 
-        # Scheduler process holds InstanceManager and Scheduler (single source of truth)
-        self.instance_manager = InstanceManager(config)
+        self.instance_manager = instance_manager if instance_manager is not None else InstanceManager(config)
         self.scheduler = Scheduler(instance_provider=self.instance_manager, config=config)
 
-        # Async ZMQ context and sockets
         self.context: zmq.asyncio.Context | None = None
         self._transport: _SchedulerFrontendTransport | None = None
 
-        # Background task refs
         self._active_tasks: set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
 
-        # Serializer (instance-level, shared by all tasks for cache reuse)
-        # Encode/decode locks separate so encode and decode can run concurrently
         from motor.coordinator.scheduler.runtime.zmq_protocol import (
             ZMQMessageSerializer,
         )
@@ -1285,22 +688,35 @@ class AsyncSchedulerServer:
         self._encode_lock = asyncio.Lock()
         self._decode_lock = asyncio.Lock()
 
-        # Dispatch timeout to avoid thread-pool exhaustion from long blocks
         self._dispatch_timeout = 5.0
 
-        # Set in start() (G.CLS.08: declare in __init__)
         self._dispatcher: _SchedulerRequestDispatcher | None = None
-        self._workload_shm = None
         self._workload_writer: WorkloadSharedMemoryWriter | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._pub_socket: zmq.asyncio.Socket | None = None
         self._cb_manager: CircuitBreakerManager | None = None
+        self._loop_task: asyncio.Task | None = None
+
+    async def apply_refresh(self, event_type: EventType, instances: list[Instance]) -> bool:
+        """In-process instance refresh (HTTP /instances/refresh). Returns whether membership changed."""
+        if self._dispatcher is None:
+            logger.warning("apply_refresh called before control plane started")
+            return False
+        return await self._dispatcher.apply_refresh(event_type, instances)
 
     async def stop(self):
-        """Stop the async server."""
-        logger.info("Stopping async scheduler server...")
+        """Stop the control plane (ROUTER, PUB, SHM, heartbeat, probe timers)."""
+        logger.info("Stopping control plane...")
 
         self._stop_event.set()
+
+        if self._loop_task and not self._loop_task.done() and self._loop_task is not asyncio.current_task():
+            self._loop_task.cancel()
+            try:
+                await self._loop_task
+            except asyncio.CancelledError:
+                pass
+            self._loop_task = None
 
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
@@ -1310,31 +726,23 @@ class AsyncSchedulerServer:
                 pass
             self._heartbeat_task = None
 
-        # Wait for all active request-handling tasks to finish
         if self._active_tasks:
             logger.info(
                 "Waiting for %s active request tasks to complete...",
                 len(self._active_tasks),
             )
-            # Cancel all unfinished tasks
             for task in self._active_tasks:
                 if not task.done():
                     task.cancel()
-            # Wait for all tasks (including cancelled)
             await asyncio.gather(*self._active_tasks, return_exceptions=True)
             self._active_tasks.clear()
 
-        # Close shared memory (release writer's buffer first to avoid BufferError: exported pointers exist)
         if self._workload_writer:
-            self._workload_writer.release()
-            self._workload_writer = None
-        if self._workload_shm:
             try:
-                self._workload_shm.close()
-                self._workload_shm.unlink()
+                self._workload_writer.release()
             except Exception as e:
-                logger.warning("Error closing workload shared memory: %s", e)
-            self._workload_shm = None
+                logger.warning("Error releasing workload writer: %s", e)
+            self._workload_writer = None
         if self._dispatcher is not None:
             for key, task in list(self._dispatcher._recovery_timers.items()):
                 if not task.done():
@@ -1354,19 +762,17 @@ class AsyncSchedulerServer:
             await self._transport.disconnect()
         if self.context:
             try:
-                # term() is synchronous on zmq.asyncio.Context; do not await.
                 self.context.term()
             except Exception as e:
                 logger.warning("Error terminating context: %s", e)
+            self.context = None
 
-        logger.info("Async scheduler server stopped")
+        logger.info("Control plane stopped")
 
-    async def start(self):
-        """Start the async Scheduler server."""
-        from multiprocessing import shared_memory
-        from motor.coordinator.scheduler.runtime.workload_shm import total_size
+    async def start_control_plane(self) -> None:
+        """Bind ROUTER+PUB, create schema-4 SHM, start heartbeat and dispatcher. Does not recv-loop."""
+        self._stop_event = asyncio.Event()
 
-        # Create async ZMQ context and ROUTER transport
         self.context = zmq.asyncio.Context()
         self._transport = _SchedulerFrontendTransport(self.context)
         await self._transport.bind(self.frontend_address)
@@ -1379,17 +785,14 @@ class AsyncSchedulerServer:
             self._pub_socket.bind(instance_pub_address)
             logger.info("Instance change PUB bound: %s", instance_pub_address)
 
-        max_entries = DEFAULT_WORKLOAD_SHM_MAX_ENTRIES
         shm_name = f"mindie_workload_{os.getpid()}"
-        shm_size = total_size(max_entries)
-        self._workload_shm = _create_workload_shared_memory(shared_memory, shm_name, shm_size)
         self._workload_writer = WorkloadSharedMemoryWriter(
-            self._workload_shm,
             self.instance_manager,
-            max_entries=max_entries,
+            max_entries=DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
+            shm_name=shm_name,
         )
         self._workload_writer.write_snapshot()
-        logger.info("Workload shared memory enabled: %s (%d entries)", shm_name, max_entries)
+        logger.info("Workload shared memory enabled: %s", shm_name)
 
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
@@ -1405,9 +808,15 @@ class AsyncSchedulerServer:
             pub_socket=self._pub_socket,
         )
 
-        logger.info("Async scheduler server started, frontend: %s", self.frontend_address)
+        logger.info("Control plane started, frontend: %s", self.frontend_address)
 
-        # Async main loop (fully non-blocking)
+    async def run_request_loop(self) -> None:
+        """Serve DEALER requests until stop(). Used by Mgmt lifespan as a background task."""
+        await self._run_async_loop()
+
+    async def start(self):
+        """Standalone entry: start control plane then block on the recv loop."""
+        await self.start_control_plane()
         try:
             await self._run_async_loop()
         except KeyboardInterrupt:
@@ -1445,7 +854,7 @@ class AsyncSchedulerServer:
         }
 
     async def _heartbeat_loop(self) -> None:
-        """Write heartbeat to shm every 1s so Infer can detect Scheduler restart (stale = no change)."""
+        """Write heartbeat to shm every 1s so Infer can detect a dead Mgmt control plane (stale = no change)."""
         while not self._stop_event.is_set():
             try:
                 await asyncio.sleep(1.0)
@@ -1459,7 +868,7 @@ class AsyncSchedulerServer:
 
     async def _run_async_loop(self):
         """Async main loop: handle all requests concurrently; main loop never blocks."""
-        logger.info("Async main loop started")
+        logger.info("Control-plane request loop started")
 
         while not self._stop_event.is_set():
             try:
@@ -1492,7 +901,7 @@ class AsyncSchedulerServer:
 
             log_req_id = (request.data or {}).get(REQUEST_ID_KEY) or request.request_id
             logger.debug(
-                "Scheduler request received request_type=%s req_id=%s",
+                "Control-plane request received request_type=%s req_id=%s",
                 request.request_type,
                 log_req_id,
             )
@@ -1508,7 +917,7 @@ class AsyncSchedulerServer:
 
             elapsed_ms = (time.time() - handle_start) * 1000
             logger.debug(
-                "Scheduler request done request_type=%s req_id=%s elapsed_ms=%.1f",
+                "Control-plane request done request_type=%s req_id=%s elapsed_ms=%.1f",
                 request.request_type,
                 log_req_id,
                 elapsed_ms,
@@ -1562,9 +971,6 @@ class AsyncSchedulerServer:
                 logger.error("Error sending error response: %s", e2, exc_info=True)
 
 
-# ==================== Entry points ====================
-
-
 async def run_async_scheduler_server(config: CoordinatorConfig):
     """Run Scheduler server asynchronously (asyncio entry)."""
     # Set process title
@@ -1597,5 +1003,5 @@ def run_async_scheduler_server_proc(config: CoordinatorConfig) -> None:
     asyncio.run(run_async_scheduler_server(config))
 
 
-# Backward compat: scheduler_manager (process/) etc. import SchedulerServer from this module
+# Backward compat alias used by unit tests.
 SchedulerServer = AsyncSchedulerServer

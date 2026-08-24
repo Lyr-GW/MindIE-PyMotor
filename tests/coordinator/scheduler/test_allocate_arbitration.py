@@ -11,11 +11,9 @@
 """
 No-ZMQ arbitration golden tests (design §6.2 / §11.3 / R4).
 
-These mirror the winner semantics of ``test_scheduler_allocate_arbitration.py`` (which drives the
-same logic through the ``ALLOCATE_ONLY`` ZMQ dispatcher) but call the extracted
-``allocate_arbitration`` functions directly with an ``ArbitrationContext``. This is the entry the
-Infer Worker will use after the shared-memory CAS refactor, so it must select the SAME
-(instance, endpoint) as the authoritative path -- with no ZMQ, no dispatcher, no Scheduler process.
+These call the extracted ``allocate_arbitration`` functions directly with an
+``ArbitrationContext``. They must select the SAME (instance, endpoint) as the
+former ALLOCATE_ONLY authoritative path -- with no ZMQ and no dispatcher.
 """
 
 import pytest

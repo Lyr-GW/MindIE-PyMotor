@@ -956,11 +956,13 @@ class TestCoordinatorServerAdvanced:
 
         # Create test server shell (ManagementServer + InferenceServer)
         self.coordinator_server = _TestServerShell(config=coordinator_config)
-        # Replace scheduler connection with mock to avoid ZMQ connection timeout (~15s per call)
-        self.coordinator_server._mgmt._scheduler_connection = MagicMock()
-        self.coordinator_server._mgmt._scheduler_connection.ensure_connected = AsyncMock()
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = None
-        self.coordinator_server._mgmt._scheduler_connection.disconnect = AsyncMock()
+        # Skip real ROUTER/PUB/SHM bind in TestClient lifespan
+        mgmt = self.coordinator_server._mgmt
+        mgmt._start_control_plane = AsyncMock()
+        mgmt._stop_control_plane = AsyncMock()
+        mgmt._control_plane.apply_refresh = AsyncMock(return_value=True)
+        mgmt._control_plane.scheduler = MagicMock()
+        mgmt._control_plane.scheduler.dismiss_precision_alarm_state = AsyncMock(return_value=True)
         self.coordinator_server.setup_rate_limiting()
         # Do not mock _handle_openai_request: let real handler run so validation (400), JSON/decode (500), and
         # _is_available (503) are exercised; handle_request is already patched above for 200 responses.
@@ -1052,9 +1054,9 @@ class TestCoordinatorServerAdvanced:
 
     def test_precision_alarm_cleared_success(self):
         """Test precision alarm clear returns dismissed when scheduler state is cleared."""
-        scheduler_client = MagicMock()
-        scheduler_client.dismiss_precision_alarm_state = AsyncMock(return_value=True)
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = scheduler_client
+        scheduler = MagicMock()
+        scheduler.dismiss_precision_alarm_state = AsyncMock(return_value=True)
+        self.coordinator_server._mgmt._control_plane.scheduler = scheduler
 
         response = self.mgmt_client.post(
             "/precision/alarm_cleared",
@@ -1065,14 +1067,14 @@ class TestCoordinatorServerAdvanced:
         data = response.json()
         assert data["status"] == "success"
         assert data["data"]["dismissed"] is True
-        scheduler_client.dismiss_precision_alarm_state.assert_awaited_once_with(
+        scheduler.dismiss_precision_alarm_state.assert_awaited_once_with(
             p_instance_id=1,
             d_instance_id=2,
         )
 
     def test_precision_alarm_cleared_fails_without_scheduler_client(self):
         """Test precision alarm clear does not report success when scheduler client is unavailable."""
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = None
+        self.coordinator_server._mgmt._control_plane.scheduler = None
 
         response = self.mgmt_client.post(
             "/precision/alarm_cleared",
@@ -1083,9 +1085,9 @@ class TestCoordinatorServerAdvanced:
 
     def test_precision_alarm_cleared_fails_when_scheduler_rejects(self):
         """Test precision alarm clear does not report success when scheduler rejects the request."""
-        scheduler_client = MagicMock()
-        scheduler_client.dismiss_precision_alarm_state = AsyncMock(return_value=False)
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = scheduler_client
+        scheduler = MagicMock()
+        scheduler.dismiss_precision_alarm_state = AsyncMock(return_value=False)
+        self.coordinator_server._mgmt._control_plane.scheduler = scheduler
 
         response = self.mgmt_client.post(
             "/precision/alarm_cleared",

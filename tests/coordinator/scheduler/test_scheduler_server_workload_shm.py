@@ -1,33 +1,40 @@
-# -*- coding: utf-8 -*-
-"""Tests for scheduler workload SharedMemory creation (POSIX orphan recovery)."""
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# MindIE is licensed under Mulan PSL v2.
+
+"""Tests for schema-4 workload SHM create orphan recovery (POSIX)."""
 
 import os
 import sys
 import uuid
-from multiprocessing import shared_memory
 
 import pytest
 
-from motor.coordinator.scheduler.runtime.scheduler_server import _create_workload_shared_memory
+from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_VALID
+from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    NativeWorkloadShmUnavailable,
+    WorkloadShm,
+    load_native_library,
+)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shared_memory orphan semantics differ on Windows")
-def test_create_workload_shm_recovers_from_orphan_segment():
-    """Stale mindie_workload_* from unclean exit causes FileExistsError; helper unlinks and recreates."""
-    name = f"mindie_workload_test_{os.getpid()}_{uuid.uuid4().hex[:8]}"
-    size = 4096
-    orphan = shared_memory.SharedMemory(name=name, create=True, size=size)
-    orphan.close()
-    # Segment may still exist until unlink; create=True must fail
-    with pytest.raises(FileExistsError):
-        shared_memory.SharedMemory(name=name, create=True, size=size)
-
-    recovered = _create_workload_shared_memory(shared_memory, name, size)
+def test_create_v4_recovers_from_orphan_segment():
+    """Stale mindie_workload_* from unclean exit is unlinked and recreated by create_v4."""
     try:
-        assert recovered.size >= size
+        lib = load_native_library()
+    except NativeWorkloadShmUnavailable as e:
+        pytest.skip(f"native workload-shm library not built: {e}")
+
+    name = f"mw{os.getpid()}{uuid.uuid4().hex[:6]}"[:24]
+    first = WorkloadShm.create_v4(name, 8, lib=lib)
+    first.write_snapshot_v4([(1, 10, 0, 0, FLAG_VALID, 1.0)])
+    first.close(unlink=False)
+
+    second = WorkloadShm.create_v4(name, 8, lib=lib)
+    try:
+        second.write_snapshot_v4([(2, 20, 0, 0, FLAG_VALID, 2.0)])
+        entry = second.load_entry(0)
+        assert entry["instance_id"] == 2
+        assert entry["active_tokens"] == 2.0
     finally:
-        recovered.close()
-        try:
-            recovered.unlink()
-        except FileNotFoundError:
-            pass
+        second.close(unlink=True)

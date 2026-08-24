@@ -4,6 +4,7 @@
 """Unit tests for circuit breaker report handler (_handle_circuit_breaker_report)."""
 
 import asyncio
+from unittest.mock import MagicMock
 
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain.circuit_breaker import CircuitBreakerManager
@@ -119,3 +120,23 @@ class TestCircuitBreakerReport:
         resp = _dispatch(dispatcher, _cb_request(1, "failure"))
         assert resp.response_type == SchedulerResponseType.SUCCESS
         assert not cb.is_open(1)
+
+    def test_third_failure_sets_shm_blocked(self):
+        """Trip must mirror OPEN onto SHM BLOCKED so allocate CAS is the final gate."""
+        dispatcher, cb = _make_cb_dispatcher()
+        writer = MagicMock()
+        dispatcher._workload_writer = writer
+        for _ in range(3):
+            _dispatch(dispatcher, _cb_request(1, "failure"))
+        assert cb.is_open(1)
+        writer.set_blocked.assert_called_with(1, True)
+
+    def test_success_recovery_clears_shm_blocked(self):
+        dispatcher, _cb = _make_cb_dispatcher()
+        writer = MagicMock()
+        dispatcher._workload_writer = writer
+        for _ in range(3):
+            _dispatch(dispatcher, _cb_request(1, "failure"))
+        writer.reset_mock()
+        _dispatch(dispatcher, _cb_request(1, "success"))
+        writer.set_blocked.assert_called_with(1, False)

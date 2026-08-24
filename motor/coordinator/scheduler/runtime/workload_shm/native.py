@@ -224,10 +224,16 @@ def load_native_library(path: str | None = None) -> ctypes.CDLL:
 class WorkloadShm:
     """Thin OO wrapper over the C ABI. One instance owns one handle."""
 
-    def __init__(self, lib: ctypes.CDLL, handle: int, *, created: bool):
+    def __init__(self, lib: ctypes.CDLL, handle: int, *, created: bool, name: str = ""):
         self._lib = lib
         self._handle = handle
         self._created = created
+        self._name = name
+
+    @property
+    def name(self) -> str:
+        """POSIX SHM name this handle is attached to."""
+        return self._name
 
     @property
     def handle(self) -> int:
@@ -246,7 +252,7 @@ class WorkloadShm:
         lib = lib or load_native_library()
         handle = ctypes.c_uint64(0)
         _check(lib.mindie_wl_create(name.encode("utf-8"), int(max_entries), ctypes.byref(handle)), "create")
-        return cls(lib, handle.value, created=True)
+        return cls(lib, handle.value, created=True, name=name)
 
     @classmethod
     def create_v4(
@@ -263,7 +269,7 @@ class WorkloadShm:
             lib.mindie_wl_create_v4(name.encode("utf-8"), int(max_entries), ctypes.byref(handle)),
             "create_v4",
         )
-        return cls(lib, handle.value, created=True)
+        return cls(lib, handle.value, created=True, name=name)
 
     @classmethod
     def attach(cls, name: str, *, lib: ctypes.CDLL | None = None) -> "WorkloadShm":
@@ -271,7 +277,7 @@ class WorkloadShm:
         lib = lib or load_native_library()
         handle = ctypes.c_uint64(0)
         _check(lib.mindie_wl_attach(name.encode("utf-8"), ctypes.byref(handle)), "attach")
-        return cls(lib, handle.value, created=False)
+        return cls(lib, handle.value, created=False, name=name)
 
     def snapshot_begin(self) -> None:
         """Mark the segment writer-in-progress (odd seqlock)."""
@@ -349,7 +355,11 @@ class WorkloadShm:
     def cas_add_until_ok(
         self, instance_id: int, endpoint_id: int, generation: int, delta: float, *, max_tries: int = 1000
     ) -> float:
-        """CAS-expected retry loop (design §6.3): re-read fresh value on CHANGED until the add lands.
+        """Test-only: retry the same slot on CHANGED until add lands.
+
+        Production allocate must not call this. On CHANGED the Worker reloads the snapshot and
+        re-runs the same Python scorer / arbitration (design §6 / R4), instead of blindly
+        incrementing a stale candidate.
 
         Raises NativeWorkloadShmError on BLOCKED / SLOT_INVALID (caller drops the candidate).
         """

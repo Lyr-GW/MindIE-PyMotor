@@ -11,15 +11,11 @@
 """
 Workload SHM Writer -> Reader roundtrip contract (design §5 / §11.3).
 
-Unlike ``test_workload_shm_writer.py`` / ``test_workload_shm_reader.py`` (which assert on private
-buffers / patched ``unpack_header``), this drives a real POSIX ``shared_memory`` segment end to end:
-the Writer packs it, the Reader reads it back through ``read_and_patch_cache``. It locks the on-wire
-contract (magic, schema 3, 24B entry stride at offset 64, heartbeat at offset 32, and odd-sequence
-seqlock retry) so a future Rust ``.so`` writer/reader can be validated against the exact same test.
+Drives a real POSIX segment through the schema-4 Rust .so: Writer snapshots membership,
+Reader atomic-loads tokens. Locks magic/schema 4/even seqlock/heartbeat and odd-seqlock retry.
 """
 
-import struct
-from multiprocessing import shared_memory
+import os
 
 import pytest
 
@@ -28,20 +24,14 @@ from motor.common.resources.http_msg_spec import EventType
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain.instance_manager import InstanceManager
-from motor.coordinator.scheduler.runtime.workload_shm.layout import (
-    HEADER_SIZE,
-    HEARTBEAT_OFFSET,
-    MAGIC,
-    SCHEMA_VERSION,
-    WorkloadShmHeader,
-    pack_header,
-    total_size,
-    unpack_header,
+from motor.coordinator.scheduler.runtime.workload_shm.layout import SCHEMA_VERSION
+from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    NativeWorkloadShmUnavailable,
+    WorkloadShm,
+    load_native_library,
 )
 from motor.coordinator.scheduler.runtime.workload_shm.reader import WorkloadSharedMemoryReader
 from motor.coordinator.scheduler.runtime.workload_shm.writer import WorkloadSharedMemoryWriter
-
-_MAX_ENTRIES = 16
 
 
 class _FakeCache:
@@ -91,26 +81,34 @@ async def _populated_manager() -> InstanceManager:
     return im
 
 
-def _new_segment() -> shared_memory.SharedMemory:
-    return shared_memory.SharedMemory(create=True, size=total_size(_MAX_ENTRIES))
+def _unique(tag: str) -> str:
+    return f"mw{os.getpid()}{tag}"[:24]
+
+
+@pytest.fixture
+def native_lib():
+    try:
+        return load_native_library()
+    except NativeWorkloadShmUnavailable as e:
+        pytest.skip(f"native workload-shm library not built: {e}")
+        return None
 
 
 @pytest.mark.asyncio
-async def test_snapshot_roundtrips_header_and_entries():
-    """Writer snapshot -> Reader read_and_patch_cache: header contract + all 24B entries patched."""
+async def test_snapshot_roundtrips_header_and_entries(native_lib):
+    """Writer snapshot -> Reader read_and_patch_cache: schema 4 + all entries patched."""
+    del native_lib
     im = await _populated_manager()
-    shm = _new_segment()
-    writer = WorkloadSharedMemoryWriter(shm, im, max_entries=_MAX_ENTRIES)
-    reader = WorkloadSharedMemoryReader(shm.name)
+    name = _unique("rt")
+    writer = WorkloadSharedMemoryWriter(im, max_entries=16, shm_name=name)
+    reader = WorkloadSharedMemoryReader(name)
     try:
         writer.write_snapshot()
-
-        header = unpack_header(memoryview(shm.buf))
-        assert header.magic == MAGIC
-        assert header.schema_version == SCHEMA_VERSION == 3
-        assert header.sequence % 2 == 0  # stable snapshot
-        assert header.entry_count == 4
-        assert header.instance_version == 1
+        header = writer.native.read_header()
+        assert header["schema_version"] == SCHEMA_VERSION == 4
+        assert header["sequence"] % 2 == 0
+        assert header["entry_count"] == 4
+        assert header["instance_version"] == 1
 
         reader.attach()
         cache = _FakeCache()
@@ -127,108 +125,64 @@ async def test_snapshot_roundtrips_header_and_entries():
     finally:
         reader.detach()
         writer.release()
-        shm.close()
-        shm.unlink()
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_lives_at_offset_32():
-    """write_heartbeat bumps the u64 at byte offset 32 and the Reader observes the change."""
+async def test_heartbeat_is_observed_by_reader(native_lib):
+    """write_heartbeat bumps the header counter; Reader does not treat a fresh writer as stale."""
+    del native_lib
     im = await _populated_manager()
-    shm = _new_segment()
-    writer = WorkloadSharedMemoryWriter(shm, im, max_entries=_MAX_ENTRIES)
-    reader = WorkloadSharedMemoryReader(shm.name)
+    name = _unique("hb")
+    writer = WorkloadSharedMemoryWriter(im, max_entries=16, shm_name=name)
+    reader = WorkloadSharedMemoryReader(name)
     try:
         writer.write_snapshot()
         writer.write_heartbeat()
-
-        raw = struct.unpack("<Q", bytes(memoryview(shm.buf)[HEARTBEAT_OFFSET : HEARTBEAT_OFFSET + 8]))[0]
-        assert raw == 1
-        assert unpack_header(memoryview(shm.buf)).heartbeat_sequence == 1
-
+        assert writer.native.read_header()["heartbeat"] == 1
         reader.attach()
         _, stale = reader.read_and_patch_cache(_FakeCache(), role=None)
         assert stale is False
     finally:
         reader.detach()
         writer.release()
-        shm.close()
-        shm.unlink()
 
 
 @pytest.mark.asyncio
-async def test_odd_sequence_is_rejected_by_reader():
+async def test_odd_sequence_is_rejected_by_reader(native_lib):
     """A writer-in-progress (odd seqlock) snapshot must not be accepted or patched."""
+    del native_lib
     im = await _populated_manager()
-    shm = _new_segment()
-    writer = WorkloadSharedMemoryWriter(shm, im, max_entries=_MAX_ENTRIES)
-    reader = WorkloadSharedMemoryReader(shm.name)
+    name = _unique("od")
+    writer = WorkloadSharedMemoryWriter(im, max_entries=16, shm_name=name)
+    reader = WorkloadSharedMemoryReader(name)
     try:
         writer.write_snapshot()
         reader.attach()
-
-        # Force the on-wire sequence odd (writer mid-update) without a matching even close.
-        stable = unpack_header(memoryview(shm.buf))
-        memoryview(shm.buf)[:HEADER_SIZE] = pack_header(
-            WorkloadShmHeader(
-                magic=stable.magic,
-                schema_version=stable.schema_version,
-                sequence=stable.sequence + 1,  # odd
-                entry_count=stable.entry_count,
-                max_entries=stable.max_entries,
-                instance_version=stable.instance_version,
-                heartbeat_sequence=stable.heartbeat_sequence,
-                prefill_sequence=stable.prefill_sequence,
-                decode_sequence=stable.decode_sequence,
-                hybrid_sequence=stable.hybrid_sequence,
-            )
-        )
-
+        writer.native.snapshot_begin()
         cache = _FakeCache()
         instance_version, stale = reader.read_and_patch_cache(cache, role=None)
         assert instance_version is None
         assert stale is False
         assert cache.patched == {}
+        writer.native.snapshot_commit(4, bump_instance_version=False)
     finally:
         reader.detach()
         writer.release()
-        shm.close()
-        shm.unlink()
 
 
 @pytest.mark.asyncio
-async def test_schema_mismatch_is_refused():
-    """A mismatched schema_version is refused (wrong entry stride would feed garbage loads)."""
-    im = await _populated_manager()
-    shm = _new_segment()
-    writer = WorkloadSharedMemoryWriter(shm, im, max_entries=_MAX_ENTRIES)
-    reader = WorkloadSharedMemoryReader(shm.name)
+async def test_schema_mismatch_is_refused(native_lib):
+    """A schema-3 segment is refused by the schema-4 Reader."""
+    name = _unique("sm")
+    shm = WorkloadShm.create(name, 8, lib=native_lib)
+    reader = WorkloadSharedMemoryReader(name)
     try:
-        writer.write_snapshot()
+        shm.write_snapshot([(1, 10, 0, 7.0)])
         reader.attach()
-
-        stable = unpack_header(memoryview(shm.buf))
-        memoryview(shm.buf)[:HEADER_SIZE] = pack_header(
-            WorkloadShmHeader(
-                magic=stable.magic,
-                schema_version=SCHEMA_VERSION + 1,  # future/unknown schema
-                sequence=stable.sequence,
-                entry_count=stable.entry_count,
-                max_entries=stable.max_entries,
-                instance_version=stable.instance_version,
-                heartbeat_sequence=stable.heartbeat_sequence,
-                prefill_sequence=stable.prefill_sequence,
-                decode_sequence=stable.decode_sequence,
-                hybrid_sequence=stable.hybrid_sequence,
-            )
-        )
-
         cache = _FakeCache()
-        instance_version, stale = reader.read_and_patch_cache(cache, role=None)
+        instance_version, _stale = reader.read_and_patch_cache(cache, role=None)
         assert instance_version is None
         assert cache.patched == {}
     finally:
         reader.detach()
-        writer.release()
-        shm.close()
-        shm.unlink()
+        shm.close(unlink=True)

@@ -16,8 +16,8 @@ from unittest.mock import AsyncMock, Mock, call, patch
 import pytest
 
 from motor.common.resources.instance import Instance, PDRole
-from motor.common.resources.endpoint import Endpoint, Workload, WorkloadAction, EndpointStatus
-from motor.coordinator.domain import InstanceReadiness, UpdateWorkloadParams
+from motor.common.resources.endpoint import Endpoint, Workload, EndpointStatus
+from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
@@ -26,8 +26,6 @@ from motor.coordinator.scheduler.runtime.zmq_protocol import (
 from motor.coordinator.scheduler.runtime.scheduler_client import (
     AsyncSchedulerClient,
     SchedulerClientConfig,
-    SchedulerRequestFailureReason,
-    SchedulerRequestResult,
     _SchedulerInstanceCache,
     _collect_active_endpoints_from_cache,
 )
@@ -446,163 +444,6 @@ class TestAsyncSchedulerClient:
 
         assert [(instance.id, endpoint.id) for instance, endpoint, _ in candidates] == [(2, 2)]
 
-    # -- test_select_and_allocate -------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_select_and_allocate(self):
-        """select_and_allocate returns (Instance, Endpoint, Workload) or None."""
-        mock_inst = Mock(spec=Instance)
-        mock_inst.id = 1
-        mock_ep = Mock(spec=Endpoint)
-        mock_ep.id = 10
-
-        # Setup transport to return success for ALLOCATE_ONLY
-        inst_dict = _build_instance_dict(instance_id=1)
-        ep_dict = _make_endpoint(endpoint_id=10).model_dump(mode="json")
-        self._mock_send_request(
-            SchedulerResponseType.SUCCESS,
-            {"instance": inst_dict, "endpoint": ep_dict},
-        )
-
-        mock_req_info = Mock(spec=RequestInfo)
-        mock_req_info.req_id = "req-alloc"
-        mock_req_info.req_len = 200
-
-        result = await self.client.select_and_allocate(
-            PDRole.ROLE_P,
-            mock_req_info,
-        )
-
-        # Without cached instances or a successful GET_AVAILABLE_INSTANCES, selection may be None.
-        assert result is None or (isinstance(result, tuple) and len(result) == 3)
-
-    @pytest.mark.asyncio
-    async def test_select_and_allocate_no_selection(self):
-        """select_and_allocate returns None when no instance/endpoint available."""
-        # Setup no instances in cache and transport returns empty
-        self.mock_cache.get_instances.return_value = []
-        self._mock_send_request(SchedulerResponseType.SUCCESS, {"instances": []})
-
-        mock_req_info = Mock(spec=RequestInfo)
-        mock_req_info.req_id = "req-none"
-        mock_req_info.req_len = 100
-
-        result = await self.client.select_and_allocate(
-            PDRole.ROLE_P,
-            mock_req_info,
-        )
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_select_and_allocate_transport_failure(self):
-        """select_and_allocate returns None when transport.send_request fails."""
-        mock_inst = Mock(spec=Instance)
-        mock_inst.id = 1
-        mock_ep = Mock(spec=Endpoint)
-        mock_ep.id = 10
-
-        with patch.object(
-            self.client,
-            "_select_endpoint_candidates_with_policy",
-            return_value=([(mock_inst, mock_ep, 0.0)], "round_robin"),
-        ):
-            self.mock_transport.send_request = AsyncMock(return_value=None)
-
-            mock_req_info = Mock(spec=RequestInfo)
-            mock_req_info.req_id = "req-fail"
-            mock_req_info.req_len = 100
-            mock_req_info.kv_affinity_debug = None
-
-            result = await self.client.select_and_allocate(
-                PDRole.ROLE_P,
-                mock_req_info,
-            )
-            assert result is None
-
-    # -- test_update_workload -----------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_update_workload(self):
-        """update_workload returns True on success."""
-        self._mock_send_request(
-            SchedulerResponseType.SUCCESS,
-            {"success": True},
-        )
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=10,
-            role=PDRole.ROLE_P,
-            req_id="req-upd",
-            workload_action=WorkloadAction.ALLOCATION,
-            workload_change=Workload(active_tokens=5.0),
-            operation_id="op-update-workload",
-        )
-
-        result = await self.client.update_workload(params)
-        assert result is True
-        sent_request = self.mock_transport.send_request.await_args.args[0]
-        assert sent_request.data["operation_id"] == "op-update-workload"
-
-    # -- test_update_workload_transport_failure -----------------------------
-
-    @pytest.mark.asyncio
-    async def test_update_workload_transport_failure(self):
-        """update_workload returns False when transport returns None."""
-        self.mock_transport.send_request = AsyncMock(return_value=None)
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=10,
-            role=PDRole.ROLE_P,
-            req_id="req-fail",
-            workload_action=WorkloadAction.ALLOCATION,
-            workload_change=Workload(),
-        )
-
-        result = await self.client.update_workload(params)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_update_workload_response_error(self):
-        """update_workload returns False when scheduler returns error response."""
-        self._mock_send_request(
-            SchedulerResponseType.ERROR,
-            error="Internal server error",
-        )
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=10,
-            role=PDRole.ROLE_P,
-            req_id="req-err",
-            workload_action=WorkloadAction.RELEASE_TOKENS,
-            workload_change=Workload(active_tokens=1.0),
-        )
-
-        result = await self.client.update_workload(params)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_update_workload_success_false(self):
-        """update_workload returns False when scheduler returns success=False."""
-        self._mock_send_request(
-            SchedulerResponseType.SUCCESS,
-            {"success": False},
-        )
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=10,
-            role=PDRole.ROLE_P,
-            req_id="req-bad",
-            workload_action=WorkloadAction.RELEASE_TOKENS,
-            workload_change=Workload(),
-        )
-
-        result = await self.client.update_workload(params)
-        assert result is False
-
     # -- test_get_available_instances ---------------------------------------
 
     @pytest.mark.asyncio
@@ -798,33 +639,6 @@ class TestAsyncSchedulerClient:
         assert decouple == {}
         assert encode == {}
 
-    # -- test_refresh_instances ---------------------------------------------
-
-    @pytest.mark.asyncio
-    async def test_refresh_instances(self):
-        """refresh_instances sends REFRESH_INSTANCES request without error."""
-        self._mock_send_request(
-            SchedulerResponseType.SUCCESS,
-            {"message": "Refreshed 1 instances"},
-        )
-
-        mock_inst = Mock(spec=Instance)
-        mock_inst.model_dump = Mock(return_value={"id": 1, "role": "prefill"})
-
-        await self.client.refresh_instances("ADDED", [mock_inst])
-        self.mock_transport.send_request.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_refresh_instances_error_response(self):
-        """refresh_instances handles error response without raising."""
-        self._mock_send_request(
-            SchedulerResponseType.ERROR,
-            error="Refresh failed",
-        )
-
-        await self.client.refresh_instances("REMOVED", [])
-        self.mock_transport.send_request.assert_awaited_once()
-
     # -- test_on_instance_change_notify ------------------------------------
 
     @pytest.mark.asyncio
@@ -905,53 +719,6 @@ class TestAsyncSchedulerClient:
         result = await self.client.get_available_instances(PDRole.ROLE_P)
         assert result == {}
 
-    @pytest.mark.asyncio
-    async def test_transport_timeout_in_update_workload(self):
-        """When transport returns None (timeout), update_workload returns False."""
-        self.mock_transport.send_request = AsyncMock(return_value=None)
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=1,
-            role=PDRole.ROLE_P,
-            req_id="req-timeout",
-            workload_action=WorkloadAction.ALLOCATION,
-            workload_change=Workload(),
-        )
-
-        result = await self.client.update_workload(params)
-        assert result is False
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "reason",
-        [
-            SchedulerRequestFailureReason.TIMEOUT,
-            SchedulerRequestFailureReason.CANCELLED,
-            SchedulerRequestFailureReason.DISCONNECTED,
-        ],
-    )
-    async def test_update_workload_logs_classified_no_response_reason(self, reason, caplog):
-        """update_workload logs the specific scheduler transport failure reason."""
-        self.client._send_request_result = AsyncMock(
-            return_value=SchedulerRequestResult(failure_reason=reason, error="classified-error")
-        )
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=1,
-            role=PDRole.ROLE_P,
-            req_id=f"req-{reason.value}",
-            workload_action=WorkloadAction.RELEASE_TOKENS,
-            workload_change=Workload(),
-        )
-
-        result = await self.client.update_workload(params)
-
-        assert result is False
-        assert f"reason={reason.value}" in caplog.text
-        assert "classified-error" in caplog.text
-
     # -- test_client_not_connected_operations --------------------------------
 
     @pytest.mark.asyncio
@@ -962,30 +729,3 @@ class TestAsyncSchedulerClient:
 
         result = await self.client.get_available_instances(PDRole.ROLE_P)
         assert result == {}
-
-    @pytest.mark.asyncio
-    async def test_client_not_connected_update_workload(self):
-        """When not connected, update_workload returns False gracefully."""
-        self.mock_transport.connected = False
-        self.mock_transport.send_request = AsyncMock(return_value=None)
-
-        params = UpdateWorkloadParams(
-            instance_id=1,
-            endpoint_id=1,
-            role=PDRole.ROLE_P,
-            req_id="req-nc",
-            workload_action=WorkloadAction.ALLOCATION,
-            workload_change=Workload(),
-        )
-
-        result = await self.client.update_workload(params)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_client_not_connected_refresh_instances(self):
-        """When not connected, refresh_instances handles gracefully (no raise)."""
-        self.mock_transport.connected = False
-        self.mock_transport.send_request = AsyncMock(return_value=None)
-
-        await self.client.refresh_instances("ADDED", [])
-        self.mock_transport.send_request.assert_awaited_once()
