@@ -50,6 +50,16 @@ _STATUS = {
 }
 _STATUS_OK = 0
 
+# Named status codes for CAS control flow (callers branch on these; they are not errors).
+STATUS_OK = 0
+STATUS_CHANGED = 1
+STATUS_BLOCKED = 2
+STATUS_SLOT_INVALID = 3
+
+# Entry flag bits (must match layout.rs / schema 4).
+FLAG_BLOCKED = 0b0000_0001
+FLAG_VALID = 0b0000_0010
+
 _PDROLE_TO_SHM = {
     PDRole.ROLE_E: ROLE_ENCODE,
     PDRole.ROLE_P: ROLE_PREFILL,
@@ -118,6 +128,57 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_uint32),
         ctypes.POINTER(ctypes.c_uint64),
         ctypes.POINTER(ctypes.c_uint64),
+    ]
+    # Schema 4 (per-slot CAS) surface.
+    lib.mindie_wl_create_v4.restype = ctypes.c_int32
+    lib.mindie_wl_create_v4.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64)]
+    lib.mindie_wl_snapshot_write_entry_v4.restype = ctypes.c_int32
+    lib.mindie_wl_snapshot_write_entry_v4.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_uint32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint8,
+        ctypes.c_uint16,
+        ctypes.c_uint8,
+        ctypes.c_double,
+    ]
+    lib.mindie_wl_cas_add.restype = ctypes.c_int32
+    lib.mindie_wl_cas_add.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint16,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    lib.mindie_wl_cas_sub_floor0.restype = ctypes.c_int32
+    lib.mindie_wl_cas_sub_floor0.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_uint16,
+        ctypes.c_double,
+        ctypes.POINTER(ctypes.c_double),
+    ]
+    lib.mindie_wl_set_blocked.restype = ctypes.c_int32
+    lib.mindie_wl_set_blocked.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    lib.mindie_wl_load_entry.restype = ctypes.c_int32
+    lib.mindie_wl_load_entry.argtypes = [
+        ctypes.c_uint64,
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_int32),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(ctypes.c_uint8),
+        ctypes.POINTER(ctypes.c_uint16),
+        ctypes.POINTER(ctypes.c_double),
     ]
     return lib
 
@@ -188,6 +249,23 @@ class WorkloadShm:
         return cls(lib, handle.value, created=True)
 
     @classmethod
+    def create_v4(
+        cls,
+        name: str,
+        max_entries: int = DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
+        *,
+        lib: ctypes.CDLL | None = None,
+    ) -> "WorkloadShm":
+        """Create and own a new schema-4 (per-slot CAS) segment."""
+        lib = lib or load_native_library()
+        handle = ctypes.c_uint64(0)
+        _check(
+            lib.mindie_wl_create_v4(name.encode("utf-8"), int(max_entries), ctypes.byref(handle)),
+            "create_v4",
+        )
+        return cls(lib, handle.value, created=True)
+
+    @classmethod
     def attach(cls, name: str, *, lib: ctypes.CDLL | None = None) -> "WorkloadShm":
         """Attach to an existing segment (does not own unlink)."""
         lib = lib or load_native_library()
@@ -230,6 +308,116 @@ class WorkloadShm:
     def heartbeat(self) -> None:
         """Bump the heartbeat counter (~1/s) so readers can detect a dead writer."""
         _check(self._lib.mindie_wl_heartbeat(self._handle), "heartbeat")
+
+    # ------------------------------------------------------------------
+    # Schema 4: per-slot CAS data plane
+    # ------------------------------------------------------------------
+
+    def write_snapshot_v4(
+        self,
+        entries: list[tuple[int, int, int, int, int, float]],
+        *,
+        bump_instance_version: bool = True,
+    ) -> None:
+        """Write a schema-4 snapshot: (instance_id, endpoint_id, role, generation, flags, tokens)/slot."""
+        self.snapshot_begin()
+        for slot, (iid, eid, role, gen, flags, tokens) in enumerate(entries):
+            _check(
+                self._lib.mindie_wl_snapshot_write_entry_v4(
+                    self._handle, int(slot), int(iid), int(eid), int(role), int(gen), int(flags), float(tokens)
+                ),
+                "snapshot_write_entry_v4",
+            )
+        self.snapshot_commit(len(entries), bump_instance_version=bump_instance_version)
+
+    def cas_add(
+        self, instance_id: int, endpoint_id: int, generation: int, expected: float, delta: float
+    ) -> tuple[int, float]:
+        """Atomic CAS-add. Returns (status, actual): OK (added), CHANGED/BLOCKED/SLOT_INVALID (not)."""
+        actual = ctypes.c_double(0.0)
+        status = self._lib.mindie_wl_cas_add(
+            self._handle,
+            int(instance_id),
+            int(endpoint_id),
+            int(generation),
+            float(expected),
+            float(delta),
+            ctypes.byref(actual),
+        )
+        return status, actual.value
+
+    def cas_add_until_ok(
+        self, instance_id: int, endpoint_id: int, generation: int, delta: float, *, max_tries: int = 1000
+    ) -> float:
+        """CAS-expected retry loop (design §6.3): re-read fresh value on CHANGED until the add lands.
+
+        Raises NativeWorkloadShmError on BLOCKED / SLOT_INVALID (caller drops the candidate).
+        """
+        expected = 0.0
+        for _ in range(max_tries):
+            status, actual = self.cas_add(instance_id, endpoint_id, generation, expected, delta)
+            if status == STATUS_OK:
+                return actual
+            if status == STATUS_CHANGED:
+                expected = actual
+                continue
+            raise NativeWorkloadShmError(
+                f"cas_add refused: status={status} ({_STATUS.get(status, 'Unknown')}) "
+                f"instance_id={instance_id} endpoint_id={endpoint_id}"
+            )
+        raise NativeWorkloadShmError(f"cas_add did not converge after {max_tries} retries")
+
+    def cas_sub_floor0(self, instance_id: int, endpoint_id: int, generation: int, delta: float) -> tuple[int, float]:
+        """Atomic CAS-subtract flooring at 0 (release path). Returns (status, actual)."""
+        actual = ctypes.c_double(0.0)
+        status = self._lib.mindie_wl_cas_sub_floor0(
+            self._handle,
+            int(instance_id),
+            int(endpoint_id),
+            int(generation),
+            float(delta),
+            ctypes.byref(actual),
+        )
+        return status, actual.value
+
+    def set_blocked(self, instance_id: int, blocked: bool) -> int:
+        """Set/clear the BLOCKED flag on all VALID slots of an instance. Returns slots touched."""
+        touched = ctypes.c_uint32(0)
+        _check(
+            self._lib.mindie_wl_set_blocked(self._handle, int(instance_id), 1 if blocked else 0, ctypes.byref(touched)),
+            "set_blocked",
+        )
+        return touched.value
+
+    def load_entry(self, slot: int) -> dict:
+        """Read one schema-4 entry: instance_id, endpoint_id, role, flags, generation, active_tokens."""
+        iid = ctypes.c_int32(0)
+        eid = ctypes.c_int32(0)
+        role = ctypes.c_uint8(0)
+        flags = ctypes.c_uint8(0)
+        generation = ctypes.c_uint16(0)
+        tokens = ctypes.c_double(0.0)
+        _check(
+            self._lib.mindie_wl_load_entry(
+                self._handle,
+                int(slot),
+                ctypes.byref(iid),
+                ctypes.byref(eid),
+                ctypes.byref(role),
+                ctypes.byref(flags),
+                ctypes.byref(generation),
+                ctypes.byref(tokens),
+            ),
+            "load_entry",
+        )
+        return {
+            "instance_id": iid.value,
+            "endpoint_id": eid.value,
+            "role": role.value,
+            "flags": flags.value,
+            "generation": generation.value,
+            "active_tokens": tokens.value,
+        }
 
     def read_header(self) -> dict[str, int]:
         """Read header scalars: schema_version, sequence, entry_count, instance_version, heartbeat."""
