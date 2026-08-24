@@ -48,6 +48,38 @@ pub const ROLE_DECODE: u8 = 1;
 pub const ROLE_HYBRID: u8 = 2;
 pub const ROLE_ENCODE: u8 = 3;
 
+// ---------------------------------------------------------------------------
+// Schema 4 (P2): per-slot atomic CAS layout. Header is unchanged (64B); the schema_version field
+// is 4 and the seqlock now covers only membership changes (token CAS does NOT bump it), so readers
+// must atomic-load tokens on every scoring pass.
+// ---------------------------------------------------------------------------
+
+pub const SCHEMA_VERSION_V4: u16 = 4;
+
+// Entry field byte offsets within a 24-byte slot for schema 4.
+//
+// active_tokens is placed at offset 16 so that, with an 8-aligned segment base and a 24B stride,
+// it is always 8-byte aligned and can host a sound hardware `AtomicU64` CAS (mandatory on
+// aarch64 / Ascend hosts, where a misaligned 8-byte atomic faults).
+//
+// NOTE: design §5.2 lists active_tokens at offset 12; under a 24B stride that is only 4-byte
+// aligned (64 + slot*24 + 12 ≡ 4 mod 8) and cannot host an aligned u64 atomic. We keep every field,
+// the 24B size, and all semantics; only the intra-entry offset of active_tokens/reserved moved.
+pub const ENTRY_V4_OFF_INSTANCE_ID: usize = 0; // i32 (written on snapshot only)
+pub const ENTRY_V4_OFF_ENDPOINT_ID: usize = 4; // i32 (written on snapshot only)
+pub const ENTRY_V4_OFF_ROLE: usize = 8; // u8 (written on snapshot only)
+pub const ENTRY_V4_OFF_FLAGS: usize = 9; // u8, AtomicU8 (BLOCKED / VALID)
+pub const ENTRY_V4_OFF_GENERATION: usize = 10; // u16 (written on snapshot only; ABA guard)
+pub const ENTRY_V4_OFF_RESERVED: usize = 12; // u32
+pub const ENTRY_V4_OFF_ACTIVE_TOKENS: usize = 16; // u64 (f64::to_bits), AtomicU64, 8-aligned
+
+// Entry flags bits.
+pub const FLAG_BLOCKED: u8 = 0b0000_0001; // circuit-breaker OPEN: allocate CAS must refuse
+pub const FLAG_VALID: u8 = 0b0000_0010; // slot holds a live (instance, endpoint)
+
+// Compile-time guarantee that the 8-byte atomic active_tokens fits inside a 24B entry.
+const _: () = assert!(ENTRY_V4_OFF_ACTIVE_TOKENS + 8 <= ENTRY_SIZE);
+
 /// Total segment size in bytes for `max_entries` slots.
 pub fn total_size(max_entries: u32) -> usize {
     HEADER_SIZE + (max_entries as usize) * ENTRY_SIZE
@@ -123,5 +155,18 @@ mod tests {
         assert_eq!(total_size(10240), 64 + 10240 * 24);
         assert_eq!(entry_offset(0), 64);
         assert_eq!(entry_offset(1), 88);
+    }
+
+    #[test]
+    fn schema4_active_tokens_is_8_byte_aligned_for_every_slot() {
+        // A sound AtomicU64 CAS requires the address be 8-aligned on all slots.
+        for slot in 0..1024u32 {
+            let off = entry_offset(slot) + ENTRY_V4_OFF_ACTIVE_TOKENS;
+            assert_eq!(
+                off % 8,
+                0,
+                "slot {slot} active_tokens offset {off} not 8-aligned"
+            );
+        }
     }
 }
