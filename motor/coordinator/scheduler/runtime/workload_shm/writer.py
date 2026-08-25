@@ -72,6 +72,16 @@ def _collect_entries_and_slot_map(instance_manager: InstanceManager, max_entries
     return entries, slot_map
 
 
+def _lowest_free_slot(used: set[int], max_entries: int) -> int | None:
+    """Return the lowest unused slot index, or None if the table is full."""
+    slot = 0
+    while slot in used:
+        slot += 1
+    if slot >= max_entries:
+        return None
+    return slot
+
+
 class WorkloadSharedMemoryWriter:
     """Mgmt-side schema-4 SHM owner. Membership snapshot + heartbeat + BLOCKED flags."""
 
@@ -135,30 +145,52 @@ class WorkloadSharedMemoryWriter:
         """Full membership snapshot. Preserves in-flight tokens and bumps generation on reuse."""
         if self._native is None:
             return
-        entries, self._slot_map = _collect_entries_and_slot_map(self._im, self._max_entries)
+        entries = _collect_entries_and_slot_map(self._im, self._max_entries)[0]
         existing = self._load_existing_pairs()
-        v4: list[tuple[int, int, int, int, int, float]] = []
-        live: set[tuple[int, int]] = set()
+        live: dict[tuple[int, int], tuple[int, float]] = {}
         for iid, eid, role, im_tokens in entries:
-            pair = (iid, eid)
-            live.add(pair)
+            live[(iid, eid)] = (role, im_tokens)
+
+        used: set[int] = set()
+        assignments: dict[tuple[int, int], int] = {}
+        for pair, slot in self._slot_map.items():
+            if pair in live:
+                assignments[pair] = slot
+                used.add(slot)
+
+        for pair in live:
+            if pair in assignments:
+                continue
+            slot = _lowest_free_slot(used, self._max_entries)
+            if slot is None:
+                logger.warning(
+                    "Workload shm max_entries=%d exceeded, truncating new endpoints",
+                    self._max_entries,
+                )
+                continue
+            used.add(slot)
+            assignments[pair] = slot
+
+        n = (max(used) + 1) if used else 0
+        v4: list[tuple[int, int, int, int, int, float]] = [(0, 0, 0, 0, 0, 0.0)] * n
+        for pair, slot in assignments.items():
+            iid, eid = pair
+            role, im_tokens = live[pair]
             if pair in existing:
-                gen, tokens, flags = existing[pair]
+                gen, flags = existing[pair]
                 self._generation[pair] = gen
-                v4.append((iid, eid, role, gen, flags | FLAG_VALID, tokens))
+                # Tokens are Worker-owned; native write_entry_v4 leaves them in place.
+                v4[slot] = (iid, eid, role, gen, flags | FLAG_VALID, 0.0)
             else:
                 gen = self._generation.get(pair, -1) + 1
                 self._generation[pair] = gen
-                v4.append((iid, eid, role, gen, FLAG_VALID, im_tokens))
-        for pair in list(self._generation):
-            if pair not in live:
-                # Keep last generation so a later re-add of the same pair cannot ABA.
-                continue
+                v4[slot] = (iid, eid, role, gen, FLAG_VALID, im_tokens)
+        self._slot_map = assignments
         self._native.write_snapshot_v4(v4, bump_instance_version=True)
 
-    def _load_existing_pairs(self) -> dict[tuple[int, int], tuple[int, float, int]]:
-        """Read current VALID slots: (iid, eid) -> (generation, tokens, flags)."""
-        out: dict[tuple[int, int], tuple[int, float, int]] = {}
+    def _load_existing_pairs(self) -> dict[tuple[int, int], tuple[int, int]]:
+        """Read current VALID slots: (iid, eid) -> (generation, flags)."""
+        out: dict[tuple[int, int], tuple[int, int]] = {}
         if self._native is None:
             return out
         try:
@@ -175,7 +207,6 @@ class WorkloadSharedMemoryWriter:
                 continue
             out[(int(entry["instance_id"]), int(entry["endpoint_id"]))] = (
                 int(entry["generation"]),
-                float(entry["active_tokens"]),
                 int(entry["flags"]),
             )
         return out

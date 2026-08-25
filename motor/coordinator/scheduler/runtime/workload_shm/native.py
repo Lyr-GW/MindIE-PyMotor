@@ -55,6 +55,7 @@ STATUS_OK = 0
 STATUS_CHANGED = 1
 STATUS_BLOCKED = 2
 STATUS_SLOT_INVALID = 3
+STATUS_BAD_ARG = 8
 
 # Entry flag bits (must match layout.rs / schema 4).
 FLAG_BLOCKED = 0b0000_0001
@@ -248,7 +249,7 @@ class WorkloadShm:
         *,
         lib: ctypes.CDLL | None = None,
     ) -> "WorkloadShm":
-        """Create and own a new segment (unlinks any orphan of the same name first)."""
+        """Create and own a new segment (unlinks an EEXIST orphan of the same name, then recreates)."""
         lib = lib or load_native_library()
         handle = ctypes.c_uint64(0)
         _check(lib.mindie_wl_create(name.encode("utf-8"), int(max_entries), ctypes.byref(handle)), "create")
@@ -325,7 +326,11 @@ class WorkloadShm:
         *,
         bump_instance_version: bool = True,
     ) -> None:
-        """Write a schema-4 snapshot: (instance_id, endpoint_id, role, generation, flags, tokens)/slot."""
+        """Write a schema-4 snapshot: (instance_id, endpoint_id, role, generation, flags, tokens)/slot.
+
+        ``tokens`` seeds a new pair only. A live pair's in-flight CAS value is preserved by the
+        native writer (stale caller tokens are ignored). ``(0, 0, *, *, 0, *)`` punches a hole.
+        """
         self.snapshot_begin()
         for slot, (iid, eid, role, gen, flags, tokens) in enumerate(entries):
             _check(
@@ -339,7 +344,7 @@ class WorkloadShm:
     def cas_add(
         self, instance_id: int, endpoint_id: int, generation: int, expected: float, delta: float
     ) -> tuple[int, float]:
-        """Atomic CAS-add. Returns (status, actual): OK (added), CHANGED/BLOCKED/SLOT_INVALID (not)."""
+        """Atomic CAS-add. Returns (status, actual): OK (added), CHANGED/BLOCKED/SLOT_INVALID/BAD_ARG (not)."""
         actual = ctypes.c_double(0.0)
         status = self._lib.mindie_wl_cas_add(
             self._handle,
@@ -353,7 +358,7 @@ class WorkloadShm:
         return status, actual.value
 
     def cas_sub_floor0(self, instance_id: int, endpoint_id: int, generation: int, delta: float) -> tuple[int, float]:
-        """Atomic CAS-subtract flooring at 0 (release path). Returns (status, actual)."""
+        """Atomic CAS-subtract flooring at 0 (release path). Returns (status, actual); BAD_ARG on invalid delta."""
         actual = ctypes.c_double(0.0)
         status = self._lib.mindie_wl_cas_sub_floor0(
             self._handle,

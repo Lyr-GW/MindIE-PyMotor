@@ -741,6 +741,27 @@ class TestAsyncSchedulerClient:
         result = await self.client.get_available_instances(PDRole.ROLE_P)
         assert result == {}
 
+    @pytest.mark.asyncio
+    async def test_update_workload_rejects_allocation_without_cas(self):
+        """Release-only gate must fire before cas_sub_floor0, even with a stub native handle."""
+        native = Mock()
+        reader = Mock()
+        reader.native = native
+        reader.entry_meta.return_value = {"generation": 0, "active_tokens": 5.0}
+        self.client._workload_reader = reader
+        ok = await self.client.update_workload(
+            UpdateWorkloadParams(
+                instance_id=1,
+                endpoint_id=10,
+                role=PDRole.ROLE_P,
+                req_id="req-alloc",
+                workload_action=WorkloadAction.ALLOCATION,
+                workload_change=Workload(active_tokens=4.0),
+            )
+        )
+        assert ok is False
+        native.cas_sub_floor0.assert_not_called()
+
 
 def _cas_shm_name(tag: str) -> str:
     return f"mw{os.getpid()}{tag}"[:24]
@@ -897,6 +918,39 @@ class TestSelectAndAllocateCas:
             meta = client._workload_reader.entry_meta(instance.id, endpoint.id)
             assert meta is not None
             assert meta["active_tokens"] == pytest.approx(1.0)
+        finally:
+            client._workload_reader.detach()
+            writer.release()
+
+    @pytest.mark.asyncio
+    async def test_update_workload_rejects_non_release_action(self, native_lib):
+        """update_workload is release-only; ALLOCATION must not subtract."""
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10, 1.0)])
+        name = _cas_shm_name("aloc")
+        client, writer = await _client_with_shm(im, name)
+        try:
+            req = RequestInfo(req_id="req-aloc", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            instance, endpoint, committed = result
+            before = client._workload_reader.entry_meta(instance.id, endpoint.id)["active_tokens"]
+            ok = await client.update_workload(
+                UpdateWorkloadParams(
+                    instance_id=instance.id,
+                    endpoint_id=endpoint.id,
+                    role=PDRole.ROLE_P,
+                    req_id="req-aloc",
+                    workload_action=WorkloadAction.ALLOCATION,
+                    workload_change=Workload(active_tokens=committed.active_tokens),
+                )
+            )
+            assert ok is False
+            meta = client._workload_reader.entry_meta(instance.id, endpoint.id)
+            assert meta is not None
+            assert meta["active_tokens"] == pytest.approx(before)
         finally:
             client._workload_reader.detach()
             writer.release()

@@ -25,6 +25,7 @@ from motor.coordinator.scheduler.runtime.workload_shm.writer import (
     WorkloadSharedMemoryWriter,
     _pdrole_to_shm_role,
     _collect_entries_and_slot_map,
+    _lowest_free_slot,
 )
 from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     ROLE_PREFILL,
@@ -33,6 +34,7 @@ from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     SCHEMA_VERSION,
 )
 from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    STATUS_OK,
     NativeWorkloadShmUnavailable,
     load_native_library,
 )
@@ -155,6 +157,12 @@ class TestCollectEntriesAndSlotMap(unittest.TestCase):
         self.assertEqual(len(slot_map), 2)
         self.assertEqual(slot_map, {(1, 0): 0, (1, 1): 1})
 
+    def test_lowest_free_slot(self):
+        """Stable-slot allocator picks the lowest hole and refuses a full table."""
+        self.assertEqual(_lowest_free_slot(set(), 8), 0)
+        self.assertEqual(_lowest_free_slot({0, 1, 3}, 8), 2)
+        self.assertIsNone(_lowest_free_slot({0, 1, 2}, 3))
+
 
 def _unique(tag: str) -> str:
     return f"mw{os.getpid()}{tag}"[:24]
@@ -245,5 +253,32 @@ async def test_writer_set_blocked(native_lib):
         status, actual = writer.native.cas_add(3, 30, int(meta["generation"]), 0.0, 1.0)
         assert status == STATUS_BLOCKED
         assert actual == 0.0
+    finally:
+        writer.release()
+
+
+@pytest.mark.asyncio
+async def test_writer_snapshot_preserves_cas_tokens(native_lib):
+    """Refresh snapshot must not reset tokens a Worker already CAS-added (IM seed stays 0)."""
+    del native_lib
+    config = CoordinatorConfig()
+    im = InstanceManager(config)
+    await im.refresh_instances(EventType.ADD, [_make_real_instance(1, 10, 0.0)])
+    name = _unique("wt")
+    writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
+    try:
+        writer.write_snapshot()
+        meta = writer.native.load_entry(0)
+        status, actual = writer.native.cas_add(1, 10, int(meta["generation"]), 0.0, 10.0)
+        assert status == STATUS_OK
+        assert actual == 10.0
+        await im.refresh_instances(EventType.ADD, [_make_real_instance(2, 20, 0.0)])
+        writer.write_snapshot()
+        first = writer.native.load_entry(0)
+        assert first["instance_id"] == 1
+        assert first["active_tokens"] == 10.0
+        second = writer.native.load_entry(1)
+        assert second["instance_id"] == 2
+        assert second["active_tokens"] == 0.0
     finally:
         writer.release()

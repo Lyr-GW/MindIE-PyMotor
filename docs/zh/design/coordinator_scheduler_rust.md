@@ -383,6 +383,7 @@ CAS 必须同时校验 `(instance_id, endpoint_id, generation)` 仍匹配调用�
 
 ```text
 fn cas_add(slot, expected_bits, delta) -> Result:
+    if !delta.is_finite() || delta < 0: return BadArg
     loop:
         cur = atomic_load(Acquire)
         if flags & BLOCKED: return Blocked
@@ -397,6 +398,7 @@ fn cas_add(slot, expected_bits, delta) -> Result:
 
 ```text
 fn cas_sub_floor0(slot, delta):
+    if !delta.is_finite() || delta < 0: return BadArg
     loop:
         cur = load
         new_f = max(0.0, from_bits(cur) - delta)
@@ -413,7 +415,7 @@ fn cas_sub_floor0(slot, delta):
 
 1. 从 `InstanceManager` 扫 E/P/D/U 全部 available endpoint（与今天 `_collect_entries_and_slot_map` 相同顺序，保证并列打破稳定）
 2. seqlock 置奇
-3. 写全部 entry 的 iid/eid/role/generation/tokens 初值（tokens 从 IM 当前值拷贝；若已有旧槽则 **保留** 该槽 `active_tokens`，避免 refresh 把在途账本打零）
+3. 写 entry 的 iid/eid/role/generation/flags。**已有 pair 的 tokens 禁止普通 store**：同槽留下 Worker CAS 值；换槽则 atomic-load 旧槽当前值再写入新槽。新 pair 才用 IM 种子。Python 侧对仍存活的 pair **保持 slot 稳定**（新 pair 占最低空槽，下线 pair 打 INVALID 洞），避免成员表变化时把别人的槽前移盖掉在途 CAS。
 4. 只 bump 成员集合变化了的 role membership seq；`instance_version += 1`
 5. seqlock 置偶
 6. PUB `instances_changed`
@@ -422,7 +424,7 @@ fn cas_sub_floor0(slot, delta):
 
 Heartbeat：Mgmt 每 1s `heartbeat_sequence += 1`。Worker 5s 不变 → 认为 Mgmt 不健康，停止用 SHM 打分，走 `GET_AVAILABLE_INSTANCES` 或直接 503（与今天 stale 行为对齐：先 GET 再尝试）。
 
-SHM 名：`mindie_workload_<mgmt_pid>`。创建遇 `FileExistsError` 则 unlink 再建（与今天 Scheduler 孤儿段处理相同）。Worker 从 GET 响应拿名字，不写死 PID。
+SHM 名：`mindie_workload_<mgmt_pid>`。创建遇 `EEXIST` 则 unlink 再建（其它 errno 不得 unlink 仍被占用的同名段）。Worker 从 GET 响应拿名字，不写死 PID。
 
 ### 5.6 CPython resource_tracker
 

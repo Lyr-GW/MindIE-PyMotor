@@ -23,6 +23,7 @@ from motor.common.resources.instance import PDRole
 from motor.coordinator.scheduler.runtime.workload_shm import native
 from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_VALID, ROLE_PREFILL, SCHEMA_VERSION
 from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    STATUS_BAD_ARG,
     STATUS_BLOCKED,
     STATUS_CHANGED,
     STATUS_OK,
@@ -197,6 +198,45 @@ def _cas_add_until_ok(shm: WorkloadShm, instance_id: int, endpoint_id: int, gene
             continue
         raise NativeWorkloadShmError(f"cas_add refused: status={status}")
     raise NativeWorkloadShmError("cas_add did not converge after 1000 retries")
+
+
+def test_snapshot_v4_does_not_clobber_cas_tokens(lib):
+    """Membership rewrite must not store stale caller tokens over a live pair."""
+    shm = _single_entry_segment(lib, "clob")
+    try:
+        assert shm.cas_add(1, 10, 0, 0.0, 11.0)[0] == STATUS_OK
+        shm.write_snapshot_v4([(1, 10, ROLE_PREFILL, 0, FLAG_VALID, 0.0)])
+        assert shm.load_entry(0)["active_tokens"] == 11.0
+        status, _ = shm.cas_add(1, 10, 0, 11.0, float("nan"))
+        assert status == STATUS_BAD_ARG
+        status, _ = shm.cas_add(1, 10, 0, 11.0, -1.0)
+        assert status == STATUS_BAD_ARG
+        assert shm.load_entry(0)["active_tokens"] == 11.0
+        status, _ = shm.cas_sub_floor0(1, 10, 0, float("nan"))
+        assert status == STATUS_BAD_ARG
+        assert shm.load_entry(0)["active_tokens"] == 11.0
+    finally:
+        shm.close(unlink=True)
+
+
+def test_snapshot_v4_copies_tokens_when_pair_moves_slot(lib):
+    """Compaction that relocates a pair must copy current tokens, not the stale snapshot argument."""
+    shm = WorkloadShm.create_v4(_unique("mv"), 8, lib=lib)
+    try:
+        shm.write_snapshot_v4(
+            [
+                (1, 10, ROLE_PREFILL, 0, FLAG_VALID, 0.0),
+                (2, 20, ROLE_PREFILL, 0, FLAG_VALID, 0.0),
+            ]
+        )
+        assert shm.cas_add(2, 20, 0, 0.0, 7.0)[0] == STATUS_OK
+        shm.write_snapshot_v4([(2, 20, ROLE_PREFILL, 0, FLAG_VALID, 0.0)])
+        entry = shm.load_entry(0)
+        assert entry["instance_id"] == 2
+        assert entry["endpoint_id"] == 20
+        assert entry["active_tokens"] == 7.0
+    finally:
+        shm.close(unlink=True)
 
 
 def test_cas_add_ok_then_changed(lib):

@@ -107,9 +107,11 @@ Header is 64B, each entry 24B:
 
 `active_tokens` is at **offset 16**, not 12: a 24B stride from a 64B header would leave offset 12 only 4-byte aligned, which faults an 8-byte atomic on aarch64. Scoring must atomic-load tokens every pass (seqlock no longer covers token updates). Schema 3 readers are hard-rejected.
 
-**SHM name:** `mindie_workload_<mgmt_pid>` — includes PID for uniqueness and orphan detection. Created via Rust `create_v4` (orphan unlink on recreate).
+**SHM name:** `mindie_workload_<mgmt_pid>` — includes PID for uniqueness and orphan detection. Created via Rust `create_v4`. `shm_open(O_CREAT|O_EXCL)` failure unlinks and retries **only on `EEXIST`** (orphan); other errno values return SYSCALL without touching a live segment.
 
-**Recovery:** Native create unlinks a leftover segment of the same name. Workers detect stale SHM (heartbeat >5s old) → trigger full `GET_AVAILABLE_INSTANCES` refresh. Attach failure is loud (`NativeWorkloadShmUnavailable`); there is no Python writer fallback.
+**Membership snapshot:** Mgmt keeps **stable slots** for still-live `(iid, eid)` pairs (new pairs take the lowest free slot; removed pairs become INVALID holes). `write_entry_v4` never `store`s caller tokens over a live pair: same slot leaves Worker CAS bits in place; a moved pair atomic-loads the old slot. `_generation` is not pruned when a pair leaves (ABA).
+
+**Recovery:** Workers detect stale SHM (heartbeat >5s old) → trigger full `GET_AVAILABLE_INSTANCES` refresh. Attach failure is loud (`NativeWorkloadShmUnavailable`); there is no Python writer fallback. FFI `cas_add` / `cas_sub_floor0` reject non-finite or negative `delta` with `BAD_ARG`. `update_workload` is release-only (`RELEASE_TOKENS`).
 
 ### Role Shared Memory (HA)
 
@@ -250,7 +252,7 @@ Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemo
 Controller detects instance change
   → POST /instances/refresh (InsEventMsg: ADD/DEL/SET + instance list)
     → Mgmt InstanceManager.refresh + apply_refresh
-      → schema-4 SHM membership snapshot (preserve in-flight tokens)
+      → schema-4 SHM membership snapshot (stable slots; do not store over in-flight tokens)
       → PUB socket: INSTANCE_CHANGE_TOPIC (+ delta frame for ADD/DEL)
         → Workers: patch/invalidate caches; CAS uses the new generation/slots
 

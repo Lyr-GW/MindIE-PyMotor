@@ -211,7 +211,12 @@ impl Segment {
         }
     }
 
-    /// Snapshot-write one schema-4 entry (call between snapshot_begin/commit). Sets VALID.
+    /// Snapshot-write one schema-4 entry (call between snapshot_begin/commit).
+    ///
+    /// Tokens are Worker-owned. A live `(instance_id, endpoint_id)` must not be overwritten
+    /// with a caller-supplied (stale) value: same slot leaves tokens untouched; a moved pair
+    /// copies the current bits from the old slot. New pairs seed from `active_tokens`.
+    /// A hole is `(iid, eid, flags) == (0, 0, 0)` and only clears VALID.
     #[allow(clippy::too_many_arguments)]
     fn write_entry_v4(
         &self,
@@ -226,6 +231,25 @@ impl Segment {
         if slot >= self.max_entries {
             return error::NO_SPACE;
         }
+        if flags & layout::FLAG_VALID == 0 && instance_id == 0 && endpoint_id == 0 {
+            unsafe {
+                self.v4_flags(slot).store(0, Ordering::Release);
+            }
+            return error::OK;
+        }
+        // Snapshot must not clobber in-flight CAS. Copy-at-write if the pair moved slots.
+        let token_bits = match self.find_slot(instance_id, endpoint_id) {
+            Some(old) if old == slot => None,
+            Some(old) => Some(unsafe { self.v4_tokens(old).load(Ordering::Acquire) }),
+            None => {
+                let seed = if finite_nonneg(active_tokens) {
+                    active_tokens
+                } else {
+                    0.0
+                };
+                Some(seed.to_bits())
+            }
+        };
         let base_off = layout::entry_offset(slot);
         unsafe {
             let p = self.base.add(base_off);
@@ -238,8 +262,9 @@ impl Segment {
                 2,
             );
             std::ptr::write_bytes(p.add(layout::ENTRY_V4_OFF_RESERVED), 0, 4);
-            self.v4_tokens(slot)
-                .store(active_tokens.to_bits(), Ordering::Release);
+            if let Some(bits) = token_bits {
+                self.v4_tokens(slot).store(bits, Ordering::Release);
+            }
             self.v4_flags(slot)
                 .store(flags | layout::FLAG_VALID, Ordering::Release);
         }
@@ -275,6 +300,9 @@ impl Segment {
         expected: f64,
         delta: f64,
     ) -> (ShmStatus, u64) {
+        if !finite_nonneg(delta) {
+            return (error::BAD_ARG, 0);
+        }
         let slot = match self.find_slot(instance_id, endpoint_id) {
             Some(s) => s,
             None => return (error::SLOT_INVALID, 0),
@@ -317,6 +345,9 @@ impl Segment {
         generation: u16,
         delta: f64,
     ) -> (ShmStatus, u64) {
+        if !finite_nonneg(delta) {
+            return (error::BAD_ARG, 0);
+        }
         let slot = match self.find_slot(instance_id, endpoint_id) {
             Some(s) => s,
             None => return (error::SLOT_INVALID, 0),
@@ -397,6 +428,10 @@ fn cname(name: &str) -> Vec<u8> {
     v
 }
 
+fn finite_nonneg(delta: f64) -> bool {
+    delta.is_finite() && delta >= 0.0
+}
+
 unsafe fn map_fd(fd: c_int, size: usize) -> *mut u8 {
     let p = libc::mmap(
         ptr::null_mut(),
@@ -445,8 +480,8 @@ pub extern "C" fn mindie_wl_schema_version() -> u32 {
 
 /// Shared create implementation for a given on-wire schema (3 = P1 single-writer, 4 = P2 CAS).
 ///
-/// Orphan recovery: if the name already exists it is unlinked and recreated, matching the Python
-/// writer's FileExistsError handling.
+/// Orphan recovery: unlink and recreate only when `shm_open(O_EXCL)` fails with `EEXIST`.
+/// Other errno values (EACCES, EMFILE, …) must not unlink a segment another process still holds.
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated C string; `out_handle` a valid, writable pointer.
@@ -472,7 +507,10 @@ unsafe fn create_segment(
         mode as libc::c_uint,
     );
     if fd < 0 {
-        // Stale/orphan segment: unlink and retry once.
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        if errno != libc::EEXIST {
+            return error::SYSCALL;
+        }
         libc::shm_unlink(cn.as_ptr() as *const c_char);
         fd = libc::shm_open(
             cn.as_ptr() as *const c_char,
@@ -760,7 +798,8 @@ pub unsafe extern "C" fn mindie_wl_snapshot_write_entry_v4(
 }
 
 /// CAS-add on the (instance_id, endpoint_id) slot. `out_actual` receives the new value on Ok, or
-/// the current value on Changed/Blocked. Returns Ok/Changed/Blocked/SlotInvalid.
+/// the current value on Changed/Blocked. Returns Ok/Changed/Blocked/SlotInvalid/BadArg
+/// (non-finite or negative `delta`).
 ///
 /// # Safety
 /// `handle` must be a live handle from create_v4/attach; `out_actual` may be null.
@@ -786,7 +825,7 @@ pub unsafe extern "C" fn mindie_wl_cas_add(
 }
 
 /// CAS-subtract on the (instance_id, endpoint_id) slot, flooring at 0. `out_actual` receives the
-/// new value on Ok. Returns Ok/SlotInvalid.
+/// new value on Ok. Returns Ok/SlotInvalid/BadArg (non-finite or negative `delta`).
 ///
 /// # Safety
 /// `handle` must be a live handle from create_v4/attach; `out_actual` may be null.
@@ -1155,6 +1194,180 @@ mod tests {
                 error::OK
             );
             assert_eq!(total, (n_threads * per_thread) as f64);
+            assert_eq!(mindie_wl_close(h, 1), error::OK);
+        }
+    }
+
+    #[test]
+    fn cas_add_rejects_nan_and_negative_delta() {
+        unsafe {
+            let (h, _cn) = v4_single_entry("bad_add");
+            let mut actual = -1.0f64;
+            assert_eq!(
+                mindie_wl_cas_add(h, 1, 10, 0, 0.0, f64::NAN, &mut actual),
+                error::BAD_ARG
+            );
+            assert_eq!(
+                mindie_wl_cas_add(h, 1, 10, 0, 0.0, -1.0, &mut actual),
+                error::BAD_ARG
+            );
+            assert_eq!(
+                mindie_wl_cas_add(h, 1, 10, 0, 0.0, f64::INFINITY, &mut actual),
+                error::BAD_ARG
+            );
+            let mut tokens = -1.0f64;
+            assert_eq!(
+                mindie_wl_load_entry(
+                    h,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tokens
+                ),
+                error::OK
+            );
+            assert_eq!(tokens, 0.0);
+            assert_eq!(mindie_wl_close(h, 1), error::OK);
+        }
+    }
+
+    #[test]
+    fn cas_sub_floor0_rejects_nan_and_negative_delta() {
+        unsafe {
+            let (h, _cn) = v4_single_entry("bad_sub");
+            let mut actual = -1.0f64;
+            assert_eq!(
+                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 5.0, &mut actual),
+                error::OK
+            );
+            assert_eq!(
+                mindie_wl_cas_sub_floor0(h, 1, 10, 0, f64::NAN, &mut actual),
+                error::BAD_ARG
+            );
+            assert_eq!(
+                mindie_wl_cas_sub_floor0(h, 1, 10, 0, -1.0, &mut actual),
+                error::BAD_ARG
+            );
+            let mut tokens = -1.0f64;
+            assert_eq!(
+                mindie_wl_load_entry(
+                    h,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tokens
+                ),
+                error::OK
+            );
+            assert_eq!(tokens, 5.0);
+            assert_eq!(mindie_wl_close(h, 1), error::OK);
+        }
+    }
+
+    #[test]
+    fn snapshot_does_not_clobber_in_flight_tokens() {
+        unsafe {
+            let (h, _cn) = v4_single_entry("noclobber");
+            let mut actual = -1.0f64;
+            assert_eq!(
+                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 11.0, &mut actual),
+                error::OK
+            );
+            assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
+            // Same pair, stale caller tokens=0 must not store over the CAS result.
+            assert_eq!(
+                mindie_wl_snapshot_write_entry_v4(
+                    h,
+                    0,
+                    1,
+                    10,
+                    layout::ROLE_PREFILL,
+                    0,
+                    layout::FLAG_VALID,
+                    0.0
+                ),
+                error::OK
+            );
+            assert_eq!(mindie_wl_snapshot_commit(h, 1, 1), error::OK);
+            let mut tokens = 0.0f64;
+            assert_eq!(
+                mindie_wl_load_entry(
+                    h,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tokens
+                ),
+                error::OK
+            );
+            assert_eq!(tokens, 11.0);
+            assert_eq!(mindie_wl_close(h, 1), error::OK);
+        }
+    }
+
+    #[test]
+    fn snapshot_copies_tokens_when_pair_moves_slot() {
+        unsafe {
+            let cn = CString::new(unique_name("move")).unwrap();
+            let mut h: u64 = 0;
+            assert_eq!(mindie_wl_create_v4(cn.as_ptr(), 8, &mut h), error::OK);
+            assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
+            assert_eq!(
+                mindie_wl_snapshot_write_entry_v4(h, 0, 1, 10, layout::ROLE_PREFILL, 0, 0, 0.0),
+                error::OK
+            );
+            assert_eq!(
+                mindie_wl_snapshot_write_entry_v4(h, 1, 2, 20, layout::ROLE_PREFILL, 0, 0, 0.0),
+                error::OK
+            );
+            assert_eq!(mindie_wl_snapshot_commit(h, 2, 1), error::OK);
+            let mut actual = -1.0f64;
+            assert_eq!(
+                mindie_wl_cas_add(h, 2, 20, 0, 0.0, 7.0, &mut actual),
+                error::OK
+            );
+            // Compact: pair (2,20) moves from slot 1 to slot 0 with stale tokens=0.
+            assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
+            assert_eq!(
+                mindie_wl_snapshot_write_entry_v4(
+                    h,
+                    0,
+                    2,
+                    20,
+                    layout::ROLE_PREFILL,
+                    0,
+                    layout::FLAG_VALID,
+                    0.0
+                ),
+                error::OK
+            );
+            assert_eq!(mindie_wl_snapshot_commit(h, 1, 1), error::OK);
+            let mut iid = 0i32;
+            let mut tokens = 0.0f64;
+            assert_eq!(
+                mindie_wl_load_entry(
+                    h,
+                    0,
+                    &mut iid,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut tokens
+                ),
+                error::OK
+            );
+            assert_eq!(iid, 2);
+            assert_eq!(tokens, 7.0);
             assert_eq!(mindie_wl_close(h, 1), error::OK);
         }
     }

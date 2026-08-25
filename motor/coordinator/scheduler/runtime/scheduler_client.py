@@ -21,7 +21,7 @@ import msgspec
 import zmq
 
 from motor.common.resources.instance import Instance, PDRole
-from motor.common.resources.endpoint import Endpoint, Workload
+from motor.common.resources.endpoint import Endpoint, Workload, WorkloadAction
 from motor.coordinator.domain import (
     InstanceReadiness,
     UpdateWorkloadParams,
@@ -1298,6 +1298,15 @@ class AsyncSchedulerClient:
         if self._workload_reader is None or self._workload_reader.native is None:
             logger.error(
                 "update_workload refused: native workload shm not attached instance_id=%s endpoint_id=%s req_id=%s",
+                params.instance_id,
+                params.endpoint_id,
+                params.req_id,
+            )
+            return False
+        if params.workload_action != WorkloadAction.RELEASE_TOKENS:
+            logger.error(
+                "update_workload refused: action=%s is not RELEASE_TOKENS instance_id=%s endpoint_id=%s req_id=%s",
+                getattr(params.workload_action, "value", params.workload_action),
                 params.instance_id,
                 params.endpoint_id,
                 params.req_id,
