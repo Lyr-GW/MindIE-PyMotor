@@ -838,7 +838,7 @@ P1 起对这些用例的策略是：**改写成公共 API / 字节契约，或�
 
 | 建议文件 | 用例意图 | 红/绿条件 |
 |----------|----------|-----------|
-| `tests/coordinator/scheduler/test_workload_shm_roundtrip.py` | Writer 写真实 POSIX SHM → Reader `read_and_patch_cache`：magic、schema、偶数 seq、entry 24B、heartbeat@offset 32 | P1：Python 或 `.so` 任一 writer 都必须绿；P1 结束时必须能对 `.so` 绿 |
+| `tests/coordinator/scheduler/test_workload_shm_writer.py` | Writer 写真实 POSIX SHM → Reader `read_and_patch_cache`：magic、schema、偶数 seq、entry 24B、heartbeat@offset 32 | P1：Python 或 `.so` 任一 writer 都必须绿；P1 结束时必须能对 `.so` 绿 |
 | 同上 | 写中途 header sequence 为奇数 → Reader 返回不稳定 / 重试后成功 | 无 seqlock 则红 |
 | 同上 | schema ≠ 当前版本 → 拒绝，不污染 cached role seq | 已有 reader 用例语义，改为走真 header 字节 |
 | `tests/coordinator/scheduler/test_workload_shm_native.py` | `mindie_wl_cas_add`：expected 匹配 → Ok 且 tokens += delta | P2 前 skip |
@@ -854,7 +854,7 @@ P1 起对这些用例的策略是：**改写成公共 API / 字节契约，或�
 | 建议文件 | 用例意图 |
 |----------|----------|
 | `tests/coordinator/scheduler/test_allocate_arbitration.py`（由现文件改挂） | 无 ZMQ：固定 ledger 向量 → 与今日 12 条 **同一 winner / 同一 committed** |
-| 同上或 `test_select_and_allocate_cas.py` | `select_and_allocate` **不** mock `send_request`：读 SHM → 打分 → CAS → 返回 `(Instance, Endpoint, Workload)` |
+| 同上或 `test_scheduler_client.py` | `select_and_allocate` **不** mock `send_request`：读 SHM → 打分 → CAS → 返回 `(Instance, Endpoint, Workload)` |
 | 同上 | 人为把 expected 设成过期 → 第二次打分输入等于更新后的向量（同一套 Python 函数） |
 
 **L3 控制面改挂**
@@ -863,7 +863,7 @@ P1 起对这些用例的策略是：**改写成公共 API / 字节契约，或�
 |----------|----------|
 | `test_circuit_breaker_report.py` 改 Mgmt | REPORT → 状态机数字不变 + `set_blocked` 反映到 SHM |
 | `test_scheduler_circuit_breaker_probe.py` 改 Mgmt | `/health` 语义不变 |
-| 新：`test_mgmt_instance_pub.py` | Mgmt refresh → PUB 帧 → 第二进程 cache `apply_add`（发布端不再绑 SchedulerServer） |
+| 新：`test_scheduler_server_main.py` | Mgmt refresh → PUB 帧 → 第二进程 cache `apply_add`（发布端不再绑 SchedulerServer） |
 | 精度四个 RPC | 可选：Mgmt ROUTER round-trip；状态机金标已覆盖数字 |
 
 ### 11.4 现有文件在重构后的处置
@@ -874,7 +874,7 @@ P1 起对这些用例的策略是：**改写成公共 API / 字节契约，或�
 | `test_scheduler_allocate_arbitration.py` | P0 抽函数后改挂；禁止继续 `dispatch(ALLOCATE_ONLY)` |
 | `test_workload_shm_writer.py` / `reader.py` | P1 改为测公共 API + 字节；删除私有字段断言 |
 | `test_workload_shm_roles.py` | 补「Encode role byte 出现在 slot 字节」；可删纯 mapper |
-| `test_scheduler_server_workload_shm.py` 孤儿段 | 迁到 Mgmt create 路径，行为保留 |
+| `test_workload_shm_native.py` 孤儿段 | 迁到 Mgmt create 路径，行为保留 |
 | `test_scheduler_client.py` 的 ALLOCATE/UPDATE/transport_failure | P2 **删除或改写**为 CAS 路径；禁止保绿 |
 | `test_scheduler_server_main.py` ALLOCATE/UPDATE/fast_path 私有方法 | P3 删除 |
 | `test_circuit_breaker.py` | 零改动 |
@@ -948,7 +948,7 @@ P0 钉门禁与补契约（测试为主，代码只抽函数）
 
 - crate `workload_shm_rs` + ctypes `native.py`；`build.sh` / `setup.py` / pre-commit。
 - `.so` 实现 **schema 3 兼容写**（原子 store + 真 seqlock fence）。Writer 仍在 Scheduler；热路径仍 ALLOCATE。
-- `test_workload_shm_roundtrip.py` 对 `.so` 绿；私有字段测试改写或删。
+- `test_workload_shm_writer.py` 对 `.so` 绿；私有字段测试改写或删。
 
 **门禁**
 
@@ -1124,7 +1124,7 @@ P99(T_sched→P)_优化后  ≤  0.5 × P99(T_sched→P)_优化前
 | ID | 标准 | 验证方法 |
 |----|------|----------|
 | B1 | 无 Scheduler 子进程（`START_ORDER` / HA 监督集 / ProcessManager） | daemon 代码 |
-| B2 | Mgmt bind PUB；Worker 收到的 `instances_changed` 来自 Mgmt | `test_mgmt_instance_pub.py` |
+| B2 | Mgmt bind PUB；Worker 收到的 `instances_changed` 来自 Mgmt | `test_scheduler_server_main.py` |
 | B3 | `POST /instances/refresh` 本地落地 + snapshot + PUB，不再转发另一进程 | `management_server.py` |
 | B4 | ADD/DEL delta、SET 全量 GET 与现网 Worker cache 一致 | `test_scheduler_client_cache.py` |
 | B5 | `GET_AVAILABLE_INSTANCES`（含 shm 名）由 Mgmt 提供 | 单测 |
@@ -1201,10 +1201,10 @@ P3 功能工程证明勾完（§13.1 + §13.3）
 | `motor/coordinator/scheduler/runtime/workload_shm/native.py` | ctypes 封装 |
 | `motor/coordinator/scheduler/allocate_arbitration.py`（建议） | 从 server 下沉的重选函数 |
 | `docs/zh/design/coordinator_scheduler_rust.md` | 本文 |
-| `tests/coordinator/scheduler/test_workload_shm_roundtrip.py` | Writer→Reader 真 mmap 契约（P0/P1） |
+| `tests/coordinator/scheduler/test_workload_shm_writer.py` | Writer→Reader 真 mmap 契约（P0/P1） |
 | `tests/coordinator/scheduler/test_workload_shm_native.py` | FFI / 多进程 CAS（P2） |
-| `tests/coordinator/scheduler/test_select_and_allocate_cas.py` | 无 ZMQ 的提交路径（P2） |
-| `tests/coordinator/scheduler/test_mgmt_instance_pub.py` | Mgmt 为 PUB 源（P3） |
+| `tests/coordinator/scheduler/test_scheduler_client.py` | 无 ZMQ 的提交路径（P2） |
+| `tests/coordinator/scheduler/test_scheduler_server_main.py` | Mgmt 为 PUB 源（P3） |
 
 ### 14.2 大改
 

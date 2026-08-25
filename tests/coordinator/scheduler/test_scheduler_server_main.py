@@ -22,12 +22,11 @@ from motor.common.resources.http_msg_spec import EventType
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.config.coordinator import CoordinatorConfig, SchedulerType
 from motor.coordinator.domain.instance_manager import InstanceManager
+from motor.coordinator.scheduler.runtime.scheduler_client import _SchedulerInstanceCache
 from motor.coordinator.scheduler.runtime.scheduler_server import (
     _SchedulerFrontendTransport,
     _SchedulerRequestDispatcher,
     _instance_from_dict,
-    _serialize_endpoint_minimal,
-    _serialize_instance_minimal,
     AsyncSchedulerServer,
 )
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
@@ -156,74 +155,15 @@ class TestInstanceFromDict:
         assert result.id == 5
 
 
-class TestSerializeInstanceMinimal:
-    def test_none_returns_empty_dict(self):
-        assert _serialize_instance_minimal(None) == {}
-
-    def test_valid_instance_returns_minimal_fields(self):
-        inst = _make_instance(7, (70,), role=PDRole.ROLE_D)
-        inst.dispatch_capabilities = ["concurrent_engine_sync"]
-        inst.engine_type = "vllm"
-        result = _serialize_instance_minimal(inst)
-        assert result["id"] == 7
-        assert result["role"] == PDRole.ROLE_D
-        assert result["job_name"] == inst.job_name
-        assert result["model_name"] == "test_model"
-        assert result["engine_type"] == "vllm"
-        assert result["dispatch_capabilities"] == ["concurrent_engine_sync"]
-        assert len(result) == 6
-
-    def test_allocate_only_roundtrip_keeps_trigger_capability(self):
-        """ALLOCATE_ONLY minimal payload must keep caps so Worker can select TRIGGER."""
-        inst = _make_instance(8, (80,), role=PDRole.ROLE_D, engine_type="vllm")
-        inst.dispatch_capabilities = ["concurrent_engine_sync"]
-        restored = _instance_from_dict(_serialize_instance_minimal(inst))
-        assert restored is not None
-        assert restored.dispatch_capabilities == ["concurrent_engine_sync"]
-
-
-class TestSerializeEndpointMinimal:
-    def test_none_returns_empty_dict(self):
-        assert _serialize_endpoint_minimal(None) == {}
-
-    def test_endpoint_without_status(self):
-        ep = Endpoint(id=11, ip="1.2.3.4", business_port="8080", mgmt_port="9090")
-        result = _serialize_endpoint_minimal(ep)
-        assert result["id"] == 11
-        assert result["ip"] == "1.2.3.4"
-        assert result["business_port"] == "8080"
-        assert result["mgmt_port"] == "9090"
-
-    def test_endpoint_with_status_serializes_value(self):
-        ep = Endpoint(
-            id=12,
-            ip="5.6.7.8",
-            business_port="8081",
-            mgmt_port="9090",
-            status=EndpointStatus.NORMAL,
-        )
-        result = _serialize_endpoint_minimal(ep)
-        assert result["status"] == EndpointStatus.NORMAL.value
-
-    def test_endpoint_serializes_bootstrap_port(self):
-        ep = Endpoint(
-            id=14,
-            ip="10.0.0.14",
-            business_port="8014",
-            mgmt_port="9014",
-            bootstrap_port=9114,
-        )
-
-        result = _serialize_endpoint_minimal(ep)
-        restored = Endpoint.model_validate(result)
-
-        assert restored.bootstrap_port == 9114
-
-    def test_endpoint_with_empty_mgmt_port_defaults_empty_string(self):
-        """mgmt_port='' → serializer returns empty string (falsy → or '' branch)."""
-        ep = Endpoint(id=13, ip="9.9.9.9", business_port="9000", mgmt_port="")
-        result = _serialize_endpoint_minimal(ep)
-        assert result["mgmt_port"] == ""
+class TestControlPlaneProtocol:
+    def test_hot_path_rpcs_removed_from_protocol(self):
+        """P3 gate: ALLOCATE / UPDATE / REFRESH must not exist on the control-plane enum."""
+        names = {member.name for member in SchedulerRequestType}
+        assert "ALLOCATE_ONLY" not in names
+        assert "UPDATE_WORKLOAD" not in names
+        assert "REFRESH_INSTANCES" not in names
+        assert "GET_AVAILABLE_INSTANCES" in names
+        assert "CIRCUIT_BREAKER_REPORT" in names
 
 
 class TestDispatchUnknownType:
@@ -292,6 +232,25 @@ class TestHandleGetAvailableInstances:
         assert 1 in ids
         assert 2 not in ids
 
+    @pytest.mark.asyncio
+    async def test_get_payload_keeps_dispatch_capabilities(self):
+        """GET model_dump must keep caps so Worker can select TRIGGER."""
+        dispatcher, instance_manager, *_ = _make_dispatcher()
+        inst = _make_instance(8, (80,), role=PDRole.ROLE_D, engine_type="vllm")
+        inst.dispatch_capabilities = ["concurrent_engine_sync"]
+        await instance_manager.refresh_instances(EventType.ADD, [inst])
+
+        request = SchedulerRequest(
+            request_type=SchedulerRequestType.GET_AVAILABLE_INSTANCES,
+            request_id="req-g-caps",
+            data={},
+        )
+        response = await dispatcher.dispatch(request)
+        assert response.response_type == SchedulerResponseType.SUCCESS
+        restored = _instance_from_dict(response.data["instances"][0])
+        assert restored is not None
+        assert restored.dispatch_capabilities == ["concurrent_engine_sync"]
+
 
 class TestApplyRefresh:
     @pytest.mark.asyncio
@@ -329,6 +288,29 @@ class TestApplyRefresh:
         assert changed is True
         assert writer.snapshots == 1
         assert published and published[0][0] == EventType.ADD
+
+    @pytest.mark.asyncio
+    async def test_add_delta_applies_to_worker_cache(self):
+        """apply_refresh ADD -> PUB delta payload -> Worker cache.apply_add (no REFRESH RPC)."""
+        published = []
+
+        async def on_done(event_type, instances):
+            published.append((event_type, instances))
+
+        dispatcher, instance_manager, *_ = _make_dispatcher(on_refresh_done=on_done)
+        inst = _make_instance(7, (70,))
+        changed = await dispatcher.apply_refresh(EventType.ADD, [inst])
+        assert changed is True
+        assert published and published[0][0] == EventType.ADD
+
+        server = AsyncSchedulerServer(CoordinatorConfig(), instance_manager=instance_manager)
+        delta = server._build_instance_delta(EventType.ADD, published[0][1])
+        assert delta is not None
+        assert delta["event"] == "add"
+        rebuilt = [x for x in (_instance_from_dict(d) for d in delta["instances"]) if x is not None]
+        cache = _SchedulerInstanceCache()
+        assert await cache.apply_add(rebuilt) is True
+        assert [i.id for i in cache.get_instances(PDRole.ROLE_P)] == [7]
 
     @pytest.mark.asyncio
     async def test_del_clears_blocked_flag(self):

@@ -352,31 +352,6 @@ class WorkloadShm:
         )
         return status, actual.value
 
-    def cas_add_until_ok(
-        self, instance_id: int, endpoint_id: int, generation: int, delta: float, *, max_tries: int = 1000
-    ) -> float:
-        """Test-only: retry the same slot on CHANGED until add lands.
-
-        Production allocate must not call this. On CHANGED the Worker reloads the snapshot and
-        re-runs the same Python scorer / arbitration (design §6 / R4), instead of blindly
-        incrementing a stale candidate.
-
-        Raises NativeWorkloadShmError on BLOCKED / SLOT_INVALID (caller drops the candidate).
-        """
-        expected = 0.0
-        for _ in range(max_tries):
-            status, actual = self.cas_add(instance_id, endpoint_id, generation, expected, delta)
-            if status == STATUS_OK:
-                return actual
-            if status == STATUS_CHANGED:
-                expected = actual
-                continue
-            raise NativeWorkloadShmError(
-                f"cas_add refused: status={status} ({_STATUS.get(status, 'Unknown')}) "
-                f"instance_id={instance_id} endpoint_id={endpoint_id}"
-            )
-        raise NativeWorkloadShmError(f"cas_add did not converge after {max_tries} retries")
-
     def cas_sub_floor0(self, instance_id: int, endpoint_id: int, generation: int, delta: float) -> tuple[int, float]:
         """Atomic CAS-subtract flooring at 0 (release path). Returns (status, actual)."""
         actual = ctypes.c_double(0.0)

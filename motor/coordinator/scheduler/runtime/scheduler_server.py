@@ -83,39 +83,6 @@ def _instance_from_dict(data: dict) -> Instance | None:
         return None
 
 
-def _serialize_instance_minimal(instance: Instance | None) -> dict:
-    """Serialize minimal fields for select/allocate result (forward and release); reduce ZMQ payload.
-
-    Must keep ``dispatch_capabilities``: Worker rebuilds Instance for UnifiedPDRouter._select_coordination_mode (TRIGGER vs HANDOFF).
-    """
-    if instance is None:
-        return {}
-    return {
-        "id": instance.id,
-        "role": instance.role,
-        "job_name": instance.job_name,
-        "model_name": instance.model_name,
-        "engine_type": instance.engine_type,
-        "dispatch_capabilities": list(instance.dispatch_capabilities or []),
-    }
-
-
-def _serialize_endpoint_minimal(endpoint: Endpoint | None) -> dict:
-    """Serialize minimal fields for select/allocate result (forward and release)."""
-    if endpoint is None:
-        return {}
-    out = {
-        "id": endpoint.id,
-        "ip": endpoint.ip,
-        "business_port": endpoint.business_port,
-        "mgmt_port": getattr(endpoint, "mgmt_port", "") or "",
-        "bootstrap_port": endpoint.bootstrap_port,
-    }
-    if hasattr(endpoint, "status") and endpoint.status is not None:
-        out["status"] = endpoint.status.value if hasattr(endpoint.status, "value") else str(endpoint.status)
-    return out
-
-
 # ==================== Request dispatch ====================
 
 

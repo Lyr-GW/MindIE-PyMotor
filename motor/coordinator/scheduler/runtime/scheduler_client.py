@@ -1411,7 +1411,7 @@ class AsyncSchedulerClient:
             return instances
 
         if response:
-            logger.error(f"Failed to get available instances: {response.error}")
+            logger.error("Failed to get available instances: %s", response.error)
         return {}
 
     def _roles_from_cache(self) -> set[PDRole]:

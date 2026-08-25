@@ -11,13 +11,18 @@
 """Tests for AsyncSchedulerClient and _SchedulerInstanceCache."""
 
 import asyncio
+import os
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import pytest
 
-from motor.common.resources.instance import Instance, PDRole
-from motor.common.resources.endpoint import Endpoint, Workload, EndpointStatus
+from motor.common.resources.http_msg_spec import EventType
+from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
+from motor.common.resources.endpoint import Endpoint, Workload, EndpointStatus, WorkloadAction
+from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain import InstanceReadiness
+from motor.coordinator.domain.instance_manager import InstanceManager
+from motor.coordinator.domain.scheduling import UpdateWorkloadParams
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
@@ -29,6 +34,12 @@ from motor.coordinator.scheduler.runtime.scheduler_client import (
     _SchedulerInstanceCache,
     _collect_active_endpoints_from_cache,
 )
+from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    NativeWorkloadShmUnavailable,
+    load_native_library,
+)
+from motor.coordinator.scheduler.runtime.workload_shm.reader import WorkloadSharedMemoryReader
+from motor.coordinator.scheduler.runtime.workload_shm.writer import WorkloadSharedMemoryWriter
 
 
 # ========================================================================
@@ -729,3 +740,163 @@ class TestAsyncSchedulerClient:
 
         result = await self.client.get_available_instances(PDRole.ROLE_P)
         assert result == {}
+
+
+def _cas_shm_name(tag: str) -> str:
+    return f"mw{os.getpid()}{tag}"[:24]
+
+
+def _make_cas_instance(instance_id: int, endpoint_id: int, tokens: float) -> Instance:
+    inst = Instance(
+        job_name=f"p-{instance_id}",
+        model_name="test_model",
+        id=instance_id,
+        role=PDRole.ROLE_P,
+        status=InsStatus.ACTIVE,
+        parallel_config=ParallelConfig(dp_size=1),
+    )
+    inst.add_endpoints(
+        f"pod-{instance_id}",
+        {
+            0: Endpoint(
+                id=endpoint_id,
+                ip=f"10.0.0.{instance_id}",
+                business_port="8080",
+                mgmt_port="9080",
+                status=EndpointStatus.NORMAL,
+                workload=Workload(active_tokens=tokens),
+            )
+        },
+    )
+    return inst
+
+
+@pytest.fixture
+def native_lib():
+    try:
+        return load_native_library()
+    except NativeWorkloadShmUnavailable as e:
+        pytest.skip(f"native workload-shm library not built: {e}")
+        return None
+
+
+async def _client_with_shm(im: InstanceManager, name: str) -> tuple[AsyncSchedulerClient, WorkloadSharedMemoryWriter]:
+    writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
+    writer.write_snapshot()
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
+    )
+    cache = _SchedulerInstanceCache()
+    instances = list(im.get_available_instances(PDRole.ROLE_P).values())
+    await cache.replace_all(PDRole.ROLE_P, instances)
+    client._cache = cache
+    reader = WorkloadSharedMemoryReader(name)
+    reader.attach()
+    client._workload_reader = reader
+    return client, writer
+
+
+class TestSelectAndAllocateCas:
+    """Local scoring + schema-4 CAS. Does not mock send_request."""
+
+    @pytest.mark.asyncio
+    async def test_select_and_allocate_cas_commits_lowest_load(self, native_lib):
+        """Read SHM, score with LoadBalance, CAS-add, return (Instance, Endpoint, Workload)."""
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(
+            EventType.ADD,
+            [_make_cas_instance(1, 10, 1.0), _make_cas_instance(2, 20, 50.0)],
+        )
+        name = _cas_shm_name("al")
+        client, writer = await _client_with_shm(im, name)
+        try:
+            req = RequestInfo(req_id="req-cas", req_data={}, req_len=8, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            instance, endpoint, committed = result
+            assert instance.id == 1
+            assert endpoint.id == 10
+            assert committed.active_tokens == pytest.approx(4.0)
+            meta = client._workload_reader.entry_meta(1, 10)
+            assert meta is not None
+            assert meta["active_tokens"] == pytest.approx(5.0)
+        finally:
+            client._workload_reader.detach()
+            writer.release()
+
+    @pytest.mark.asyncio
+    async def test_select_and_allocate_changed_reloads_and_rescores(self, native_lib):
+        """Stale expected (CHANGED) must re-score on the fresh vector, not blindly add on the old winner."""
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(
+            EventType.ADD,
+            [_make_cas_instance(1, 10, 1.0), _make_cas_instance(2, 20, 8.0)],
+        )
+        name = _cas_shm_name("ch")
+        client, writer = await _client_with_shm(im, name)
+        native = client._workload_reader.native
+        orig = native.cas_add
+        calls = {"n": 0}
+
+        def wrapped(iid, eid, gen, expected, delta):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                orig(iid, eid, gen, expected, 80.0)
+            return orig(iid, eid, gen, expected, delta)
+
+        native.cas_add = wrapped
+        try:
+            req = RequestInfo(req_id="req-changed", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            instance, endpoint, _committed = result
+            assert instance.id == 2
+            assert endpoint.id == 20
+            assert calls["n"] >= 2
+        finally:
+            native.cas_add = orig
+            client._workload_reader.detach()
+            writer.release()
+
+    @pytest.mark.asyncio
+    async def test_select_and_allocate_without_shm_returns_none(self):
+        """Missing native attach fails closed (A7): no silent Python ledger."""
+        client = AsyncSchedulerClient(SchedulerClientConfig(scheduler_type="load_balance"))
+        req = RequestInfo(req_id="req-none", req_data={}, req_len=4, api="completions", token_ids=[1])
+        assert await client.select_and_allocate(PDRole.ROLE_P, req) is None
+
+    @pytest.mark.asyncio
+    async def test_update_workload_cas_sub_floor0(self, native_lib):
+        """Release path CAS-sub on the same slot allocate just filled."""
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10, 1.0)])
+        name = _cas_shm_name("rl")
+        client, writer = await _client_with_shm(im, name)
+        try:
+            req = RequestInfo(req_id="req-rel", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            instance, endpoint, committed = result
+            ok = await client.update_workload(
+                UpdateWorkloadParams(
+                    instance_id=instance.id,
+                    endpoint_id=endpoint.id,
+                    role=PDRole.ROLE_P,
+                    req_id="req-rel",
+                    workload_action=WorkloadAction.RELEASE_TOKENS,
+                    workload_change=Workload(active_tokens=-committed.active_tokens),
+                )
+            )
+            assert ok is True
+            meta = client._workload_reader.entry_meta(instance.id, endpoint.id)
+            assert meta is not None
+            assert meta["active_tokens"] == pytest.approx(1.0)
+        finally:
+            client._workload_reader.detach()
+            writer.release()

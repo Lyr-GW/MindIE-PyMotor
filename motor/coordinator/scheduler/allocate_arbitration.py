@@ -12,14 +12,9 @@
 ZMQ-free allocate arbitration for the coordinator scheduling hot path.
 
 These functions are the single source of truth for "given a worker-proposed candidate (or
-candidate set) and a fresh workload view, which (instance, endpoint) wins". They were previously
-private methods on ``_SchedulerRequestDispatcher`` in ``scheduler_server.py`` and were only
-reachable through the ``ALLOCATE_ONLY`` ZMQ RPC. They are extracted here, behavior-unchanged, so
-they can be driven directly (no ZMQ) -- both by the Scheduler process today and by the Infer Worker
-after the shared-memory CAS refactor (see ``docs/zh/design/coordinator_scheduler_rust.md`` §6.2).
-
-The scoring formulas themselves live in ``motor/coordinator/scheduler/policy`` and are intentionally
-NOT duplicated here: this module only decides the winner from those scores plus the fresh ledger.
+candidate set) and a fresh workload view, which (instance, endpoint) wins". Infer Worker
+``select_and_allocate`` calls them on the CAS CHANGED slow path (same Python scorer, no ZMQ).
+Scoring formulas live in ``motor/coordinator/scheduler/policy`` and are not duplicated here.
 """
 
 from collections.abc import Callable
@@ -43,9 +38,8 @@ class ArbitrationContext:
     """
     Host-supplied dependencies the ZMQ-free arbitration needs.
 
-    Both the Scheduler process (authoritative ``InstanceManager`` + ``CircuitBreakerManager``) and,
-    after the refactor, the Infer Worker (local instance cache + circuit-breaker mirror / SHM blocked
-    flag) provide these so the same selection logic runs without a ZMQ round-trip.
+    Infer Worker ``AsyncSchedulerClient`` supplies the local instance cache and circuit-breaker
+    / SHM blocked view so the same selection logic runs without a ZMQ round-trip.
     """
 
     get_available_instances: Callable[[PDRole | None], dict[int, Instance]]

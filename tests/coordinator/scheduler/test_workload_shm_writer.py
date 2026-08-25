@@ -212,11 +212,16 @@ async def test_writer_snapshot_and_heartbeat(native_lib):
         assert header["sequence"] % 2 == 0
         assert header["heartbeat"] == 1
         reader.attach()
-        cache = MagicMock()
-        version, stale = reader.read_and_patch_cache(cache, role=None)
+        patched: dict[tuple[int, int], tuple[PDRole, float]] = {}
+
+        class _Cache:
+            def patch_workload_from_shm(self, instance_id, endpoint_id, role, active_tokens) -> None:
+                patched[(instance_id, endpoint_id)] = (role, active_tokens)
+
+        version, stale = reader.read_and_patch_cache(_Cache(), role=None)
         assert version == 1
         assert stale is False
-        cache.patch_workload_from_shm.assert_called()
+        assert patched == {(1, 10): (PDRole.ROLE_P, 7.0)}
     finally:
         reader.detach()
         writer.release()
