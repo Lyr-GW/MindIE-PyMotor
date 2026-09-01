@@ -35,6 +35,7 @@ from motor.coordinator.scheduler.runtime.scheduler_client import (
     _collect_active_endpoints_from_cache,
 )
 from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    STATUS_OK,
     NativeWorkloadShmUnavailable,
     load_native_library,
 )
@@ -767,7 +768,7 @@ def _cas_shm_name(tag: str) -> str:
     return f"mw{os.getpid()}{tag}"[:24]
 
 
-def _make_cas_instance(instance_id: int, endpoint_id: int, tokens: float) -> Instance:
+def _make_cas_instance(instance_id: int, endpoint_id: int) -> Instance:
     inst = Instance(
         job_name=f"p-{instance_id}",
         model_name="test_model",
@@ -785,11 +786,24 @@ def _make_cas_instance(instance_id: int, endpoint_id: int, tokens: float) -> Ins
                 business_port="8080",
                 mgmt_port="9080",
                 status=EndpointStatus.NORMAL,
-                workload=Workload(active_tokens=tokens),
+                workload=Workload(),
             )
         },
     )
     return inst
+
+
+def _seed_shm_tokens(writer: WorkloadSharedMemoryWriter, instance_id: int, endpoint_id: int, tokens: float) -> None:
+    """CAS-seed SHM after snapshot. ADD clears IM, so fixture tokens never reach a new pair."""
+    header = writer.native.read_header()
+    for slot in range(int(header.get("entry_count", 0) or 0)):
+        entry = writer.native.load_entry(slot)
+        if int(entry["instance_id"]) == instance_id and int(entry["endpoint_id"]) == endpoint_id:
+            status, actual = writer.native.cas_add(instance_id, endpoint_id, int(entry["generation"]), 0.0, tokens)
+            assert status == STATUS_OK
+            assert actual == tokens
+            return
+    raise AssertionError(f"missing slot for ({instance_id}, {endpoint_id})")
 
 
 @pytest.fixture
@@ -828,10 +842,12 @@ class TestSelectAndAllocateCas:
         im = InstanceManager(config)
         await im.refresh_instances(
             EventType.ADD,
-            [_make_cas_instance(1, 10, 1.0), _make_cas_instance(2, 20, 50.0)],
+            [_make_cas_instance(1, 10), _make_cas_instance(2, 20)],
         )
         name = _cas_shm_name("al")
         client, writer = await _client_with_shm(im, name)
+        _seed_shm_tokens(writer, 1, 10, 1.0)
+        _seed_shm_tokens(writer, 2, 20, 50.0)
         try:
             req = RequestInfo(req_id="req-cas", req_data={}, req_len=8, api="completions", token_ids=[1, 2, 3, 4])
             result = await client.select_and_allocate(PDRole.ROLE_P, req)
@@ -855,10 +871,12 @@ class TestSelectAndAllocateCas:
         im = InstanceManager(config)
         await im.refresh_instances(
             EventType.ADD,
-            [_make_cas_instance(1, 10, 1.0), _make_cas_instance(2, 20, 8.0)],
+            [_make_cas_instance(1, 10), _make_cas_instance(2, 20)],
         )
         name = _cas_shm_name("ch")
         client, writer = await _client_with_shm(im, name)
+        _seed_shm_tokens(writer, 1, 10, 1.0)
+        _seed_shm_tokens(writer, 2, 20, 8.0)
         native = client._workload_reader.native
         orig = native.cas_add
         calls = {"n": 0}
@@ -896,9 +914,10 @@ class TestSelectAndAllocateCas:
         del native_lib
         config = CoordinatorConfig()
         im = InstanceManager(config)
-        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10, 1.0)])
+        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10)])
         name = _cas_shm_name("rl")
         client, writer = await _client_with_shm(im, name)
+        _seed_shm_tokens(writer, 1, 10, 1.0)
         try:
             req = RequestInfo(req_id="req-rel", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
             result = await client.select_and_allocate(PDRole.ROLE_P, req)
@@ -928,7 +947,7 @@ class TestSelectAndAllocateCas:
         del native_lib
         config = CoordinatorConfig()
         im = InstanceManager(config)
-        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10, 1.0)])
+        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10)])
         name = _cas_shm_name("aloc")
         client, writer = await _client_with_shm(im, name)
         try:

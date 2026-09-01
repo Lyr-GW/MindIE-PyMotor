@@ -204,11 +204,11 @@ def native_lib():
 
 @pytest.mark.asyncio
 async def test_writer_snapshot_and_heartbeat(native_lib):
-    """Public writer API: snapshot schema 4, heartbeat bump, reader patches tokens."""
+    """Public writer API: first ADD snapshot seeds 0, heartbeat bumps, reader patches cache."""
     del native_lib
     config = CoordinatorConfig()
     im = InstanceManager(config)
-    await im.refresh_instances(EventType.ADD, [_make_real_instance(1, 10, 7.0)])
+    await im.refresh_instances(EventType.ADD, [_make_real_instance(1, 10, 0.0)])
     name = _unique("ws")
     writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
     reader = WorkloadSharedMemoryReader(name)
@@ -229,7 +229,7 @@ async def test_writer_snapshot_and_heartbeat(native_lib):
         version, stale = reader.read_and_patch_cache(_Cache(), role=None)
         assert version == 1
         assert stale is False
-        assert patched == {(1, 10): (PDRole.ROLE_P, 7.0)}
+        assert patched == {(1, 10): (PDRole.ROLE_P, 0.0)}
     finally:
         reader.detach()
         writer.release()
