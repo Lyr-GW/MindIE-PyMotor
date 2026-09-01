@@ -56,15 +56,9 @@ class WorkloadSharedMemoryReader:
     def __init__(self, shm_name: str):
         self._shm_name = shm_name
         self._native: WorkloadShm | None = None
-        self._last_sequence: int | None = None
         self._last_heartbeat_value: int = 0
         self._last_heartbeat_time: float = 0.0
         self._meta: dict[tuple[int, int], dict[str, Any]] = {}
-
-    @property
-    def last_sequence(self) -> int | None:
-        """Last stable membership seqlock read from shared memory."""
-        return self._last_sequence
 
     @property
     def native(self) -> WorkloadShm | None:
@@ -74,10 +68,6 @@ class WorkloadSharedMemoryReader:
     def entry_meta(self, instance_id: int, endpoint_id: int) -> dict[str, Any] | None:
         """Last loaded schema-4 slot for (instance_id, endpoint_id), or None."""
         return self._meta.get((instance_id, endpoint_id))
-
-    def last_sequence_for_role(self, role: PDRole) -> int | None:
-        """Deprecated: schema 4 does not skip token loads by role sequence."""
-        return self._last_sequence
 
     def attach(self) -> None:
         """Attach to existing shared memory via the Rust .so (no CPython resource_tracker)."""
@@ -127,7 +117,6 @@ class WorkloadSharedMemoryReader:
             header, entries = snapshot
             heartbeat_stale = self._update_heartbeat_and_check_stale(int(header["heartbeat"]))
             self._patch_entries(cache, entries, role=role)
-            self._last_sequence = int(header["sequence"])
             return (int(header["instance_version"]), heartbeat_stale)
         except Exception as e:
             logger.debug("WorkloadSharedMemoryReader read error: %s", e)

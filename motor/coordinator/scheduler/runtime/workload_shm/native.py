@@ -9,13 +9,12 @@
 # See the Mulan PSL v2 for more details.
 
 """
-ctypes binding for the Rust ``libmindie_workload_shm`` shared-memory writer (design §8.4 / §8.6).
+ctypes binding for the Rust ``libmindie_workload_shm`` shared-memory ledger (schema 4).
 
-P1 exposes the schema-3 single-writer surface (create / attach / snapshot / heartbeat / close) so
-the segment written here is byte-compatible with the existing Python
-``WorkloadSharedMemoryReader``. If the ``.so`` is missing the loader raises
-``NativeWorkloadShmUnavailable`` with a clear message -- callers must fail loudly rather than
-silently fall back to a wrong ledger (design §8.5 / R-6 / A7).
+Mgmt owns the segment (create_v4 / membership snapshot / heartbeat / set_blocked). Infer Workers
+attach and CAS tokens (cas_add / cas_sub_floor0) against per-slot AtomicU64 plus generation and
+flags. If the ``.so`` is missing the loader raises ``NativeWorkloadShmUnavailable`` with a clear
+message -- callers must fail loudly rather than silently fall back to a wrong ledger.
 """
 
 import ctypes
@@ -100,23 +99,12 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.mindie_wl_abi_version.argtypes = []
     lib.mindie_wl_schema_version.restype = ctypes.c_uint32
     lib.mindie_wl_schema_version.argtypes = []
-    lib.mindie_wl_create.restype = ctypes.c_int32
-    lib.mindie_wl_create.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64)]
     lib.mindie_wl_attach.restype = ctypes.c_int32
     lib.mindie_wl_attach.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_uint64)]
     lib.mindie_wl_close.restype = ctypes.c_int32
     lib.mindie_wl_close.argtypes = [ctypes.c_uint64, ctypes.c_int32]
     lib.mindie_wl_snapshot_begin.restype = ctypes.c_int32
     lib.mindie_wl_snapshot_begin.argtypes = [ctypes.c_uint64]
-    lib.mindie_wl_snapshot_write_entry.restype = ctypes.c_int32
-    lib.mindie_wl_snapshot_write_entry.argtypes = [
-        ctypes.c_uint64,
-        ctypes.c_uint32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_uint8,
-        ctypes.c_double,
-    ]
     lib.mindie_wl_snapshot_commit.restype = ctypes.c_int32
     lib.mindie_wl_snapshot_commit.argtypes = [ctypes.c_uint64, ctypes.c_uint32, ctypes.c_int32]
     lib.mindie_wl_heartbeat.restype = ctypes.c_int32
@@ -242,20 +230,6 @@ class WorkloadShm:
         return self._handle
 
     @classmethod
-    def create(
-        cls,
-        name: str,
-        max_entries: int = DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
-        *,
-        lib: ctypes.CDLL | None = None,
-    ) -> "WorkloadShm":
-        """Create and own a new segment (unlinks an EEXIST orphan of the same name, then recreates)."""
-        lib = lib or load_native_library()
-        handle = ctypes.c_uint64(0)
-        _check(lib.mindie_wl_create(name.encode("utf-8"), int(max_entries), ctypes.byref(handle)), "create")
-        return cls(lib, handle.value, created=True, name=name)
-
-    @classmethod
     def create_v4(
         cls,
         name: str,
@@ -284,33 +258,12 @@ class WorkloadShm:
         """Mark the segment writer-in-progress (odd seqlock)."""
         _check(self._lib.mindie_wl_snapshot_begin(self._handle), "snapshot_begin")
 
-    def write_entry(self, slot: int, instance_id: int, endpoint_id: int, role: int, active_tokens: float) -> None:
-        """Write one 24-byte entry at ``slot`` (call between begin and commit)."""
-        _check(
-            self._lib.mindie_wl_snapshot_write_entry(
-                self._handle, int(slot), int(instance_id), int(endpoint_id), int(role), float(active_tokens)
-            ),
-            "write_entry",
-        )
-
     def snapshot_commit(self, entry_count: int, bump_instance_version: bool = True) -> None:
         """Publish the snapshot (even seqlock) with ``entry_count`` valid slots."""
         _check(
             self._lib.mindie_wl_snapshot_commit(self._handle, int(entry_count), 1 if bump_instance_version else 0),
             "snapshot_commit",
         )
-
-    def write_snapshot(
-        self,
-        entries: list[tuple[int, int, int, float]],
-        *,
-        bump_instance_version: bool = True,
-    ) -> None:
-        """Write a full snapshot: (instance_id, endpoint_id, role_byte, active_tokens) per slot."""
-        self.snapshot_begin()
-        for slot, (iid, eid, role, tokens) in enumerate(entries):
-            self.write_entry(slot, iid, eid, role, tokens)
-        self.snapshot_commit(len(entries), bump_instance_version=bump_instance_version)
 
     def heartbeat(self) -> None:
         """Bump the heartbeat counter (~1/s) so readers can detect a dead writer."""

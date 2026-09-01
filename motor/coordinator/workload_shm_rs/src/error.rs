@@ -10,9 +10,8 @@
 
 //! Stable integer status codes returned across the C ABI.
 //!
-//! The numbering matches `docs/zh/design/coordinator_scheduler_rust.md` §8.4 so the schema-4 CAS
-//! codes (Changed / Blocked / SlotInvalid) already have reserved values even though P1 only writes
-//! schema 3 and never returns them yet.
+//! The numbering matches `docs/zh/design/coordinator_scheduler_rust.md` §8.4. Schema-4 CAS
+//! returns Changed / Blocked / SlotInvalid on the allocate/release hot path.
 
 /// C ABI status code (`shm_status`).
 pub type ShmStatus = i32;

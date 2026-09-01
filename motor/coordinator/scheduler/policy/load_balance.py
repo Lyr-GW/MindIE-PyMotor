@@ -15,7 +15,7 @@ from typing import Callable, Iterable
 from motor.common.resources.instance import Instance, PDRole
 from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.domain import InstanceProvider
-from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy, WorkloadLedgerMixin
+from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.common.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,11 +32,10 @@ class EndpointCandidate:
     score: float
 
 
-class LoadBalancePolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
+class LoadBalancePolicy(BaseSchedulingPolicy):
     """
     Load Balance Scheduler Policy implementation.
     Selects instances and endpoints based on their current workload.
-    Implements select_and_endpoint and update_workload required by SchedulingFacade (forwarded via Scheduler).
     """
 
     def __init__(self, instance_provider: InstanceProvider):

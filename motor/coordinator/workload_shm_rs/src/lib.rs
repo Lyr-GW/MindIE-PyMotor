@@ -10,11 +10,9 @@
 
 //! In-process POSIX shared-memory workload ledger for the MindIE-PyMotor coordinator.
 //!
-//! P1 scope (see `docs/zh/design/coordinator_scheduler_rust.md` §12.2): a single-writer,
-//! schema-3-compatible segment written through a narrow C ABI (loaded from Python via ctypes),
-//! so the existing Python `WorkloadSharedMemoryReader` reads bytes produced by this crate
-//! unchanged. Per-slot atomic CAS / schema 4 / multi-writer arrive in P2 and are intentionally
-//! NOT implemented here (their status codes are reserved in `error`).
+//! Schema 4: Mgmt is the sole membership writer (seqlock snapshot + heartbeat + BLOCKED flags).
+//! Infer Workers attach and CAS `active_tokens` on per-slot AtomicU64 (generation + flags).
+//! The C ABI is loaded from Python via ctypes (`native.py`).
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
@@ -25,12 +23,12 @@ pub mod error;
 pub mod layout;
 
 use error::ShmStatus;
-use layout::{Entry, MAGIC, SCHEMA_VERSION, SCHEMA_VERSION_V4};
+use layout::{MAGIC, SCHEMA_VERSION};
 
 /// ABI version, independent of the on-wire SCHEMA_VERSION (the ABI may evolve without the layout).
 pub const ABI_VERSION: u32 = 1;
 
-/// A mapped workload segment. Not thread-safe; the coordinator drives it from one writer.
+/// A mapped workload segment. Membership snapshot is single-writer (Mgmt); token CAS is multi-writer.
 pub struct Segment {
     base: *mut u8,
     size: usize,
@@ -40,7 +38,7 @@ pub struct Segment {
     heartbeat: u64,
     role_seq: [u64; 3], // prefill, decode, hybrid
     sequence: i64,
-    schema: u16,   // on-wire schema_version this segment carries (3 or 4)
+    schema: u16,   // on-wire schema_version this segment carries
     name: Vec<u8>, // NUL-terminated POSIX name, for shm_unlink on close
     created: bool,
 }
@@ -125,18 +123,6 @@ impl Segment {
         }
     }
 
-    fn write_entry(&self, slot: u32, entry: &Entry) -> ShmStatus {
-        if slot >= self.max_entries {
-            return error::NO_SPACE;
-        }
-        let off = layout::entry_offset(slot);
-        unsafe {
-            let dst = std::slice::from_raw_parts_mut(self.base.add(off), layout::ENTRY_SIZE);
-            layout::pack_entry(dst, entry);
-        }
-        error::OK
-    }
-
     fn snapshot_begin(&mut self) {
         self.begin_write();
     }
@@ -146,7 +132,7 @@ impl Segment {
         if bump_instance_version {
             self.instance_version = self.instance_version.wrapping_add(1);
         }
-        // Single-writer P1: bump all role change counters so a role-scoped reader re-scans.
+        // Membership snapshot: bump all role change counters so a role-scoped reader re-scans.
         for s in self.role_seq.iter_mut() {
             *s = s.wrapping_add(1);
         }
@@ -478,19 +464,14 @@ pub extern "C" fn mindie_wl_schema_version() -> u32 {
     SCHEMA_VERSION as u32
 }
 
-/// Shared create implementation for a given on-wire schema (3 = P1 single-writer, 4 = P2 CAS).
+/// Shared create implementation. Always writes SCHEMA_VERSION (4).
 ///
 /// Orphan recovery: unlink and recreate only when `shm_open(O_EXCL)` fails with `EEXIST`.
 /// Other errno values (EACCES, EMFILE, …) must not unlink a segment another process still holds.
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated C string; `out_handle` a valid, writable pointer.
-unsafe fn create_segment(
-    name: *const c_char,
-    max_entries: u32,
-    schema: u16,
-    out_handle: *mut u64,
-) -> ShmStatus {
+unsafe fn create_segment(name: *const c_char, max_entries: u32, out_handle: *mut u64) -> ShmStatus {
     if name.is_null() || out_handle.is_null() || max_entries == 0 {
         return error::BAD_ARG;
     }
@@ -541,7 +522,7 @@ unsafe fn create_segment(
         heartbeat: 0,
         role_seq: [0; 3],
         sequence: 0,
-        schema,
+        schema: SCHEMA_VERSION,
         name: cn,
         created: true,
     };
@@ -550,20 +531,7 @@ unsafe fn create_segment(
     error::OK
 }
 
-/// Create (and own) a schema-3 (P1 single-writer) segment.
-///
-/// # Safety
-/// `name` must be a valid NUL-terminated C string; `out_handle` a valid, writable pointer.
-#[no_mangle]
-pub unsafe extern "C" fn mindie_wl_create(
-    name: *const c_char,
-    max_entries: u32,
-    out_handle: *mut u64,
-) -> ShmStatus {
-    create_segment(name, max_entries, SCHEMA_VERSION, out_handle)
-}
-
-/// Create (and own) a schema-4 (P2 per-slot CAS) segment.
+/// Create (and own) a schema-4 (per-slot CAS) segment.
 ///
 /// # Safety
 /// `name` must be a valid NUL-terminated C string; `out_handle` a valid, writable pointer.
@@ -573,7 +541,7 @@ pub unsafe extern "C" fn mindie_wl_create_v4(
     max_entries: u32,
     out_handle: *mut u64,
 ) -> ShmStatus {
-    create_segment(name, max_entries, SCHEMA_VERSION_V4, out_handle)
+    create_segment(name, max_entries, out_handle)
 }
 
 /// Attach to an existing segment (read/write mapping; does not own unlink).
@@ -663,31 +631,6 @@ pub unsafe extern "C" fn mindie_wl_snapshot_begin(handle: u64) -> ShmStatus {
             seg.snapshot_begin();
             error::OK
         }
-        None => error::NOT_ATTACHED,
-    }
-}
-
-/// # Safety
-/// `handle` must be a live handle from create/attach.
-#[no_mangle]
-pub unsafe extern "C" fn mindie_wl_snapshot_write_entry(
-    handle: u64,
-    slot: u32,
-    instance_id: i32,
-    endpoint_id: i32,
-    role: u8,
-    active_tokens: f64,
-) -> ShmStatus {
-    match seg_mut(handle) {
-        Some(seg) => seg.write_entry(
-            slot,
-            &Entry {
-                instance_id,
-                endpoint_id,
-                role,
-                active_tokens,
-            },
-        ),
         None => error::NOT_ATTACHED,
     }
 }
@@ -921,7 +864,8 @@ mod tests {
     use std::ffi::CString;
 
     fn unique_name(tag: &str) -> String {
-        format!("mindie_wl_rs_test_{}_{}", tag, std::process::id())
+        // Darwin PSHMNAMLEN is 31 including the leading '/'; keep this short.
+        format!("mw{}_{}", std::process::id(), tag)
     }
 
     #[test]
@@ -930,14 +874,32 @@ mod tests {
         let cn = CString::new(name.clone()).unwrap();
         unsafe {
             let mut h: u64 = 0;
-            assert_eq!(mindie_wl_create(cn.as_ptr(), 16, &mut h), error::OK);
+            assert_eq!(mindie_wl_create_v4(cn.as_ptr(), 16, &mut h), error::OK);
             assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
             assert_eq!(
-                mindie_wl_snapshot_write_entry(h, 0, 1, 10, layout::ROLE_PREFILL, 7.0),
+                mindie_wl_snapshot_write_entry_v4(
+                    h,
+                    0,
+                    1,
+                    10,
+                    layout::ROLE_PREFILL,
+                    0,
+                    layout::FLAG_VALID,
+                    7.0
+                ),
                 error::OK
             );
             assert_eq!(
-                mindie_wl_snapshot_write_entry(h, 1, 2, 20, layout::ROLE_PREFILL, 9.0),
+                mindie_wl_snapshot_write_entry_v4(
+                    h,
+                    1,
+                    2,
+                    20,
+                    layout::ROLE_PREFILL,
+                    0,
+                    layout::FLAG_VALID,
+                    9.0
+                ),
                 error::OK
             );
             assert_eq!(mindie_wl_snapshot_commit(h, 2, 1), error::OK);
@@ -961,13 +923,27 @@ mod tests {
             assert_eq!(ver, 1);
             assert_eq!(hb, 1);
 
-            let base = seg_mut(h2).unwrap().base;
-            let e0 = layout::unpack_entry(std::slice::from_raw_parts(
-                base.add(layout::entry_offset(0)),
-                layout::ENTRY_SIZE,
-            ));
-            assert_eq!(e0.instance_id, 1);
-            assert_eq!(e0.active_tokens, 7.0);
+            let mut iid = 0i32;
+            let mut eid = 0i32;
+            let mut role = 0u8;
+            let mut flags = 0u8;
+            let mut gen = 0u16;
+            let mut tokens = 0.0f64;
+            assert_eq!(
+                mindie_wl_load_entry(
+                    h2,
+                    0,
+                    &mut iid,
+                    &mut eid,
+                    &mut role,
+                    &mut flags,
+                    &mut gen,
+                    &mut tokens
+                ),
+                error::OK
+            );
+            assert_eq!(iid, 1);
+            assert_eq!(tokens, 7.0);
 
             assert_eq!(mindie_wl_close(h2, 0), error::OK);
             assert_eq!(mindie_wl_close(h, 1), error::OK); // creator unlinks
@@ -980,7 +956,7 @@ mod tests {
         let cn = CString::new(name).unwrap();
         unsafe {
             let mut h: u64 = 0;
-            assert_eq!(mindie_wl_create(cn.as_ptr(), 4, &mut h), error::OK);
+            assert_eq!(mindie_wl_create_v4(cn.as_ptr(), 4, &mut h), error::OK);
             assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
             let seq = seg_mut(h)
                 .unwrap()
@@ -1003,12 +979,12 @@ mod tests {
         let cn = CString::new(name).unwrap();
         unsafe {
             let mut h1: u64 = 0;
-            assert_eq!(mindie_wl_create(cn.as_ptr(), 4, &mut h1), error::OK);
+            assert_eq!(mindie_wl_create_v4(cn.as_ptr(), 4, &mut h1), error::OK);
             // Leak the mapping (simulate a crashed writer that never unlinked).
             std::mem::forget(Box::from_raw(h1 as *mut Segment));
             // A fresh create over the orphan must succeed (unlink + recreate).
             let mut h2: u64 = 0;
-            assert_eq!(mindie_wl_create(cn.as_ptr(), 4, &mut h2), error::OK);
+            assert_eq!(mindie_wl_create_v4(cn.as_ptr(), 4, &mut h2), error::OK);
             assert_eq!(mindie_wl_close(h2, 1), error::OK);
         }
     }

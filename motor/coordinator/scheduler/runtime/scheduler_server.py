@@ -34,7 +34,7 @@ from motor.coordinator.domain.circuit_breaker import (
 from motor.coordinator.models.constants import DEFAULT_REQUEST_ID, REQUEST_ID_KEY
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.scheduler.scheduler import Scheduler
-from motor.coordinator.scheduler.runtime.workload_shm import WorkloadSharedMemoryWriter
+from motor.coordinator.scheduler.runtime.workload_shm import WorkloadSharedMemoryOwner
 from motor.coordinator.scheduler.runtime.workload_shm.layout import (
     DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
 )
@@ -97,7 +97,7 @@ class _SchedulerRequestDispatcher:
         instance_manager: InstanceManager,
         scheduler: Scheduler,
         config: CoordinatorConfig,
-        workload_writer: WorkloadSharedMemoryWriter | None = None,
+        workload_writer: WorkloadSharedMemoryOwner | None = None,
         on_instance_refresh_done: InstanceRefreshCallback | None = None,
         circuit_breaker_manager: CircuitBreakerManager | None = None,
         pub_socket: zmq.asyncio.Socket | None = None,
@@ -658,7 +658,7 @@ class AsyncSchedulerServer:
         self._dispatch_timeout = 5.0
 
         self._dispatcher: _SchedulerRequestDispatcher | None = None
-        self._workload_writer: WorkloadSharedMemoryWriter | None = None
+        self._workload_writer: WorkloadSharedMemoryOwner | None = None
         self._heartbeat_task: asyncio.Task | None = None
         self._pub_socket: zmq.asyncio.Socket | None = None
         self._cb_manager: CircuitBreakerManager | None = None
@@ -753,7 +753,7 @@ class AsyncSchedulerServer:
             logger.info("Instance change PUB bound: %s", instance_pub_address)
 
         shm_name = f"mindie_workload_{os.getpid()}"
-        self._workload_writer = WorkloadSharedMemoryWriter(
+        self._workload_writer = WorkloadSharedMemoryOwner(
             self.instance_manager,
             max_entries=DEFAULT_WORKLOAD_SHM_MAX_ENTRIES,
             shm_name=shm_name,
@@ -936,39 +936,3 @@ class AsyncSchedulerServer:
                 await self._transport.send(client_id, error_frames)
             except Exception as e2:
                 logger.error("Error sending error response: %s", e2, exc_info=True)
-
-
-async def run_async_scheduler_server(config: CoordinatorConfig):
-    """Run Scheduler server asynchronously (asyncio entry)."""
-    # Set process title
-    try:
-        import setproctitle
-
-        setproctitle.setproctitle("AsyncSchedulerServer")
-    except ImportError:
-        pass
-
-    logger.info("Async scheduler server process starting (PID: %s)", os.getpid())
-
-    from motor.config.coordinator import DEFAULT_SCHEDULER_PROCESS_CONFIG
-
-    frontend_address = DEFAULT_SCHEDULER_PROCESS_CONFIG.frontend_address
-
-    # Create and start async server
-    server = AsyncSchedulerServer(config, frontend_address)
-
-    try:
-        await server.start()
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
-    finally:
-        await server.stop()
-
-
-def run_async_scheduler_server_proc(config: CoordinatorConfig) -> None:
-    """Async Scheduler server process entry (for sync entry points)."""
-    asyncio.run(run_async_scheduler_server(config))
-
-
-# Backward compat alias used by unit tests.
-SchedulerServer = AsyncSchedulerServer

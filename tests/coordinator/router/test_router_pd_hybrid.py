@@ -130,9 +130,9 @@ class TestRouterPDHybrid:
         monkeypatch.setattr(InstanceManager, "get_required_instances_status", mock_get_required_instances_status)
         monkeypatch.setattr(InstanceManager, "has_required_instances", mock_has_required_instances)
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
 
         mock_scheduler_config = MagicMock()
         mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
@@ -386,9 +386,9 @@ class TestRouterPDHybrid:
             return resp
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
 
         req_info = RequestInfo(
@@ -456,9 +456,9 @@ class TestRouterPDHybrid:
             return resp
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
 
         req_info = RequestInfo(
@@ -560,9 +560,9 @@ class TestPDHybridTracer:
             return [mock_instance.id] if role == PDRole.ROLE_U else []
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
 
     @pytest.mark.asyncio
     async def test_stream_creates_inference_span(
@@ -728,9 +728,9 @@ class TestPDHybridTracer:
             return resp
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
 
         req_info = RequestInfo(
@@ -838,9 +838,9 @@ class TestPDHybridCancelReschedule:
             return [mock_instance.id] if role == PDRole.ROLE_U else []
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
 
     @staticmethod
     def _build_router(

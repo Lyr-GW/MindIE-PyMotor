@@ -16,7 +16,7 @@ from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.domain.block_offset_translator import attach_block_offsets
-from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy, WorkloadLedgerMixin
+from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.config.coordinator import (
     AIGW_D_MAX_SEQLEN,
     AIGW_P_MAX_SEQLEN,
@@ -103,7 +103,7 @@ def adapt_context_budget(
         )
 
 
-class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
+class KvCacheAffinityPolicy(BaseSchedulingPolicy):
     """
     KvCache Affinity Scheduler Policy implementation.
     Selects instances and endpoints in a kvcache-affinity fashion.

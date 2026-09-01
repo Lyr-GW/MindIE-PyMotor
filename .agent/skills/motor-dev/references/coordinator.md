@@ -9,7 +9,7 @@ CoordinatorDaemon (parent process, async main loop)
 │
 ├── MgmtServer (1 process)               — Management HTTP + control plane
 │     owns: InstanceManager master (TYPE_MGMT, KV register), CircuitBreakerManager,
-│           precision tables, schema-4 WorkloadSharedMemoryWriter, ZMQ ROUTER + PUB
+│           precision tables, schema-4 WorkloadSharedMemoryOwner, ZMQ ROUTER + PUB
 │     start order: 1st | stop order: last
 │
 ├── ObsServer (1 process)                — Observability API
@@ -109,7 +109,7 @@ Header is 64B, each entry 24B:
 
 **SHM name:** `mindie_workload_<mgmt_pid>` — includes PID for uniqueness and orphan detection. Created via Rust `create_v4`. `shm_open(O_CREAT|O_EXCL)` failure unlinks and retries **only on `EEXIST`** (orphan); other errno values return SYSCALL without touching a live segment.
 
-**Membership snapshot:** Mgmt keeps **stable slots** for still-live `(iid, eid)` pairs (new pairs take the lowest free slot; removed pairs become INVALID holes). `write_entry_v4` never `store`s caller tokens over a live pair: same slot leaves Worker CAS bits in place; a moved pair atomic-loads the old slot. `_generation` is not pruned when a pair leaves (ABA).
+**Membership snapshot:** Mgmt keeps **stable slots** for still-live `(iid, eid)` pairs (new pairs take the lowest free slot; removed pairs become INVALID holes). `write_entry_v4` never `store`s caller tokens over a live pair: same slot leaves Worker CAS bits in place; a moved pair atomic-loads the old slot. `_generation` is not pruned when a pair leaves (ABA). `_add_instances` resets `endpoint.workload` to empty, so a new pair's IM seed is 0; non-zero tokens come only from Worker `cas_add`.
 
 **Recovery:** Workers detect stale SHM (heartbeat >5s old) → trigger full `GET_AVAILABLE_INSTANCES` refresh. Attach failure is loud (`NativeWorkloadShmUnavailable`); there is no Python writer fallback. FFI `cas_add` / `cas_sub_floor0` reject non-finite or negative `delta` with `BAD_ARG`. `update_workload` is release-only (`RELEASE_TOKENS`).
 
@@ -218,13 +218,13 @@ Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemo
 | `motor/coordinator/process/obs_manager.py` | | `ObsProcessManager` + `run_obs_server_proc` |
 | `motor/coordinator/process/inference_manager.py` | | `InferenceProcessManager` + shared socket + `run_inference_worker_proc` |
 | `motor/coordinator/process/constants.py` | | Process keys, start/stop order |
-| `motor/coordinator/scheduler/scheduler.py` | | `Scheduler` facade over scheduling policies |
+| `motor/coordinator/scheduler/scheduler.py` | | `Scheduler`: Mgmt precision sampling/alarm state (not SchedulingFacade) |
 | `motor/coordinator/scheduler/policy/factory.py` | | `SchedulingPolicyFactory` registry |
-| `motor/coordinator/scheduler/runtime/scheduler_server.py` | | `AsyncSchedulerServer`: Mgmt control plane (ROUTER+PUB, CB, precision, SHM writer) |
+| `motor/coordinator/scheduler/runtime/scheduler_server.py` | | `AsyncSchedulerServer`: Mgmt control plane (ROUTER+PUB, CB, precision, SHM owner) |
 | `motor/coordinator/scheduler/runtime/scheduler_client.py` | | `AsyncSchedulerClient`: control-plane DEALER + instance cache + SHM CAS |
 | `motor/coordinator/scheduler/runtime/zmq_protocol.py` | | Request/response types, msgpack framing, topic constants |
 | `motor/coordinator/scheduler/allocate_arbitration.py` | | Shared LB/KVA/RR reselect (R4; no ZMQ) |
-| `motor/coordinator/scheduler/runtime/workload_shm/` | | schema-4 layout + Reader/Writer + `native.py` ctypes |
+| `motor/coordinator/scheduler/runtime/workload_shm/` | | schema-4 layout + Reader/Owner + `native.py` ctypes |
 | `motor/coordinator/workload_shm_rs/` | | Rust cdylib: POSIX SHM create/attach, seqlock snapshot, per-slot CAS |
 | `motor/coordinator/domain/instance_manager.py` | | Central instance pool (available/unavailable, per-role sub-pools) |
 | `motor/coordinator/domain/request_manager.py` | | Request ID generation, workload tracking per request |

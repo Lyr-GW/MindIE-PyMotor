@@ -11,14 +11,14 @@
 //! Byte layout for the workload shared-memory segment.
 //!
 //! This mirrors, byte-for-byte, the Python layout in
-//! `motor/coordinator/scheduler/runtime/workload_shm/layout.py` (SCHEMA_VERSION 3):
-//! a 64-byte header followed by N 24-byte entries, little-endian, so the existing Python
-//! `WorkloadSharedMemoryReader` can read a segment written by this crate unchanged.
+//! `motor/coordinator/scheduler/runtime/workload_shm/layout.py` (SCHEMA_VERSION 4):
+//! a 64-byte header followed by N 24-byte entries, little-endian. Membership is seqlock-
+//! published by Mgmt; per-slot `active_tokens` is an AtomicU64 CAS'd by Infer Workers.
 
 /// Magic "WKLD" (0x57 0x4B 0x4C 0x44) little-endian.
 pub const MAGIC: u32 = 0x574B_4C44;
-/// Layout schema version. Must match the Python reader/writer.
-pub const SCHEMA_VERSION: u16 = 3;
+/// Layout schema version. Must match the Python reader/owner.
+pub const SCHEMA_VERSION: u16 = 4;
 
 pub const HEADER_SIZE: usize = 64;
 pub const ENTRY_SIZE: usize = 24;
@@ -36,12 +36,6 @@ pub const OFF_PREFILL_SEQ: usize = 40; // u64
 pub const OFF_DECODE_SEQ: usize = 48; // u64
 pub const OFF_HYBRID_SEQ: usize = 56; // u64
 
-// Entry field byte offsets within a 24-byte slot (see layout.py ENTRY_FMT "<i i B 3x d 4x").
-pub const ENTRY_OFF_INSTANCE_ID: usize = 0; // i32
-pub const ENTRY_OFF_ENDPOINT_ID: usize = 4; // i32
-pub const ENTRY_OFF_ROLE: usize = 8; // u8
-pub const ENTRY_OFF_ACTIVE_TOKENS: usize = 12; // f64 (4-byte aligned only; not atomic)
-
 // shm role bytes (layout.py: prefill=0, decode=1, hybrid=2, encode=3).
 pub const ROLE_PREFILL: u8 = 0;
 pub const ROLE_DECODE: u8 = 1;
@@ -49,12 +43,9 @@ pub const ROLE_HYBRID: u8 = 2;
 pub const ROLE_ENCODE: u8 = 3;
 
 // ---------------------------------------------------------------------------
-// Schema 4 (P2): per-slot atomic CAS layout. Header is unchanged (64B); the schema_version field
-// is 4 and the seqlock now covers only membership changes (token CAS does NOT bump it), so readers
-// must atomic-load tokens on every scoring pass.
+// Schema 4: per-slot atomic CAS layout. Header is 64B; seqlock covers only membership
+// (token CAS does NOT bump it), so readers must atomic-load tokens on every scoring pass.
 // ---------------------------------------------------------------------------
-
-pub const SCHEMA_VERSION_V4: u16 = 4;
 
 // Entry field byte offsets within a 24-byte slot for schema 4.
 //
@@ -90,63 +81,9 @@ pub fn entry_offset(slot: u32) -> usize {
     HEADER_SIZE + (slot as usize) * ENTRY_SIZE
 }
 
-/// One workload entry.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Entry {
-    pub instance_id: i32,
-    pub endpoint_id: i32,
-    pub role: u8,
-    pub active_tokens: f64,
-}
-
-/// Write an entry's 24 bytes into `slot_bytes` (must be at least ENTRY_SIZE long).
-pub fn pack_entry(slot_bytes: &mut [u8], entry: &Entry) {
-    slot_bytes[ENTRY_OFF_INSTANCE_ID..ENTRY_OFF_INSTANCE_ID + 4]
-        .copy_from_slice(&entry.instance_id.to_le_bytes());
-    slot_bytes[ENTRY_OFF_ENDPOINT_ID..ENTRY_OFF_ENDPOINT_ID + 4]
-        .copy_from_slice(&entry.endpoint_id.to_le_bytes());
-    slot_bytes[ENTRY_OFF_ROLE] = entry.role;
-    slot_bytes[ENTRY_OFF_ROLE + 1..ENTRY_OFF_ROLE + 4].fill(0);
-    slot_bytes[ENTRY_OFF_ACTIVE_TOKENS..ENTRY_OFF_ACTIVE_TOKENS + 8]
-        .copy_from_slice(&entry.active_tokens.to_le_bytes());
-    slot_bytes[ENTRY_OFF_ACTIVE_TOKENS + 8..ENTRY_SIZE].fill(0);
-}
-
-/// Read an entry's 24 bytes back (used by cargo tests / native reader).
-pub fn unpack_entry(slot_bytes: &[u8]) -> Entry {
-    let mut iid = [0u8; 4];
-    iid.copy_from_slice(&slot_bytes[ENTRY_OFF_INSTANCE_ID..ENTRY_OFF_INSTANCE_ID + 4]);
-    let mut eid = [0u8; 4];
-    eid.copy_from_slice(&slot_bytes[ENTRY_OFF_ENDPOINT_ID..ENTRY_OFF_ENDPOINT_ID + 4]);
-    let mut tokens = [0u8; 8];
-    tokens.copy_from_slice(&slot_bytes[ENTRY_OFF_ACTIVE_TOKENS..ENTRY_OFF_ACTIVE_TOKENS + 8]);
-    Entry {
-        instance_id: i32::from_le_bytes(iid),
-        endpoint_id: i32::from_le_bytes(eid),
-        role: slot_bytes[ENTRY_OFF_ROLE],
-        active_tokens: f64::from_le_bytes(tokens),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn entry_roundtrips_24_bytes() {
-        let mut buf = [0xAAu8; ENTRY_SIZE];
-        let e = Entry {
-            instance_id: 7,
-            endpoint_id: 21,
-            role: ROLE_DECODE,
-            active_tokens: 12.5,
-        };
-        pack_entry(&mut buf, &e);
-        // padding bytes must be zeroed.
-        assert_eq!(&buf[9..12], &[0, 0, 0]);
-        assert_eq!(&buf[20..24], &[0, 0, 0, 0]);
-        assert_eq!(unpack_entry(&buf), e);
-    }
 
     #[test]
     fn sizes_match_python_layout() {

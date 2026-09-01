@@ -9,9 +9,9 @@
 # See the Mulan PSL v2 for more details.
 
 """
-WorkloadSharedMemoryWriter: Mgmt-side schema-4 membership snapshot via the Rust .so.
+WorkloadSharedMemoryOwner: Mgmt-side schema-4 membership snapshot via the Rust .so.
 
-Token allocate/release is done by Infer Workers with per-slot CAS; this writer only
+Token allocate/release is done by Infer Workers with per-slot CAS; this owner only
 creates the segment, snapshots membership (preserving in-flight tokens), heartbeats,
 and sets BLOCKED flags for the circuit breaker.
 """
@@ -82,7 +82,7 @@ def _lowest_free_slot(used: set[int], max_entries: int) -> int | None:
     return slot
 
 
-class WorkloadSharedMemoryWriter:
+class WorkloadSharedMemoryOwner:
     """Mgmt-side schema-4 SHM owner. Membership snapshot + heartbeat + BLOCKED flags."""
 
     def __init__(
@@ -121,12 +121,12 @@ class WorkloadSharedMemoryWriter:
             return 0
 
     def release(self) -> None:
-        """Close the native handle; unlinks when this writer created the segment."""
+        """Close the native handle; unlinks when this owner created the segment."""
         if self._native is not None:
             try:
                 self._native.close(unlink=self._owns_native)
             except Exception as e:
-                logger.warning("WorkloadSharedMemoryWriter close error: %s", e)
+                logger.warning("WorkloadSharedMemoryOwner close error: %s", e)
             self._native = None
 
     def write_heartbeat(self) -> None:

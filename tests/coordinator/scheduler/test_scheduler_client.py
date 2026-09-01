@@ -40,7 +40,7 @@ from motor.coordinator.scheduler.runtime.workload_shm.native import (
     load_native_library,
 )
 from motor.coordinator.scheduler.runtime.workload_shm.reader import WorkloadSharedMemoryReader
-from motor.coordinator.scheduler.runtime.workload_shm.writer import WorkloadSharedMemoryWriter
+from motor.coordinator.scheduler.runtime.workload_shm.writer import WorkloadSharedMemoryOwner
 
 
 # ========================================================================
@@ -793,7 +793,7 @@ def _make_cas_instance(instance_id: int, endpoint_id: int) -> Instance:
     return inst
 
 
-def _seed_shm_tokens(writer: WorkloadSharedMemoryWriter, instance_id: int, endpoint_id: int, tokens: float) -> None:
+def _seed_shm_tokens(writer: WorkloadSharedMemoryOwner, instance_id: int, endpoint_id: int, tokens: float) -> None:
     """CAS-seed SHM after snapshot. ADD clears IM, so fixture tokens never reach a new pair."""
     header = writer.native.read_header()
     for slot in range(int(header.get("entry_count", 0) or 0)):
@@ -815,8 +815,8 @@ def native_lib():
         return None
 
 
-async def _client_with_shm(im: InstanceManager, name: str) -> tuple[AsyncSchedulerClient, WorkloadSharedMemoryWriter]:
-    writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
+async def _client_with_shm(im: InstanceManager, name: str) -> tuple[AsyncSchedulerClient, WorkloadSharedMemoryOwner]:
+    writer = WorkloadSharedMemoryOwner(im, max_entries=8, shm_name=name)
     writer.write_snapshot()
     client = AsyncSchedulerClient(
         SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)

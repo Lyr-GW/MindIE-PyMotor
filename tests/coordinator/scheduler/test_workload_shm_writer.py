@@ -8,7 +8,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 license for more details.
 
-"""Tests for WorkloadSharedMemoryWriter public API and membership helpers."""
+"""Tests for WorkloadSharedMemoryOwner public API and membership helpers."""
 
 import os
 import unittest
@@ -22,7 +22,7 @@ from motor.common.resources.instance import Instance, InsStatus, PDRole, Paralle
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.scheduler.runtime.workload_shm.writer import (
-    WorkloadSharedMemoryWriter,
+    WorkloadSharedMemoryOwner,
     _pdrole_to_shm_role,
     _collect_entries_and_slot_map,
     _lowest_free_slot,
@@ -210,7 +210,7 @@ async def test_writer_snapshot_and_heartbeat(native_lib):
     im = InstanceManager(config)
     await im.refresh_instances(EventType.ADD, [_make_real_instance(1, 10, 0.0)])
     name = _unique("ws")
-    writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
+    writer = WorkloadSharedMemoryOwner(im, max_entries=8, shm_name=name)
     reader = WorkloadSharedMemoryReader(name)
     try:
         writer.write_snapshot()
@@ -245,7 +245,7 @@ async def test_writer_set_blocked(native_lib):
     im = InstanceManager(config)
     await im.refresh_instances(EventType.ADD, [_make_real_instance(3, 30, 0.0)])
     name = _unique("wb")
-    writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
+    writer = WorkloadSharedMemoryOwner(im, max_entries=8, shm_name=name)
     try:
         writer.write_snapshot()
         assert writer.set_blocked(3, True) >= 1
@@ -265,7 +265,7 @@ async def test_writer_snapshot_preserves_cas_tokens(native_lib):
     im = InstanceManager(config)
     await im.refresh_instances(EventType.ADD, [_make_real_instance(1, 10, 0.0)])
     name = _unique("wt")
-    writer = WorkloadSharedMemoryWriter(im, max_entries=8, shm_name=name)
+    writer = WorkloadSharedMemoryOwner(im, max_entries=8, shm_name=name)
     try:
         writer.write_snapshot()
         meta = writer.native.load_entry(0)

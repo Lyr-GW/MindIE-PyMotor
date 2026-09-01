@@ -14,6 +14,8 @@ Native shared-memory writer contract (schema 4) and per-slot CAS.
 Drives ``libmindie_workload_shm`` via ctypes and reads back with the production Python reader.
 """
 
+import ctypes
+import mmap
 import multiprocessing
 import os
 
@@ -72,6 +74,7 @@ def _read_with_python(name: str, role: PDRole | None = None) -> tuple[tuple[int 
 def test_native_reports_abi(lib):
     """ABI version is stable; production segments are schema 4."""
     assert lib.mindie_wl_abi_version() >= 1
+    assert lib.mindie_wl_schema_version() == 4
     name = _unique("ab")
     shm = WorkloadShm.create_v4(name, 4, lib=lib)
     try:
@@ -163,13 +166,34 @@ def test_missing_library_raises_clear_error():
     assert native._LIB_BASENAME in str(exc.value)
 
 
+def _poke_schema_version(name: str, schema: int) -> None:
+    """Overwrite header schema_version (offset 4, little-endian u16) on a live POSIX SHM."""
+    libc = ctypes.CDLL(None)
+    shm_open = libc.shm_open
+    shm_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_uint]
+    shm_open.restype = ctypes.c_int
+    posix_name = name if name.startswith("/") else f"/{name}"
+    fd = shm_open(posix_name.encode("utf-8"), os.O_RDWR, 0o600)
+    if fd < 0:
+        raise OSError("shm_open failed while poking schema_version")
+    try:
+        mm = mmap.mmap(fd, 8)
+        try:
+            mm[4:6] = schema.to_bytes(2, "little")
+        finally:
+            mm.close()
+    finally:
+        os.close(fd)
+
+
 def test_schema_mismatch_is_refused(lib):
-    """A schema-3 segment is refused by the schema-4 Reader."""
+    """A non-schema-4 header is refused by the Reader."""
     name = _unique("sm")
-    shm = WorkloadShm.create(name, 8, lib=lib)
+    shm = WorkloadShm.create_v4(name, 8, lib=lib)
     reader = WorkloadSharedMemoryReader(name)
     try:
-        shm.write_snapshot([(1, 10, 0, 7.0)])
+        shm.write_snapshot_v4([(1, 10, 0, 0, FLAG_VALID, 7.0)])
+        _poke_schema_version(name, 3)
         reader.attach()
         cache = _FakeCache()
         instance_version, _stale = reader.read_and_patch_cache(cache, role=None)
