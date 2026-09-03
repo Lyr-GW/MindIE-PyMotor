@@ -111,6 +111,11 @@ class _SchedulerRequestDispatcher:
         self._pub_socket = pub_socket
         self._recovery_timers: dict[int, asyncio.Task] = {}
         self._workload_commit_lock = asyncio.Lock()
+        # instance_id -> BLOCKED state that failed to apply to SHM; drained by _retry_pending_blocked.
+        self._pending_blocked: dict[int, bool] = {}
+        # True when InstanceManager has changes not yet reflected in the SHM snapshot; drained by
+        # _retry_dirty_snapshot (also forces a resync on the next apply_refresh).
+        self._snapshot_dirty = False
 
     async def dispatch(self, request: SchedulerRequest) -> SchedulerResponse:
         """Dispatch control-plane request to the appropriate handler."""
@@ -167,8 +172,10 @@ class _SchedulerRequestDispatcher:
                     self._cb_manager.clear_instance(inst.id)
                     self._cancel_recovery(inst.id)
                     self._set_blocked(inst.id, False)
-            if changed and self._workload_writer:
+            if (changed or self._snapshot_dirty) and self._workload_writer:
+                self._snapshot_dirty = True  # cleared only after write_snapshot succeeds below
                 self._workload_writer.write_snapshot()
+                self._snapshot_dirty = False
             if event_type == EventType.SET:
                 for iid in previously_open_ids:
                     self._set_blocked(iid, False)
@@ -184,19 +191,48 @@ class _SchedulerRequestDispatcher:
             asyncio.create_task(self._publish_circuit_breaker(iid, "closed"))
         return changed
 
-    def _set_blocked(self, instance_id: int, blocked: bool) -> None:
-        """Mirror circuit-breaker OPEN/CLOSED onto SHM BLOCKED flags (final CAS gate)."""
+    def _set_blocked(self, instance_id: int, blocked: bool) -> bool:
+        """Mirror circuit-breaker OPEN/CLOSED onto SHM BLOCKED flags (final CAS gate).
+
+        Returns False on native failure instead of silently dropping it; the desired state is
+        queued and retried from the heartbeat loop (_retry_pending_blocked).
+        """
         if not self._workload_writer:
-            return
+            return True
         try:
             self._workload_writer.set_blocked(instance_id, blocked)
+            self._pending_blocked.pop(instance_id, None)
+            return True
         except Exception as e:
-            logger.warning(
-                "Failed to set_blocked instance_id=%d blocked=%s: %s",
+            logger.error(
+                "Failed to set_blocked instance_id=%d blocked=%s, will retry: %s",
                 instance_id,
                 blocked,
                 e,
             )
+            self._pending_blocked[instance_id] = blocked
+            return False
+
+    def _retry_dirty_snapshot(self) -> None:
+        """Retry a previously failed write_snapshot. Called every heartbeat tick."""
+        if not self._snapshot_dirty or not self._workload_writer:
+            return
+        try:
+            self._workload_writer.write_snapshot()
+            self._snapshot_dirty = False
+        except Exception as e:
+            logger.debug("Retry write_snapshot still failing: %s", e)
+
+    def _retry_pending_blocked(self) -> None:
+        """Flush SHM BLOCKED flags that previously failed to apply. Called every heartbeat tick."""
+        if not self._pending_blocked or not self._workload_writer:
+            return
+        for instance_id, blocked in list(self._pending_blocked.items()):
+            try:
+                self._workload_writer.set_blocked(instance_id, blocked)
+                self._pending_blocked.pop(instance_id, None)
+            except Exception as e:
+                logger.debug("Retry set_blocked instance_id=%d blocked=%s still failing: %s", instance_id, blocked, e)
 
     async def _handle_confirm_sample(self, request: SchedulerRequest) -> SchedulerResponse:
         """Cross-worker precision sampling exit gate (per PD group, interval in request data)."""
@@ -828,6 +864,9 @@ class AsyncSchedulerServer:
                 if self._stop_event.is_set() or not self._workload_writer:
                     break
                 self._workload_writer.write_heartbeat()
+                if self._dispatcher is not None:
+                    self._dispatcher._retry_pending_blocked()
+                    self._dispatcher._retry_dirty_snapshot()
             except asyncio.CancelledError:
                 break
             except Exception as e:

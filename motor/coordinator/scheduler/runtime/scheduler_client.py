@@ -1031,7 +1031,9 @@ class AsyncSchedulerClient:
             return None
 
         for _attempt in range(_MAX_CAS_ALLOCATE_ATTEMPTS):
-            await self._refresh_cache_from_workload_reader(role)
+            # First attempt reuses the candidate-selection refresh above; later retries re-read.
+            if _attempt > 0:
+                await self._refresh_cache_from_workload_reader(role)
             ctx = self._arbitration_context()
             open_pairs = [pair for pair in candidate_pairs if pair not in excluded] or (
                 [proposed] if proposed not in excluded else []
@@ -1047,6 +1049,7 @@ class AsyncSchedulerClient:
                     self._kv_affinity_prefill_load_scale if global_affinity else None,
                     self._kv_affinity_load_weight if global_affinity else None,
                     normalized_engine_type or None,
+                    excluded=excluded,
                 )
             else:
                 selected = select_valid_candidate(ctx, proposed, role, normalized_engine_type or None)
@@ -1061,6 +1064,7 @@ class AsyncSchedulerClient:
                         self._kv_affinity_prefill_load_scale if global_affinity else None,
                         self._kv_affinity_load_weight if global_affinity else None,
                         normalized_engine_type or None,
+                        excluded=excluded,
                     )
                     use_authoritative = True
             if selected is None:
@@ -1342,8 +1346,21 @@ class AsyncSchedulerClient:
             role = params.role if isinstance(params.role, PDRole) else PDRole(params.role)
         except ValueError:
             role = PDRole.ROLE_U
-        self._cache.patch_workload_from_shm(params.instance_id, params.endpoint_id, role, actual)
         meta["active_tokens"] = actual
+        # CAS already committed above; a cache-patch failure must not turn this into a retry
+        # (a second cas_sub_floor0 would subtract the same delta twice).
+        try:
+            self._cache.patch_workload_from_shm(params.instance_id, params.endpoint_id, role, actual)
+        except Exception as e:
+            logger.warning(
+                "update_workload cache patch failed after CAS success instance_id=%s endpoint_id=%s "
+                "role=%s req_id=%s: %s",
+                params.instance_id,
+                params.endpoint_id,
+                role_str,
+                params.req_id,
+                e,
+            )
         return True
 
     async def get_available_instances(self, role: PDRole | None = None) -> dict[int, Instance]:

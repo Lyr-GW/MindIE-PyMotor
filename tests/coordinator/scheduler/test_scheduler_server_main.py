@@ -322,6 +322,41 @@ class TestApplyRefresh:
         assert changed is True
         assert (4, False) in writer.blocked
 
+    @pytest.mark.asyncio
+    async def test_dirty_snapshot_is_retried_even_when_next_refresh_is_a_noop(self):
+        """A write_snapshot failure leaves _snapshot_dirty set; a later apply_refresh whose own IM
+        delta is a no-op (idempotent retry) must still force write_snapshot while dirty, so IM/SHM
+        cannot stay diverged forever just because no further real change ever arrives (P0 fix).
+        """
+        writer = _DummyWorkloadWriter()
+        writer.write_snapshot = MagicMock(side_effect=RuntimeError("shm write failed"))
+        dispatcher, instance_manager, *_ = _make_dispatcher(workload_writer=writer)
+        inst = _make_instance(1, (10,))
+
+        with pytest.raises(RuntimeError):
+            await dispatcher.apply_refresh(EventType.ADD, [inst])
+        assert dispatcher._snapshot_dirty is True
+
+        writer.write_snapshot = MagicMock()  # recovers
+        instance_manager.refresh_instances = AsyncMock(return_value=False)  # idempotent no-op
+        changed = await dispatcher.apply_refresh(EventType.ADD, [inst])
+
+        assert changed is False
+        writer.write_snapshot.assert_called_once()
+        assert dispatcher._snapshot_dirty is False
+
+    @pytest.mark.asyncio
+    async def test_retry_dirty_snapshot_converges_from_heartbeat_loop(self):
+        """The heartbeat-driven retry (no new instance-list event at all) must also clear dirty."""
+        writer = _DummyWorkloadWriter()
+        dispatcher, *_ = _make_dispatcher(workload_writer=writer)
+        dispatcher._snapshot_dirty = True
+
+        dispatcher._retry_dirty_snapshot()
+
+        assert writer.snapshots == 1
+        assert dispatcher._snapshot_dirty is False
+
 
 class TestSchedulerFrontendTransport:
     @pytest.mark.asyncio

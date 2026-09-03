@@ -259,3 +259,51 @@ async def test_circuit_open_is_the_final_gate():
     instance, endpoint, _ = selected
     assert instance.id == 1
     assert endpoint.id == 10  # ep10=20 < ep11=30
+
+
+@pytest.mark.asyncio
+async def test_global_load_balance_skips_excluded_pair():
+    """A pair this CAS round already rejected must not win the re-scan again."""
+    im = await _two_prefill_pool(_STD_LOADS)
+    ctx = _context(im, is_load_balance=True)
+
+    selected = allocate_arbitration.select_global_load_balance_candidate(ctx, PDRole.ROLE_P, excluded={(2, 20)})
+
+    assert selected is not None
+    instance, endpoint, _ = selected
+    assert (instance.id, endpoint.id) == (1, 10)  # next-lowest after excluding the global min (2,20)
+
+
+@pytest.mark.asyncio
+async def test_authoritative_load_balance_skips_excluded_pair():
+    """select_authoritative_allocate_candidate must forward excluded into the LB global scan."""
+    im = await _two_prefill_pool(_STD_LOADS)
+    ctx = _context(im, is_load_balance=True)
+
+    selected = allocate_arbitration.select_authoritative_allocate_candidate(
+        ctx, (1, 10), [(1, 10)], PDRole.ROLE_P, candidate_policy=None, excluded={(2, 20)}
+    )
+
+    assert selected is not None
+    instance, endpoint, _ = selected
+    assert (instance.id, endpoint.id) == (1, 10)
+
+
+@pytest.mark.asyncio
+async def test_affinity_global_skips_excluded_pair():
+    """Unified affinity re-rank must not keep re-picking a pair this CAS round already rejected."""
+    im = await _two_prefill_pool({(1, 10): 1, (1, 11): 1, (2, 20): 50, (2, 21): 1})
+    ctx = _context(im, is_load_balance=False)
+
+    selected = allocate_arbitration.select_affinity_global(
+        ctx,
+        [(1, 10, 10000.0), (1, 11, 10000.0), (2, 20, 0.0), (2, 21, 10000.0)],
+        PDRole.ROLE_P,
+        prefill_load_scale=1.0,
+        load_weight=1.0,
+        excluded={(2, 20)},
+    )
+
+    assert selected is not None
+    instance, endpoint, _ = selected
+    assert (instance.id, endpoint.id) != (2, 20)

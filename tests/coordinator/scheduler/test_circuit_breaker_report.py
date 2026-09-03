@@ -140,3 +140,22 @@ class TestCircuitBreakerReport:
         writer.reset_mock()
         _dispatch(dispatcher, _cb_request(1, "success"))
         writer.set_blocked.assert_called_with(1, False)
+
+    def test_set_blocked_failure_is_queued_and_retried(self):
+        """A native set_blocked error is queued (not dropped) and the heartbeat-driven retry
+        flushes it once native recovers.
+        """
+        dispatcher, cb = _make_cb_dispatcher()
+        writer = MagicMock()
+        writer.set_blocked.side_effect = RuntimeError("shm write failed")
+        dispatcher._workload_writer = writer
+        for _ in range(3):
+            _dispatch(dispatcher, _cb_request(1, "failure"))
+        assert cb.is_open(1)
+        assert dispatcher._pending_blocked == {1: True}
+
+        writer.set_blocked.side_effect = None
+        dispatcher._retry_pending_blocked()
+
+        writer.set_blocked.assert_called_with(1, True)
+        assert dispatcher._pending_blocked == {}

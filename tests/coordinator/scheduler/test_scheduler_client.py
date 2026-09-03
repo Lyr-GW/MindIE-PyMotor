@@ -35,6 +35,7 @@ from motor.coordinator.scheduler.runtime.scheduler_client import (
     _collect_active_endpoints_from_cache,
 )
 from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    STATUS_BLOCKED,
     STATUS_OK,
     NativeWorkloadShmUnavailable,
     load_native_library,
@@ -864,6 +865,33 @@ class TestSelectAndAllocateCas:
             writer.release()
 
     @pytest.mark.asyncio
+    async def test_select_and_allocate_fast_path_refreshes_once(self, native_lib):
+        """First CAS attempt must not redo the refresh candidate selection already did."""
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10)])
+        name = _cas_shm_name("frf")
+        client, writer = await _client_with_shm(im, name)
+        _seed_shm_tokens(writer, 1, 10, 1.0)
+        orig_refresh = client._refresh_cache_from_workload_reader
+        calls = {"n": 0}
+
+        async def counting_refresh(*args, **kwargs):
+            calls["n"] += 1
+            return await orig_refresh(*args, **kwargs)
+
+        client._refresh_cache_from_workload_reader = counting_refresh
+        try:
+            req = RequestInfo(req_id="req-frf", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            assert calls["n"] == 1
+        finally:
+            client._workload_reader.detach()
+            writer.release()
+
+    @pytest.mark.asyncio
     async def test_select_and_allocate_changed_reloads_and_rescores(self, native_lib):
         """Stale expected (CHANGED) must re-score on the fresh vector, not blindly add on the old winner."""
         del native_lib
@@ -896,6 +924,46 @@ class TestSelectAndAllocateCas:
             assert instance.id == 2
             assert endpoint.id == 20
             assert calls["n"] >= 2
+        finally:
+            native.cas_add = orig
+            client._workload_reader.detach()
+            writer.release()
+
+    @pytest.mark.asyncio
+    async def test_select_and_allocate_blocked_excludes_pair_and_switches_candidate(self, native_lib):
+        """CAS BLOCKED on the proposed pair must exclude it from the LB re-scan and pick the other
+        healthy pair, instead of re-selecting it until the retry budget is exhausted.
+        """
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(
+            EventType.ADD,
+            [_make_cas_instance(1, 10), _make_cas_instance(2, 20)],
+        )
+        name = _cas_shm_name("blk")
+        client, writer = await _client_with_shm(im, name)
+        _seed_shm_tokens(writer, 1, 10, 1.0)  # globally lowest -> proposed
+        _seed_shm_tokens(writer, 2, 20, 8.0)
+        native = client._workload_reader.native
+        orig = native.cas_add
+        calls = {"n": 0}
+
+        def wrapped(iid, eid, gen, expected, delta):
+            calls["n"] += 1
+            if (iid, eid) == (1, 10):
+                return (STATUS_BLOCKED, expected)
+            return orig(iid, eid, gen, expected, delta)
+
+        native.cas_add = wrapped
+        try:
+            req = RequestInfo(req_id="req-blocked", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            instance, endpoint, _committed = result
+            assert (instance.id, endpoint.id) == (2, 20)
+            # Must switch on the second attempt, not exhaust retries re-selecting the excluded pair.
+            assert calls["n"] == 2
         finally:
             native.cas_add = orig
             client._workload_reader.detach()
@@ -937,6 +1005,55 @@ class TestSelectAndAllocateCas:
             meta = client._workload_reader.entry_meta(instance.id, endpoint.id)
             assert meta is not None
             assert meta["active_tokens"] == pytest.approx(1.0)
+        finally:
+            client._workload_reader.detach()
+            writer.release()
+
+    @pytest.mark.asyncio
+    async def test_update_workload_cas_success_survives_cache_patch_failure(self, native_lib):
+        """A cache-patch error after cas_sub_floor0 commits must not fail the release (would
+        cause the caller to retry and subtract the same delta twice).
+        """
+        del native_lib
+        config = CoordinatorConfig()
+        im = InstanceManager(config)
+        await im.refresh_instances(EventType.ADD, [_make_cas_instance(1, 10)])
+        name = _cas_shm_name("rlp")
+        client, writer = await _client_with_shm(im, name)
+        _seed_shm_tokens(writer, 1, 10, 1.0)
+        try:
+            req = RequestInfo(req_id="req-relp", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+            result = await client.select_and_allocate(PDRole.ROLE_P, req)
+            assert result is not None
+            instance, endpoint, committed = result
+            native = client._workload_reader.native
+            orig_cas_sub = native.cas_sub_floor0
+            calls = {"n": 0}
+
+            def counting_cas_sub(*args, **kwargs):
+                calls["n"] += 1
+                return orig_cas_sub(*args, **kwargs)
+
+            native.cas_sub_floor0 = counting_cas_sub
+            client._cache.patch_workload_from_shm = Mock(side_effect=RuntimeError("cache patch boom"))
+            try:
+                ok = await client.update_workload(
+                    UpdateWorkloadParams(
+                        instance_id=instance.id,
+                        endpoint_id=endpoint.id,
+                        role=PDRole.ROLE_P,
+                        req_id="req-relp",
+                        workload_action=WorkloadAction.RELEASE_TOKENS,
+                        workload_change=Workload(active_tokens=-committed.active_tokens),
+                    )
+                )
+                assert ok is True
+                assert calls["n"] == 1
+                meta = client._workload_reader.entry_meta(instance.id, endpoint.id)
+                assert meta is not None
+                assert meta["active_tokens"] == pytest.approx(1.0)
+            finally:
+                native.cas_sub_floor0 = orig_cas_sub
         finally:
             client._workload_reader.detach()
             writer.release()

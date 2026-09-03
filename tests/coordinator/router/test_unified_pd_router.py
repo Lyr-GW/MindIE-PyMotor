@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -1370,6 +1370,63 @@ async def test_unified_pd_release_inflight_deduplicates_same_action():
         assert scheduler.update_workload.await_count == 1
         assert attempt.release_flags.prefill_tokens
         assert not router._release_inflight
+    finally:
+        await request_manager.del_req_info(req_info.req_id)
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_release_finalize_failure_still_marks_released_and_is_not_resent():
+    """A finalize_release failure after a successful scheduler ACK must not leave the release
+    re-sendable, or a later re-enqueue would resend (double-subtract) the same delta.
+    """
+    req_info = RequestInfo(
+        req_id="root-release-finalize-failure",
+        req_data={"model": "m", "prompt": "hello", "stream": True, "max_tokens": 8},
+        api="v1/completions",
+        entry_api="v1/completions",
+        req_len=10,
+    )
+    config = _config()
+    request_manager = RequestManager(config)
+    scheduler = _Scheduler()
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=scheduler,
+        request_manager=request_manager,
+    )
+
+    await request_manager.add_req_info(req_info)
+    try:
+        attempt = await router._create_attempt(PDDispatchSession(req_info.req_id))
+        with patch.object(
+            router._workload_action_handler,
+            "finalize_release",
+            AsyncMock(side_effect=RuntimeError("finalize boom")),
+        ):
+            submitted = await router._release_attempt_resource(
+                attempt.prefill_resource,
+                attempt.attempt_seq,
+                WorkloadAction.RELEASE_TOKENS,
+                attempt,
+                wait=False,
+            )
+            assert submitted is True
+            await router._drain_release_tasks()
+
+        assert scheduler.update_workload.await_count == 1
+        assert attempt.release_flags.prefill_tokens  # marked despite finalize failing
+
+        # A later re-enqueue must short-circuit as already-marked and not call the scheduler again.
+        second = await router._release_attempt_resource(
+            attempt.prefill_resource,
+            attempt.attempt_seq,
+            WorkloadAction.RELEASE_TOKENS,
+            attempt,
+            wait=False,
+        )
+        assert second is False
+        assert scheduler.update_workload.await_count == 1
     finally:
         await request_manager.del_req_info(req_info.req_id)
 

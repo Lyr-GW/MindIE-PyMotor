@@ -89,15 +89,22 @@ class WorkloadSharedMemoryReader:
 
         Returns (instance_version, heartbeat_stale). Always loads tokens (schema 4 multi-writer);
         membership seqlock retries reject a torn snapshot.
+
+        Heartbeat is checked before the stable-snapshot loop: it is bumped by its own atomic store
+        outside the seqlock, so it stays readable even while ``sequence`` is stuck odd.
         """
         if self._native is None:
             return (None, False)
         try:
+            header = self._native.read_header()
+            if not self._is_valid_header(header):
+                return (None, False)
+            heartbeat_stale = self._update_heartbeat_and_check_stale(int(header["heartbeat"]))
             snapshot = None
             for _ in range(STABLE_SNAPSHOT_READ_ATTEMPTS):
                 header = self._native.read_header()
                 if not self._is_valid_header(header):
-                    return (None, False)
+                    return (None, heartbeat_stale)
                 sequence = int(header["sequence"])
                 if sequence % 2 == 1:
                     continue
@@ -113,9 +120,8 @@ class WorkloadSharedMemoryReader:
                     snapshot = (header_after, entries)
                     break
             if snapshot is None:
-                return (None, False)
+                return (None, heartbeat_stale)
             header, entries = snapshot
-            heartbeat_stale = self._update_heartbeat_and_check_stale(int(header["heartbeat"]))
             self._patch_entries(cache, entries, role=role)
             return (int(header["instance_version"]), heartbeat_stale)
         except Exception as e:

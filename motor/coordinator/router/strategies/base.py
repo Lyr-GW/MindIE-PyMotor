@@ -743,24 +743,21 @@ class BaseRouter(ABC):
             workload_action=action,
             workload_change=workload_change,
         )
-        # Release RPC must finish even if the request/stream task is cancelled (e.g. client disconnect).
+        # Shield covers finalize_release too: it is the only gate against re-sending this release,
+        # so it must not be interrupted by the same cancellation that shields update_workload.
         with CancelScope(shield=True):
             ok = await self._scheduler.update_workload(params)
-        if ok and action == WorkloadAction.RELEASE_TOKENS:
-            # Scheduler ACKed the release: drop the worker-side ledger record retained for
-            # failure recomputation (see WorkloadActionHandler.compute_and_update).
-            try:
-                await self._workload_action_handler.finalize_release(self.req_info.req_id, role)
-            except Exception as exc:
-                # The scheduler already applied the release; a finalize failure only leaves a
-                # stale local record (a later re-release is deduped by operation_id). Log it
-                # but do not turn the ACKed release into a failure.
-                self.logger.warning(
-                    "finalize_release failed after scheduler ACK req_id=%s action=%s: %s",
-                    self.req_info.req_id,
-                    action.value,
-                    exc,
-                )
+            if ok and action == WorkloadAction.RELEASE_TOKENS:
+                try:
+                    await self._workload_action_handler.finalize_release(self.req_info.req_id, role)
+                except Exception as exc:
+                    # Scheduler already applied the release; keep the ACK as success regardless.
+                    self.logger.warning(
+                        "finalize_release failed after scheduler ACK req_id=%s action=%s: %s",
+                        self.req_info.req_id,
+                        action.value,
+                        exc,
+                    )
         return ok
 
     async def _submit_token_sample(

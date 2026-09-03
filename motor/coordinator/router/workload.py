@@ -111,10 +111,10 @@ class WorkloadActionHandler:
                 )
                 return (None, None)
             workload_change = Workload(active_tokens=-current_workload.active_tokens)
-            # Keep the local record until the scheduler ACKs the release (finalize_release).
-            # If the RPC fails permanently or the task is cancelled mid-flight, a later
-            # re-enqueue can still recompute the full negative delta from the retained record
-            # and resend it; the scheduler dedups repeated releases by deterministic operation_id.
+            # Keep the local record until the scheduler ACKs the release (finalize_release), so a
+            # failed/cancelled RPC can recompute and resend. The caller must mark the release done
+            # atomically with the CAS ACK (before finalize_release) so this path is only reachable
+            # when the previous attempt never got an ACK -- there is no CAS-side dedup here.
 
         else:
             logger.warning("Unknown workload action: %s", action)

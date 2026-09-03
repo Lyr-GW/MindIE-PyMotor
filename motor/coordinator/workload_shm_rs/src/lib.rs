@@ -439,12 +439,27 @@ fn boxed_handle(seg: Segment) -> u64 {
 }
 
 /// # Safety
-/// `handle` must be a live handle previously returned by create/attach and not yet closed.
+/// `handle` must be a live handle from create/attach, not yet closed. Only for the single-writer
+/// membership path (snapshot begin/commit, heartbeat), which mutates cached scalar fields on
+/// `Segment` and must never run concurrently with another call on the same handle. CAS/load/
+/// write_entry/read_header only need `&self` and must use `seg()` instead: they run concurrently
+/// from multiple threads on the same handle, and `&mut Segment` per call would alias.
 unsafe fn seg_mut<'a>(handle: u64) -> Option<&'a mut Segment> {
     if handle == 0 {
         None
     } else {
         Some(&mut *(handle as *mut Segment))
+    }
+}
+
+/// # Safety
+/// `handle` must be a live handle from create/attach, not yet closed. Safe to call concurrently
+/// with other `seg()` calls on the same handle.
+unsafe fn seg<'a>(handle: u64) -> Option<&'a Segment> {
+    if handle == 0 {
+        None
+    } else {
+        Some(&*(handle as *const Segment))
     }
 }
 
@@ -678,7 +693,7 @@ pub unsafe extern "C" fn mindie_wl_read_header(
     out_instance_version: *mut u64,
     out_heartbeat: *mut u64,
 ) -> ShmStatus {
-    let seg = match seg_mut(handle) {
+    let seg = match seg(handle) {
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
@@ -726,7 +741,7 @@ pub unsafe extern "C" fn mindie_wl_snapshot_write_entry_v4(
     flags: u8,
     active_tokens: f64,
 ) -> ShmStatus {
-    match seg_mut(handle) {
+    match seg(handle) {
         Some(seg) => seg.write_entry_v4(
             slot,
             instance_id,
@@ -756,7 +771,7 @@ pub unsafe extern "C" fn mindie_wl_cas_add(
     delta: f64,
     out_actual: *mut f64,
 ) -> ShmStatus {
-    let seg = match seg_mut(handle) {
+    let seg = match seg(handle) {
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
@@ -781,7 +796,7 @@ pub unsafe extern "C" fn mindie_wl_cas_sub_floor0(
     delta: f64,
     out_actual: *mut f64,
 ) -> ShmStatus {
-    let seg = match seg_mut(handle) {
+    let seg = match seg(handle) {
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
@@ -803,7 +818,7 @@ pub unsafe extern "C" fn mindie_wl_set_blocked(
     blocked: c_int,
     out_touched: *mut u32,
 ) -> ShmStatus {
-    let seg = match seg_mut(handle) {
+    let seg = match seg(handle) {
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
@@ -830,7 +845,7 @@ pub unsafe extern "C" fn mindie_wl_load_entry(
     out_generation: *mut u16,
     out_active_tokens: *mut f64,
 ) -> ShmStatus {
-    let seg = match seg_mut(handle) {
+    let seg = match seg(handle) {
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
@@ -958,13 +973,13 @@ mod tests {
             let mut h: u64 = 0;
             assert_eq!(mindie_wl_create_v4(cn.as_ptr(), 4, &mut h), error::OK);
             assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
-            let seq = seg_mut(h)
+            let seq = seg(h)
                 .unwrap()
                 .atomic_i64(layout::OFF_SEQUENCE)
                 .load(Ordering::Acquire);
             assert_eq!(seq % 2, 1, "sequence must be odd mid-write");
             assert_eq!(mindie_wl_snapshot_commit(h, 0, 0), error::OK);
-            let seq2 = seg_mut(h)
+            let seq2 = seg(h)
                 .unwrap()
                 .atomic_i64(layout::OFF_SEQUENCE)
                 .load(Ordering::Acquire);

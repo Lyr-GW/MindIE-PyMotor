@@ -78,6 +78,7 @@ class LoadBalancePolicy(BaseSchedulingPolicy):
         start_index: int = 0,
         *,
         is_blocked: Callable[[int], bool] | None = None,
+        excluded_pairs: set[tuple[int, int]] | None = None,
     ) -> list[EndpointCandidate]:
         """
         Select top-K endpoints globally across all instances.
@@ -87,6 +88,8 @@ class LoadBalancePolicy(BaseSchedulingPolicy):
 
         ``is_blocked`` optional filter (instance_id) -> bool. Blocked instances are
         skipped during scoring (usually circuit-breaker OPEN instances from local PUB cache).
+
+        ``excluded_pairs`` optional (instance_id, endpoint_id) pairs to skip during scoring.
         """
         if top_k <= 0:
             return []
@@ -102,6 +105,8 @@ class LoadBalancePolicy(BaseSchedulingPolicy):
         for instance in rotated_instances:
             for endpoint in instance.get_all_endpoints():
                 if is_blocked is not None and is_blocked(instance.id):
+                    continue
+                if excluded_pairs is not None and (instance.id, endpoint.id) in excluded_pairs:
                     continue
                 try:
                     score = LoadBalancePolicy.calculate_endpoint_score(

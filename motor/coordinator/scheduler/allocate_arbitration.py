@@ -121,11 +121,12 @@ def select_global_load_balance_candidate(
     ctx: ArbitrationContext,
     role: PDRole,
     required_engine_type: str | None = None,
+    excluded: set[tuple[int, int]] | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """Select the globally lowest-score endpoint for the role from the fresh pool.
 
     Circuit-broken endpoints are filtered so the authoritative re-scan never picks one that a local
-    PUB cache may not yet know about.
+    PUB cache may not yet know about. ``excluded`` drops pairs this CAS round already rejected.
     """
     instances = [
         instance
@@ -138,6 +139,7 @@ def select_global_load_balance_candidate(
         top_k=1,
         instance_score_weight=ctx.endpoint_instance_score_weight,
         is_blocked=ctx.is_instance_circuit_open,
+        excluded_pairs=excluded,
     )
     if not candidates:
         return None
@@ -152,6 +154,7 @@ def select_affinity_global(
     prefill_load_scale: float | None,
     load_weight: float | None,
     required_engine_type: str | None = None,
+    excluded: set[tuple[int, int]] | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """
     Global kv_cache_affinity unified selection over EVERY reported endpoint.
@@ -159,11 +162,14 @@ def select_affinity_global(
     For each candidate, recompute the unified cost with the fresh load:
     ``combined = prefill_load_scale * prefill_cost + load_weight * fresh_load``. Pick the minimum;
     ties prefer the lower prefill_cost (better affinity). The returned score is ``combined``.
+    ``excluded`` drops pairs this CAS round already rejected.
     """
     pscale = prefill_load_scale if prefill_load_scale is not None else 1.0
     lweight = load_weight if load_weight is not None else 1.0
     best: tuple[Instance, Endpoint, float, float] | None = None  # (..., combined, prefill_cost)
     for instance_id, endpoint_id, prefill_cost in affinity_candidates:
+        if excluded is not None and (instance_id, endpoint_id) in excluded:
+            continue
         if ctx.is_instance_circuit_open(instance_id):
             continue
         found = find_available_instance_endpoint(ctx, instance_id, endpoint_id)
@@ -276,6 +282,7 @@ def select_authoritative_allocate_candidate(
     prefill_load_scale: float | None = None,
     load_weight: float | None = None,
     required_engine_type: str | None = None,
+    excluded: set[tuple[int, int]] | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """
     Select the allocation target from a fresh workload view (the slow / re-rank path).
@@ -283,17 +290,23 @@ def select_authoritative_allocate_candidate(
     Load-balance scans all endpoints. KV-cache affinity in unified mode re-ranks EVERY reported
     endpoint by ``prefill_load_scale*prefill_cost + load_weight*fresh_load``; older affinity callers
     without per-endpoint prefill_cost fall back to "least-loaded among the ranked alternates". Other
-    policies keep the proposed endpoint. This is the byte-for-byte equivalent of the former
-    ``_SchedulerRequestDispatcher._select_authoritative_allocate_candidate``.
+    policies keep the proposed endpoint. ``excluded`` (pairs this CAS round already rejected) is
+    forwarded to every branch that scans beyond ``candidates`` (which the caller already filters).
     """
     if should_scan_global_load_balance(ctx, candidate_policy):
-        selected = select_global_load_balance_candidate(ctx, role, required_engine_type)
+        selected = select_global_load_balance_candidate(ctx, role, required_engine_type, excluded=excluded)
         if selected is not None:
             return selected
     if candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY:
         if affinity_candidates:
             selected = select_affinity_global(
-                ctx, affinity_candidates, role, prefill_load_scale, load_weight, required_engine_type
+                ctx,
+                affinity_candidates,
+                role,
+                prefill_load_scale,
+                load_weight,
+                required_engine_type,
+                excluded=excluded,
             )
             if selected is not None:
                 return selected

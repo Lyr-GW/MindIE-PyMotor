@@ -143,6 +143,37 @@ def test_native_odd_sequence_is_rejected_then_accepted(lib):
         shm.close(unlink=True)
 
 
+def test_heartbeat_stale_detected_even_when_sequence_stuck_odd(lib):
+    """Staleness must be detectable even while sequence is stuck odd (writer crashed mid-snapshot,
+    entries permanently unreadable).
+    """
+    from motor.coordinator.scheduler.runtime.workload_shm.layout import HEARTBEAT_STALE_SEC
+
+    name = _unique("hbo")
+    shm = WorkloadShm.create_v4(name, 4, lib=lib)
+    shm.heartbeat()  # bump once, like the real _heartbeat_loop does right after start_control_plane
+    reader = WorkloadSharedMemoryReader(name)
+    reader.attach()
+    try:
+        cache = _FakeCache()
+        _instance_version, stale = reader.read_and_patch_cache(cache)
+        assert stale is False
+
+        # Simulate elapsed time past the staleness threshold with no new heartbeat in between.
+        reader._last_heartbeat_time -= HEARTBEAT_STALE_SEC + 1.0
+
+        # Writer begins a snapshot and never commits: sequence is stuck odd, entries unreadable.
+        shm.snapshot_begin()
+        assert shm.read_header()["sequence"] % 2 == 1
+
+        instance_version2, stale2 = reader.read_and_patch_cache(cache)
+        assert instance_version2 is None  # entries still unreadable, as before
+        assert stale2 is True  # but heartbeat staleness must still be detected
+    finally:
+        reader.detach()
+        shm.close(unlink=True)
+
+
 def test_native_create_v4_recovers_from_orphan(lib):
     """Creating over an existing (orphaned) segment unlinks and recreates it."""
     name = _unique("or")
