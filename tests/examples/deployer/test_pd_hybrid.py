@@ -154,6 +154,11 @@ def test_generate_yaml_engine_creates_hybrid_workload(tmp_path, monkeypatch):
     env = {item[C.NAME]: item[C.VALUE] for item in container[C.ENV] if C.VALUE in item}
     node_selector = data[C.SPEC][C.TEMPLATE][C.SPEC][C.NODE_SELECTOR]
     assert env[C.ENV_ROLE] == C.ROLE_UNION
+    mounts = {item[C.NAME]: item[C.MOUNT_PATH] for item in container[C.VOLUME_MOUNTS]}
+    volumes = {item[C.NAME]: item for item in data[C.SPEC][C.TEMPLATE][C.SPEC][C.VOLUMES]}
+    assert mounts[C.CACHE_PATH] == C.DEFAULT_CACHE_MOUNT_PATH
+    assert volumes[C.CACHE_PATH][C.HOST_PATH]["path"] == C.DEFAULT_CACHE_MOUNT_PATH
+    assert volumes[C.CACHE_PATH][C.HOST_PATH]["type"] == "DirectoryOrCreate"
     assert data[C.SPEC][C.REPLICAS] == 1
     assert container[C.RESOURCES][C.REQUESTS][C.ASCEND_910_NPU_NUM] == 4
     assert container[C.RESOURCES][C.LIMITS][C.ASCEND_910_NPU_NUM] == 4
@@ -504,7 +509,7 @@ def test_update_infer_service_replicas_only_updates_union_for_hybrid(tmp_path):
 
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     deploy_config[C.HYBRID_INSTANCES_NUM] = 3
-    update_infer_service_replicas_only(paths["infer_service_output_yaml"], deploy_config)
+    update_infer_service_replicas_only(paths["infer_service_output_yaml"], deploy_config, user_config)
 
     all_docs = load_yaml(paths["infer_service_output_yaml"], False)
     infer_doc = _find_infer_service_set_doc(all_docs)

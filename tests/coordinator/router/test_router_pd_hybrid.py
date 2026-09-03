@@ -11,11 +11,12 @@
 import asyncio
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from pytest import MonkeyPatch
-from fastapi import FastAPI, status, Request
+from fastapi import FastAPI, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 import pytest
 
@@ -32,6 +33,7 @@ from motor.config.tls_config import TLSConfig
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
+from motor.common.resources.dispatch import DispatchPlan
 from motor.common.resources.endpoint import Workload
 from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.scheduler.scheduler import Scheduler
@@ -41,6 +43,9 @@ from motor.coordinator.models.request import RequestInfo, ReqState
 from motor.coordinator.router.upstream_error import UpstreamHTTPError
 import motor.coordinator.router.dispatch as router
 from motor.common.logger import get_logger
+from tests.coordinator.router.token_only_support import (
+    make_render_request_info,
+)
 
 TracerManager()
 
@@ -50,6 +55,146 @@ app = FastAPI()
 _config = CoordinatorConfig()
 _scheduler = Scheduler(instance_provider=InstanceManager(_config), config=_config)
 _request_manager = RequestManager(_config)
+
+
+@pytest.mark.asyncio
+async def test_decode_colocation_is_last_hybrid_candidate_and_keeps_request_bare(monkeypatch):
+    decode = Instance(
+        job_name="decode",
+        model_name="model",
+        id=7,
+        role=PDRole.ROLE_D.value,
+        engine_type="vllm",
+        dispatch_capabilities=[DispatchPlan.CONCURRENT_ENGINE_SYNC.value, DispatchPlan.DECODE_COLOCATION.value],
+    )
+
+    class _DecodeOnlyScheduler:
+        async def get_unblocked_instances(self, role):
+            return [decode.id] if role == PDRole.ROLE_D else []
+
+        async def get_local_instances(self, role=None):
+            return {decode.id: decode} if role in (None, PDRole.ROLE_D) else {}
+
+    req_info = RequestInfo(
+        req_id="decode-fallback",
+        req_data={"model": "model", "prompt": "hello"},
+        req_len=5,
+        api="test",
+    )
+    config = CoordinatorConfig()
+    hybrid = PDHybridRouter(
+        req_info,
+        config,
+        scheduler=_DecodeOnlyScheduler(),
+        request_manager=RequestManager(config),
+    )
+    req_info.trace_obj.span = MagicMock()
+
+    forwarded = []
+
+    async def capture_generate_post(self, req_data, *, manage_request_context=True):
+        forwarded.append(req_data)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(PDHybridRouter, "_generate_post", capture_generate_post)
+
+    assert await hybrid._resolve_candidate_roles() == (PDRole.ROLE_D,)
+    response = await hybrid.handle_request()
+    assert response.status_code == status.HTTP_200_OK
+    assert forwarded == [{"model": "model", "prompt": "hello"}]
+    assert "kv_transfer_params" not in forwarded[0]
+    assert "metaserver" not in forwarded[0]
+    assert "do_remote_prefill" not in forwarded[0]
+    assert req_info.trace_obj.meta_error_message == (
+        "No union or prefill instances available, degraded to decode co-location"
+    )
+    assert req_info.trace_obj.route_degradation == "decode_co_location"
+    req_info.trace_obj.span.set_attribute.assert_any_call("routing.degradation", "decode_co_location")
+
+
+@pytest.mark.asyncio
+async def test_decode_colocation_filters_allocation_without_pinning_first_candidate():
+    """A mixed Decode pool must keep scheduling among all eligible instances."""
+    eligible = Instance(
+        job_name="vllm-decode",
+        model_name="model",
+        id=7,
+        role=PDRole.ROLE_D.value,
+        engine_type="vllm",
+        dispatch_capabilities=[DispatchPlan.DECODE_COLOCATION.value],
+    )
+    ineligible = Instance(
+        job_name="sglang-decode",
+        model_name="model",
+        id=3,
+        role=PDRole.ROLE_D.value,
+        engine_type="sglang",
+        dispatch_capabilities=[DispatchPlan.CONCURRENT_ENGINE_SYNC.value],
+    )
+
+    class _MixedDecodeScheduler:
+        def __init__(self):
+            self.selection = None
+
+        async def get_unblocked_instances(self, role):
+            return [ineligible.id, eligible.id] if role == PDRole.ROLE_D else []
+
+        async def get_local_instances(self, role=None):
+            return {ineligible.id: ineligible, eligible.id: eligible} if role == PDRole.ROLE_D else {}
+
+        async def select_and_allocate(self, role, req_info, **kwargs):
+            self.selection = (role, kwargs)
+            return None
+
+    scheduler = _MixedDecodeScheduler()
+    req_info = RequestInfo(req_id="mixed-decode", req_data={"prompt": "hi"}, req_len=2, api="test")
+    config = CoordinatorConfig()
+    config.exception_config.max_retry = 1
+    hybrid = PDHybridRouter(req_info, config, scheduler=scheduler, request_manager=RequestManager(config))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await hybrid.prepare_resource(PDRole.ROLE_D)
+
+    assert exc_info.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert scheduler.selection == (
+        PDRole.ROLE_D,
+        {
+            "target_instance_id": None,
+            "required_engine_type": "vllm",
+            "required_dispatch_capability": DispatchPlan.DECODE_COLOCATION.value,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_decode_colocation_does_not_bypass_disabled_fallback_in_hybrid_deploy():
+    decode = Instance(
+        job_name="decode",
+        model_name="model",
+        id=7,
+        role=PDRole.ROLE_D.value,
+        engine_type="vllm",
+        dispatch_capabilities=[DispatchPlan.DECODE_COLOCATION.value],
+    )
+
+    class _DecodeOnlyScheduler:
+        async def get_unblocked_instances(self, role):
+            return [decode.id] if role == PDRole.ROLE_D else []
+
+        async def get_local_instances(self, role=None):
+            return {decode.id: decode} if role == PDRole.ROLE_D else {}
+
+    config = CoordinatorConfig()
+    config.deploy_config.hybrid_instances_num = 1
+    config.scheduler_config.enable_pd_separation_fallback_to_hybrid = False
+    hybrid = PDHybridRouter(
+        RequestInfo(req_id="fallback-off", req_data={"prompt": "hi"}, req_len=2, api="test"),
+        config,
+        scheduler=_DecodeOnlyScheduler(),
+        request_manager=RequestManager(config),
+    )
+
+    assert await hybrid._resolve_candidate_roles() == ()
 
 
 @app.post("/v1/chat/completions")
@@ -91,6 +236,7 @@ class TestRouterPDHybrid:
         mock_instance = Instance(
             job_name=f"test-job-{instance_id}",
             model_name=f"test-model-{instance_id}",
+            engine_type="vllm",
             id=instance_id,
             role=role,
             status=InsStatus.ACTIVE,
@@ -99,11 +245,23 @@ class TestRouterPDHybrid:
         )
         return mock_instance
 
+    @staticmethod
+    def _render_router(req_info, render_client):
+        config = CoordinatorConfig()
+        result = PDHybridRouter(
+            req_info,
+            config,
+            scheduler=Scheduler(instance_provider=InstanceManager(config), config=config),
+            request_manager=RequestManager(config),
+        )
+        result.set_render_client(render_client)
+        return result
+
     @pytest.fixture
     def setup_pd_hybrid(self, monkeypatch: MonkeyPatch):
         # Create proper instance for PD hybrid flow
         mock_instance = self.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         # Mock functions (Scheduler uses get_required_instances_status for readiness)
@@ -353,10 +511,52 @@ class TestRouterPDHybrid:
         assert payload["choices"][0]["message"]["content"] == "hello"
 
     @pytest.mark.asyncio
+    async def test_pd_hybrid_render_uses_token_only_round_trip(
+        self,
+        monkeypatch: MonkeyPatch,
+        setup_pd_hybrid,
+    ):
+        generate_response = {
+            "request_id": "engine-id",
+            "choices": [{"index": 0, "token_ids": [30, 31], "finish_reason": "stop"}],
+        }
+        paths = []
+
+        async def mock_forward(self, api, req_data, client, timeout):
+            del self, req_data, client, timeout
+            paths.append(api)
+            response = MagicMock()
+            response.json.return_value = generate_response
+            return response
+
+        monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
+        req_data = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": False,
+            "max_tokens": 8,
+        }
+        req_info = make_render_request_info(
+            "rid-token-only-hybrid", req_data, "v1/chat/completions", [10, 20], req_len=99
+        )
+        render_client = AsyncMock()
+        render_client.derender.return_value = {
+            "id": "engine-id",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "token-only"}}],
+        }
+        response = await self._render_router(req_info, render_client).handle_request()
+        payload = json.loads(response.body.decode())
+
+        assert paths == ["inference/v1/generate"]
+        derender = render_client.derender.await_args.args[1]
+        assert (derender["generate_response"], derender["prompt_tokens"]) == (generate_response, 2)
+        assert payload["choices"][0]["message"]["content"] == "token-only"
+
+    @pytest.mark.asyncio
     async def test_pd_hybrid_fallback_to_prefill_when_hybrid_pool_empty(self, monkeypatch: MonkeyPatch, caplog):
         """PD degradation: pre-check empty U pool, schedule ROLE_P directly without U attempt."""
         mock_instance = self.create_mock_instance(0, PDRole.ROLE_P)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
         called_roles = []
 
@@ -426,7 +626,7 @@ class TestRouterPDHybrid:
     async def test_pd_hybrid_schedules_union_when_hybrid_pool_available(self, monkeypatch: MonkeyPatch):
         """True hybrid: pre-check finds U pool, schedule ROLE_U only."""
         mock_instance = self.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
         called_roles = []
 
@@ -542,7 +742,7 @@ class TestPDHybridTracer:
     @pytest.fixture
     def setup_role_u_hybrid(self, monkeypatch: MonkeyPatch):
         mock_instance = TestRouterPDHybrid.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         async def mock_get_available_instance_roles(self):
@@ -700,7 +900,7 @@ class TestPDHybridTracer:
     @pytest.mark.asyncio
     async def test_role_fallback_scheduling_events(self, monkeypatch: MonkeyPatch):
         mock_instance = TestRouterPDHybrid.create_mock_instance(0, PDRole.ROLE_P)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         async def mock_get_available_instance_roles(self):
@@ -820,7 +1020,7 @@ class TestPDHybridCancelReschedule:
     @pytest.fixture(name="hybrid_pool")
     def _hybrid_pool(self, monkeypatch: MonkeyPatch):
         mock_instance = TestRouterPDHybrid.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         async def mock_get_available_instance_roles(self):

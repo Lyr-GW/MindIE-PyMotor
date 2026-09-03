@@ -88,7 +88,7 @@ def check_cancel_error(error: asyncio.CancelledError) -> (str, bool):
     reason = "Exception"
     if error.args:
         reason = error.args[0]
-        if reason in {cancel_error.CLIENT_DISCONNECT, cancel_error.DISPATCH_ABORT}:
+        if reason in {cancel_error.CLIENT_DISCONNECT, cancel_error.DISPATCH_ABORT, cancel_error.INFER_TIMEOUT}:
             return reason, False
         elif reason.startswith(cancel_error.SCOPE_ABORT):
             return cancel_error.SCOPE_ABORT, False
@@ -139,6 +139,17 @@ class BaseRouter(ABC):
             else WorkloadActionHandler(self._request_manager)
         )
         self._sampling_manager = sampling_manager
+
+    def _stream_overall_timeout(self) -> float:
+        """Remaining infer_timeout budget for the streaming response, counted from request arrival.
+
+        Streaming responses are served by uvicorn after the handler returns, so the
+        ``timeout_handler`` decorator cannot bound them; the budget is passed to
+        CommitAwareStreamingResponse and enforced as an overall wall-clock deadline.
+        """
+        infer_timeout = self.config.exception_config.infer_timeout
+        elapsed = time.time() - self.req_info.status.get(ReqState.ARRIVE, time.time())
+        return max(infer_timeout - elapsed, 0.0)
 
     @staticmethod
     def build_error_response(e: Exception) -> ErrorResponse:
@@ -195,6 +206,9 @@ class BaseRouter(ABC):
             trace_obj.trace_headers = TracerManager().inject_trace_context()
             trace_obj.set_trace_attribute("requestId", self.req_info.req_id)
             trace_obj.set_trace_attribute("stream", is_stream)
+            route_degradation = getattr(trace_obj, "route_degradation", "")
+            if route_degradation:
+                trace_obj.set_trace_attribute("routing.degradation", route_degradation)
             if trace_obj.error_message:
                 trace_obj.set_trace_error_message(trace_obj.error_message)
             yield span
@@ -262,13 +276,19 @@ class BaseRouter(ABC):
                         self.req_info.state,
                     )
 
-    async def prepare_resource(self, role: PDRole) -> ScheduledResource:
+    async def prepare_resource(
+        self,
+        role: PDRole,
+        *,
+        target_instance_id: int | None = None,
+        required_engine_type: str | None = None,
+        required_dispatch_capability: str | None = None,
+    ) -> ScheduledResource:
         """Select instance + allocate workload (one RPC), record in RequestManager, retry on failure."""
         self.req_info.update_state(_scheduling_state_for_role(role))
 
-        target_instance_id = None
         constraint = self.req_info.scheduling_constraint
-        if constraint is not None:
+        if target_instance_id is None and constraint is not None:
             target_instance_id = constraint.target_for_role(role)
 
         last_exception = None
@@ -276,11 +296,12 @@ class BaseRouter(ABC):
         for attempt in range(self.config.exception_config.max_retry):
             try:
                 t0_select = time.perf_counter()
-                result = await self._scheduler.select_and_allocate(
-                    role,
-                    self.req_info,
-                    target_instance_id=target_instance_id,
-                )
+                scheduler_kwargs = {"target_instance_id": target_instance_id}
+                if required_engine_type is not None:
+                    scheduler_kwargs["required_engine_type"] = required_engine_type
+                if required_dispatch_capability is not None:
+                    scheduler_kwargs["required_dispatch_capability"] = required_dispatch_capability
+                result = await self._scheduler.select_and_allocate(role, self.req_info, **scheduler_kwargs)
                 elapsed_select_ms = (time.perf_counter() - t0_select) * 1000
                 if _should_log_scheduling_sample(self.req_info.req_id):
                     self.logger.info(

@@ -23,12 +23,34 @@ from motor.common.http.http_client import HTTPClientPool
 from motor.common.http.security_utils import sanitize_error_message
 from motor.coordinator.domain import ScheduledResource
 from motor.coordinator.models.request import ReqState
+from motor.coordinator.render.vllm_render_client import VLLMRenderClient
+from motor.coordinator.router.token_only import (
+    build_token_only_batch,
+    finish_token_only_response,
+    gather_generate_responses,
+    is_token_only_unsupported,
+    select_token_only_requests,
+    token_only_request_id,
+)
+from motor.coordinator.router.adapters.pd_protocol import (
+    EngineEndpointMetadata,
+    EngineLegSpec,
+    EnginePhase,
+    EngineRequest,
+    LegContext,
+    VllmProtocolAdapter,
+)
 from motor.coordinator.router.strategies.base import BaseRouter, check_cancel_error
 from motor.coordinator.router.rescheduler.rescheduler import Rescheduler
 import motor.coordinator.router.adapters as adapters
 from motor.coordinator.router.adapters.completion_to_chat import adapt_completion_nonstream_to_chat
 from motor.coordinator.router.precision_sample.request import inject_logprobs
 from motor.common.resources.instance import PDRole
+from motor.common.resources.dispatch import DispatchPlan
+from motor.coordinator.domain.scheduling import (
+    get_decode_colocation_candidate_ids,
+    has_decode_colocation_candidate,
+)
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.router.upstream_error import (
     UpstreamHTTPError,
@@ -51,11 +73,27 @@ class PDHybridRouter(BaseRouter):
         self._stream_body_sent = False
         self._scheduled_resource: ScheduledResource | None = None
         self._cb_iid: int | None = None
+        self._render_client: VLLMRenderClient | None = None
         self.rescheduler = Rescheduler(
             self.config.exception_config.reschedule_enabled,
             self.req_info,
             self.logger,
         )
+
+    def _decode_colocation_enabled(self) -> bool:
+        scheduler_config = getattr(self.config, "scheduler_config", None)
+        return bool(getattr(scheduler_config, "enable_pd_separation_fallback_to_hybrid", True))
+
+    def _mark_decode_colocation(self) -> None:
+        error_message = "No union or prefill instances available, degraded to decode co-location"
+        self.logger.warning("%s", error_message)
+        self.req_info.trace_obj.route_degradation = "decode_co_location"
+        self.req_info.trace_obj.set_trace_attribute("routing.degradation", "decode_co_location")
+        self.req_info.trace_obj.set_trace_error_message(error_message, is_meta=True)
+
+    def set_render_client(self, render_client: VLLMRenderClient | None) -> None:
+        """Attach the request worker's shared Render/Derender client."""
+        self._render_client = render_client
 
     @contextlib.asynccontextmanager
     async def _optional_request_context(self, manage_request_context: bool):
@@ -76,6 +114,10 @@ class PDHybridRouter(BaseRouter):
                 if await get_unblocked(role):
                     self._resolved_roles = (role,)
                     return self._resolved_roles
+            if self._decode_colocation_enabled() and await has_decode_colocation_candidate(self._scheduler):
+                self._mark_decode_colocation()
+                self._resolved_roles = (PDRole.ROLE_D,)
+                return self._resolved_roles
             self._resolved_roles = ()
             return self._resolved_roles
 
@@ -89,6 +131,15 @@ class PDHybridRouter(BaseRouter):
             self.logger.info(error_message)
             self.req_info.trace_obj.set_trace_error_message(error_message, is_meta=True)
             self._resolved_roles = (PDRole.ROLE_P,)
+            return self._resolved_roles
+
+        if (
+            PDRole.ROLE_D in roles
+            and self._decode_colocation_enabled()
+            and await has_decode_colocation_candidate(self._scheduler)
+        ):
+            self._mark_decode_colocation()
+            self._resolved_roles = (PDRole.ROLE_D,)
             return self._resolved_roles
 
         self._resolved_roles = ()
@@ -123,6 +174,39 @@ class PDHybridRouter(BaseRouter):
             if resource.instance and resource.endpoint:
                 self._cb_iid = resource.instance.id
             yield resource
+
+    async def prepare_resource(
+        self,
+        role: PDRole,
+        *,
+        target_instance_id: int | None = None,
+        required_engine_type: str | None = None,
+        required_dispatch_capability: str | None = None,
+    ) -> ScheduledResource:
+        """Pin Decode co-location to an instance that passed the capability gate."""
+        if role != PDRole.ROLE_D:
+            return await super().prepare_resource(
+                role,
+                target_instance_id=target_instance_id,
+                required_engine_type=required_engine_type,
+                required_dispatch_capability=required_dispatch_capability,
+            )
+
+        candidate_ids = await get_decode_colocation_candidate_ids(self._scheduler)
+        if not candidate_ids:
+            raise HTTPException(status_code=503, detail="No eligible Decode instance for co-location")
+        selected_target = target_instance_id
+        constraint = self.req_info.scheduling_constraint
+        if selected_target is None and constraint is not None:
+            selected_target = constraint.target_for_role(role)
+        if selected_target is not None and selected_target not in candidate_ids:
+            raise HTTPException(status_code=503, detail="Target Decode instance is not eligible for co-location")
+        return await super().prepare_resource(
+            role,
+            target_instance_id=selected_target,
+            required_engine_type="vllm",
+            required_dispatch_capability=DispatchPlan.DECODE_COLOCATION.value,
+        )
 
     async def _report_cb(self, event: str) -> None:
         iid = getattr(self, '_cb_iid', None)
@@ -192,6 +276,7 @@ class PDHybridRouter(BaseRouter):
                 self._generate_stream(req_data, manage_request_context=manage_request_context),
                 self._stream_commit_controller,
                 on_first_body_sent=self._mark_stream_body_sent,
+                timeout=self._stream_overall_timeout(),
             )
         return await self._generate_post(req_data, manage_request_context=manage_request_context)
 
@@ -403,6 +488,37 @@ class PDHybridRouter(BaseRouter):
                 self.logger.info("Retrying streaming request in %.2f seconds...", wait_time)
                 await asyncio.sleep(wait_time)
 
+    def _tokenized_hybrid_requests(self, attempt: int) -> list[EngineRequest]:
+        resource = self._scheduled_resource
+        if resource is None or str(getattr(resource.instance, "engine_type", "")).strip().lower() != "vllm":
+            return []
+        tokenized_requests = select_token_only_requests(self.req_info, self._render_client)
+        if not tokenized_requests:
+            return []
+
+        adapter = VllmProtocolAdapter()
+
+        def leg_factory(index: int) -> EngineLegSpec:
+            return EngineLegSpec(
+                context=LegContext(
+                    engine_request_id=token_only_request_id(
+                        self.req_info.req_id,
+                        attempt_seq=attempt + 1,
+                        prompt_index=index,
+                    ),
+                    pair_id=self.req_info.req_id,
+                    attempt_seq=attempt + 1,
+                    api=self.req_info.entry_api,
+                    endpoint=EngineEndpointMetadata(
+                        host=resource.endpoint.ip,
+                        bootstrap_port=resource.endpoint.bootstrap_port,
+                    ),
+                ),
+                phase=EnginePhase.DECODE,
+            )
+
+        return build_token_only_batch(adapter, tokenized_requests, leg_factory)
+
     async def _generate_post(self, req_data: dict[str, Any], *, manage_request_context: bool = True) -> JSONResponse:
         """
         Handling hybrid non-streaming requests
@@ -422,15 +538,54 @@ class PDHybridRouter(BaseRouter):
                     async with self._inference_lifecycle(
                         attempt, max_retries, manage_request_context=manage_request_context
                     ) as client:
-                        response = await self.forward_request(
-                            self.req_info.api,
-                            attempt_req,
-                            client,
-                            self.config.exception_config.infer_timeout,
-                        )
+                        tokenized_requests = self._tokenized_hybrid_requests(attempt)
+                        body = None
+                        if tokenized_requests:
+                            try:
+
+                                async def send_generate(
+                                    request: EngineRequest,
+                                    request_client: Any = client,
+                                ) -> dict[str, Any]:
+                                    response = await self.forward_request(
+                                        request.api,
+                                        request.body,
+                                        request_client,
+                                        self.config.exception_config.infer_timeout,
+                                    )
+                                    return response.json()
+
+                                generate_responses = await gather_generate_responses(
+                                    tokenized_requests,
+                                    send_generate,
+                                )
+                                if self._render_client is None:
+                                    raise RuntimeError("Derender client is not configured")
+                                body = await finish_token_only_response(
+                                    self._render_client,
+                                    self.req_info,
+                                    generate_responses,
+                                )
+                            except UpstreamHTTPError as error:
+                                if not is_token_only_unsupported(error):
+                                    raise
+                                self.logger.warning(
+                                    "vLLM token-only Union is unsupported; fallback to native OpenAI request "
+                                    "req_id=%s status_code=%s",
+                                    self.req_info.req_id,
+                                    error.status_code,
+                                )
+                        if body is None:
+                            response = await self.forward_request(
+                                self.req_info.api,
+                                attempt_req,
+                                client,
+                                self.config.exception_config.infer_timeout,
+                            )
+                            body = response.json()
 
                         self.req_info.update_state(ReqState.DECODE_END)
-                        body = response.json()
+
                         if "chat" in self.req_info.effective_entry_api() and body.get("object") == "text_completion":
                             adapt_completion_nonstream_to_chat(body, req_id=self.req_info.req_id)
                         body = self._collect_logprobs_from_nonstream_body(body, sampling_state)

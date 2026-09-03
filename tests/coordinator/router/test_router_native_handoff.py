@@ -25,6 +25,7 @@ from motor.common.resources.endpoint import (
     WorkloadAction,
 )
 from motor.common.resources.instance import PDRole, Instance, InsStatus, ParallelConfig
+from motor.common.resources.dispatch import DispatchPlan
 from motor.config.coordinator import CoordinatorConfig, ExceptionConfig, SchedulerType
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.domain import InstanceReadiness, ScheduledResource
@@ -266,6 +267,7 @@ class TestRouterNativeHandoff:
             job_name=f"test-job-{instance_id}",
             model_name=f"test-model-{instance_id}",
             engine_type="vllm",
+            dispatch_capabilities=[DispatchPlan.PREFILL_HANDOFF_DECODE.value],
             id=instance_id,
             role=role,
             status=InsStatus.ACTIVE,
@@ -296,7 +298,6 @@ class TestRouterNativeHandoff:
             id=0,
             ip=host,
             business_port="8000",
-            mgmt_port="8000",
             status=EndpointStatus.NORMAL,
         )
         mock_instance_p.endpoints = {host: {0: mock_endpoint_p}}
@@ -306,7 +307,6 @@ class TestRouterNativeHandoff:
             id=1,
             ip=host,
             business_port="8001",
-            mgmt_port="8001",
             status=EndpointStatus.NORMAL,
         )
         mock_instance_d.endpoints = {host: {1: mock_endpoint_d}}
@@ -403,6 +403,7 @@ class TestRouterNativeHandoff:
         mock_req.json = AsyncMock(return_value={"model": "test"})
         mock_req.headers = {}
         mock_req.url.path = "/v1/chat/completions"
+        mock_req.app.state.tokenization_service = None
 
         # Must be awaitable so listen_for_disconnect() does not raise; never completes so handler wins.
         async def _never_receive():
@@ -730,7 +731,7 @@ class TestRouterNativeHandoff:
         # Mock InstanceManager.get_available_instances
         host = "127.0.0.1"
         mock_instance_p = self.create_mock_instance(0, PDRole.ROLE_P)
-        mock_endpoint_p = Endpoint(id=0, ip=host, business_port="8000", mgmt_port="8000")
+        mock_endpoint_p = Endpoint(id=0, ip=host, business_port="8000")
         mock_instance_p.endpoints = {host: {0: mock_endpoint_p}}
 
         def mock_get_available_instances(self, role=None):

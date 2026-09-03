@@ -58,7 +58,6 @@ def _make_endpoint(
     endpoint_id: int = 1,
     ip: str = "127.0.0.1",
     business_port: str = "8080",
-    mgmt_port: str = "8081",
     status: EndpointStatus = EndpointStatus.NORMAL,
     active_tokens: float = 0.0,
 ) -> Endpoint:
@@ -67,7 +66,6 @@ def _make_endpoint(
         id=endpoint_id,
         ip=ip,
         business_port=business_port,
-        mgmt_port=mgmt_port,
         status=status,
         workload=Workload(active_tokens=active_tokens),
     )
@@ -78,6 +76,7 @@ def _make_instance(
     role: str = "prefill",
     endpoints: dict | None = None,
     engine_type: str | None = None,
+    dispatch_capabilities: list[str] | None = None,
 ) -> Instance:
     """Create a real Instance (used by _SchedulerInstanceCache tests)."""
     if endpoints is None:
@@ -87,6 +86,7 @@ def _make_instance(
         job_name="test-job",
         model_name="test-model",
         engine_type=engine_type,
+        dispatch_capabilities=dispatch_capabilities or [],
         id=instance_id,
         role=role,
         endpoints=endpoints,
@@ -95,7 +95,7 @@ def _make_instance(
 
 def _build_instance_dict(instance_id: int = 1, role: str = "prefill") -> dict:
     """Serialize a minimal Instance to dict (for ZMQ response payloads)."""
-    ep = Endpoint(id=1, ip="127.0.0.1", business_port="8080", mgmt_port="8081", status="normal")
+    ep = Endpoint(id=1, ip="127.0.0.1", business_port="8080", status="normal")
     inst = Instance(
         job_name="test-job",
         model_name="test-model",
@@ -457,6 +457,44 @@ class TestAsyncSchedulerClient:
 
         assert [(instance.id, endpoint.id) for instance, endpoint, _ in candidates] == [(2, 2)]
 
+    @pytest.mark.asyncio
+    async def test_select_endpoint_candidates_filters_required_dispatch_capability(self):
+        """Decode co-location must preserve LB while excluding unsupported instances."""
+        self.client._scheduler_type = "load_balance"
+        unsupported = _make_instance(
+            instance_id=1,
+            role="decode",
+            endpoints={"pod1": {1: _make_endpoint(endpoint_id=1, active_tokens=0)}},
+            engine_type="vllm",
+        )
+        eligible_busy = _make_instance(
+            instance_id=2,
+            role="decode",
+            endpoints={"pod2": {2: _make_endpoint(endpoint_id=2, active_tokens=5)}},
+            engine_type="vllm",
+            dispatch_capabilities=["decode_colocation"],
+        )
+        eligible_idle = _make_instance(
+            instance_id=3,
+            role="decode",
+            endpoints={"pod3": {3: _make_endpoint(endpoint_id=3, active_tokens=1)}},
+            engine_type="vllm",
+            dispatch_capabilities=["decode_colocation"],
+        )
+        self.mock_cache.get_instances.return_value = [unsupported, eligible_busy, eligible_idle]
+        req_info = Mock(spec=RequestInfo)
+        req_info.req_id = "req-capability-filter"
+        req_info.req_len = 10
+
+        candidates, _ = await self.client._select_endpoint_candidates_with_policy(
+            req_info,
+            PDRole.ROLE_D,
+            required_engine_type="vllm",
+            required_dispatch_capability="decode_colocation",
+        )
+
+        assert [(instance.id, endpoint.id) for instance, endpoint, _ in candidates] == [(3, 3)]
+
     # -- test_get_available_instances ---------------------------------------
 
     @pytest.mark.asyncio
@@ -785,7 +823,6 @@ def _make_cas_instance(instance_id: int, endpoint_id: int) -> Instance:
                 id=endpoint_id,
                 ip=f"10.0.0.{instance_id}",
                 business_port="8080",
-                mgmt_port="9080",
                 status=EndpointStatus.NORMAL,
                 workload=Workload(),
             )

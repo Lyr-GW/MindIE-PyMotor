@@ -55,6 +55,13 @@ def matches_engine_type(instance: Instance, required_engine_type: str | None) ->
     return str(getattr(instance, "engine_type", "")).strip().lower() == required_engine_type
 
 
+def matches_dispatch_capability(instance: Instance, required_dispatch_capability: str | None) -> bool:
+    """Return True when the instance advertises the required dispatch capability (or none required)."""
+    if not required_dispatch_capability:
+        return True
+    return required_dispatch_capability in (getattr(instance, "dispatch_capabilities", None) or [])
+
+
 def find_available_instance_endpoint(
     ctx: ArbitrationContext,
     instance_id: int,
@@ -77,12 +84,13 @@ def select_valid_candidate(
     candidate: tuple[int, int],
     role: PDRole,
     required_engine_type: str | None = None,
+    required_dispatch_capability: str | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """
     Validate one proposed candidate against the fresh view and compute its current score.
 
     This is the fast path: when the worker selected from the exact current view, only the proposed
-    endpoint is validated (in pool, right role, engine_type match, circuit not open).
+    endpoint is validated (in pool, right role, engine_type/capability match, circuit not open).
     """
     instance_id, endpoint_id = candidate
     if ctx.is_instance_circuit_open(instance_id):
@@ -92,6 +100,8 @@ def select_valid_candidate(
         return None
     instance, endpoint = found
     if not matches_engine_type(instance, required_engine_type):
+        return None
+    if not matches_dispatch_capability(instance, required_dispatch_capability):
         return None
     try:
         instance_role = PDRole(instance.role)
@@ -122,6 +132,7 @@ def select_global_load_balance_candidate(
     role: PDRole,
     required_engine_type: str | None = None,
     excluded: set[tuple[int, int]] | None = None,
+    required_dispatch_capability: str | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """Select the globally lowest-score endpoint for the role from the fresh pool.
 
@@ -132,6 +143,7 @@ def select_global_load_balance_candidate(
         instance
         for instance in ctx.get_available_instances(role).values()
         if matches_engine_type(instance, required_engine_type)
+        and matches_dispatch_capability(instance, required_dispatch_capability)
     ]
     candidates = LoadBalancePolicy.select_endpoint_candidates_from_list(
         instances,
@@ -155,6 +167,7 @@ def select_affinity_global(
     load_weight: float | None,
     required_engine_type: str | None = None,
     excluded: set[tuple[int, int]] | None = None,
+    required_dispatch_capability: str | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """
     Global kv_cache_affinity unified selection over EVERY reported endpoint.
@@ -177,6 +190,8 @@ def select_affinity_global(
             continue
         instance, endpoint = found
         if not matches_engine_type(instance, required_engine_type):
+            continue
+        if not matches_dispatch_capability(instance, required_dispatch_capability):
             continue
         try:
             instance_role = PDRole(instance.role)
@@ -214,6 +229,7 @@ def select_lowest_load_among_candidates(
     candidates: list[tuple[int, int]],
     role: PDRole,
     required_engine_type: str | None = None,
+    required_dispatch_capability: str | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """
     Among the affinity-ranked candidates, pick the lowest current endpoint score from the fresh
@@ -229,6 +245,8 @@ def select_lowest_load_among_candidates(
             continue
         instance, endpoint = found
         if not matches_engine_type(instance, required_engine_type):
+            continue
+        if not matches_dispatch_capability(instance, required_dispatch_capability):
             continue
         try:
             instance_role = PDRole(instance.role)
@@ -283,6 +301,7 @@ def select_authoritative_allocate_candidate(
     load_weight: float | None = None,
     required_engine_type: str | None = None,
     excluded: set[tuple[int, int]] | None = None,
+    required_dispatch_capability: str | None = None,
 ) -> tuple[Instance, Endpoint, float] | None:
     """
     Select the allocation target from a fresh workload view (the slow / re-rank path).
@@ -294,7 +313,13 @@ def select_authoritative_allocate_candidate(
     forwarded to every branch that scans beyond ``candidates`` (which the caller already filters).
     """
     if should_scan_global_load_balance(ctx, candidate_policy):
-        selected = select_global_load_balance_candidate(ctx, role, required_engine_type, excluded=excluded)
+        selected = select_global_load_balance_candidate(
+            ctx,
+            role,
+            required_engine_type,
+            excluded=excluded,
+            required_dispatch_capability=required_dispatch_capability,
+        )
         if selected is not None:
             return selected
     if candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY:
@@ -307,11 +332,14 @@ def select_authoritative_allocate_candidate(
                 load_weight,
                 required_engine_type,
                 excluded=excluded,
+                required_dispatch_capability=required_dispatch_capability,
             )
             if selected is not None:
                 return selected
         elif len(candidates) > 1:
-            selected = select_lowest_load_among_candidates(ctx, candidates, role, required_engine_type)
+            selected = select_lowest_load_among_candidates(
+                ctx, candidates, role, required_engine_type, required_dispatch_capability
+            )
             if selected is not None:
                 return selected
-    return select_valid_candidate(ctx, candidate, role, required_engine_type)
+    return select_valid_candidate(ctx, candidate, role, required_engine_type, required_dispatch_capability)

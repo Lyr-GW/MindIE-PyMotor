@@ -29,6 +29,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import Response
 
 from motor.config.coordinator import CoordinatorConfig
+from motor.common.resources.dispatch import DispatchPlan
 from motor.common.resources.instance import PDRole
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestInfo
@@ -42,6 +43,7 @@ from motor.coordinator.domain.agent_hint import (
 from motor.coordinator.router.adapters.pd_protocol import trim_vllm_engine_request_id
 from motor.coordinator.router.dispatch_session import AttemptContext
 from motor.coordinator.router.strategies.base import BaseRouter
+from motor.coordinator.domain.scheduling import has_decode_colocation_candidate
 from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
 from motor.coordinator.router.strategies.unified_pd import UnifiedPDRouter
 from motor.coordinator.scheduler.policy.kv_cache_affinity import adapt_context_budget
@@ -176,6 +178,41 @@ def _is_pd_separation_fallback_to_hybrid_enabled(config: CoordinatorConfig | Non
     return bool(getattr(scheduler_config, "enable_pd_separation_fallback_to_hybrid", True))
 
 
+async def _has_compatible_unblocked_pd_pair(scheduler) -> bool:
+    """Return whether the live P/D pools contain a protocol-compatible pair."""
+    get_unblocked = getattr(scheduler, "get_unblocked_instances", None)
+    if get_unblocked is None:
+        return True
+    unblocked_p = set(await get_unblocked(PDRole.ROLE_P))
+    unblocked_d = set(await get_unblocked(PDRole.ROLE_D))
+    if not unblocked_p or not unblocked_d:
+        return False
+
+    get_local = getattr(scheduler, "get_local_instances", None)
+    if get_local is None:
+        return True
+    prefill_instances = await get_local(PDRole.ROLE_P)
+    decode_instances = await get_local(PDRole.ROLE_D)
+    for prefill_id, prefill in prefill_instances.items():
+        if prefill_id not in unblocked_p:
+            continue
+        prefill_engine = str(getattr(prefill, "engine_type", "") or "").strip().lower()
+        prefill_caps = set(getattr(prefill, "dispatch_capabilities", None) or [])
+        for decode_id, decode in decode_instances.items():
+            if decode_id not in unblocked_d:
+                continue
+            decode_engine = str(getattr(decode, "engine_type", "") or "").strip().lower()
+            decode_caps = set(getattr(decode, "dispatch_capabilities", None) or [])
+            if not prefill_engine or not decode_engine or not prefill_caps or not decode_caps:
+                return True
+            shared_coordination_caps = prefill_caps.intersection(decode_caps).difference(
+                {DispatchPlan.DECODE_COLOCATION.value}
+            )
+            if prefill_engine == decode_engine and shared_coordination_caps:
+                return True
+    return False
+
+
 async def select_router_class(
     scheduler,
     req_info: RequestInfo | None = None,
@@ -193,11 +230,7 @@ async def select_router_class(
     has_pd_roles = PDRole.ROLE_P in roles and PDRole.ROLE_D in roles
     has_routable_pd_pair = has_pd_roles
     if has_pd_roles:
-        get_unblocked = getattr(scheduler, "get_unblocked_instances", None)
-        if get_unblocked is not None:
-            unblocked_p = await get_unblocked(PDRole.ROLE_P)
-            unblocked_d = await get_unblocked(PDRole.ROLE_D)
-            has_routable_pd_pair = bool(unblocked_p and unblocked_d)
+        has_routable_pd_pair = await _has_compatible_unblocked_pd_pair(scheduler)
 
     if has_routable_pd_pair:
         return UnifiedPDRouter
@@ -205,11 +238,12 @@ async def select_router_class(
     # Degrade to hybrid mode if any unblocked instance is available
     get_unblocked = getattr(scheduler, "get_unblocked_instances", None)
     has_unblocked = False
+    unblocked_by_role: dict[PDRole, bool] = {}
     if get_unblocked is not None:
         for role in (PDRole.ROLE_U, PDRole.ROLE_P, PDRole.ROLE_D):
-            if await get_unblocked(role):
+            unblocked_by_role[role] = bool(await get_unblocked(role))
+            if unblocked_by_role[role]:
                 has_unblocked = True
-                break
     else:
         has_unblocked = PDRole.ROLE_U in roles or PDRole.ROLE_P in roles or PDRole.ROLE_D in roles
 
@@ -231,18 +265,33 @@ async def select_router_class(
         logger.warning("PD separate service cannot route request because hybrid fallback is disabled: %s", message)
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=message)
 
-    if PDRole.ROLE_U in roles or PDRole.ROLE_P in roles:
+    decode_colocation_available = (
+        PDRole.ROLE_D in roles and fallback_enabled and await has_decode_colocation_candidate(scheduler)
+    )
+    if PDRole.ROLE_U in roles or PDRole.ROLE_P in roles or decode_colocation_available:
         if has_pd_roles and not has_routable_pd_pair and PDRole.ROLE_U in roles:
             message = "P/D instances are unavailable; falling back to PDHybridRouter via union instances"
             if req_info is not None:
                 req_info.trace_obj.set_trace_error_message(message)
             logger.warning(message)
         elif has_pd_roles and not has_routable_pd_pair and req_info is not None:
-            error_message = "PD separate service degraded to hybrid: P or D instances are circuit-broken"
+            if decode_colocation_available and not any(
+                unblocked_by_role.get(role, False) for role in (PDRole.ROLE_U, PDRole.ROLE_P)
+            ):
+                error_message = "PD separate service degraded to decode co-location"
+                req_info.trace_obj.route_degradation = "decode_co_location"
+            else:
+                error_message = "PD separate service degraded to hybrid: no compatible unblocked P/D pair"
             req_info.trace_obj.set_trace_error_message(error_message)
             logger.warning(error_message)
         elif req_info is not None and PDRole.ROLE_U not in roles:
-            error_message = "PD separate service degraded to hybrid: only prefill instances available"
+            if decode_colocation_available and not any(
+                unblocked_by_role.get(role, False) for role in (PDRole.ROLE_U, PDRole.ROLE_P)
+            ):
+                error_message = "PD separate service degraded to decode co-location"
+                req_info.trace_obj.route_degradation = "decode_co_location"
+            else:
+                error_message = "PD separate service degraded to hybrid: only prefill instances available"
             req_info.trace_obj.set_trace_error_message(error_message)
             logger.warning(error_message)
         return PDHybridRouter
@@ -286,7 +335,22 @@ async def handle_request(
             detail="Scheduler (SchedulingFacade) is required and must be injected by the server",
         )
 
+    tokenization_service = getattr(raw_request.app.state, "tokenization_service", None)
+    tokenized_requests = None
+    if tokenization_service is not None:
+        tokenized_requests = await tokenization_service.tokenize(
+            req_info.req_id,
+            req_info.api,
+            req_info.req_data,
+        )
+        if tokenized_requests is not None:
+            req_info.tokenized_requests = list(tokenized_requests)
+            longest_prompt = max(tokenized_requests, key=lambda item: len(item.prompt_token_ids))
+            req_info.token_ids = list(longest_prompt.prompt_token_ids)
+
     adapt_context_budget(req_info, config)
+    if tokenized_requests is not None:
+        tokenization_service.sync_sampling_params(req_info.req_data, tokenized_requests)
 
     router_impl_class = await select_router_class(scheduler, req_info=req_info, config=config)
 
@@ -298,6 +362,9 @@ async def handle_request(
         request_manager=request_manager,
         sampling_manager=sampling_manager,
     )
+    set_render_client = getattr(router_impl, "set_render_client", None)
+    if callable(set_render_client):
+        set_render_client(tokenization_service.render_client if tokenization_service is not None else None)
 
     try:
         return await router_impl.handle_request()
@@ -370,6 +437,11 @@ async def handle_metaserver_request(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Empty request json")
 
     request_id = trim_vllm_engine_request_id(str(body.get("request_id") or ""))
+    batch_index = None
+    batch_marker = request_id.rpartition("#p")
+    if batch_marker[0] and batch_marker[2].isdigit():
+        request_id = batch_marker[0]
+        batch_index = int(batch_marker[2])
     if not request_id:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Missing request_id")
     req_info = await request_manager.get_req_info(request_id)
@@ -385,6 +457,8 @@ async def handle_metaserver_request(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Trigger attempt not found")
     if attempt.attempt_seq != attempt_seq:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stale trigger attempt callback")
+    if batch_index != req_info._trigger_batch_index:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Stale trigger batch callback")
 
     if scheduler is None:
         raise HTTPException(

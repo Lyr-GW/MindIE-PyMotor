@@ -386,6 +386,8 @@ spec:
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -420,6 +422,10 @@ spec:
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: prefill
@@ -507,6 +513,8 @@ spec:
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -541,6 +549,10 @@ spec:
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: decode
@@ -628,6 +640,8 @@ spec:
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -662,6 +676,10 @@ spec:
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: union
@@ -749,6 +767,8 @@ spec:
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -784,6 +804,10 @@ spec:
               hostPath:
                 path: /root/ascend/log
                 type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
+                type: DirectoryOrCreate
 
     - name: kv-store
       replicas: 0
@@ -803,6 +827,10 @@ spec:
             port: 50090
             protocol: TCP
             targetPort: 50090
+          - name: kv-events
+            port: 5557
+            protocol: TCP
+            targetPort: 5557
           selector:
             app: mindie-motor-kv-store
           sessionAffinity: None
@@ -810,6 +838,7 @@ spec:
       workload:
         apiVersion: apps/v1
         kind: Deployment
+      metadata: {}
       spec:
         replicas: 1
         selector:
@@ -906,6 +935,7 @@ spec:
       workload:
         apiVersion: apps/v1
         kind: Deployment
+      metadata: {}
       spec:
         replicas: 1
         selector:

@@ -184,7 +184,6 @@ def _make_real_instance(instance_id: int, endpoint_id: int, tokens: float) -> In
                 id=endpoint_id,
                 ip="10.0.0.1",
                 business_port="8080",
-                mgmt_port="9080",
                 status=EndpointStatus.NORMAL,
                 workload=Workload(active_tokens=tokens),
             )

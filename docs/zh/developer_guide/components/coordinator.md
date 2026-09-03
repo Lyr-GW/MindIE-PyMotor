@@ -32,19 +32,19 @@ Mgmt 与 Obs 在主备两侧都运行。并可配合共享内存 `RoleShmHolder`
 
 ### 路由前 Token 处理
 
-Inference worker 在启动阶段初始化进程内的 `TokenizerManager` 单例；多个 worker 各自持有 tokenizer，
-Coordinator 不会为此创建独立的 tokenizer 服务进程。请求进入路由选择前，`context_budget_mode=on`
-会使用模型 tokenizer 计算输入 token，并按模型剩余上下文裁剪输出上限；同一份 token ID 还会被
-KV Cache 亲和调度复用。Chat 请求带有需要服务端管理的 `agent_hint` 时，同一 tokenization 路径还会
-执行消息/工具索引到 KV block 坐标的翻译。功能配置和边界行为见
+启用 `render_config` 后，Coordinator 在路由前优先使用本 Pod 的 vLLM Render Sidecar 处理 Chat Completions 和 Completions，并将 token ID 复用于 context budget、KV Cache 亲和调度和 P/D 路由。即使同时启用 context budget，本地 tokenizer 也延迟到 Render fallback 时加载；Render 不可用或响应无效时自动回退，不影响 Coordinator 启动。
+
+Render 产生的非流式 Chat Completions 和 Completions 请求支持完整 Token In/Token Out 链路。`context_budget_mode=on` 时，最终输出预算会同步到 Render 参数。配置与边界说明见
+[配置参考](../../user_guide/configuration/config_reference.md)、
 [max_tokens 自适应](../../user_guide/features/max_tokens_adaptation.md) 与
 [KV Cache 亲和调度](../../user_guide/features/kvcache_affinity.md)。
 
 ## 环境准备
 
-- 配置来源：`CoordinatorConfig.from_json()`，通常来自挂载的 `user_config.json` 中 **`motor_coordinator_config`** 等合并结果，字段定义见 `motor/config/coordinator.py`。
+- 配置来源：`CoordinatorConfig.from_json()`，通常来自挂载的 `user_config.json` 中 **`motor_coordinator_config`** 等合并结果，字段定义见 `motor/config/coordinator.py`。独立部署时入口只读环境变量 `USER_CONFIG_PATH`。
 - 部署与端口约定见 [配置参考：motor_coordinator_config](../../user_guide/configuration/config_reference.md) 与 [接口说明](../../user_guide/api/README.md)。
 - 负载 SHM 需要 `libmindie_workload_shm.so`（`bash build.sh` 会 cargo 构建）。缺失时启动响亮失败，不会回退到 Python 账本。
+- 不依赖 Controller / Node Manager 的拉起步骤见 [Coordinator 独立部署](../../user_guide/deployment/standalone.md)。
 
 ## 配置说明
 

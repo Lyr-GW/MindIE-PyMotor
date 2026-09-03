@@ -17,8 +17,6 @@ Observability 查询接口使用独立端口：
 > - 主备模式下，仅主 Controller 对外提供 Observability 查询能力；备 Controller 收到查询请求时返回内部错误。
 > - 当 `observability_config.observability_enable=false` 时，查询类接口返回内部错误，错误信息为 `Observability is not enabled.`。
 
----
-
 ## 模型服务清单查询接口
 
 **接口功能**
@@ -207,21 +205,17 @@ curl -X GET "http://{IP}:{Port}/observability/inventory"
 
 | 场景 | modelState | 说明 |
 | --- | --- | --- |
-| active 实例中同时存在 Prefill 和 Decode，且 initial/inactive 中没有新的实例名 | 1 | 健康。 |
-| active 实例中同时存在 Prefill 和 Decode，但 initial/inactive 中存在 active 未覆盖的实例名 | 2 | 亚健康。 |
-| active 实例中缺少 Prefill 或 Decode | 3 | 异常。 |
+| active 实例中同时存在 Prefill 和 Decode，且 initial/inactive 中没有新的实例名 | 1 | 健康 |
+| active 实例中同时存在 Prefill 和 Decode，但 initial/inactive 中存在 active 未覆盖的实例名 | 2 | 亚健康 |
+| active 实例中缺少 Prefill 或 Decode | 3 | 异常 |
 
 >[!NOTE]说明
 >响应示例仅展示部分 Pod、NPU 与 DPGroup 内容。实际返回数量以运行时实例数、Pod 数、Endpoint 数和设备数为准。
 
----
-
 ## 监控指标查询接口（已弃用）
 
-> [!WARNING] 已弃用
+> [!NOTE] 说明
 > `GET /observability/metrics` 接口已弃用，该接口是转发到 Coordinator `/metrics` 的代理，仅作兼容保留（支持 `type` / `role` 参数，直接返回 Prometheus 文本）。**获取指标请直接使用 Coordinator Observability 端口的 [`GET /metrics`](./metrics_interfaces.md#接口格式) 接口**，支持更丰富的聚合视图（`full` / `instance` / `role` / `dp` / `node`）与返回格式（Prometheus / OpenTelemetry）。
-
----
 
 ## 告警查询接口
 
@@ -250,7 +244,7 @@ curl -X GET "http://{IP}:{Port}/observability/alarms?source_id={source_id}"
 
 **响应示例**
 
-```JSON
+```json
 {
   "code": 200,
   "message": "Success",
@@ -311,8 +305,6 @@ curl -X GET "http://{IP}:{Port}/observability/alarms?source_id={source_id}"
 | serviceAffectedType | integer | 服务影响状态：`0` 不影响，`1` 影响。 |
 | additionalInformation | string | 附加信息，输出时会追加 `pod id={nativeMeDn}`。 |
 
----
-
 ## 对接 CCAE 前端平台
 
 CCAE（Cluster Computing Autonomous Engine）是集群自智引擎系统。Motor 可通过 `examples/features/observability/ccae_reporter` 中的 CCAE Reporter 对接 CCAE，由 Reporter 采集 Motor 的告警、日志、实例清单和 metrics 信息并上报到 CCAE。
@@ -326,15 +318,12 @@ CCAE（Cluster Computing Autonomous Engine）是集群自智引擎系统。Motor
   "motor_controller_config": {
     "observability_config": {
       "observability_enable": true
-    },
-    "api_config": {
-      "observability_api_port": 1027
     }
   },
   "motor_deploy_config": {
     "tls_config": {
       "north_tls_config": {
-        "enable_tls": true,
+        "enable_tls": false,
         "ca_file": "",
         "cert_file": "",
         "key_file": "",
@@ -355,7 +344,9 @@ CCAE（Cluster Computing Autonomous Engine）是集群自智引擎系统。Motor
 | 参数 | 说明 |
 | --- | --- |
 | `motor_controller_config.observability_config.observability_enable` | 开启 Controller Observability 查询接口，CCAE Reporter 依赖该接口获取清单和告警；指标由 Reporter 直接从 Coordinator 的 `/metrics` 获取。 |
-| `motor_controller_config.api_config.observability_api_port` | Observability 查询接口端口，默认 `1027`。 |
+| `motor_controller_config.api_config.observability_api_port` | Controller Observability 查询接口端口，默认 `1027`。JSON 省略时 Reporter 回落该默认值。 |
+| `motor_controller_config.api_config.controller_api_port` | Controller 管理/probe 端口，默认 `1026`。JSON 省略时 Reporter 回落该默认值。 |
+| `motor_coordinator_config.api_config.coordinator_obs_port` | Coordinator `/metrics` 端口，默认 `1027`。JSON 省略时 Reporter 回落该默认值。 |
 | `motor_deploy_config.tls_config.north_tls_config` | Reporter 访问 CCAE 北向接口和 Kafka 时使用的 TLS 配置。 |
 | `north_config.name` | 北向 Reporter 名称，配置为 `ccae_reporter`。 |
 | `north_config.ip` | CCAE 平台 IP。 |

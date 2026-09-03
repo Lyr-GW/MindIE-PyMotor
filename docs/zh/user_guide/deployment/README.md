@@ -1,6 +1,6 @@
 # 部署
 
-MindIE Motor 支持以下两种部署方式，均为最佳实践，可根据自身环境选择：
+MindIE Motor 支持以下部署方式，可根据自身环境选择：
 
 ## K8s 部署
 
@@ -12,6 +12,20 @@ MindIE Motor 支持以下两种部署方式，均为最佳实践，可根据自�
 
 ## Docker 部署
 
-适用于单机或无 K8s 环境的场景，仅需 Docker 容器 + 宿主机挂载配置即可拉起推理服务，轻量快速。
+适用于单机或无 K8s 环境。入口为 `examples/deployer/docker_deploy.py`。
 
-→ 查看 [单容器部署](docker/single_container.md) 或 [多容器部署](docker/multi_container.md)
+→ [Docker单容器服务部署指导](docker/single_container.md)
+
+→ [Docker多容器PD分离部署](docker/multi_container.md)
+
+## Slurm 部署
+
+适用于 HPC / Slurm + Apptainer 集群，通过 `examples/slurm_deployer` 提交作业拉起服务。
+
+→ 从 [Slurm 部署概述](../slurm/README.md) 开始，或直接查看 [环境准备](../slurm/environment_preparation.md) 与 [服务部署](../slurm/service_deployment.md)
+
+## Coordinator 独立部署
+
+适用于已有原生 vLLM Prefill/Decode、只需单独拉起调度面的场景，不部署 Controller 与 Node Manager。
+
+→ 见 [Coordinator 独立部署](standalone.md)

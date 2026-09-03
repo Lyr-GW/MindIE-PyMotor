@@ -13,6 +13,7 @@ import json
 import re
 import ipaddress
 import tempfile
+from pathlib import Path
 from typing import Optional, Any
 from enum import Enum
 from dataclasses import dataclass, field, asdict, is_dataclass
@@ -62,6 +63,8 @@ SLO_TTFT = "slo_ttft"
 SLO_TPOT = "slo_tpot"
 
 logger = get_logger(__name__)
+
+MGMT_API_KEY_HEADER = "X-Motor-Management-Key"
 
 
 def _require_engine_config(engine_section: dict[str, Any], *, source: str) -> dict[str, Any]:
@@ -481,6 +484,26 @@ class APIKeyConfig:
 
 
 @dataclass
+class MgmtAPIKeyConfig:
+    """Shared-secret authentication for privileged management APIs."""
+
+    enable_api_key: bool = False
+    api_key_file: str = ""
+
+    def load_api_key(self) -> str:
+        """Read the management API key without exposing it in JSON configuration."""
+        try:
+            api_key = Path(self.api_key_file).read_text(encoding=FILE_ENCODING).strip()
+        except OSError as e:
+            raise ValueError(f"Failed to read management API key file '{self.api_key_file}': {e}") from e
+        if not api_key:
+            raise ValueError("Management API key file cannot be empty")
+        if "\n" in api_key or "\r" in api_key:
+            raise ValueError("Management API key file must contain exactly one line")
+        return api_key
+
+
+@dataclass
 class InferenceWorkersConfig:
     num_workers: int = 4  # Number of inference API worker processes; >1 = multiprocess
     # Base port for per-worker metaserver; 0=disabled. Worker i listens on base+i.
@@ -591,6 +614,24 @@ class PrefillKvEventConfig:
 
 
 @dataclass
+class RenderEndpointConfig:
+    """vLLM Render sidecar endpoint."""
+
+    host: str = "127.0.0.1"
+    port: int = 8100
+
+
+@dataclass
+class RenderConfig:
+    """Coordinator frontend tokenization through a vLLM Render sidecar."""
+
+    enabled: bool = False
+    endpoint: RenderEndpointConfig = field(default_factory=RenderEndpointConfig)
+    timeout_ms: int = 5000
+    image_name: str = ""
+
+
+@dataclass
 class CoordinatorConfig:
     """Coordinator configuration class with validation, reload and error handling support"""
 
@@ -608,6 +649,7 @@ class CoordinatorConfig:
     etcd_tls_config: TLSConfig = field(default_factory=TLSConfig)
     timeout_config: TimeoutConfig = field(default_factory=TimeoutConfig)
     api_key_config: APIKeyConfig = field(default_factory=APIKeyConfig)
+    mgmt_api_key_config: MgmtAPIKeyConfig = field(default_factory=MgmtAPIKeyConfig)
     rate_limit_config: RateLimitConfig = field(default_factory=RateLimitConfig)
     standby_config: StandbyConfig = field(default_factory=StandbyConfig)
 
@@ -616,6 +658,7 @@ class CoordinatorConfig:
     api_config: ApiConfig = field(default_factory=ApiConfig)
     deploy_config: DeployConfig = field(default_factory=DeployConfig)
     tracer_config: TracerConfig = field(default_factory=TracerConfig)
+    render_config: RenderConfig = field(default_factory=RenderConfig)
     prefill_kv_event_config: PrefillKvEventConfig = field(default_factory=PrefillKvEventConfig)
     precision_detection_config: PrecisionDetectionConfig = field(default_factory=PrecisionDetectionConfig)
     port_allocator_config: PortAllocatorConfig = field(default_factory=PortAllocatorConfig)
@@ -734,6 +777,7 @@ class CoordinatorConfig:
                 ("inference_workers_config", config.inference_workers_config, None),
                 ("timeout_config", config.timeout_config, None),
                 ("api_key_config", config.api_key_config, None),
+                ("mgmt_api_key_config", config.mgmt_api_key_config, None),
                 ("rate_limit_config", config.rate_limit_config, None),
                 ("standby_config", config.standby_config, None),
                 ("etcd_config", config.etcd_config, None),
@@ -743,6 +787,7 @@ class CoordinatorConfig:
                 ("api_config", config.api_config, None),
                 ("deploy_config", config.deploy_config, None),
                 ("tracer_config", config.tracer_config, None),
+                ("render_config", config.render_config, None),
                 ("prefill_kv_event_config", config.prefill_kv_event_config, None),
                 ("precision_detection_config", config.precision_detection_config, None),
                 ("port_allocator_config", config.port_allocator_config, None),
@@ -837,6 +882,14 @@ class CoordinatorConfig:
             "num_workers",
         )
         self._validate_worker_metaserver_ports()
+
+        self._validate_ip_or_hostname(self.render_config.endpoint.host, "render_config.endpoint.host")
+        self._validate_port_range(self.render_config.endpoint.port, "render_config.endpoint.port")
+        self._validate_positive_number(self.render_config.timeout_ms, "render_config.timeout_ms")
+        if not isinstance(self.render_config.image_name, str):
+            self._errors.append("render_config.image_name must be a string")
+        elif self.render_config.image_name and not self.render_config.image_name.strip():
+            self._errors.append("render_config.image_name cannot contain only whitespace")
 
         # Validate scheduler score configuration
         self._validate_positive_number(
@@ -993,6 +1046,9 @@ class CoordinatorConfig:
             if not self.api_key_config.key_prefix:
                 self._errors.append("key_prefix cannot be empty when api_key authentication is enabled")
 
+        if self.mgmt_api_key_config.enable_api_key and not self.mgmt_api_key_config.api_key_file:
+            self._errors.append("api_key_file cannot be empty when management api_key authentication is enabled")
+
         if self._errors:
             error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in self._errors)
             logger.error(error_msg)
@@ -1108,6 +1164,7 @@ class CoordinatorConfig:
             f"    ├─ Management TLS:      {'Enabled' if self.mgmt_tls_config.enable_tls else 'Disabled'}\n"
             f"    ├─ Etcd TLS:            {'Enabled' if self.etcd_tls_config.enable_tls else 'Disabled'}\n"
             f"    ├─ API Key Auth:        {'Enabled' if self.api_key_config.enable_api_key else 'Disabled'}\n"
+            f"    ├─ Mgmt API Key Auth:   {'Enabled' if self.mgmt_api_key_config.enable_api_key else 'Disabled'}\n"
             f"    └─ Rate Limiting:       {'Enabled' if self.rate_limit_config.enable_rate_limit else 'Disabled'}\n"
             "\n"
             "  High Availability:\n"

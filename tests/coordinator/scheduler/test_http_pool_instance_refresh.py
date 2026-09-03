@@ -40,7 +40,6 @@ def _make_instance(instance_id: int, role: PDRole, endpoints: list[tuple[str, st
             id=instance_id * 10 + i,
             ip=ip,
             business_port=port,
-            mgmt_port=f"9{port}",
             status=status,
             workload=Workload(),
         )

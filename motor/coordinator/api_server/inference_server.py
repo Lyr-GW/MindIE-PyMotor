@@ -39,7 +39,11 @@ from motor.common.http.http_client import HTTPClientPool
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestType
 from motor.coordinator.domain.request_manager import RequestManager
+from motor.coordinator.domain.scheduling import InstanceReadiness, has_decode_colocation_candidate
 from motor.coordinator.router.dispatch import handle_metaserver_request, handle_request
+from motor.coordinator.render.tokenization_service import TokenizationService
+from motor.coordinator.render.vllm_render_client import VLLMRenderClient
+from motor.coordinator.scheduler.policy.kv_cache_affinity import TokenizerManager
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.domain.agent_hint import agent_hint_implies_manage_request
 
@@ -49,6 +53,24 @@ logger = get_logger(__name__)
 def get_request_manager(request: Request) -> RequestManager:
     """FastAPI dependency: inject RequestManager from app.state."""
     return request.app.state.request_manager
+
+
+def _validate_positive_int_field(body_json: dict[str, Any], field_name: str) -> None:
+    """Validate an optional positive integer field.
+
+    If the field is present but not a positive integer, remove it from the
+    request body and log a warning with the body content before removal.
+    """
+    value = body_json.get(field_name)
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        logger.warning(
+            "Invalid %s=%r in request body, removing it.",
+            field_name,
+            value,
+        )
+        body_json.pop(field_name, None)
 
 
 def _validate_anthropic_request(body_json: dict[str, Any], *, require_max_tokens: bool = True) -> None:
@@ -114,6 +136,8 @@ def _validate_openai_request(body_json: dict[str, Any], request_type: RequestTyp
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Missing required field: {OpenAIField.MODEL}",
         )
+    _validate_positive_int_field(body_json, OpenAIField.MAX_TOKENS)
+    _validate_positive_int_field(body_json, OpenAIField.MAX_COMPLETION_TOKENS)
     if request_type != RequestType.OPENAI:
         return
     if OpenAIField.PROMPT not in body_json and OpenAIField.MESSAGES not in body_json and "input" not in body_json:
@@ -232,7 +256,22 @@ class InferenceServer(BaseCoordinatorServer):
                 app.state.sampling_manager = sampling_manager
         else:
             app.state.sampling_manager = None
+        render_client = None
+        app.state.tokenization_service = None
         try:
+            render_config = self.coordinator_config.render_config
+            if render_config.enabled:
+                render_client = VLLMRenderClient(render_config)
+                if await render_client.health():
+                    logger.info("vLLM Render sidecar is available")
+                else:
+                    logger.warning("vLLM Render sidecar is unavailable; Coordinator will use tokenizer fallback")
+                app.state.tokenization_service = TokenizationService(
+                    render_config,
+                    render_client=render_client,
+                    local_tokenizer=TokenizerManager(self.coordinator_config),
+                    context_budget_mode=self.coordinator_config.context_budget_mode,
+                )
             yield
         except asyncio.CancelledError:
             logger.info("Inference server startup was cancelled")
@@ -241,6 +280,8 @@ class InferenceServer(BaseCoordinatorServer):
             raise
         finally:
             logger.info("Inference server is shutting down...")
+            if render_client is not None:
+                await render_client.aclose()
             try:
                 TracerManager().shutdown()
             except Exception as e:
@@ -389,12 +430,15 @@ class InferenceServer(BaseCoordinatorServer):
 
     async def _is_available(self) -> bool:
         """Whether instances are available (Worker reads SchedulerClient cache).
-        PD mode: available if has P or P+D.
+        PD mode: decode-only is available when hybrid fallback is enabled.
         """
         client = self._scheduler_connection.get_client()
         if client is None:
             return False
         readiness = await client.has_required_instances()
+        if readiness == InstanceReadiness.ONLY_DECODE:
+            fallback_enabled = self.coordinator_config.scheduler_config.enable_pd_separation_fallback_to_hybrid
+            return fallback_enabled and await has_decode_colocation_candidate(client)
         return readiness.is_run()
 
     def _register_routes(self) -> None:

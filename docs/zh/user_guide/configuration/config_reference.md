@@ -37,8 +37,50 @@ motor_deploy_config字段为部署与资源相关配置，由deploy.py读取并�
 | image_name | string | 推理镜像名（需包含MindIE Motor与vLLM等运行环境） |
 | job_id | string | 部署任务名，同时作为K8s命名空间使用，例如"mindie-motor" |
 | hardware_type | string | 硬件类型：<ul><li>Atlas 800I A2 推理服务器：800I_A2</li><li>Atlas 800I A3 超节点服务器：800I_A3</li><li>Atlas 850 Server：850-Atlas-8p-8</li><li>Atlas 850 Server 超节点服务器：850-SuperPod-Atlas-8</li></ul>|
-| weight_mount_path | string | 宿主机上模型权重挂载路径，容器内model_path需与此挂载路径一致，例如 `"/mnt/weight/"` |
+| weight_mount_path | string | 宿主机上模型权重挂载路径，容器内 `model` 路径需与此挂载路径一致，例如 `"/mnt/weight/"`。使用标准 deployer 时，该路径会同时挂载到 P/D（或 Union）引擎和 Coordinator；开启 `context_budget_mode: "on"` 后，Coordinator 也必须能够读取 `engine_config.model` 中的 tokenizer 文件。该字段使用 `hostPath`，因此 Coordinator 可能调度到的节点均需存在该路径，或通过 `coordinator_node_selector` 限制其调度范围。 |
 | tls_config | object | 可选；TLS相关配置，包含mgmt_tls_config、infer_tls_config、etcd_tls_config、grpc_tls_config和observability_tls_config五类 |
+
+---
+
+## <a id="additional-labels-annotations"></a>组件级Kubernetes Labels和Annotations
+
+以下组件配置支持在顶层通过 `additional_labels` 和 `additional_annotations` 为生成的Kubernetes资源添加自定义元数据：
+
+| 组件配置 | 生效组件 |
+|----------|----------|
+| motor_controller_config | Controller |
+| motor_coordinator_config | Coordinator |
+| motor_engine_prefill_config | Prefill Engine |
+| motor_engine_decode_config | Decode Engine |
+| motor_engine_encode_config | Encode Engine |
+| motor_engine_union_config | Union Engine |
+| kv_cache_store_config | KV Cache Store |
+| kv_conductor_config | KV Conductor |
+| mf_store_config | MF Store |
+
+配置示例如下所示：
+
+```json
+"motor_controller_config": {
+  "additional_annotations": {
+    "motor-component": "controller"
+  },
+  "additional_labels": {
+    "motor-component": "controller"
+  }
+}
+```
+
+| 配置项 | 类型 | 说明 |
+|--------|------|------|
+| additional_annotations | object | 可选；需要添加到组件工作负载及其Pod模板 `metadata.annotations` 的键值对，默认不添加。自定义键与模板中已有键同名时，以此处配置的值为准。键和值需符合Kubernetes Annotation规范。 |
+| additional_labels | object | 可选；需要添加到组件工作负载及其Pod模板 `metadata.labels` 的键值对，默认不添加。除部署器保留标签外，自定义键与模板中已有键同名时，以此处配置的值为准。键和值需符合Kubernetes Label规范。 |
+
+上述字段仅修改工作负载及其Pod模板的元数据，不修改对应Service等其他资源。`single_container` 部署模式下，各组件共享同一个工作负载，自定义元数据通过 `motor_coordinator_config` 配置。
+
+>[!NOTE]说明
+>
+>`app` 是部署器保留标签，不能通过 `additional_labels` 配置，部署主流程会在生成资源前拒绝此类配置。请勿覆盖其他由部署器生成的组件标识、工作负载选择器等系统Labels；本功能不会同步修改 `spec.selector`，覆盖此类Labels可能导致工作负载无法创建或无法匹配Pod。
 
 ---
 
@@ -119,7 +161,13 @@ motor_controller_config字段配置样例如下所示：
     "remote_check_timeout_seconds": 1.0,
     "bind_host": "0.0.0.0"
   },
-  "precision_auto_recovery_enable": false
+  "precision_auto_recovery_enable": false,
+  "additional_annotations": {
+    "motor-component": "controller"
+  },
+  "additional_labels": {
+    "motor-component": "controller"
+  }
 }
 ```
 
@@ -187,8 +235,8 @@ motor_controller_config字段配置样例如下所示：
 | probe_timeout_seconds |float|探测超时时间，默认值：0.5。|
 | remote_check_timeout_seconds |float|远程检测超时时间，默认值：1.0。|
 | bind_host |string|绑定主机地址，默认值：0.0.0.0。|
-
----
+| additional_annotations | object | 可选；Controller工作负载及其Pod模板的自定义Annotations |
+| additional_labels | object | 可选；Controller工作负载及其Pod模板的自定义Labels。 |
 
 ## motor_coordinator_config
 
@@ -230,6 +278,15 @@ motor_coordinator_config字段配置样例如下所示：
     "upstream_error_body_max_bytes": 65536
   },
   "context_budget_mode": "off",
+  "render_config": {
+    "enabled": false,
+    "endpoint": {
+      "host": "127.0.0.1",
+      "port": 8100
+    },
+    "timeout_ms": 5000,
+    "image_name": ""
+  },
   "scheduler_config": {
     "scheduler_type": "load_balance",
     "enable_pd_separation_fallback_to_hybrid": true,
@@ -275,6 +332,10 @@ motor_coordinator_config字段配置样例如下所示：
       "/v1/metaserver"
     ],
     "encryption_algorithm": "PBKDF2_SHA256"
+  },
+  "mgmt_api_key_config": {
+    "enable_api_key": false,
+    "api_key_file": ""
   },
   "rate_limit_config": {
     "enable_rate_limit": false,
@@ -357,7 +418,13 @@ motor_coordinator_config字段配置样例如下所示：
     "bind_host": "0.0.0.0"
   },
   "_errors": [],
-  "worker_index": null
+  "worker_index": null,
+  "additional_annotations": {
+    "motor-component": "coordinator"
+  },
+  "additional_labels": {
+    "motor-component": "coordinator"
+  }
 }
 ```
 
@@ -366,6 +433,11 @@ motor_coordinator_config字段配置样例如下所示：
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
 | context_budget_mode | string | 请求路由前使用模型 tokenizer 计算 prompt token 数，并将实际生效的 `max_tokens` / `max_completion_tokens` 裁剪到模型剩余上下文。适用于 `load_balance`、`round_robin`、`kv_cache_affinity`。可选值：`off`（默认）或 `on`；开启 `on` 时，P/D 引擎配置必须提供 `model` 与 `max_model_len`。 |
+| **render_config字段** |-|-|
+| enabled | bool | 是否启用 vLLM Render Sidecar。默认值：`false`。启用后，Coordinator 优先调用 Render；不支持的请求或调用失败会自动回退本地 tokenizer。 |
+| endpoint | object | Render Sidecar 地址。`host` 默认值为 `127.0.0.1`，Sidecar 部署仅支持本机地址；`port` 默认值为 `8100`。 |
+| timeout_ms | int | Render、Derender 与健康检查的 HTTP 超时时间，单位：毫秒。默认值：`5000`。 |
+| image_name | string | Render Sidecar 镜像。配置后使用该独立镜像；为空时复用 `motor_deploy_config.image_name`。默认值为空。 |
 | log_level | string | 日志级别。默认值：INFO<ul><li>DEBUG</li><li>INFO</li><li>WARNING</li><li>ERROR</li></ul> |
 | log_max_line_length | int | 单行日志最大长度，超过则截断。默认值：8192 |
 | log_format | string | 日志格式模板，支持 Python logging 占位符。默认值："(%(processName)s pid=%(process)d) %(levelname)s %(asctime)s \[%(name)s][%(fileinfo)s:%(lineno)d] %(message)s" |
@@ -387,14 +459,14 @@ motor_coordinator_config字段配置样例如下所示：
 | transport_max_retry | int/null | Coordinator 传输失败的最大尝试次数；`null` 时使用 `max_retry`。默认值：`null` |
 | retry_delay | float | 每次重试前的等待时间（秒）。默认值：`0.2` |
 | first_token_timeout | int | 等待首 token 返回的超时时间（秒）。默认值：`600` |
-| infer_timeout | int | 单次推理请求的总超时时间（秒）。默认值：`3600` |
+| infer_timeout | int | 单次推理请求的总超时时间（秒）。非流式场景作用于单次转发；流式场景作为整个流式请求的整体墙钟超时（从请求到达算起，超时后中断并返回 504）。默认：`3600` |
 | upstream_error_body_max_bytes | int | 向客户端透传引擎 HTTP 错误体的最大字节数，避免返回超大错误响应。默认值：`65536` |
 | **reschedule_config字段** |-|-|
-| enable | bool | 故障场景重调度功能开关。默认：`false`。<br>模型重计算由引擎侧负责，该配置不控制引擎侧重计算；`recompute_enabled`仅作为`reschedule_enabled`的旧配置兼容别名；`recompute_max_retry`已移除并会被忽略。 |
+| enable | bool | 故障场景重调度功能开关。默认值：`false`。<br>模型重计算由引擎侧负责，该配置不控制引擎侧重计算；`recompute_enabled`仅作为`reschedule_enabled`的旧配置兼容别名；`recompute_max_retry`已移除并会被忽略。 |
 | **scheduler_config字段** |-|-|
 | scheduler_type | string | 调度类型，默认值：load_balance<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询；</li><li>kv_cache_affinity：KV Cache 亲和调度。</li></ul> |
-| enable_pd_separation_fallback_to_hybrid | bool | PD分离场景下，当D实例不可用或P/D实例不满足调度条件时，是否允许降级使用混部路由，默认值为 `true` |
-| endpoint_instance_score_weight | float | endpoint 优先负载均衡时实例平均负载权重。默认：`0.05` |
+| enable_pd_separation_fallback_to_hybrid | bool | PD 分离场景下，当不存在兼容且未熔断的 P/D pair 时，是否允许降级使用混部路由，默认值为 `true`。候选优先级为 Union → Prefill → Decode；Decode 兜底仅适用于上报 `decode_colocation` capability 的 vLLM 实例，关闭后无兼容 pair 时返回 503。 |
+| endpoint_instance_score_weight | float | endpoint 优先负载均衡时实例平均负载权重。默认值：`0.05` |
 | kv_affinity | object | KV Cache 亲和性调度参数（见下表） |
 | **kv_affinity 字段** |-|-|
 | mode | string | `scheduler_type=kv_cache_affinity` 时的子策略：`unified`（默认）或 `load_gated` |
@@ -421,6 +493,9 @@ motor_coordinator_config字段配置样例如下所示：
 | key_prefix | string | 头中 Key 的前缀，如`Bearer`。默认值：`Bearer`|
 | skip_paths | array | 不校验 API Key 的路径列表（如 `/metrics`、`/liveness`、`/docs`、`/v1/metaserver` 等），可自定义。代码默认包含 `/v1/metaserver`（Decode layerwise 回调不带 Key）。 |
 | encryption_algorithm | string | Key 校验使用的加密算法，如 `PBKDF2_SHA256`。默认值：`PBKDF2_SHA256` |
+| **mgmt_api_key_config字段** |-|管理面独立 API Key 配置，仅保护实例查询、实例刷新和精度告警状态清理接口。启动、存活和就绪探针不鉴权。请求头固定为 `X-Motor-Management-Key`。|
+| enable_api_key | bool | 是否开启管理面 API Key 鉴权。可选：`true` / `false`。默认值：`false`。|
+| api_key_file | string | API Key 文件路径。开启鉴权时必填；文件必须仅含一行非空密钥。Controller 与 Coordinator 分开部署时需挂载内容相同的密钥文件。|
 | **rate_limit_config字段** |-|-|
 | enable_rate_limit | bool | 是否开启请求限流。可选：`true` / `false`。默认值：`false` |
 | provider |string|限流提供者。simple使用内置令牌桶；OLC使用过载控制库（需额外安装及配置）。|
@@ -430,7 +505,7 @@ motor_coordinator_config字段配置样例如下所示：
 | skip_paths | array | 不参与限流统计的路径列表（如 `/liveness`、`/readiness`、`/metrics`），可自定义 |
 | error_message | string | 触发限流时返回给客户端的提示文案。默认值：`too many requests, please try again later` |
 | error_status_code | int | 触发限流时返回的 HTTP 状态码，通常为 4xx（如 429）。默认值：`429` |
-| max_request_body_size | float | 请求体最大大小（MB），超过则直接拒绝并返回 413，不消耗限流令牌。`= 0` 表示不限制。支持小数（如 `0.5` 表示 0.5MB，1MB = 1024\*1024 字节）。默认：`0`（不限制） |
+| max_request_body_size | float | 请求体最大大小（MB），超过则直接拒绝并返回 413，不消耗限流令牌。`= 0` 表示不限制。支持小数（如 `0.5` 表示 0.5MB，1MB = 1024\*1024 字节）。默认值：`0`（不限制） |
 | olc_config_path |string|OLC规则配置目录的绝对路径或相对于服务启动目录的相对路径。目录下需包含overload-config.properties和olc.json。|
 | **standby_config字段** |-|-|
 | enable_master_standby | bool | 是否开启 Coordinator 主备。可选：`true` / `false`。默认值：`false` |
@@ -494,8 +569,8 @@ motor_coordinator_config字段配置样例如下所示：
 | **request_limit字段** |-|config_sample.json中未包含此字段，但PD部署时常用，合并到运行时配置后生效。|
 | single_node_max_requests | int | 单节点允许的最大并发请求数，由 user_config 配置 |
 | max_requests | int | 集群全局最大并发请求数，由 user_config 配置 |
-
----
+| additional_annotations | object | 可选；Coordinator工作负载及其Pod模板的自定义Annotations。 |
+| additional_labels | object | 可选；Coordinator工作负载及其Pod模板的自定义Labels。 |
 
 ## motor_engine_union_config
 
@@ -513,7 +588,7 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
     "pipeline_parallel_size": 1,
     "data_parallel_rpc_port": 9000,
     "enable_expert_parallel": false,
-    "enforce-eager": true,
+    "enforce-eager": false,
     "max_model_len": 2048,
     "kv_transfer_config": {
       "kv_connector": "MooncakeConnectorV1",
@@ -531,7 +606,6 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
     "endpoint_config": {
       "endpoint_num": 0,
       "base_port": 10000,
-      "mgmt_ports": [],
       "service_ports": []
     },
     "basic_config": {...
@@ -539,6 +613,11 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
     "snapshot_config": {
       "enable_snapshot": false,
       "snapshot_metadata_path": ""
+    },
+    "vllm_startup_acceleration_config": {
+      "enable_startup_plan": true,
+      "enable_graph_reuse": true,
+      "cache_root": "/mnt/vllm-cache/union"
     },
     "logging_config": {
       "log_level": "INFO",
@@ -572,6 +651,12 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
       "remote_check_timeout_seconds": 1.0,
       "bind_host": "0.0.0.0"
     }
+  },
+  "additional_annotations": {
+    "motor-component": "union-engine"
+  },
+  "additional_labels": {
+    "motor-component": "union-engine"
   }
 }
 ```
@@ -581,13 +666,14 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
 | engine_type | string | 引擎类型，如 `vllm` |
+| additional_annotations | object | 可选；Union Engine工作负载及其Pod模板的自定义Annotations。 |
+| additional_labels | object | 可选；Union Engine工作负载及其Pod模板的自定义Labels。 |
 | **engine_config字段** | - | `engine_config` 直接映射所选引擎的原生启动参数；请参阅对应 vLLM/SGLang 版本的官方参数文档。 |
 | **motor_nodemanger_config字段** |-|-|
 | api_config.pod_ip |string | Pod IP（由环境或部署注入）。默认值：`127.0.0.1`（或 Env.pod_ip） |
 | api_config.node_manager_port |int | NodeManager 端口。默认值：`1026` |
 | endpoint_config.endpoint_num |int | 引擎端点数量，通常由 HCCL/并行配置推导。默认值：`0` |
 | endpoint_config.base_port |int | 端点端口起始号。默认值：`10000` |
-| endpoint_config.mgmt_ports |array | 各端点兼容管理端口列表（整数数组）。原生引擎不监听该端口，当前为注册协议兼容字段。默认值：`[]` |
 | endpoint_config.service_ports |array | 各端点推理服务端口列表（整数数组）。默认值：`[]` |
 | endpoint_config.bootstrap_port |int/null | SGLang PD 原生 bootstrap 端口。由所选引擎配置中的 `engine_config.disaggregation_bootstrap_port`（兼容 `disaggregation-bootstrap-port`）派生；vLLM 或未配置时为空。 |
 | fault_tolerance_config.enable_fault_tolerance |bool|是否显式开启引擎软件故障轮询，默认值：false。<br>引擎 user config 检测到 FT 开关时自动开启，无需显式配置。|
@@ -596,6 +682,9 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
 | fault_tolerance_config.max_poll_failures |int|连续轮询失败阈值，达到后按 dead 上报，默认值：3。|
 | snapshot_config.enable_snapshot |bool|是否使能容器快照功能总开关，默认值：false。<br>开启后，用户可对实例容器制作快照镜像，并支持由快照恢复的实例向控制面注册。|
 | snapshot_config.snapshot_metadata_path |string|容器快照元数据文件路径，包含容器快照制作与恢复过程中依赖的元数据，默认值为空。|
+| vllm_startup_acceleration_config.enable_startup_plan |bool|是否启用 vLLM StartPlan，默认值：false。命中已有 StartPlan 时由 vLLM 跳过 memory profiling。|
+| vllm_startup_acceleration_config.enable_graph_reuse |bool|是否启用 vLLM-Ascend 后端完整图复用，默认值：false。|
+| vllm_startup_acceleration_config.cache_root |string|可选的 vLLM StartPlan 与编译缓存绝对路径。缺省时继承 `VLLM_CACHE_ROOT`，再缺省时使用 vLLM 默认目录；生产环境建议显式配置持久化路径。|
 | logging_config.log_level | string | 日志级别，默认值：INFO<ul><li>DEBUG</li><li>INFO</li><li>WARNING</li><li>ERROR</li></ul>|
 | logging_config.log_max_line_length | int | 单条日志最大长度，超过则截断。默认值：8192 |
 | logging_config.log_format | string | 日志格式模板，支持Python logging 占位符。默认值："(%(processName)s pid=%(process)d) %(levelname)s %(asctime)s \[%(name)s][%(fileinfo)s:%(lineno)d] %(message)s" |
@@ -614,8 +703,8 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
 | port_allocator_config.probe_timeout_seconds |float|探测超时时间，默认值：0.5。|
 | port_allocator_config.remote_check_timeout_seconds |float|远程检测超时时间，默认值：1.0。|
 | port_allocator_config.bind_host |string|绑定主机地址，默认值：0.0.0.0。|
-
----
+| **kv_cache_store_config字段** |-|-|
+| kv_cache_store_config | object | KV 池化配置（`enable`/`backend`/`store_mode`/`global_segment_size`/`local_buffer_size`/`store_http_port` 等），未配置则不启用池化。完整字段与默认值见 [KV 池化 README — kv_cache_store_config](../features/kv_cache_store/README.md#kv_cache_store_config全局配置)；Mooncake `standalone` 部署模式说明见 [Mooncake 后端文档](../features/kv_cache_store/backend/mooncake.md#standalone-模式独立-store-进程)。 |
 
 ## motor_engine_prefill_config/motor_engine_decode_config
 
@@ -633,7 +722,7 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
     "pipeline_parallel_size": 1,
     "data_parallel_rpc_port": 9000,
     "enable_expert_parallel": false,
-    "enforce-eager": true,
+    "enforce-eager": false,
     "max_model_len": 2048,
     "kv_transfer_config": {
       "kv_connector": "MooncakeConnectorV1",
@@ -654,7 +743,6 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
     "endpoint_config": {
       "endpoint_num": 0,
       "base_port": 10000,
-      "mgmt_ports": [],
       "service_ports": []
     },
     "basic_config": {...
@@ -662,6 +750,11 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
     "snapshot_config": {
       "enable_snapshot": false,
       "snapshot_metadata_path": ""
+    },
+    "vllm_startup_acceleration_config": {
+      "enable_startup_plan": true,
+      "enable_graph_reuse": true,
+      "cache_root": "/mnt/vllm-cache/prefill"
     },
     "logging_config": {
       "log_level": "INFO",
@@ -695,6 +788,12 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
       "remote_check_timeout_seconds": 1.0,
       "bind_host": "0.0.0.0"
     }
+  },
+  "additional_annotations": {
+    "motor-component": "prefill-engine"
+  },
+  "additional_labels": {
+    "motor-component": "prefill-engine"
   }
 },
 "motor_engine_decode_config": {
@@ -708,7 +807,7 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
     "pipeline_parallel_size": 1,
     "data_parallel_rpc_port": 9000,
     "enable_expert_parallel": false,
-    "enforce-eager": true,
+    "enforce-eager": false,
     "max_model_len": 2048,
     "kv_transfer_config": {
       "kv_connector": "MooncakeConnectorV1",
@@ -729,7 +828,6 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
     "endpoint_config": {
       "endpoint_num": 0,
       "base_port": 10000,
-      "mgmt_ports": [],
       "service_ports": []
     },
     "basic_config": {...
@@ -737,6 +835,11 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
     "snapshot_config": {
       "enable_snapshot": false,
       "snapshot_metadata_path": ""
+    },
+    "vllm_startup_acceleration_config": {
+      "enable_startup_plan": true,
+      "enable_graph_reuse": true,
+      "cache_root": "/mnt/vllm-cache/decode"
     },
     "logging_config": {
       "log_level": "INFO",
@@ -770,6 +873,12 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
       "remote_check_timeout_seconds": 1.0,
       "bind_host": "0.0.0.0"
     }
+  },
+  "additional_annotations": {
+    "motor-component": "decode-engine"
+  },
+  "additional_labels": {
+    "motor-component": "decode-engine"
   }
 }
 
@@ -780,13 +889,14 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
 | 配置项 | 类型 | 说明 |
 |--------|------|------------------|
 | engine_type | string | 引擎类型，如 `vllm` |
+| additional_annotations | object | 可选；Prefill/Decode Engine工作负载及其Pod模板的自定义Annotations。 |
+| additional_labels | object | 可选；Prefill/Decode Engine工作负载及其Pod模板的自定义Labels。 |
 | **engine_config字段** | - | `engine_config` 直接映射所选引擎的原生启动参数；请参阅对应 vLLM/SGLang 版本的官方参数文档。 |
 | **motor_nodemanger_config字段** |-|-|
 | api_config.pod_ip |string | Pod IP（由环境或部署注入）。默认值：`127.0.0.1`（或 Env.pod_ip） |
 | api_config.node_manager_port |int | NodeManager 端口。默认值：`1026` |
 | endpoint_config.endpoint_num |int | 引擎端点数量，通常由 HCCL/并行配置推导。默认值：`0` |
 | endpoint_config.base_port |int | 端点端口起始号。默认值：`10000` |
-| endpoint_config.mgmt_ports |array | 各端点兼容管理端口列表（整数数组）。原生引擎不监听该端口，当前为注册协议兼容字段。默认值：`[]` |
 | endpoint_config.service_ports |array | 各端点推理服务端口列表（整数数组）。默认值：`[]` |
 | endpoint_config.bootstrap_port |int/null | SGLang PD 原生 bootstrap 端口。由所选引擎配置中的 `engine_config.disaggregation_bootstrap_port`（兼容 `disaggregation-bootstrap-port`）派生；vLLM 或未配置时为空。 |
 | fault_tolerance_config.enable_fault_tolerance |bool|是否显式开启引擎软件故障轮询，默认值：false。<br>引擎 user config 检测到 FT 开关时自动开启，无需显式配置。|
@@ -795,6 +905,9 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
 | fault_tolerance_config.max_poll_failures |int|连续轮询失败阈值，达到后按 dead 上报，默认值：3。|
 | snapshot_config.enable_snapshot |bool|是否使能容器快照功能总开关，默认值：false。<br>开启后，用户可对实例容器制作快照镜像，并支持由快照恢复的实例向控制面注册。|
 | snapshot_config.snapshot_metadata_path |string|容器快照元数据文件路径，包含容器快照制作与恢复过程中依赖的元数据，默认值为空。|
+| vllm_startup_acceleration_config.enable_startup_plan |bool|是否启用 vLLM StartPlan，默认值：false。命中已有 StartPlan 时由 vLLM 跳过 memory profiling。|
+| vllm_startup_acceleration_config.enable_graph_reuse |bool|是否启用 vLLM-Ascend 后端完整图复用，默认值：false。|
+| vllm_startup_acceleration_config.cache_root |string|可选的 vLLM StartPlan 与编译缓存绝对路径。缺省时继承 `VLLM_CACHE_ROOT`，再缺省时使用 vLLM 默认目录；生产环境建议显式配置持久化路径。|
 | logging_config.log_level | string | 日志级别，默认值：INFO<ul><li>DEBUG</li><li>INFO</li><li>WARNING</li><li>ERROR</li></ul>|
 | logging_config.log_max_line_length | int | 单条日志最大长度，超过则截断。默认值：8192 |
 | logging_config.log_format | string | 日志格式模板，支持Python logging 占位符。默认值："(%(processName)s pid=%(process)d) %(levelname)s %(asctime)s \[%(name)s][%(fileinfo)s:%(lineno)d] %(message)s" |
@@ -813,8 +926,23 @@ motor_engine_prefill_config和motor_engine_decode_config字段用于**PD分离�
 | port_allocator_config.probe_timeout_seconds |float|探测超时时间，默认值：0.5。|
 | port_allocator_config.remote_check_timeout_seconds |float|远程检测超时时间，默认值：1.0。|
 | port_allocator_config.bind_host |string|绑定主机地址，默认值：0.0.0.0。|
+| **kv_cache_store_config字段** |-|-|
+| kv_cache_store_config | object | KV 池化配置（`enable`/`backend`/`store_mode`/`global_segment_size`/`local_buffer_size`/`store_http_port` 等），未配置则不启用池化。完整字段与默认值见 [KV 池化 README — kv_cache_store_config](../features/kv_cache_store/README.md#kv_cache_store_config全局配置)；Mooncake `standalone` 部署模式说明见 [Mooncake 后端文档](../features/kv_cache_store/backend/mooncake.md#standalone-模式独立-store-进程)。 |
 
 PD模式下P与D**各自独立配置**"health_check_config"，未配置时使用代码默认值。
+
+### vLLM 启动加速
+
+`vllm_startup_acceleration_config` 仅适用于 `engine_type` 为 `vllm` 的引擎配置。
+
+- `enable_startup_plan=true`：启用 vLLM StartPlan。Profile 命中并通过安全检查后跳过 memory profiling。
+- `enable_startup_plan=false`：不生成或加载 StartPlan。
+- `enable_startup_plan=true` 需要配套的 vLLM/vLLM-Ascend 版本已经接入 StartPlan；Motor 不修改运行时源码。
+- `enable_graph_reuse=true`：启用 vLLM-Ascend 后端完整图复用，并以该配置为准设置
+  `enable_npugraph_ex=true`、`enforce_eager=false` 和角色对应的 `cudagraph_mode`。
+- `enable_graph_reuse=false`：关闭 vLLM-Ascend 后端完整图复用，不强制关闭普通图捕获或 AOT 缓存。
+- `cache_root`：vLLM 缓存根目录，用于保存 StartPlan、AOT 和后端编译图缓存。PD 分离场景建议为 Prefill、
+  Decode 配置各自可持久化且对 vLLM 进程可读写的目录。
 
 ### dispatch_profile
 
@@ -842,8 +970,6 @@ PD模式下P与D**各自独立配置**"health_check_config"，未配置时使用
 | health_collector_timeout | int | 推理面 `GET /health` 探测超时（秒），默认值：5。vLLM 与 SGLang 心跳均使用。 |
 | health_collector_timeout_retry_attempts | int | 单次 `GET /health` 超时后的最大尝试次数（包含首次请求），默认值：3；仅超时重试。 |
 | startup_timeout | int | 原生引擎模型加载启动窗口（秒），默认值：1800。窗口内连接失败保持 STARTING，不判定实例异常。 |
-
----
 
 ## 其他参数说明
 

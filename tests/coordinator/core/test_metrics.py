@@ -104,12 +104,12 @@ class TestMetrics:
         self.config = CoordinatorConfig()
         self.instance_manager = InstanceManager(self.config)
 
-        ep0 = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
-        ep1 = Endpoint(id=1, ip="127.0.0.1", business_port="8001", mgmt_port="8001")
-        ep2 = Endpoint(id=2, ip="127.0.0.1", business_port="8002", mgmt_port="8002")
-        ep3 = Endpoint(id=3, ip="127.0.0.1", business_port="8003", mgmt_port="8003")
-        ep4 = Endpoint(id=4, ip="127.0.0.1", business_port="8004", mgmt_port="8004")
-        ep5 = Endpoint(id=5, ip="127.0.0.1", business_port="8005", mgmt_port="8005")
+        ep0 = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
+        ep1 = Endpoint(id=1, ip="127.0.0.1", business_port="8001")
+        ep2 = Endpoint(id=2, ip="127.0.0.1", business_port="8002")
+        ep3 = Endpoint(id=3, ip="127.0.0.1", business_port="8003")
+        ep4 = Endpoint(id=4, ip="127.0.0.1", business_port="8004")
+        ep5 = Endpoint(id=5, ip="127.0.0.1", business_port="8005")
         self.p_ins = Instance(
             job_name="test-prefill",
             model_name="test-model",
@@ -193,7 +193,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_gauge.label = ['vllm:num_requests_running{model_name="/job/model/Qwen2.5-0.5B-Instruct"}']
         metric_gauge.value = [1.0]
 
-        return metric_str_gauge.strip(), copy.deepcopy(metric_gauge)
+        return metric_str_gauge.strip() + "\n", copy.deepcopy(metric_gauge)
 
     def load_test_counter_metric(self):
         # metric text
@@ -216,7 +216,7 @@ vllm:request_success_total{engine="0",finished_reason="abort",model_name="/job/m
         ]
         metric_counter.value = [1.0, 2.0, 0.0]
 
-        return metric_str_counter.strip(), copy.deepcopy(metric_counter)
+        return metric_str_counter.strip() + "\n", copy.deepcopy(metric_counter)
 
     def load_test_histogram_metric(self):
         # metric text
@@ -249,7 +249,7 @@ vllm:request_params_n_sum{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         ]
         metric_histogram.value = [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
 
-        return metric_str_histogram.strip(), copy.deepcopy(metric_histogram)
+        return metric_str_histogram.strip() + "\n", copy.deepcopy(metric_histogram)
 
     def load_test_summary_metric(self):
         metric_str_summary = """
@@ -272,7 +272,7 @@ http_request_size_bytes_sum{handler="/v1/chat/completions"} 268.0"""
         ]
         metric_summary.value = [2.0, 312.0, 1.0, 268.0]
 
-        return metric_str_summary.strip(), copy.deepcopy(metric_summary)
+        return metric_str_summary.strip() + "\n", copy.deepcopy(metric_summary)
 
     def check_metric_value_equel(self, a: list[float], b: list[float]) -> bool:
         if not isinstance(a, list) or not isinstance(b, list):
@@ -827,7 +827,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
         metric_str_counter, metric_counter = self.load_test_counter_metric()
         metric_str_histogram, metric_histogram = self.load_test_histogram_metric()
         metric_str_summary, metric_summary = self.load_test_summary_metric()
-        metric_str_mix = "\n".join([metric_str_gauge, metric_str_counter, metric_str_histogram, metric_str_summary])
+        metric_str_mix = "".join([metric_str_gauge, metric_str_counter, metric_str_histogram, metric_str_summary])
         metric_mix = [metric_gauge, metric_counter, metric_histogram, metric_summary]
 
         # check function
@@ -881,7 +881,6 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
             id=7,
             ip="2001:db8::7",
             business_port="8007",
-            mgmt_port="9007",
         )
         instance = Instance(
             job_name="native-metrics",
@@ -1184,6 +1183,28 @@ def test_fetch_memcache_metrics_brackets_ipv6_service():
 
 
 @patch("threading.Thread.start", MagicMock())
+def test_fetch_mooncake_metrics_auto_port_default_50090():
+    """Mooncake backend without explicit metrics_port must fall back to 50090.
+
+    Regression guard: previously the auto-fallback pointed mooncake at the store
+    business port (50088), where no /metrics endpoint exists.
+    """
+    config = CoordinatorConfig()
+    config.prometheus_metrics_config.enable_kv_store_metrics = True
+    config.prometheus_metrics_config.kv_store_backend = "mooncake"
+    config.prometheus_metrics_config.kv_store_service = "kv-store-svc"
+    collector = MetricsCollector(config)
+
+    response = MagicMock()
+    response.status_code = 200
+    response.text = ""
+    with patch("motor.coordinator.metrics.metrics_collector.requests.get", return_value=response) as mock_get:
+        collector._fetch_kv_store_metrics()
+
+    mock_get.assert_called_once_with("http://kv-store-svc:50090/metrics", timeout=15)
+
+
+@patch("threading.Thread.start", MagicMock())
 def test_get_metrics_full_with_kv_store_append():
     _cleanup_singletons()
     config = CoordinatorConfig()
@@ -1270,12 +1291,16 @@ def test_get_metrics_role_all():
 
     collector._last_collects = {
         0: {"role": "prefill", "endpoints": {0: {"metrics": [metric], "pod_ip": "10.0.0.1"}}},
+        1: {"role": "decode", "endpoints": {0: {"metrics": [metric], "pod_ip": "10.0.0.2"}}},
     }
     collector._collects_version = 1
 
     result = collector.get_metrics(metrics_type="role")
     assert isinstance(result, str)
     assert "prefill" in result
+    assert "decode" in result
+    assert result.endswith("\n")
+    assert "\n#" in result
     _cleanup_singletons()
 
 

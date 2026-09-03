@@ -185,6 +185,15 @@
         "w_disk": 0.0
       }
     },
+    "render_config": {
+      "enabled": false,
+      "endpoint": {
+        "host": "127.0.0.1",
+        "port": 8100
+      },
+      "timeout_ms": 5000,
+      "image_name": ""
+    },
     "inference_workers_config": {
       "num_workers": 4,
       "worker_metaserver_base_port": 12000
@@ -311,7 +320,6 @@
     "endpoint_config": {
       "endpoint_num": 0,
       "base_port": 10000,
-      "mgmt_ports": [],
       "service_ports": []
     },
     "basic_config": {
@@ -337,6 +345,11 @@
     "snapshot_config": {
       "enable_snapshot": false,
       "snapshot_metadata_path": ""
+    },
+    "vllm_startup_acceleration_config": {
+      "enable_startup_plan": false,
+      "enable_graph_reuse": false,
+      "cache_root": ""
     },
     "logging_config": {
       "log_level": "INFO",

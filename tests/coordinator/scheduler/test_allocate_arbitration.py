@@ -51,7 +51,6 @@ def _make_instance(
                 id=endpoint_id,
                 ip=f"10.0.0.{instance_id}",
                 business_port=f"80{idx}",
-                mgmt_port=f"90{idx}",
                 status=EndpointStatus.NORMAL,
                 workload=Workload(),
             )
@@ -272,6 +271,24 @@ async def test_global_load_balance_skips_excluded_pair():
     assert selected is not None
     instance, endpoint, _ = selected
     assert (instance.id, endpoint.id) == (1, 10)  # next-lowest after excluding the global min (2,20)
+
+
+@pytest.mark.asyncio
+async def test_global_load_balance_skips_missing_dispatch_capability():
+    """Decode co-location fallback must not re-pick an instance that lacks the required capability."""
+    im = await _two_prefill_pool(_STD_LOADS)
+    for instance in im.get_available_instances(PDRole.ROLE_P).values():
+        instance.dispatch_capabilities = ["decode_colocation"] if instance.id == 1 else []
+    ctx = _context(im, is_load_balance=True)
+
+    selected = allocate_arbitration.select_global_load_balance_candidate(
+        ctx, PDRole.ROLE_P, required_dispatch_capability="decode_colocation"
+    )
+
+    assert selected is not None
+    instance, endpoint, _ = selected
+    assert instance.id == 1
+    assert endpoint.id == 10
 
 
 @pytest.mark.asyncio

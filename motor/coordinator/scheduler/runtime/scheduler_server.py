@@ -160,7 +160,7 @@ class _SchedulerRequestDispatcher:
         previously_open_ids: list[int] = []
         async with self._workload_commit_lock:
             changed = await self._instance_manager.refresh_instances(event_type, instances)
-            if event_type == EventType.SET:
+            if event_type == EventType.SET and changed:
                 previously_open_ids = self._cb_manager.get_open_instance_ids()
                 self._cb_manager.clear_all()
                 for key, task in list(self._recovery_timers.items()):

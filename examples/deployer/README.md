@@ -10,7 +10,7 @@
 
 建议在正式部署前先阅读上述文档，按文档完成环境准备与配置后再使用本目录中的工具进行部署。
 
-## `deploy.py` 使用方法
+## deploy.py使用方法
 
 ### 参数说明
 
@@ -183,6 +183,34 @@ Node selector 字段均为 JSON 对象。自定义标签会与 deployer 根据 `
 同一 namespace 下由本服务自己占用的端口不算冲突，因此重复部署与 `--update_instance_num` 扩缩容不会被误判。InferServiceSet 模式下 CRD 会把 Service 重命名为 `{service_name}-{InferServiceSet 名}-{索引}-{role}`，该命名同样识别为本服务自有端口。
 
 说明：交互 remap 只修改本次部署使用的 `output_yamls`，**不会**自动回写 `user_config.json`。若需要把新端口持久化到配置里，请手动同步修改 `motor_deploy_config` 中对应的 `*_node_port` 字段。
+
+### vLLM Render Sidecar 配置
+
+vLLM Render 通过 `user_config.json` 中的 `motor_coordinator_config.render_config` 进行配置：
+
+```json
+{
+  "motor_coordinator_config": {
+    "render_config": {
+      "enabled": true,
+      "endpoint": {
+        "host": "127.0.0.1",
+        "port": 8100
+      },
+      "timeout_ms": 5000,
+      "image_name": "vllm-render-cpu:v0.25.0-arm64"
+    }
+  }
+}
+```
+
+Deployer 会将 Render Sidecar 添加到 Coordinator Pod，并从当前 vLLM Engine 配置读取模型信息。`image_name` 指定独立 CPU 镜像；为空时复用服务镜像、只读挂载 Ascend 驱动库且不申请 NPU。
+
+使用限制：
+
+- Render 镜像需同时提供 Render 和 Derender 接口，建议vllm版本 >= 0.24.0。
+- 非流式 Chat Completions 和 Completions 请求支持完整 Token In/Token Out 链路。
+- Render tokenization 失败会回退本地 tokenizer；Derender 失败直接返回客户端。
 
 ### env.json
 
