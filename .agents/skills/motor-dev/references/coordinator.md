@@ -238,6 +238,17 @@ SGLang stays on native bootstrap (`CoordinationMode.BOOTSTRAP`); that path is un
 
 P99 acceptance greps `stage=dispatch_to_p` and takes `elapsed_ms` on successful-to-P requests; do not use `stage=select_and_allocate`.
 
+### Native Responses Create Route
+
+`POST /v1/responses` forwards the native Responses request body and path to the
+engine. Its array input is a Responses input-item union, not a Chat Completions
+message array. The HTTP boundary validates message-shaped items, including the
+`developer` role, but defers schema validation for other explicitly typed items
+to the native engine. For scheduling tokenization, `responses_input.py` maps
+`developer` to `system` without changing the request body sent to the engine.
+Non-message and other unsupported scheduling shapes fall back instead of
+claiming an incorrect KV prefix match.
+
 ### Hot-Reload
 
 Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemon's loop): when the config file changes, it calls `CoordinatorConfig.reload()` (re-parse from JSON) and pushes the updated config into the running `ManagementServer`. The reload skip-set is exactly `frozenset({"worker_index"})` — the runtime-only field that must not change mid-flight; everything else re-applies. If no valid config path exists, hot-reload is disabled.
@@ -272,7 +283,8 @@ Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemo
 | `motor/coordinator/api_client/` | | `ConductorApiClient` / `ControllerApiClient` / `NativeEngineApiClient` (HTTP clients to kv-conductor, controller, engine) |
 | `motor/coordinator/api_server/management_server.py` | | Mgmt: `/liveness`, `/readiness`, `GET /instances`, `/instances/refresh`, `/precision/alarm_cleared` |
 | `motor/coordinator/api_server/observability_server.py` | | Obs: `/metrics`, `/health` (`/instance/metrics` deprecated → `GET /metrics?type=instance`) |
-| `motor/coordinator/api_server/inference_server.py` | | Infer: `/v1/completions`, `/v1/chat/completions`, `/v1/models`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic); dedicated metaserver app `POST /v1/metaserver` |
+| `motor/coordinator/api_server/inference_server.py` | | Infer: `/v1/completions`, `/v1/chat/completions`, `/v1/responses`, `/v1/models`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic); dedicated metaserver app `POST /v1/metaserver` |
+| `motor/coordinator/domain/responses_input.py` | | Text-only scheduling view for native Responses input; maps `developer` to `system` without rewriting the engine request |
 | `motor/coordinator/scheduler/runtime/scheduler_connection_manager.py` | | Shared ZMQ DEALER to Mgmt control plane (used by Obs/Infer) |
 | `motor/coordinator/domain/circuit_breaker.py` | | Per-instance circuit breaker state (closed/open) |
 | `motor/coordinator/domain/scheduling_pin.py` | | Pinned-instance resolution, endpoint selection for an instance |
@@ -332,7 +344,7 @@ and from `mgmt_tls_config`; use TLS as well when management traffic crosses an u
 
 ## Fault Tolerance: Circuit Breaker & Precision Detection
 
-**Circuit breaker** (`domain/circuit_breaker.py`): per-instance state machine tracking consecutive failures. Each instance is `"closed"` (normal, schedulable) or `"open"` (tripped, blocked from scheduling). Workers report instance outcomes via `CIRCUIT_BREAKER_REPORT`; Mgmt's `CircuitBreakerManager` (inside `AsyncSchedulerServer`) trips the circuit after three consecutive failures (30s first trip timeout, with backoff) and resets the failure count on success or auto-recovery. State changes are mirrored onto SHM `flags.BLOCKED` first; `CIRCUIT_BREAKER_TOPIC` PUB is sent only after that write succeeds (heartbeat retries both). Allocate CAS is the final gate for workers that miss the PUB. `select_router_class()` consults the Worker-local breaker cache: a P/D pair is only "compatible" if both roles have non-blocked instances, and 503 is returned when all instances are circuit-broken.
+**Circuit breaker** (`domain/circuit_breaker.py`): per-instance state machine tracking consecutive failures. Each instance is `"closed"` (normal, schedulable) or `"open"` (tripped, blocked from scheduling). Workers report instance outcomes via `CIRCUIT_BREAKER_REPORT`; Mgmt's `CircuitBreakerManager` (inside `AsyncSchedulerServer`) is constructed from `circuit_config` (default: trip after 3 consecutive failures, 30s first timeout, 300s cap; `enable=false` disarms counting). Config is snapshotted at Coordinator startup. Success or auto-recovery resets the failure count. State changes are mirrored onto SHM `flags.BLOCKED` first; `CIRCUIT_BREAKER_TOPIC` PUB is sent only after that write succeeds (heartbeat retries both). Allocate CAS is the final gate for workers that miss the PUB. `select_router_class()` consults the Worker-local breaker cache: a P/D pair is only "compatible" if both roles have non-blocked instances, and 503 is returned when all instances are circuit-broken.
 
 **Precision detection** (`fault_tolerance/precision/` + `fault_tolerance/probe/`): cross-worker sampling (`sample_controller.py`, `streak_result.py`) coordinated with Mgmt via the four precision request types — `CONFIRM_SAMPLE` (cross-worker exit gate), `RECORD_PRECISION_RESULT` (global consecutive failures + probing state), `FINISH_PRECISION_ACTION` (clear probing after probe/alarm), `DISMISS_PRECISION_ALARM_STATE` (external recovery cleared the alarm). Alarm publishing lives in `fault_tolerance/alarm/` (`precision_alarm.py`); probes (`chat_probe.py`, `router_probe.py`) route identically to user traffic through `select_router_class()`.
 
