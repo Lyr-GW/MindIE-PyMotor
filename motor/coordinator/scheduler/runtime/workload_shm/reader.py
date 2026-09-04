@@ -144,15 +144,12 @@ class WorkloadSharedMemoryReader:
         return True
 
     def _load_entries(self, entry_count: int) -> list[dict[str, Any]]:
-        entries: list[dict[str, Any]] = []
         if self._native is None:
-            return entries
-        for slot in range(entry_count):
-            try:
-                entries.append(self._native.load_entry(slot))
-            except NativeWorkloadShmError:
-                continue
-        return entries
+            return []
+        try:
+            return self._native.load_entries(entry_count)
+        except NativeWorkloadShmError:
+            return []
 
     def _update_heartbeat_and_check_stale(self, heartbeat_sequence: int) -> bool:
         """Track heartbeat changes and return whether the writer appears stale."""

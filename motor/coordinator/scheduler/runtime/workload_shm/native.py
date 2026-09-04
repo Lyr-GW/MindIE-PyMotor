@@ -19,6 +19,7 @@ message -- callers must fail loudly rather than silently fall back to a wrong le
 
 import ctypes
 import os
+from typing import Any
 
 from motor.common.logger import get_logger
 from motor.common.resources.instance import PDRole
@@ -55,6 +56,27 @@ STATUS_CHANGED = 1
 STATUS_BLOCKED = 2
 STATUS_SLOT_INVALID = 3
 STATUS_BAD_ARG = 8
+
+# Must match Rust SLOT_HINT_NONE: cas_add/cas_sub_floor0 linear-scan when the caller has no slot.
+SLOT_HINT_NONE = 0xFFFFFFFF
+# ctypes arg layout for cas_add/cas_sub/load_entries; older .so must not be bound.
+MIN_ABI_VERSION = 2
+
+
+class _LoadedEntry(ctypes.Structure):
+    """24-byte schema-4 entry view returned by mindie_wl_load_entries."""
+
+    _pack_ = 1
+    _fields_ = [
+        ("instance_id", ctypes.c_int32),
+        ("endpoint_id", ctypes.c_int32),
+        ("role", ctypes.c_uint8),
+        ("flags", ctypes.c_uint8),
+        ("generation", ctypes.c_uint16),
+        ("reserved", ctypes.c_uint32),
+        ("active_tokens", ctypes.c_double),
+    ]
+
 
 # Entry flag bits (must match layout.rs / schema 4).
 FLAG_BLOCKED = 0b0000_0001
@@ -135,6 +157,7 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.mindie_wl_cas_add.restype = ctypes.c_int32
     lib.mindie_wl_cas_add.argtypes = [
         ctypes.c_uint64,
+        ctypes.c_uint32,
         ctypes.c_int32,
         ctypes.c_int32,
         ctypes.c_uint16,
@@ -145,6 +168,7 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
     lib.mindie_wl_cas_sub_floor0.restype = ctypes.c_int32
     lib.mindie_wl_cas_sub_floor0.argtypes = [
         ctypes.c_uint64,
+        ctypes.c_uint32,
         ctypes.c_int32,
         ctypes.c_int32,
         ctypes.c_uint16,
@@ -168,6 +192,13 @@ def _bind(lib: ctypes.CDLL) -> ctypes.CDLL:
         ctypes.POINTER(ctypes.c_uint8),
         ctypes.POINTER(ctypes.c_uint16),
         ctypes.POINTER(ctypes.c_double),
+    ]
+    lib.mindie_wl_load_entries.restype = ctypes.c_int32
+    lib.mindie_wl_load_entries.argtypes = [
+        ctypes.c_uint64,
+        ctypes.POINTER(_LoadedEntry),
+        ctypes.c_uint32,
+        ctypes.POINTER(ctypes.c_uint32),
     ]
     return lib
 
@@ -193,8 +224,12 @@ def load_native_library(path: str | None = None) -> ctypes.CDLL:
             continue
         try:
             lib = _bind(ctypes.CDLL(candidate))
-        except OSError as e:
+        except (OSError, AttributeError) as e:
             errors.append(f"{candidate}: {e}")
+            continue
+        abi = int(lib.mindie_wl_abi_version())
+        if abi < MIN_ABI_VERSION:
+            errors.append(f"{candidate}: ABI {abi} < {MIN_ABI_VERSION}")
             continue
         if path is None:
             _lib_cache = lib
@@ -295,12 +330,22 @@ class WorkloadShm:
         self.snapshot_commit(len(entries), bump_instance_version=bump_instance_version)
 
     def cas_add(
-        self, instance_id: int, endpoint_id: int, generation: int, expected: float, delta: float
+        self,
+        instance_id: int,
+        endpoint_id: int,
+        generation: int,
+        expected: float,
+        delta: float,
+        slot: int | None = None,
     ) -> tuple[int, float]:
-        """Atomic CAS-add. Returns (status, actual): OK (added), CHANGED/BLOCKED/SLOT_INVALID/BAD_ARG (not)."""
+        """Atomic CAS-add. Returns (status, actual): OK (added), CHANGED/BLOCKED/SLOT_INVALID/BAD_ARG (not).
+
+        ``slot`` is the known SHM index from the last batch load; omit to linear-scan.
+        """
         actual = ctypes.c_double(0.0)
         status = self._lib.mindie_wl_cas_add(
             self._handle,
+            SLOT_HINT_NONE if slot is None else int(slot),
             int(instance_id),
             int(endpoint_id),
             int(generation),
@@ -310,11 +355,19 @@ class WorkloadShm:
         )
         return status, actual.value
 
-    def cas_sub_floor0(self, instance_id: int, endpoint_id: int, generation: int, delta: float) -> tuple[int, float]:
+    def cas_sub_floor0(
+        self,
+        instance_id: int,
+        endpoint_id: int,
+        generation: int,
+        delta: float,
+        slot: int | None = None,
+    ) -> tuple[int, float]:
         """Atomic CAS-subtract flooring at 0 (release path). Returns (status, actual); BAD_ARG on invalid delta."""
         actual = ctypes.c_double(0.0)
         status = self._lib.mindie_wl_cas_sub_floor0(
             self._handle,
+            SLOT_HINT_NONE if slot is None else int(slot),
             int(instance_id),
             int(endpoint_id),
             int(generation),
@@ -361,6 +414,33 @@ class WorkloadShm:
             "generation": generation.value,
             "active_tokens": tokens.value,
         }
+
+    def load_entries(self, entry_count: int) -> list[dict[str, Any]]:
+        """Read ``entry_count`` schema-4 slots in one FFI call. Each dict includes ``slot``."""
+        cap = max(int(entry_count), 0)
+        if cap == 0:
+            return []
+        buf = (_LoadedEntry * cap)()
+        out_n = ctypes.c_uint32(0)
+        _check(
+            self._lib.mindie_wl_load_entries(self._handle, buf, cap, ctypes.byref(out_n)),
+            "load_entries",
+        )
+        entries: list[dict[str, Any]] = []
+        for slot in range(int(out_n.value)):
+            row = buf[slot]
+            entries.append(
+                {
+                    "slot": slot,
+                    "instance_id": row.instance_id,
+                    "endpoint_id": row.endpoint_id,
+                    "role": row.role,
+                    "flags": row.flags,
+                    "generation": row.generation,
+                    "active_tokens": row.active_tokens,
+                }
+            )
+        return entries
 
     def read_header(self) -> dict[str, int]:
         """Read header scalars: schema_version, sequence, entry_count, instance_version, heartbeat."""

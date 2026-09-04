@@ -946,11 +946,11 @@ class TestSelectAndAllocateCas:
         orig = native.cas_add
         calls = {"n": 0}
 
-        def wrapped(iid, eid, gen, expected, delta):
+        def wrapped(iid, eid, gen, expected, delta, slot=None):
             calls["n"] += 1
             if calls["n"] == 1:
-                orig(iid, eid, gen, expected, 80.0)
-            return orig(iid, eid, gen, expected, delta)
+                orig(iid, eid, gen, expected, 80.0, slot=slot)
+            return orig(iid, eid, gen, expected, delta, slot=slot)
 
         native.cas_add = wrapped
         try:
@@ -986,11 +986,11 @@ class TestSelectAndAllocateCas:
         orig = native.cas_add
         calls = {"n": 0}
 
-        def wrapped(iid, eid, gen, expected, delta):
+        def wrapped(iid, eid, gen, expected, delta, slot=None):
             calls["n"] += 1
             if (iid, eid) == (1, 10):
                 return (STATUS_BLOCKED, expected)
-            return orig(iid, eid, gen, expected, delta)
+            return orig(iid, eid, gen, expected, delta, slot=slot)
 
         native.cas_add = wrapped
         try:

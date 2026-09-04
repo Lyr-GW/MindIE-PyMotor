@@ -1115,6 +1115,7 @@ class AsyncSchedulerClient:
                 int(meta["generation"]),
                 float(meta["active_tokens"]),
                 float(committed.active_tokens),
+                slot=meta.get("slot"),
             )
             if status == STATUS_OK:
                 self._cache.patch_workload_from_shm(out_instance.id, out_endpoint.id, role, actual)
@@ -1352,6 +1353,7 @@ class AsyncSchedulerClient:
             params.endpoint_id,
             int(meta["generation"]),
             delta,
+            slot=meta.get("slot"),
         )
         if status != STATUS_OK:
             logger.warning(

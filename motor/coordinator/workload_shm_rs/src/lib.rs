@@ -26,7 +26,26 @@ use error::ShmStatus;
 use layout::{MAGIC, SCHEMA_VERSION};
 
 /// ABI version, independent of the on-wire SCHEMA_VERSION (the ABI may evolve without the layout).
-pub const ABI_VERSION: u32 = 1;
+/// v2: `cas_add`/`cas_sub_floor0` take a slot hint; `load_entries` batches a snapshot read.
+pub const ABI_VERSION: u32 = 2;
+
+/// `slot_hint` sent by callers that do not yet know the slot (linear `find_slot` fallback).
+pub const SLOT_HINT_NONE: u32 = u32::MAX;
+
+/// Packed view copied out of SHM by `mindie_wl_load_entries` (24B, matches schema-4 entry).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct LoadedEntry {
+    pub instance_id: i32,
+    pub endpoint_id: i32,
+    pub role: u8,
+    pub flags: u8,
+    pub generation: u16,
+    pub reserved: u32,
+    pub active_tokens: f64,
+}
+
+const _: () = assert!(std::mem::size_of::<LoadedEntry>() == layout::ENTRY_SIZE);
 
 /// A mapped workload segment. Membership snapshot is single-writer (Mgmt); token CAS is multi-writer.
 pub struct Segment {
@@ -260,26 +279,58 @@ impl Segment {
     /// Find the VALID slot matching (instance_id, endpoint_id) within the current entry_count.
     fn find_slot(&self, instance_id: i32, endpoint_id: i32) -> Option<u32> {
         let count = self.current_entry_count().min(self.max_entries);
-        for slot in 0..count {
+        (0..count).find(|&slot| self.slot_matches(slot, instance_id, endpoint_id))
+    }
+
+    fn slot_matches(&self, slot: u32, instance_id: i32, endpoint_id: i32) -> bool {
+        unsafe {
+            let flags = self.v4_flags(slot).load(Ordering::Acquire);
+            if flags & layout::FLAG_VALID == 0 {
+                return false;
+            }
+            self.v4_read_i32(slot, layout::ENTRY_V4_OFF_INSTANCE_ID) == instance_id
+                && self.v4_read_i32(slot, layout::ENTRY_V4_OFF_ENDPOINT_ID) == endpoint_id
+        }
+    }
+
+    /// O(1) when `slot_hint` names this pair. Stale/wrong hints return `None` (no scan).
+    /// `SLOT_HINT_NONE` falls back to linear `find_slot`.
+    fn slot_from_hint(&self, slot_hint: u32, instance_id: i32, endpoint_id: i32) -> Option<u32> {
+        if slot_hint != SLOT_HINT_NONE {
+            let count = self.current_entry_count().min(self.max_entries);
+            if slot_hint < count && self.slot_matches(slot_hint, instance_id, endpoint_id) {
+                return Some(slot_hint);
+            }
+            return None;
+        }
+        self.find_slot(instance_id, endpoint_id)
+    }
+
+    fn load_entries_into(&self, out: &mut [LoadedEntry]) -> u32 {
+        let count = self.current_entry_count().min(self.max_entries) as usize;
+        let n = count.min(out.len());
+        for (slot, dest) in out.iter_mut().enumerate().take(n) {
+            let s = slot as u32;
             unsafe {
-                let flags = self.v4_flags(slot).load(Ordering::Acquire);
-                if flags & layout::FLAG_VALID == 0 {
-                    continue;
-                }
-                if self.v4_read_i32(slot, layout::ENTRY_V4_OFF_INSTANCE_ID) == instance_id
-                    && self.v4_read_i32(slot, layout::ENTRY_V4_OFF_ENDPOINT_ID) == endpoint_id
-                {
-                    return Some(slot);
-                }
+                *dest = LoadedEntry {
+                    instance_id: self.v4_read_i32(s, layout::ENTRY_V4_OFF_INSTANCE_ID),
+                    endpoint_id: self.v4_read_i32(s, layout::ENTRY_V4_OFF_ENDPOINT_ID),
+                    role: self.v4_role(s),
+                    flags: self.v4_flags(s).load(Ordering::Acquire),
+                    generation: self.v4_generation(s),
+                    reserved: 0,
+                    active_tokens: f64::from_bits(self.v4_tokens(s).load(Ordering::Acquire)),
+                };
             }
         }
-        None
+        n as u32
     }
 
     /// CAS-add `delta` iff the slot's tokens still equal `expected` and it is not BLOCKED.
     /// Returns (status, actual_bits). See design §5.4 / §6.
     fn cas_add(
         &self,
+        slot_hint: u32,
         instance_id: i32,
         endpoint_id: i32,
         generation: u16,
@@ -289,7 +340,7 @@ impl Segment {
         if !finite_nonneg(delta) {
             return (error::BAD_ARG, 0);
         }
-        let slot = match self.find_slot(instance_id, endpoint_id) {
+        let slot = match self.slot_from_hint(slot_hint, instance_id, endpoint_id) {
             Some(s) => s,
             None => return (error::SLOT_INVALID, 0),
         };
@@ -326,6 +377,7 @@ impl Segment {
     /// moved since allocate is normal. Returns (status, actual_bits).
     fn cas_sub_floor0(
         &self,
+        slot_hint: u32,
         instance_id: i32,
         endpoint_id: i32,
         generation: u16,
@@ -334,7 +386,7 @@ impl Segment {
         if !finite_nonneg(delta) {
             return (error::BAD_ARG, 0);
         }
-        let slot = match self.find_slot(instance_id, endpoint_id) {
+        let slot = match self.slot_from_hint(slot_hint, instance_id, endpoint_id) {
             Some(s) => s,
             None => return (error::SLOT_INVALID, 0),
         };
@@ -755,15 +807,16 @@ pub unsafe extern "C" fn mindie_wl_snapshot_write_entry_v4(
     }
 }
 
-/// CAS-add on the (instance_id, endpoint_id) slot. `out_actual` receives the new value on Ok, or
-/// the current value on Changed/Blocked. Returns Ok/Changed/Blocked/SlotInvalid/BadArg
-/// (non-finite or negative `delta`).
+/// CAS-add on the (instance_id, endpoint_id) slot. `slot_hint` is the known slot (`SLOT_HINT_NONE`
+/// to scan). `out_actual` receives the new value on Ok, or the current value on Changed/Blocked.
 ///
 /// # Safety
 /// `handle` must be a live handle from create_v4/attach; `out_actual` may be null.
 #[no_mangle]
+#[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn mindie_wl_cas_add(
     handle: u64,
+    slot_hint: u32,
     instance_id: i32,
     endpoint_id: i32,
     generation: u16,
@@ -775,21 +828,29 @@ pub unsafe extern "C" fn mindie_wl_cas_add(
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
-    let (status, actual_bits) = seg.cas_add(instance_id, endpoint_id, generation, expected, delta);
+    let (status, actual_bits) = seg.cas_add(
+        slot_hint,
+        instance_id,
+        endpoint_id,
+        generation,
+        expected,
+        delta,
+    );
     if !out_actual.is_null() {
         *out_actual = f64::from_bits(actual_bits);
     }
     status
 }
 
-/// CAS-subtract on the (instance_id, endpoint_id) slot, flooring at 0. `out_actual` receives the
-/// new value on Ok. Returns Ok/SlotInvalid/BadArg (non-finite or negative `delta`).
+/// CAS-subtract on the (instance_id, endpoint_id) slot, flooring at 0. `slot_hint` is the known
+/// slot (`SLOT_HINT_NONE` to scan). `out_actual` receives the new value on Ok.
 ///
 /// # Safety
 /// `handle` must be a live handle from create_v4/attach; `out_actual` may be null.
 #[no_mangle]
 pub unsafe extern "C" fn mindie_wl_cas_sub_floor0(
     handle: u64,
+    slot_hint: u32,
     instance_id: i32,
     endpoint_id: i32,
     generation: u16,
@@ -800,7 +861,8 @@ pub unsafe extern "C" fn mindie_wl_cas_sub_floor0(
         Some(seg) => seg,
         None => return error::NOT_ATTACHED,
     };
-    let (status, actual_bits) = seg.cas_sub_floor0(instance_id, endpoint_id, generation, delta);
+    let (status, actual_bits) =
+        seg.cas_sub_floor0(slot_hint, instance_id, endpoint_id, generation, delta);
     if !out_actual.is_null() {
         *out_actual = f64::from_bits(actual_bits);
     }
@@ -825,6 +887,40 @@ pub unsafe extern "C" fn mindie_wl_set_blocked(
     let touched = seg.set_blocked(instance_id, blocked != 0);
     if !out_touched.is_null() {
         *out_touched = touched;
+    }
+    error::OK
+}
+
+/// Copy `entry_count` schema-4 slots into `out` (one FFI for a scoring refresh).
+///
+/// Each slot uses atomic loads for flags/tokens. `cap` is the number of `LoadedEntry`s the
+/// caller allocated; `out_n` receives how many were written (`min(entry_count, cap)`).
+///
+/// # Safety
+/// `handle` must be live; `out` must point at `cap` writable `LoadedEntry`s (or be null
+/// only when `cap == 0`); `out_n` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn mindie_wl_load_entries(
+    handle: u64,
+    out: *mut LoadedEntry,
+    cap: u32,
+    out_n: *mut u32,
+) -> ShmStatus {
+    let seg = match seg(handle) {
+        Some(seg) => seg,
+        None => return error::NOT_ATTACHED,
+    };
+    if cap > 0 && out.is_null() {
+        return error::BAD_ARG;
+    }
+    let n = if cap == 0 || out.is_null() {
+        0
+    } else {
+        let slice = std::slice::from_raw_parts_mut(out, cap as usize);
+        seg.load_entries_into(slice)
+    };
+    if !out_n.is_null() {
+        *out_n = n;
     }
     error::OK
 }
@@ -1027,13 +1123,13 @@ mod tests {
             let mut actual = -1.0f64;
             // expected matches current (0.0) -> Ok, tokens become 3.0
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 3.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 3.0, &mut actual),
                 error::OK
             );
             assert_eq!(actual, 3.0);
             // stale expected (0.0 != 3.0) -> Changed, returns current 3.0, no add
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 100.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 100.0, &mut actual),
                 error::CHANGED
             );
             assert_eq!(actual, 3.0);
@@ -1047,12 +1143,12 @@ mod tests {
             let (h, _cn) = v4_single_entry("floor0");
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 5.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 5.0, &mut actual),
                 error::OK
             );
             // subtract more than present -> floors at 0
             assert_eq!(
-                mindie_wl_cas_sub_floor0(h, 1, 10, 0, 9.0, &mut actual),
+                mindie_wl_cas_sub_floor0(h, SLOT_HINT_NONE, 1, 10, 0, 9.0, &mut actual),
                 error::OK
             );
             assert_eq!(actual, 0.0);
@@ -1069,14 +1165,14 @@ mod tests {
             assert_eq!(touched, 1);
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 1.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 1.0, &mut actual),
                 error::BLOCKED
             );
             assert_eq!(actual, 0.0); // unchanged
                                      // clearing the flag re-enables allocation
             assert_eq!(mindie_wl_set_blocked(h, 1, 0, &mut touched), error::OK);
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 1.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 1.0, &mut actual),
                 error::OK
             );
             assert_eq!(actual, 1.0);
@@ -1091,7 +1187,7 @@ mod tests {
             let mut actual = -1.0f64;
             // slot generation is 0; caller remembers 1 -> SlotInvalid (ABA guard)
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 1, 0.0, 1.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 1, 0.0, 1.0, &mut actual),
                 error::SLOT_INVALID
             );
             assert_eq!(mindie_wl_close(h, 1), error::OK);
@@ -1104,7 +1200,7 @@ mod tests {
             let (h, _cn) = v4_single_entry("missing");
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 999, 999, 0, 0.0, 1.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 999, 999, 0, 0.0, 1.0, &mut actual),
                 error::SLOT_INVALID
             );
             assert_eq!(mindie_wl_close(h, 1), error::OK);
@@ -1138,6 +1234,7 @@ mod tests {
                             let mut actual = 0.0f64;
                             let status = mindie_wl_cas_add(
                                 hv,
+                                SLOT_HINT_NONE,
                                 1,
                                 10,
                                 0,
@@ -1195,15 +1292,15 @@ mod tests {
             let (h, _cn) = v4_single_entry("bad_add");
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, f64::NAN, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, f64::NAN, &mut actual),
                 error::BAD_ARG
             );
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, -1.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, -1.0, &mut actual),
                 error::BAD_ARG
             );
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, f64::INFINITY, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, f64::INFINITY, &mut actual),
                 error::BAD_ARG
             );
             let mut tokens = -1.0f64;
@@ -1231,15 +1328,15 @@ mod tests {
             let (h, _cn) = v4_single_entry("bad_sub");
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 5.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 5.0, &mut actual),
                 error::OK
             );
             assert_eq!(
-                mindie_wl_cas_sub_floor0(h, 1, 10, 0, f64::NAN, &mut actual),
+                mindie_wl_cas_sub_floor0(h, SLOT_HINT_NONE, 1, 10, 0, f64::NAN, &mut actual),
                 error::BAD_ARG
             );
             assert_eq!(
-                mindie_wl_cas_sub_floor0(h, 1, 10, 0, -1.0, &mut actual),
+                mindie_wl_cas_sub_floor0(h, SLOT_HINT_NONE, 1, 10, 0, -1.0, &mut actual),
                 error::BAD_ARG
             );
             let mut tokens = -1.0f64;
@@ -1267,7 +1364,7 @@ mod tests {
             let (h, _cn) = v4_single_entry("noclobber");
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 1, 10, 0, 0.0, 11.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 1, 10, 0, 0.0, 11.0, &mut actual),
                 error::OK
             );
             assert_eq!(mindie_wl_snapshot_begin(h), error::OK);
@@ -1323,7 +1420,7 @@ mod tests {
             assert_eq!(mindie_wl_snapshot_commit(h, 2, 1), error::OK);
             let mut actual = -1.0f64;
             assert_eq!(
-                mindie_wl_cas_add(h, 2, 20, 0, 0.0, 7.0, &mut actual),
+                mindie_wl_cas_add(h, SLOT_HINT_NONE, 2, 20, 0, 0.0, 7.0, &mut actual),
                 error::OK
             );
             // Compact: pair (2,20) moves from slot 1 to slot 0 with stale tokens=0.
@@ -1359,6 +1456,41 @@ mod tests {
             );
             assert_eq!(iid, 2);
             assert_eq!(tokens, 7.0);
+            assert_eq!(mindie_wl_close(h, 1), error::OK);
+        }
+    }
+
+    #[test]
+    fn load_entries_batches_and_slot_hint_cas_is_o1() {
+        unsafe {
+            let (h, _cn) = v4_single_entry("batch");
+            let mut buf = [LoadedEntry {
+                instance_id: 0,
+                endpoint_id: 0,
+                role: 0,
+                flags: 0,
+                generation: 0,
+                reserved: 0,
+                active_tokens: 0.0,
+            }; 4];
+            let mut n = 0u32;
+            assert_eq!(
+                mindie_wl_load_entries(h, buf.as_mut_ptr(), 4, &mut n),
+                error::OK
+            );
+            assert_eq!(n, 1);
+            assert_eq!(buf[0].instance_id, 1);
+            assert_eq!(buf[0].endpoint_id, 10);
+            let mut actual = -1.0f64;
+            assert_eq!(
+                mindie_wl_cas_add(h, 0, 1, 10, 0, 0.0, 3.0, &mut actual),
+                error::OK
+            );
+            assert_eq!(actual, 3.0);
+            assert_eq!(
+                mindie_wl_cas_add(h, 3, 1, 10, 0, 3.0, 1.0, &mut actual),
+                error::SLOT_INVALID
+            );
             assert_eq!(mindie_wl_close(h, 1), error::OK);
         }
     }

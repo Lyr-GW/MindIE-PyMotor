@@ -25,6 +25,7 @@ from motor.common.resources.instance import PDRole
 from motor.coordinator.scheduler.runtime.workload_shm import native
 from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_VALID, ROLE_PREFILL, SCHEMA_VERSION
 from motor.coordinator.scheduler.runtime.workload_shm.native import (
+    MIN_ABI_VERSION,
     STATUS_BAD_ARG,
     STATUS_BLOCKED,
     STATUS_CHANGED,
@@ -73,7 +74,8 @@ def _read_with_python(name: str, role: PDRole | None = None) -> tuple[tuple[int 
 
 def test_native_reports_abi(lib):
     """ABI version is stable; production segments are schema 4."""
-    assert lib.mindie_wl_abi_version() >= 1
+    assert lib.mindie_wl_abi_version() >= MIN_ABI_VERSION
+    assert MIN_ABI_VERSION == 2
     assert lib.mindie_wl_schema_version() == 4
     name = _unique("ab")
     shm = WorkloadShm.create_v4(name, 4, lib=lib)
@@ -400,5 +402,46 @@ def test_multiprocess_cas_conserves_total(lib):
             assert p.exitcode == 0, f"worker exited with {p.exitcode}"
         total = shm.load_entry(0)["active_tokens"]
         assert total == float(n_procs * per_proc)
+    finally:
+        shm.close(unlink=True)
+
+
+def test_load_entries_matches_per_slot_and_cas_uses_slot(lib):
+    """One FFI refresh must equal N load_entry calls; cas_add with a stale slot is SLOT_INVALID."""
+    assert ctypes.sizeof(native._LoadedEntry) == 24
+    shm = WorkloadShm.create_v4(_unique("batch"), 16, lib=lib)
+    try:
+        shm.write_snapshot_v4(
+            [
+                (1, 10, ROLE_PREFILL, 0, FLAG_VALID, 0.0),
+                (2, 20, ROLE_PREFILL, 0, FLAG_VALID, 0.0),
+            ]
+        )
+        batched = shm.load_entries(2)
+        assert [row["slot"] for row in batched] == [0, 1]
+        assert batched[0]["instance_id"] == 1
+        assert batched[1]["instance_id"] == 2
+        assert batched[0]["active_tokens"] == shm.load_entry(0)["active_tokens"]
+        status, actual = shm.cas_add(1, 10, 0, 0.0, 3.0, slot=0)
+        assert status == STATUS_OK
+        assert actual == 3.0
+        status, _ = shm.cas_add(1, 10, 0, 3.0, 1.0, slot=1)
+        assert status == STATUS_SLOT_INVALID
+    finally:
+        shm.close(unlink=True)
+
+
+@pytest.mark.parametrize("n_slots", [1, 100, 1000, 10240])
+def test_load_entries_scales_with_live_slot_count(lib, n_slots):
+    """Batch load of N live slots (reviewer 1/100/1000/10240) returns N rows in one FFI."""
+    shm = WorkloadShm.create_v4(_unique(f"n{n_slots}"), n_slots, lib=lib)
+    try:
+        entries = [(i + 1, i + 1, ROLE_PREFILL, 0, FLAG_VALID, 0.0) for i in range(n_slots)]
+        shm.write_snapshot_v4(entries)
+        loaded = shm.load_entries(n_slots)
+        assert len(loaded) == n_slots
+        assert loaded[0]["slot"] == 0
+        assert loaded[-1]["slot"] == n_slots - 1
+        assert loaded[-1]["instance_id"] == n_slots
     finally:
         shm.close(unlink=True)

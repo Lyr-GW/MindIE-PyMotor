@@ -4,7 +4,7 @@
 """Unit tests for circuit breaker report handler (_handle_circuit_breaker_report)."""
 
 import asyncio
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain.circuit_breaker import CircuitBreakerManager
@@ -159,3 +159,27 @@ class TestCircuitBreakerReport:
 
         writer.set_blocked.assert_called_with(1, True)
         assert dispatcher._pending_blocked == {}
+        assert dispatcher._pending_blocked_pub == {}
+
+    def test_set_blocked_failure_does_not_publish_until_retry_succeeds(self):
+        """SHM BLOCKED is the allocate gate: PUB OPEN must wait until set_blocked lands."""
+        dispatcher, cb = _make_cb_dispatcher()
+        pub = MagicMock()
+        pub.send_multipart = AsyncMock()
+        dispatcher._pub_socket = pub
+        writer = MagicMock()
+        writer.set_blocked.side_effect = RuntimeError("shm write failed")
+        dispatcher._workload_writer = writer
+
+        for _ in range(3):
+            _dispatch(dispatcher, _cb_request(1, "failure"))
+
+        assert cb.is_open(1)
+        pub.send_multipart.assert_not_called()
+        assert dispatcher._pending_blocked_pub == {1: "open"}
+
+        writer.set_blocked.side_effect = None
+        asyncio.run(dispatcher._retry_pending_blocked_and_publish())
+        pub.send_multipart.assert_awaited()
+        assert dispatcher._pending_blocked == {}
+        assert dispatcher._pending_blocked_pub == {}

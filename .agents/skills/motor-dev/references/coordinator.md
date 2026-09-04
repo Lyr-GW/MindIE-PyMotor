@@ -91,7 +91,7 @@ There is no `ALLOCATE_ONLY`, `UPDATE_WORKLOAD`, or `REFRESH_INSTANCES` RPC.
 - Each worker subscribes to the PUB socket; on notification, invalidates or patches its cached instance list
 - Workers also detect `instance_version` bumps in the workload SHM header as a backup signal
 - Circuit-breaker state changes are published on `CIRCUIT_BREAKER_TOPIC` (multipart `[topic, msgpack_payload]`)
-- Trip/recover also sets SHM `flags.BLOCKED` so allocate CAS is the final gate
+- Trip writes SHM `flags.BLOCKED` first; `CIRCUIT_BREAKER_TOPIC` PUB follows only after that write succeeds (heartbeat retries both)
 
 ### Workload Shared Memory
 
@@ -135,7 +135,7 @@ Header is 64B, each entry 24B:
 
 **Membership snapshot:** Mgmt keeps **stable slots** for still-live `(iid, eid)` pairs (new pairs take the lowest free slot; removed pairs become INVALID holes). `write_entry_v4` never `store`s caller tokens over a live pair: same slot leaves Worker CAS bits in place; a moved pair atomic-loads the old slot. `_generation` is not pruned when a pair leaves (ABA). `_add_instances` resets `endpoint.workload` to empty, so a new pair's IM seed is 0; non-zero tokens come only from Worker `cas_add`.
 
-**Recovery:** Workers detect stale SHM (heartbeat >5s old) → trigger full `GET_AVAILABLE_INSTANCES` refresh. Attach failure is loud (`NativeWorkloadShmUnavailable`); there is no Python writer fallback. FFI `cas_add` / `cas_sub_floor0` reject non-finite or negative `delta` with `BAD_ARG`. `update_workload` is release-only (`RELEASE_TOKENS`).
+**Recovery:** Workers detect stale SHM (heartbeat >5s old) → trigger full `GET_AVAILABLE_INSTANCES` refresh. Attach failure is loud (`NativeWorkloadShmUnavailable`); there is no Python writer fallback. Native **ABI_VERSION=2** (`mindie_wl_abi_version`; Python `MIN_ABI_VERSION=2` refuses older `.so`). Scoring refresh uses one FFI `load_entries` (atomic-load flags/tokens in Rust); `cas_add` / `cas_sub_floor0` take a slot hint from that snapshot (`SLOT_HINT_NONE` scans; a stale hint is `SLOT_INVALID`, no rescan). Both reject non-finite or negative `delta` with `BAD_ARG`. `update_workload` is release-only (`RELEASE_TOKENS`).
 
 ### Role Shared Memory (HA)
 
@@ -323,7 +323,7 @@ and from `mgmt_tls_config`; use TLS as well when management traffic crosses an u
 
 ## Fault Tolerance: Circuit Breaker & Precision Detection
 
-**Circuit breaker** (`domain/circuit_breaker.py`): per-instance state machine tracking consecutive failures. Each instance is `"closed"` (normal, schedulable) or `"open"` (tripped, blocked from scheduling). Workers report instance outcomes via `CIRCUIT_BREAKER_REPORT`; Mgmt's `CircuitBreakerManager` (inside `AsyncSchedulerServer`) trips the circuit after three consecutive failures (30s first trip timeout, with backoff) and resets the failure count on success or auto-recovery. State changes are broadcast on `CIRCUIT_BREAKER_TOPIC` and mirrored onto SHM `flags.BLOCKED` so allocate CAS is the final gate. `select_router_class()` consults the Worker-local breaker cache: a P/D pair is only "compatible" if both roles have non-blocked instances, and 503 is returned when all instances are circuit-broken.
+**Circuit breaker** (`domain/circuit_breaker.py`): per-instance state machine tracking consecutive failures. Each instance is `"closed"` (normal, schedulable) or `"open"` (tripped, blocked from scheduling). Workers report instance outcomes via `CIRCUIT_BREAKER_REPORT`; Mgmt's `CircuitBreakerManager` (inside `AsyncSchedulerServer`) trips the circuit after three consecutive failures (30s first trip timeout, with backoff) and resets the failure count on success or auto-recovery. State changes are mirrored onto SHM `flags.BLOCKED` first; `CIRCUIT_BREAKER_TOPIC` PUB is sent only after that write succeeds (heartbeat retries both). Allocate CAS is the final gate for workers that miss the PUB. `select_router_class()` consults the Worker-local breaker cache: a P/D pair is only "compatible" if both roles have non-blocked instances, and 503 is returned when all instances are circuit-broken.
 
 **Precision detection** (`fault_tolerance/precision/` + `fault_tolerance/probe/`): cross-worker sampling (`sample_controller.py`, `streak_result.py`) coordinated with Mgmt via the four precision request types — `CONFIRM_SAMPLE` (cross-worker exit gate), `RECORD_PRECISION_RESULT` (global consecutive failures + probing state), `FINISH_PRECISION_ACTION` (clear probing after probe/alarm), `DISMISS_PRECISION_ALARM_STATE` (external recovery cleared the alarm). Alarm publishing lives in `fault_tolerance/alarm/` (`precision_alarm.py`); probes (`chat_probe.py`, `router_probe.py`) route identically to user traffic through `select_router_class()`.
 

@@ -113,6 +113,8 @@ class _SchedulerRequestDispatcher:
         self._workload_commit_lock = asyncio.Lock()
         # instance_id -> BLOCKED state that failed to apply to SHM; drained by _retry_pending_blocked.
         self._pending_blocked: dict[int, bool] = {}
+        # Desired PUB state for a set_blocked that has not yet landed on SHM.
+        self._pending_blocked_pub: dict[int, str] = {}
         # True when InstanceManager has changes not yet reflected in the SHM snapshot; drained by
         # _retry_dirty_snapshot (also forces a resync on the next apply_refresh).
         self._snapshot_dirty = False
@@ -158,6 +160,7 @@ class _SchedulerRequestDispatcher:
     async def apply_refresh(self, event_type: EventType, instances: list[Instance]) -> bool:
         """Apply an instance-list change locally: IM + SHM snapshot + PUB (no ZMQ REFRESH)."""
         previously_open_ids: list[int] = []
+        shm_closed_ids: list[int] = []
         async with self._workload_commit_lock:
             changed = await self._instance_manager.refresh_instances(event_type, instances)
             if event_type == EventType.SET and changed:
@@ -178,7 +181,8 @@ class _SchedulerRequestDispatcher:
                 self._snapshot_dirty = False
             if event_type == EventType.SET:
                 for iid in previously_open_ids:
-                    self._set_blocked(iid, False)
+                    if self._set_blocked(iid, False):
+                        shm_closed_ids.append(iid)
         if changed:
             if self._on_instance_refresh_done:
                 try:
@@ -187,7 +191,7 @@ class _SchedulerRequestDispatcher:
                         await result
                 except Exception as e:
                     logger.warning("Failed to publish instance change: %s", e)
-        for iid in previously_open_ids:
+        for iid in shm_closed_ids:
             asyncio.create_task(self._publish_circuit_breaker(iid, "closed"))
         return changed
 
@@ -195,13 +199,15 @@ class _SchedulerRequestDispatcher:
         """Mirror circuit-breaker OPEN/CLOSED onto SHM BLOCKED flags (final CAS gate).
 
         Returns False on native failure instead of silently dropping it; the desired state is
-        queued and retried from the heartbeat loop (_retry_pending_blocked).
+        queued and retried from the heartbeat loop (_retry_pending_blocked). Callers must not
+        PUB OPEN/CLOSED until this returns True — SHM BLOCKED is the allocate gate.
         """
         if not self._workload_writer:
             return True
         try:
             self._workload_writer.set_blocked(instance_id, blocked)
             self._pending_blocked.pop(instance_id, None)
+            self._pending_blocked_pub.pop(instance_id, None)
             return True
         except Exception as e:
             logger.error(
@@ -211,6 +217,7 @@ class _SchedulerRequestDispatcher:
                 e,
             )
             self._pending_blocked[instance_id] = blocked
+            self._pending_blocked_pub[instance_id] = "open" if blocked else "closed"
             return False
 
     def _retry_dirty_snapshot(self) -> None:
@@ -223,16 +230,25 @@ class _SchedulerRequestDispatcher:
         except Exception as e:
             logger.debug("Retry write_snapshot still failing: %s", e)
 
-    def _retry_pending_blocked(self) -> None:
-        """Flush SHM BLOCKED flags that previously failed to apply. Called every heartbeat tick."""
+    def _retry_pending_blocked(self) -> list[tuple[int, str]]:
+        """Flush SHM BLOCKED flags that previously failed. Returns (instance_id, state) to PUB."""
+        flushed: list[tuple[int, str]] = []
         if not self._pending_blocked or not self._workload_writer:
-            return
+            return flushed
         for instance_id, blocked in list(self._pending_blocked.items()):
             try:
                 self._workload_writer.set_blocked(instance_id, blocked)
                 self._pending_blocked.pop(instance_id, None)
+                state = self._pending_blocked_pub.pop(instance_id, "open" if blocked else "closed")
+                flushed.append((instance_id, state))
             except Exception as e:
                 logger.debug("Retry set_blocked instance_id=%d blocked=%s still failing: %s", instance_id, blocked, e)
+        return flushed
+
+    async def _retry_pending_blocked_and_publish(self) -> None:
+        """Heartbeat drain: land SHM BLOCKED, then PUB so workers see the same transition."""
+        for instance_id, state in self._retry_pending_blocked():
+            await self._publish_circuit_breaker(instance_id, state)
 
     async def _handle_confirm_sample(self, request: SchedulerRequest) -> SchedulerResponse:
         """Cross-worker precision sampling exit gate (per PD group, interval in request data)."""
@@ -445,15 +461,17 @@ class _SchedulerRequestDispatcher:
         if event == "failure":
             should_trip, timeout = self._cb_manager.process_failure(instance_id)
             if should_trip:
-                self._set_blocked(instance_id, True)
+                shm_ok = self._set_blocked(instance_id, True)
                 self._schedule_recovery(instance_id, timeout)
-                await self._publish_circuit_breaker(instance_id, "open")
+                if shm_ok:
+                    await self._publish_circuit_breaker(instance_id, "open")
         elif event == "success":
             recovered = self._cb_manager.process_success(instance_id)
             if recovered:
-                self._set_blocked(instance_id, False)
+                shm_ok = self._set_blocked(instance_id, False)
                 self._cancel_recovery(instance_id)
-                await self._publish_circuit_breaker(instance_id, "closed")
+                if shm_ok:
+                    await self._publish_circuit_breaker(instance_id, "closed")
         else:
             return SchedulerResponse(
                 response_type=SchedulerResponseType.ERROR,
@@ -497,8 +515,8 @@ class _SchedulerRequestDispatcher:
         try:
             recovered = self._cb_manager.auto_recover(instance_id)
             if recovered:
-                self._set_blocked(instance_id, False)
-                await self._publish_circuit_breaker(instance_id, "closed")
+                if self._set_blocked(instance_id, False):
+                    await self._publish_circuit_breaker(instance_id, "closed")
         finally:
             # Only remove our own entry: a concurrent _schedule_recovery may have
             # already replaced _recovery_timers[instance_id] with a new task before
@@ -516,8 +534,8 @@ class _SchedulerRequestDispatcher:
             )
             # Not schedulable: nothing to protect; _auto_recover stops on process_probe_failure() == None.
             self._cb_manager.clear_instance(instance_id)
-            self._set_blocked(instance_id, False)
-            await self._publish_circuit_breaker(instance_id, "closed")
+            if self._set_blocked(instance_id, False):
+                await self._publish_circuit_breaker(instance_id, "closed")
             return False
         endpoints = instance.get_all_endpoints()
         if not endpoints:
@@ -865,7 +883,7 @@ class AsyncSchedulerServer:
                     break
                 self._workload_writer.write_heartbeat()
                 if self._dispatcher is not None:
-                    self._dispatcher._retry_pending_blocked()
+                    await self._dispatcher._retry_pending_blocked_and_publish()
                     self._dispatcher._retry_dirty_snapshot()
             except asyncio.CancelledError:
                 break
