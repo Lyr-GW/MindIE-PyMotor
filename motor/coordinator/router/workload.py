@@ -89,9 +89,22 @@ class WorkloadActionHandler:
         if action == WorkloadAction.ALLOCATION:
             allocate_workload = calculate_demand_workload(role, req_info)
             if attempt_seq is None:
-                added = await request_mgr.add_req_workload(req_id, role, allocate_workload)
+                added = await request_mgr.add_req_workload(
+                    req_id,
+                    role,
+                    allocate_workload,
+                    instance_id=resource.instance.id,
+                    endpoint_id=resource.endpoint.id,
+                )
             else:
-                added = await request_mgr.add_req_attempt_workload(req_id, attempt_seq, role, allocate_workload)
+                added = await request_mgr.add_req_attempt_workload(
+                    req_id,
+                    attempt_seq,
+                    role,
+                    allocate_workload,
+                    instance_id=resource.instance.id,
+                    endpoint_id=resource.endpoint.id,
+                )
             if not added:
                 logger.debug(
                     "Request %s attempt %s already allocated for role %s, allocation ignored", req_id, attempt_seq, role

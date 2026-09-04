@@ -220,7 +220,8 @@ SGLang stays on native bootstrap (`CoordinationMode.BOOTSTRAP`); that path is un
 - The callback URL advertises `POD_IP` when available, otherwise `api_config.coordinator_api_host`; IPv6 literals are RFC 3986 bracketed. `0.0.0.0`/`::` remain valid listen hosts at startup (including default `worker_metaserver_base_port=12000`). Trigger rejects them as advertised callback addresses when `POD_IP` is absent (HTTP 503 + error log), because wildcard listen addresses are not routable Decode callback destinations.
 - Callback `request_id` is trimmed (`chatcmpl-` / `cmpl-…-0`) then looked up in that Worker's `RequestManager`. Query `?attempt=` must match the bound attempt (404 unknown request, 409 stale attempt).
 - Each trigger attempt serializes callbacks with `AttemptContext.trigger_lock`. The active callback is registered as the attempt's Prefill task so disconnect/Decode failure during TTFT cancels it; a retry after Prefill completion returns idempotent success without allocating P again.
-- If SHM CAS allocation succeeds but Worker-local attempt workload registration fails, the allocation is rolled back with `cas_sub_floor0` using the same demand delta.
+- If SHM CAS allocation succeeds but Worker-local attempt workload registration fails (including `CancelledError`), the allocation is rolled back with `cas_sub_floor0` using the same demand delta. `add_req_workload` / `add_req_attempt_workload` store `(instance_id, endpoint_id)` so teardown can reclaim.
+- Request teardown (`BaseRouter._manage_request_context`) drains in-flight releases, then `RequestManager.pop_residual_workloads` and `cas_sub_floor0` any leftover ledger commits. `del_req_info` must not be the only owner of residual records (that path only logs a leak).
 - Runtime field `CoordinatorConfig.worker_metaserver_port` is per-process (`base+worker_index`) and is in the hot-reload skip-set.
 
 **Request lifecycle:**
@@ -228,6 +229,7 @@ SGLang stays on native bootstrap (`CoordinationMode.BOOTSTRAP`); that path is un
 1. `prepare_resource(plan)` — scheduling policy scores locally → Worker `cas_add` on schema-4 SHM (stale expected → reload + same Python scorer, not blind retry)
 2. `forward_request(plan)` — HTTP POST to engine's infer endpoint (streaming or non-streaming)
 3. `release_all(plan)` — Worker `cas_sub_floor0` on the same SHM slot (no UPDATE ZMQ)
+4. Teardown — drain pending releases, reclaim residual SHM tokens, then `del_req_info`
 
 ### Hot-Reload
 
@@ -255,7 +257,7 @@ Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemo
 | `motor/coordinator/scheduler/runtime/workload_shm/` | | schema-4 layout + Reader/Owner + `native.py` ctypes |
 | `motor/coordinator/workload_shm_rs/` | | Rust cdylib: POSIX SHM create/attach, seqlock snapshot, per-slot CAS |
 | `motor/coordinator/domain/instance_manager.py` | | Central instance pool (available/unavailable/paused); `snapshot_instances()` for mgmt list |
-| `motor/coordinator/domain/request_manager.py` | | Request ID generation, workload tracking per request |
+| `motor/coordinator/domain/request_manager.py` | | Request ID generation, per-request workload records + residual reclaim owners |
 | `motor/coordinator/router/dispatch.py` | | `select_router_class` (dynamic router selection from live topology) + `handle_request` + `handle_metaserver_request` |
 | `motor/coordinator/router/strategies/` | | `BaseRouter` + `PDHybridRouter` + `UnifiedPDRouter` implementations |
 | `motor/coordinator/router/dispatch_session.py` | | Dispatch attempt session/state tracking |

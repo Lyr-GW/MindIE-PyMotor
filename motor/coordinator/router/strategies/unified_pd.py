@@ -696,14 +696,22 @@ class UnifiedPDRouter(BaseRouter):
                 attempt_seq,
                 required_engine_type=str(p_resource.instance.engine_type),
             )
-        except Exception as e:
+        except BaseException as e:
             error_message = (
                 f"Unified PD D allocation failed after P allocated "
-                f"req_id={self.req_info.req_id} attempt={attempt_seq}: {e}"
+                f"req_id={self.req_info.req_id} attempt={attempt_seq}: {e!r}"
             )
             self.req_info.trace_obj.set_trace_error_message(error_message)
             self.logger.warning(error_message)
-            await self._release_attempt_resource(p_resource, attempt_seq, WorkloadAction.RELEASE_TOKENS)
+            self._submit_release_attempt_resource_background(p_resource, attempt_seq, WorkloadAction.RELEASE_TOKENS)
+            try:
+                await self._drain_release_tasks()
+            except asyncio.CancelledError:
+                self.logger.warning(
+                    "Unified PD cancelled while draining P release after D allocation failure req_id=%s attempt=%s",
+                    self.req_info.req_id,
+                    attempt_seq,
+                )
             raise
         return session.new_attempt(p_resource, d_resource, self.config)
 
@@ -2017,12 +2025,29 @@ class UnifiedPDRouter(BaseRouter):
                 raise HTTPException(status_code=503, detail=error_message)
             raise RuntimeError(error_message)
         ins, endpoint, workload = result
-        if not await self._request_manager.add_req_attempt_workload(
-            self.req_info.req_id,
-            attempt_seq,
-            role,
-            workload,
-        ):
+        try:
+            recorded = await self._request_manager.add_req_attempt_workload(
+                self.req_info.req_id,
+                attempt_seq,
+                role,
+                workload,
+                instance_id=ins.id,
+                endpoint_id=endpoint.id,
+            )
+        except BaseException as e:
+            self.logger.error(
+                "Workload bookkeeping interrupted after allocation; rolling back "
+                "req_id=%s attempt_seq=%s role=%s instance_id=%s endpoint_id=%s error=%r",
+                self.req_info.req_id,
+                attempt_seq,
+                role,
+                ins.id,
+                endpoint.id,
+                e,
+            )
+            await self._rollback_allocated_workload(ins, endpoint, role, workload)
+            raise
+        if not recorded:
             await self._rollback_allocated_workload(ins, endpoint, role, workload)
             raise RuntimeError(
                 f"Request {self.req_info.req_id} already allocated for attempt {attempt_seq} role {role}"
@@ -2047,6 +2072,10 @@ class UnifiedPDRouter(BaseRouter):
                 attempt,
                 wait=wait,
             )
+
+    async def _drain_pending_releases(self) -> None:
+        """Unified PD runs releases as background tasks; settle them before residual reclaim."""
+        await self._drain_release_tasks()
 
     def _submit_prefill_release_background(self, attempt: AttemptContext, action: WorkloadAction) -> None:
         if attempt.prefill_resource is None:

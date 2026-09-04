@@ -227,8 +227,78 @@ class BaseRouter(ABC):
         try:
             yield
         finally:
-            await self._request_manager.del_req_info(self.req_info.req_id)
+            with CancelScope(shield=True):
+                await self._reclaim_residual_workloads()
+                await self._request_manager.del_req_info(self.req_info.req_id)
             self._log_request_details()
+
+    async def _drain_pending_releases(self) -> None:
+        """Hook: routers that run background release tasks drain them before residual reclaim."""
+        return
+
+    async def _reclaim_residual_workloads(self) -> None:
+        """Release scheduler-ledger entries whose local records survived the whole request.
+
+        Must run after all in-flight releases settle (see _drain_pending_releases), because a
+        record is only removed by finalize_release after the ledger ACKed the release; popping
+        a record while its release RPC is still in flight would double-subtract the ledger.
+        """
+        try:
+            await self._drain_pending_releases()
+        except Exception as e:
+            self.logger.error(
+                "Draining pending releases failed; skip residual workload reclaim to avoid "
+                "double release req_id=%s error=%r",
+                self.req_info.req_id,
+                e,
+            )
+            return
+        residuals = await self._request_manager.pop_residual_workloads(self.req_info.req_id)
+        for key, workload, owner in residuals:
+            if owner is None:
+                self.logger.error(
+                    "Orphan workload record has no owner; cannot reclaim ledger tokens "
+                    "req_id=%s key=%s active_tokens=%s",
+                    self.req_info.req_id,
+                    key,
+                    workload.active_tokens,
+                )
+                continue
+            instance_id, endpoint_id = owner
+            self.logger.error(
+                "Reclaiming orphan workload allocation req_id=%s key=%s instance_id=%s endpoint_id=%s active_tokens=%s",
+                self.req_info.req_id,
+                key,
+                instance_id,
+                endpoint_id,
+                workload.active_tokens,
+            )
+            params = UpdateWorkloadParams(
+                instance_id=instance_id,
+                endpoint_id=endpoint_id,
+                role=key[-1],
+                req_id=self.req_info.req_id,
+                workload_action=WorkloadAction.RELEASE_TOKENS,
+                workload_change=Workload(active_tokens=-workload.active_tokens),
+            )
+            try:
+                ok = await self._scheduler.update_workload(params)
+            except Exception as e:
+                self.logger.error(
+                    "Reclaim release RPC raised req_id=%s instance_id=%s endpoint_id=%s error=%r",
+                    self.req_info.req_id,
+                    instance_id,
+                    endpoint_id,
+                    e,
+                )
+                continue
+            if not ok:
+                self.logger.error(
+                    "Reclaim release rejected by scheduler req_id=%s instance_id=%s endpoint_id=%s",
+                    self.req_info.req_id,
+                    instance_id,
+                    endpoint_id,
+                )
 
     @contextlib.asynccontextmanager
     async def _manage_client_context(self, resource: ScheduledResource):
@@ -321,13 +391,31 @@ class BaseRouter(ABC):
                     msg = f"Invalid scheduler result: {result}"
                     raise ValueError(msg)
 
-                if not await self._request_manager.add_req_workload(self.req_info.req_id, role, allocate_workload):
-                    await self._rollback_allocated_workload(
-                        ins,
-                        endpoint,
+                try:
+                    recorded = await self._request_manager.add_req_workload(
+                        self.req_info.req_id,
                         role,
                         allocate_workload,
+                        instance_id=ins.id,
+                        endpoint_id=endpoint.id,
                     )
+                except BaseException as e:
+                    # The ledger commit inside select_and_allocate already succeeded; if local
+                    # bookkeeping is interrupted (incl. CancelledError, which is not an
+                    # Exception subclass), roll the commit back before propagating.
+                    self.logger.error(
+                        "Workload bookkeeping interrupted after allocation; rolling back "
+                        "req_id=%s role=%s instance_id=%s endpoint_id=%s error=%r",
+                        self.req_info.req_id,
+                        role,
+                        ins.id,
+                        endpoint.id,
+                        e,
+                    )
+                    await self._rollback_allocated_workload(ins, endpoint, role, allocate_workload)
+                    raise
+                if not recorded:
+                    await self._rollback_allocated_workload(ins, endpoint, role, allocate_workload)
                     msg = f"Request {self.req_info.req_id} already allocated for role {role}"
                     raise RuntimeError(msg)
 

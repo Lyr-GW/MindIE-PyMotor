@@ -3137,3 +3137,68 @@ def test_retry_plan_preserves_max_completion_tokens_precedence_for_completion_re
     assert "messages" not in decode_request
     assert "max_completion_tokens" not in decode_request
     assert decode_request["max_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_create_attempt_releases_p_when_d_allocation_cancelled():
+    req_info = RequestInfo(
+        req_id="req-w1-cancel",
+        req_data={"model": "m", "prompt": "hi"},
+        api="v1/completions",
+        entry_api="v1/completions",
+        req_len=3,
+    )
+    config = _config()
+    scheduler = _Scheduler()
+    p_instance = scheduler.p
+    p_endpoint = next(iter(next(iter(p_instance.endpoints.values())).values()))
+
+    async def _select_and_allocate(role, req_info, **_kwargs):
+        if role == PDRole.ROLE_P:
+            return p_instance, p_endpoint, Workload(active_tokens=3)
+        raise asyncio.CancelledError()
+
+    scheduler.select_and_allocate = _select_and_allocate
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=scheduler,
+        request_manager=RequestManager(config),
+    )
+    router._pd_uses_trigger = False
+
+    with pytest.raises(asyncio.CancelledError):
+        await router._create_attempt(PDDispatchSession(req_info.req_id))
+
+    await asyncio.sleep(0)
+    scheduler.update_workload.assert_called()
+    params = scheduler.update_workload.call_args.args[0]
+    assert params.workload_change.active_tokens == -3
+    assert params.workload_action == WorkloadAction.RELEASE_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_prepare_attempt_resource_rolls_back_when_bookkeeping_cancelled():
+    req_info = RequestInfo(
+        req_id="req-w2-cancel",
+        req_data={"model": "m", "prompt": "hi"},
+        api="v1/completions",
+        entry_api="v1/completions",
+        req_len=3,
+    )
+    config = _config()
+    scheduler = _Scheduler()
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=scheduler,
+        request_manager=RequestManager(config),
+    )
+    router._request_manager.add_req_attempt_workload = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await router._prepare_attempt_resource(PDRole.ROLE_P, 1)
+
+    scheduler.update_workload.assert_called_once()
+    params = scheduler.update_workload.call_args.args[0]
+    assert params.workload_change.active_tokens < 0
