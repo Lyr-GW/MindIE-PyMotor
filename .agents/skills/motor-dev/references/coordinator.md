@@ -231,6 +231,13 @@ SGLang stays on native bootstrap (`CoordinationMode.BOOTSTRAP`); that path is un
 3. `release_all(plan)` — Worker `cas_sub_floor0` on the same SHM slot (no UPDATE ZMQ)
 4. Teardown — drain pending releases, reclaim residual SHM tokens, then `del_req_info`
 
+**T_sched→P logs** (full INFO, never `_should_log_scheduling_sample`):
+
+- Start: `Scheduling metric stage=request_arrive req_id=… unix_ts=…` in `__create_request_info` immediately after `RequestInfo` construction. `unix_ts` is `ReqState.ARRIVE` (`time.time()`).
+- End: `Scheduling metric stage=dispatch_to_p … elapsed_ms=…` in `BaseRouter.forward_request` / `forward_stream_request`, immediately before the first httpx POST to a **P or U** instance. Decode/Encode and later retries of the same request are skipped. `elapsed_ms` is \(T_{\mathrm{sched}\rightarrow P}\). Use `time.time()` (not `perf_counter`) so the line pairs with `kubectl logs --timestamps`.
+
+P99 acceptance greps `stage=dispatch_to_p` and takes `elapsed_ms` on successful-to-P requests; do not use `stage=select_and_allocate`.
+
 ### Hot-Reload
 
 Hot-reload is driven by a `ConfigWatcher` in the **Mgmt process** (not the daemon's loop): when the config file changes, it calls `CoordinatorConfig.reload()` (re-parse from JSON) and pushes the updated config into the running `ManagementServer`. The reload skip-set is exactly `frozenset({"worker_index"})` — the runtime-only field that must not change mid-flight; everything else re-applies. If no valid config path exists, hot-reload is disabled.

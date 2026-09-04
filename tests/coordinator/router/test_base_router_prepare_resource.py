@@ -209,3 +209,31 @@ async def test_reclaim_residual_workloads_skips_on_drain_failure(monkeypatch, ca
 
     router._request_manager.pop_residual_workloads.assert_not_called()
     assert any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_forward_request_logs_dispatch_to_p_before_http(caplog):
+    caplog.set_level(logging.INFO, logger=_ROUTER_LOGGER)
+    router = _make_router()
+    router._forward_resource = _make_resource(PDRole.ROLE_P)
+    seen_before_post = []
+
+    async def _post(*_args, **_kwargs):
+        seen_before_post.extend(rec.getMessage() for rec in caplog.records if "stage=dispatch_to_p" in rec.getMessage())
+        response = MagicMock()
+        response.is_success = True
+        response.status_code = 200
+        response.content = b"{}"
+        response.aclose = AsyncMock()
+        return response
+
+    client = MagicMock()
+    client.base_url = "http://127.0.0.1:8080"
+    client.timeout = 1
+    client.post = _post
+
+    await router.forward_request("v1/completions", {"prompt": "hi"}, client, 1)
+
+    assert len(seen_before_post) == 1
+    assert "elapsed_ms=" in seen_before_post[0]
+    assert "role=prefill" in seen_before_post[0]

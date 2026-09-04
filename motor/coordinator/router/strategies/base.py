@@ -139,6 +139,8 @@ class BaseRouter(ABC):
             else WorkloadActionHandler(self._request_manager)
         )
         self._sampling_manager = sampling_manager
+        self._forward_resource: ScheduledResource | None = None
+        self._sched_to_p_logged = False
 
     def _stream_overall_timeout(self) -> float:
         """Remaining infer_timeout budget for the streaming response, counted from request arrival.
@@ -150,6 +152,25 @@ class BaseRouter(ABC):
         infer_timeout = self.config.exception_config.infer_timeout
         elapsed = time.time() - self.req_info.status.get(ReqState.ARRIVE, time.time())
         return max(infer_timeout - elapsed, 0.0)
+
+    def _log_sched_to_p_if_needed(self) -> None:
+        """Full-INFO T_sched→P end mark, immediately before the first HTTP POST to P/U."""
+        resource = self._forward_resource
+        if self._sched_to_p_logged or resource is None or resource.instance is None:
+            return
+        role = resource.instance.role
+        if role not in (PDRole.ROLE_P, PDRole.ROLE_U):
+            return
+        self._sched_to_p_logged = True
+        now = time.time()
+        arrive = self.req_info.status.get(ReqState.ARRIVE, now)
+        self.logger.info(
+            "Scheduling metric stage=dispatch_to_p req_id=%s unix_ts=%.6f elapsed_ms=%.2f role=%s",
+            self.req_info.req_id,
+            now,
+            (now - arrive) * 1000.0,
+            getattr(role, "value", role),
+        )
 
     @staticmethod
     def build_error_response(e: Exception) -> ErrorResponse:
@@ -315,7 +336,12 @@ class BaseRouter(ABC):
             endpoint.ip,
             endpoint.business_port,
         )
-        yield client
+        previous = self._forward_resource
+        self._forward_resource = resource
+        try:
+            yield client
+        finally:
+            self._forward_resource = previous
 
     @contextlib.asynccontextmanager
     async def _manage_resource_context(self, role: PDRole, release_func):
@@ -541,6 +567,7 @@ class BaseRouter(ABC):
 
         self.first_chunk_sent = False
         trace_obj.add_trace_event(f"Begin to stream: {client.base_url}/{api}, {client.timeout}", is_meta=self.is_meta)
+        self._log_sched_to_p_if_needed()
         t0_forward = time.perf_counter()
         async with client.stream(
             "POST",
@@ -633,6 +660,7 @@ class BaseRouter(ABC):
         )
 
         trace_obj.add_trace_event(f"Begin to post: {client.base_url}/{api}, {client.timeout}", is_meta=self.is_meta)
+        self._log_sched_to_p_if_needed()
         t0_forward = time.perf_counter()
         url = f"/{api}"
         async with self._open_nonstream_response(

@@ -1079,6 +1079,11 @@ T_sched→P = t(Worker 对 Prefill 实例发出 HTTP 请求的时刻)
 
 【代码事实】进入时刻为 `RequestInfo` 构造时写入的 `ReqState.ARRIVE`（`motor/coordinator/models/request.py`）。发出时刻为 `UnifiedPDRouter` / `PDHybridRouter` 在 **已经 `select_and_allocate` 成功之后**、第一次对 P（或 Hybrid 的 U/P）调用 `forward_request` / httpx POST **之前** 打点。
 
+现网全量 INFO（禁止抽样）：
+
+- 起点：`Scheduling metric stage=request_arrive req_id=… unix_ts=…`（`unix_ts` = `ReqState.ARRIVE`）
+- 终点：`Scheduling metric stage=dispatch_to_p req_id=… unix_ts=… elapsed_ms=… role=prefill|union …`（`elapsed_ms` 即 \(T_{\mathrm{sched}\rightarrow P}\)）
+
 本指标 **不含** Prefill 计算、KV 传输、Decode、首 token 返回（那些是 TTFT/E2E，不是本需求优化对象）。PD 分离只统计 **到 P 的这一段**；不把选 D 的时间算进去。
 
 现网日志里的 `Scheduling latency ... stage=select_and_allocate` 只覆盖 allocate RPC，**短于** 本指标（还缺进入后到选点前、以及 allocate 后到发出 HTTP 前）。验收须用 **全量** 直方图或全量日志，**禁止**用 `_should_log_scheduling_sample` 抽样估 P99。
