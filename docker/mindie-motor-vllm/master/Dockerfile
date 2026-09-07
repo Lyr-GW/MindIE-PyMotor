@@ -9,6 +9,11 @@ FROM ${BASE_IMAGE}
 ARG IMAGE_VERSION=master
 ARG PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
 ARG PIP_TRUSTED_HOST=repo.huaweicloud.com
+# This Dockerfile never shipped kv-conductor before (no cargo was present in the
+# base image), so keep it skipped by default rather than adding a libzmq
+# dependency here. Override with --build-arg SKIP_KV_CONDUCTOR_BUILD=0 on a base
+# image that already has libzmq3-dev / zeromq-devel installed.
+ARG SKIP_KV_CONDUCTOR_BUILD=1
 
 ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
@@ -17,21 +22,24 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
 
 USER root
 
+# pciutils: NPU discovery. gcc/curl: needed to install rustup and cargo-build the
+# required workload-shm cdylib (see build.sh / scripts/ensure_rust.sh). Rust itself
+# is installed by build.sh and removed after pip install; this layer only ensures
+# the C linker and network client cargo needs are present beforehand.
 RUN set -eux; \
-    if command -v lspci >/dev/null 2>&1; then \
-        exit 0; \
-    elif command -v apt-get >/dev/null 2>&1; then \
+    if command -v apt-get >/dev/null 2>&1; then \
         apt-get update; \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pciutils; \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pciutils build-essential ca-certificates curl; \
         rm -rf /var/lib/apt/lists/*; \
     elif command -v dnf >/dev/null 2>&1; then \
-        dnf install -y pciutils; \
+        dnf install -y pciutils gcc gcc-c++ make ca-certificates curl; \
         dnf clean all; \
     elif command -v yum >/dev/null 2>&1; then \
-        yum install -y pciutils; \
+        yum install -y pciutils gcc gcc-c++ make ca-certificates curl; \
         yum clean all; \
     else \
-        echo "pciutils is missing and no supported package manager was found" >&2; \
+        echo "no supported package manager was found" >&2; \
         exit 1; \
     fi
 
@@ -46,9 +54,12 @@ COPY motor ./motor
 COPY examples ./examples
 
 RUN set -eux; \
-    bash build.sh; \
+    SKIP_KV_CONDUCTOR_BUILD="${SKIP_KV_CONDUCTOR_BUILD}" bash build.sh; \
     pip install --no-cache-dir --force-reinstall dist/motor*.whl; \
-    rm -rf build/ motor.egg-info/ dist/
+    python -c "from pathlib import Path; import motor.coordinator.workload_shm_rs as p; lib=Path(p.__file__).resolve().parent/'lib'/'libmindie_workload_shm.so'; assert lib.is_file() and lib.stat().st_size>0, lib"; \
+    rm -rf build/ motor.egg-info/ dist/ \
+        /root/.cargo /root/.rustup "${HOME}/.cargo" "${HOME}/.rustup" \
+        motor/coordinator/workload_shm_rs/target motor/kv_conductor/target
 
 RUN set -eux; \
     cd examples/features/observability; \

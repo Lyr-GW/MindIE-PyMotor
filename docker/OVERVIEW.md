@@ -79,6 +79,8 @@ docker build --network=host \
 
 Each Dockerfile header comment contains the exact `--platform` value, source repository info, and full `docker build` command.
 
+The `master` Dockerfile installs gcc / curl so `build.sh` can locate or rustup-install cargo and compile the required `libmindie_workload_shm.so`, then removes rustup after `pip install` (kv-conductor packaging is unchanged and stays disabled there by default). Build the `.so` on the same OS/glibc as the runtime image.
+
 ---
 
 ## License

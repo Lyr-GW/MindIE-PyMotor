@@ -41,19 +41,58 @@ motor_version : ${MOTOR_VERSION}
 EOF
 echo "Using motor_version=${MOTOR_VERSION}"
 
+# --- Rust toolchain (CI / Docker / host) ---
+# Jenkins often has rustup under $HOME/.cargo or /root/.cargo while the job PATH
+# does not. Nightly previously skipped native crates and shipped an empty wheel.
+# Source cargo env first; if still missing and workload-shm has no prebuilt, install
+# rustup unless SKIP_RUST_INSTALL=1 (offline packing with WORKLOAD_SHM_PREBUILT).
+#
+# Set SKIP_RUST_BUILD=1 when no Rust source changed since the last successful
+# build.sh run and you only need to repackage Python/config changes into a new
+# wheel: it skips cargo for BOTH crates and reuses lib/*.so + bin/kv-conductor
+# from the previous build (per-crate SKIP_*_BUILD env vars still override it).
+
+KV_CONDUCTOR_DIR="./motor/kv_conductor"
+KV_CONDUCTOR_BIN_DIR="$KV_CONDUCTOR_DIR/bin"
+KV_CONDUCTOR_BIN="$KV_CONDUCTOR_BIN_DIR/kv-conductor"
+WORKLOAD_SHM_DIR="./motor/coordinator/workload_shm_rs"
+WORKLOAD_SHM_LIB_DIR="$WORKLOAD_SHM_DIR/lib"
+WORKLOAD_SHM_LIB="$WORKLOAD_SHM_LIB_DIR/libmindie_workload_shm.so"
+
+# shellcheck disable=SC1091
+source ./scripts/ensure_rust.sh
+motor_apply_skip_rust_build_shorthand
+motor_source_cargo_env || true
+
+_shm_has_input="0"
+if [[ -n "${WORKLOAD_SHM_PREBUILT:-}" || -f "$WORKLOAD_SHM_LIB" ]]; then
+    _shm_has_input="1"
+fi
+if ! command -v cargo >/dev/null 2>&1; then
+    if [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" == "1" && "$_shm_has_input" == "1" ]]; then
+        echo "cargo not on PATH; reusing prebuilt/existing workload-shm library."
+    elif [[ -n "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
+        echo "cargo not on PATH; using WORKLOAD_SHM_PREBUILT."
+    else
+        echo "=== rust toolchain ==="
+        if ! motor_ensure_cargo; then
+            echo "[ERROR] cargo is required to compile libmindie_workload_shm.so."
+            echo "  Install Rust, or set WORKLOAD_SHM_PREBUILT, or copy the .so into $WORKLOAD_SHM_LIB_DIR/."
+            echo "  Offline: SKIP_RUST_INSTALL=1 plus a prebuilt library."
+            exit 1
+        fi
+    fi
+fi
+
 # --- Conditional kv-conductor build ---
-# Priority:
+# Priority (unchanged by the workload-shm work below):
 #   1. KV_CONDUCTOR_PREBUILT env var — path to a pre-built binary
-#   2. Build from source via cargo (if available) — always rebuilds
+#   2. Build from source via cargo (if available)
 #   3. motor/kv_conductor/bin/kv-conductor already exists (no cargo; manual copy)
 #   4. Skip — wheel built without kv-conductor (optional component)
 #
 # Set SKIP_KV_CONDUCTOR_BUILD=1 to skip cargo build even when cargo is
 # available (use the existing bin/kv-conductor, or skip if none).
-
-KV_CONDUCTOR_DIR="./motor/kv_conductor"
-KV_CONDUCTOR_BIN_DIR="$KV_CONDUCTOR_DIR/bin"
-KV_CONDUCTOR_BIN="$KV_CONDUCTOR_BIN_DIR/kv-conductor"
 
 echo "=== kv-conductor ==="
 
@@ -91,22 +130,21 @@ else
     echo "  Options:"
     echo "    1. KV_CONDUCTOR_PREBUILT=/path/to/kv-conductor bash build.sh"
     echo "    2. cp /path/to/kv-conductor motor/kv_conductor/bin/ && bash build.sh"
-    echo "    3. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    echo "    3. Install Rust, or run scripts/ensure_rust.sh"
+    echo "  (kv-conductor is optional; the wheel will still ship without it.)"
 fi
 
 echo ""
 
-# --- Conditional workload-shm (coordinator) build ---
-# Same priority chain as kv-conductor:
+# --- Required workload-shm (coordinator) build ---
+# Priority:
 #   1. WORKLOAD_SHM_PREBUILT env var — path to a pre-built .so
 #   2. build from source via cargo (unless SKIP_WORKLOAD_SHM_BUILD=1)
 #   3. motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so already present
-#   4. skip — wheel without the .so; the Python runtime raises a clear error (scheduling unavailable),
-#      it never silently falls back to a wrong ledger.
-
-WORKLOAD_SHM_DIR="./motor/coordinator/workload_shm_rs"
-WORKLOAD_SHM_LIB_DIR="$WORKLOAD_SHM_DIR/lib"
-WORKLOAD_SHM_LIB="$WORKLOAD_SHM_LIB_DIR/libmindie_workload_shm.so"
+# Unlike kv-conductor this library is required: Coordinator has no Python ledger
+# fallback. Missing .so is a hard build error (do not emit a wheel without it).
+# SKIP_WORKLOAD_SHM_BUILD=1 only skips cargo rebuild; it does not authorize a
+# wheel without the library.
 
 echo "=== workload-shm ==="
 
@@ -120,7 +158,11 @@ if [[ -n "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
     chmod +x "$WORKLOAD_SHM_LIB"
     echo "workload-shm library ready (pre-built): $WORKLOAD_SHM_LIB"
 
-elif command -v cargo >/dev/null 2>&1 && [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" != "1" ]]; then
+elif command -v cargo >/dev/null 2>&1 && \
+    { [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" != "1" ]] || [[ ! -f "$WORKLOAD_SHM_LIB" ]]; }; then
+    if [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" == "1" ]]; then
+        echo "[WARNING] SKIP_WORKLOAD_SHM_BUILD=1 ignored because $WORKLOAD_SHM_LIB is missing."
+    fi
     echo "Building workload-shm from source (cargo build --release)..."
     (
         cd "$WORKLOAD_SHM_DIR" || exit 1
@@ -135,13 +177,21 @@ elif [[ -f "$WORKLOAD_SHM_LIB" ]]; then
     echo "workload-shm library ready (existing, no rebuild): $WORKLOAD_SHM_LIB"
 
 else
-    rm -rf "$WORKLOAD_SHM_LIB_DIR"
-    echo "[WARNING] workload-shm .so not found and cargo unavailable."
-    echo "  The coordinator scheduler will raise a clear error at runtime (no silent fallback)."
+    echo "[ERROR] workload-shm .so not found and cargo unavailable."
+    echo "  A motor wheel without this library cannot start Coordinator (no Python ledger fallback)."
     echo "  Options:"
     echo "    1. WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so bash build.sh"
     echo "    2. cp /path/to/libmindie_workload_shm.so $WORKLOAD_SHM_LIB_DIR/ && bash build.sh"
-    echo "    3. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+    echo "    3. Unset SKIP_RUST_INSTALL and retry (build.sh installs rustup), or install cargo on PATH"
+    echo "  SKIP_RUST_BUILD=1 / SKIP_WORKLOAD_SHM_BUILD=1 only reuse an existing .so; they do not"
+    echo "  authorize a first-time build without one."
+    exit 1
+fi
+
+if [[ ! -f "$WORKLOAD_SHM_LIB" ]]; then
+    echo "[ERROR] $WORKLOAD_SHM_LIB is missing after the workload-shm build step."
+    echo "  cargo/prebuilt must produce libmindie_workload_shm.so before pip wheel."
+    exit 1
 fi
 
 echo ""
@@ -155,3 +205,12 @@ if [[ "${VERBOSE}" -eq 0 ]]; then
 fi
 
 "${cmd[@]}"
+
+WHEEL_PATH="$(ls -1 dist/motor-*.whl 2>/dev/null | head -n1 || true)"
+if [[ -z "${WHEEL_PATH}" || ! -f "${WHEEL_PATH}" ]]; then
+    echo "[ERROR] pip wheel did not produce dist/motor-*.whl" >&2
+    exit 1
+fi
+PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
+    "from motor.coordinator.workload_shm_rs.wheel_gate import assert_motor_wheel_has_workload_shm; assert_motor_wheel_has_workload_shm(r'''${WHEEL_PATH}''')"
+echo "wheel native lib verified: ${WHEEL_PATH}"

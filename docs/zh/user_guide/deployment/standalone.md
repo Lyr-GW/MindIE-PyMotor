@@ -20,8 +20,9 @@
 
 | 项 | 要求 |
 |----|------|
-| OS | Linux（aarch64 / x86_64） |
+| OS | Linux（aarch64 / x86_64），与运行环境相同 glibc |
 | Python | `>= 3.11` |
+| 自打包 | `curl`、C 编译器（`build-essential` / `gcc`）；无 cargo 时 `build.sh` 会 rustup 安装 |
 | 网络 | 可达各 P/D 引擎 HTTP 端口（常见 `8000` / `10000`） |
 | 端口 | 本机 `1025`（推理）/ `1026`（管理）/ `1027`（观测）空闲 |
 
@@ -42,14 +43,14 @@ pip install -r requirements.txt
 # 安装 motor（三选一）
 # A. 源码可编辑：
 pip install --no-deps -e .
-# B. 自打包 whl（无 cargo / 不需要 KV 亲和时可：SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh）：
-bash build.sh
+# B. 自打包 whl（空环境务必带 SKIP_KV_CONDUCTOR_BUILD=1，否则会去编可选的 kv-conductor，缺 libzmq 时整次失败）：
+SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 pip install --no-deps --force-reinstall dist/motor-*.whl
 # C. 现成 whl：
 # pip install --no-deps --force-reinstall /path/to/motor-*.whl
 ```
 
-`--no-deps`：whl 不声明依赖，须先装 `requirements.txt`。离线场景见 [附录 A](#附录-a离线安装)。
+`--no-deps`：whl 不声明依赖，须先装 `requirements.txt`。离线场景见 [附录 A](#附录-a离线安装)。未改 `.rs` 时用 `SKIP_RUST_BUILD=1 bash build.sh` 复用已有 `lib/*.so`；不能装 rustup 时用 `WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so`。打出的 wheel 必须含 `libmindie_workload_shm.so`（`unzip -l dist/motor-*.whl | grep libmindie_workload_shm.so`）。开关细节见仓库根 `AGENTS.md`「构建」。
 
 ---
 

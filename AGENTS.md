@@ -22,8 +22,8 @@ docs/                    文档站（mkdocs）
 
 ## 环境要求
 
-- Python **3.10+**（类型语法按 py310 目标）
-- Rust + Cargo（构建 kv_conductor，可选：存在预编译 bin 时可跳过）
+- Python **3.10+**（类型语法按 py310 目标；打包/运行见 `setup.py` `>=3.11`）
+- Rust + Cargo：`libmindie_workload_shm.so` **必需**（无 cargo 时 `build.sh` 会 rustup 安装）；kv_conductor 可选
 
 ## 安装
 
@@ -31,21 +31,30 @@ docs/                    文档站（mkdocs）
 # 1. 依赖（whl 的 install_requires 为空，必须显式装 requirements.txt）
 pip install -r requirements.txt
 
-# 2. 构建并安装 whl
-bash build.sh                    # 生成 dist/motor-*.whl（自动生成 protobuf + cargo 构建 kv_conductor）
+# 2. 构建并安装 whl（空环境务必带 SKIP_KV_CONDUCTOR_BUILD=1，见下文「构建」）
+SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 pip install dist/motor-*.whl
 ```
 
 ## 构建
 
 ```bash
-bash build.sh        # 产物：dist/motor-0.1.0-py3-none-any.whl
+bash build.sh                                      # 默认：有 cargo，可顺带编 kv-conductor
+SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh             # 空环境：只强制编 workload-shm
+SKIP_RUST_BUILD=1 bash build.sh                     # 未改 .rs，复用已有 lib/*.so 重打包
+WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so bash build.sh   # 离线预编译 .so
 ```
 
-- 自动执行 `scripts/generate_proto.sh`（etcd protobuf）与两个 Rust crate 的 cargo 构建：`motor/kv_conductor`（bin）与 `motor/coordinator/workload_shm_rs`（`libmindie_workload_shm.so`，coordinator 负载记账共享内存）
-- 无 cargo 时分别用 `SKIP_KV_CONDUCTOR_BUILD=1` / `SKIP_WORKLOAD_SHM_BUILD=1` 跳过（改用 `KV_CONDUCTOR_PREBUILT` / `WORKLOAD_SHM_PREBUILT` 预编译产物）
+产物：`dist/motor-0.1.0-py3-none-any.whl`。验收：`unzip -l dist/motor-*.whl | grep libmindie_workload_shm.so`。
+
+前置：仓库根目录、Python 3.11+、已装 `requirements.txt`、`curl`、C 编译器（Ubuntu：`build-essential`；openEuler：`gcc gcc-c++ make`）。无 cargo 时 `scripts/ensure_rust.sh` 会 rustup 安装（默认 rsproxy）。`.so` 必须在与运行镜像相同的 OS/glibc 里编译。
+
+- 自动执行 `scripts/generate_proto.sh`（etcd protobuf）与两个 Rust crate 的 cargo 构建：`motor/kv_conductor`（bin，可选）与 `motor/coordinator/workload_shm_rs`（`libmindie_workload_shm.so`，**不可缺**）
+- **cargo 探测**：`scripts/ensure_rust.sh` 先 source `$HOME/.cargo` / `CARGO_HOME`（Jenkins PATH 经常看不到 rustup），仍没有则 rustup 安装（`SKIP_RUST_INSTALL=1` 关闭）。CI 不要设 `SKIP_WORKLOAD_SHM_BUILD=1`
+- **SKIP**：`SKIP_KV_CONDUCTOR_BUILD=1` 跳过可选 kv-conductor（空环境建议设，否则装好 cargo 后会去编它，缺 libzmq 时整次失败）；`SKIP_WORKLOAD_SHM_BUILD=1` 只在已有 `lib/` 时跳过重编，缺库则忽略并编译；`SKIP_RUST_BUILD=1` 是前两者的快捷键（未显式设置时才填充，例如 `SKIP_RUST_BUILD=1 SKIP_KV_CONDUCTOR_BUILD=0` 可只重编 kv-conductor）；`SKIP_RUST_INSTALL=1` 禁止 rustup，须 `WORKLOAD_SHM_PREBUILT` 或已有 `lib/*.so`。禁止打出无 `.so` 的 wheel
+- **ABI**：Euler 宿主机编完塞进 Ubuntu 镜像可能加载失败。Dockerfile 路径在镜像内 `bash build.sh` 后卸掉 rustup
 - **源码开发（Python）**：改代码直接生效（import 走源码目录），无需重建
-- **源码开发（Rust）**：改 `.rs` 后必须重新 `cargo build --release`（不像纯 Python 改完即生效）；`native.py` 优先加载 `workload_shm_rs/lib/*.so`（whl）再回退 `target/release/*.so`（源码开发），缺失时抛 `NativeWorkloadShmUnavailable`（不静默回退错误账本）
+- **源码开发（Rust）**：改 `.rs` 后必须重新 `cargo build --release`；`native.py` 优先加载 `workload_shm_rs/lib/*.so`（whl）再回退 `target/release/*.so`，缺失时抛 `NativeWorkloadShmUnavailable`（不静默回退错误账本）
 - **打包/部署**：whl 是快照，打包后才装的镜像/环境必须重新 `bash build.sh` 生成新 whl，否则旧 wheel 残留导致 NameError/ImportError
 
 ## 测试

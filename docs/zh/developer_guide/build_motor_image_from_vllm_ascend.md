@@ -1,5 +1,7 @@
 # 基于vllm-ascend安装MindIE Motor
 
+先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。空环境：`SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`（需 gcc/curl；未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`）。
+
 ## 构建开发测试镜像
 
 项目提供 `docker/mindie-motor-vllm/master/Dockerfile`，用于将当前工作区源码构建到 vLLM-Ascend 基础镜像中。该 Dockerfile 与发布镜像 Dockerfile 的定位不同：
@@ -130,13 +132,14 @@ tar -czvf packages-offline.tar.gz packages-offline
 cd /mnt/MindIE-Motor
 
 # 构建好的whl包在/mnt/MindIE-Motor/dist/路径下
-bash build.sh
+# 请在与运行镜像相同的 OS 容器内执行（需 gcc/curl）
+SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 
 cd /mnt/
 tar -czvf MindIE-Motor.tar.gz MindIE-Motor
 ```
 
-将`/mnt/MindIE-Motor.tar.gz`拷贝到制作镜像机器的`/mnt/`路径下
+将`/mnt/MindIE-Motor.tar.gz`拷贝到制作镜像机器的`/mnt/`路径下。
 
 ## 获取基础镜像，以vLLM-Ascend为例
 
@@ -212,7 +215,7 @@ dpkg -i *.deb
 
     pip install -r requirements.txt
 
-    bash build.sh
+    SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
     pip install --force-reinstall ./dist/motor-*.whl
 
     mkdir -p /tmp/motor/

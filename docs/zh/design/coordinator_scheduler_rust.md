@@ -636,12 +636,12 @@ ABI 版本：在 `.so` 导出 `mindie_wl_abi_version() -> uint32_t`，与 `SCHEM
 
 ### 8.5 构建与打包
 
-`build.sh` 在 kv-conductor 段落后增加同样的优先级链：
+`build.sh` 在 kv-conductor 段落后增加同样的优先级链，并在此之前 `source scripts/ensure_rust.sh`（PATH / `$HOME/.cargo`，缺失则 rustup 安装）。空环境一键：`SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`（需 gcc/curl；未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`）：
 
 1. `WORKLOAD_SHM_PREBUILT` → copy `.so`
-2. 有 cargo 且未设 `SKIP_WORKLOAD_SHM_BUILD=1` → `cargo build --release --manifest-path motor/coordinator/workload_shm_rs/Cargo.toml`，copy `target/release/libmindie_workload_shm.so`（macOS 为 `dylib`）到 `motor/coordinator/workload_shm_rs/lib/`
+2. 有 cargo 且（未设 `SKIP_WORKLOAD_SHM_BUILD=1` 或 `lib/` 不存在）→ `cargo build --release`，copy `target/release/libmindie_workload_shm.so`（macOS 为 `dylib`）到 `motor/coordinator/workload_shm_rs/lib/`
 3. `lib/` 已有产物 → 跳过
-4. 否则 WARNING，wheel 不含 `.so`；运行时 Python 报明确错误（调度不可用），**不要**静默回退到错误账本
+4. 否则 **ERROR + exit 1**，禁止打出不含 `.so` 的 wheel。`SKIP_WORKLOAD_SHM_BUILD=1` 只在已有 `lib/` 时跳过重编，缺库时忽略 SKIP。pip wheel 之后再断言 archive 含 `motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so`。源码开发仍可走 `target/release`，运行时缺库响亮失败、**不要**静默回退到错误账本
 
 `setup.py`：
 
@@ -657,7 +657,7 @@ if os.path.isfile(_shm_so):
 
 `AGENTS.md` / `.agent/skills/motor-dev/references/coordinator.md`：与实现 **同一 PR** 更新进程图、SHM layout（schema 4）、RPC 表。这是仓库 Skill Sync 铁律。
 
-Docker：`docker/mindie-motor-vllm/*/Dockerfile` 已有 cargo（为 kv-conductor）。新 crate 无 libzmq 依赖，只要 rustc。`SKIP_*` 行为与 conductor 对齐。
+Docker：`docker/mindie-motor-vllm/master/Dockerfile` 安装 gcc/curl（cargo 链接与安装 rustup 所需）；`build.sh` 通过 `scripts/ensure_rust.sh` 探测或 rustup 安装 cargo，pip install 后删除 rustup，运行镜像不保留工具链。该 Dockerfile 默认 `SKIP_KV_CONDUCTOR_BUILD=1`（未改 kv-conductor 打包逻辑本身，只是维持它此前从未随 master 镜像打包的现状，避免额外引入 libzmq 依赖）。版本化 Dockerfile 在 bump 到含本逻辑的 commit 后同样走 `build.sh`。新 crate 无 libzmq 依赖，只要 rustc。`SKIP_WORKLOAD_SHM_BUILD=1` 只在已有 `lib/` 时跳过重编。
 
 ### 8.6 Python 加载
 

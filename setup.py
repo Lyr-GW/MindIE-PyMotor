@@ -38,8 +38,9 @@ _kv_bin = os.path.join("motor", "kv_conductor", "bin", "kv-conductor")
 if os.path.isfile(_kv_bin):
     _package_data["motor.kv_conductor"] = ["bin/kv-conductor"]
 
-# Conditionally include the workload-shm cdylib when it was built (see build.sh). Missing at import
-# time surfaces as an explicit runtime error (native.py), never a silent wrong-ledger fallback.
+# Include the workload-shm cdylib when build.sh (or a prebuilt copy) placed it in lib/.
+# Official packaging is bash build.sh, which refuses to emit a wheel without this file.
+# Source-dev / editable installs may omit it and load target/release via native.py.
 _shm_so = os.path.join("motor", "coordinator", "workload_shm_rs", "lib", "libmindie_workload_shm.so")
 if os.path.isfile(_shm_so):
     _package_data["motor.coordinator.workload_shm_rs"] = ["lib/*"]
