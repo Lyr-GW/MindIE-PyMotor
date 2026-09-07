@@ -1,6 +1,6 @@
 # 基于vllm-ascend安装MindIE Motor
 
-先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。空环境：`SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`（需 gcc/curl；未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`）。
+先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。默认 `bash build.sh` 同时编 kv-conductor（需 gcc/curl/libzmq）；无 libzmq 时 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`。未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。
 
 ## 构建开发测试镜像
 
@@ -133,6 +133,7 @@ cd /mnt/MindIE-Motor
 
 # 构建好的whl包在/mnt/MindIE-Motor/dist/路径下
 # 请在与运行镜像相同的 OS 容器内执行（需 gcc/curl）
+# 默认 bash build.sh 同时编 kv-conductor（需 libzmq）；无 libzmq 才 SKIP
 SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 
 cd /mnt/
@@ -215,6 +216,7 @@ dpkg -i *.deb
 
     pip install -r requirements.txt
 
+    # 无 libzmq 时 SKIP；有 libzmq 用 bash build.sh 同时打 kv-conductor
     SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
     pip install --force-reinstall ./dist/motor-*.whl
 

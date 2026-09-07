@@ -79,7 +79,7 @@ docker build --network=host \
 
 Each Dockerfile header comment contains the exact `--platform` value, source repository info, and full `docker build` command.
 
-The `master` Dockerfile installs gcc / curl so `build.sh` can locate or rustup-install cargo and compile the required `libmindie_workload_shm.so`, then removes rustup after `pip install` (kv-conductor packaging is unchanged and stays disabled there by default). Build the `.so` on the same OS/glibc as the runtime image.
+The `master` Dockerfile installs gcc / curl / libzmq so `build.sh` can locate or rustup-install cargo and pack both `libmindie_workload_shm.so` (required; missing library refuses the wheel) and `kv-conductor`, then removes rustup after `pip install`. Override with `--build-arg SKIP_KV_CONDUCTOR_BUILD=1` only when libzmq cannot be installed. Build the `.so` on the same OS/glibc as the runtime image.
 
 ---
 

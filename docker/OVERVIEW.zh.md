@@ -79,7 +79,7 @@ docker build --network=host \
 
 各 Dockerfile 头部注释中已写明对应的 `--platform`、源码仓库信息与完整 `docker build` 命令，可直接复制使用。
 
-`master` Dockerfile 会在构建阶段安装 gcc / curl，由 `build.sh` 探测或 rustup 安装 cargo，编出必需的 `libmindie_workload_shm.so` 打进 wheel，`pip install` 后删除 rustup（kv-conductor 打包逻辑未改动，该 Dockerfile 默认仍不打包它）。请勿在与运行镜像不同的 OS 上交叉拷贝 `.so`（glibc 可能对不上）。
+`master` Dockerfile 会在构建阶段安装 gcc / curl / libzmq，由 `build.sh` 探测或 rustup 安装 cargo，把必需的 `libmindie_workload_shm.so` 与 `kv-conductor` 打进 wheel（缺 `.so` 拒绝出包），`pip install` 后删除 rustup。仅在无法安装 libzmq 时用 `--build-arg SKIP_KV_CONDUCTOR_BUILD=1`。请勿在与运行镜像不同的 OS 上交叉拷贝 `.so`（glibc 可能对不上）。
 
 ---
 

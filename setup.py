@@ -27,9 +27,10 @@ def _read_version() -> str:
     return match.group(1)
 
 
-# Conditionally include the kv-conductor binary when it was built (see build.sh).
-# When the Rust toolchain is unavailable, the binary does not exist and the
-# wheel is packaged without it — the Python runtime handles this gracefully.
+# Include the kv-conductor binary when build.sh produced it. Official packaging
+# is bash build.sh, which packs both crates when cargo + libzmq are present and
+# asserts the binary is in the wheel. SKIP_KV_CONDUCTOR_BUILD=1 (or no cargo)
+# omits it — the Python runtime handles a missing conductor gracefully.
 _package_data: dict[str, list[str]] = {
     "motor": ["version.info"],
 }

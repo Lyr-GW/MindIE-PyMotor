@@ -76,9 +76,10 @@ if ! command -v cargo >/dev/null 2>&1; then
     else
         echo "=== rust toolchain ==="
         if ! motor_ensure_cargo; then
-            echo "[ERROR] cargo is required to compile libmindie_workload_shm.so."
-            echo "  Install Rust, or set WORKLOAD_SHM_PREBUILT, or copy the .so into $WORKLOAD_SHM_LIB_DIR/."
-            echo "  Offline: SKIP_RUST_INSTALL=1 plus a prebuilt library."
+            echo "[ERROR] refusing to emit dist/motor-*.whl: cargo is required to compile libmindie_workload_shm.so." >&2
+            echo "  Coordinator cannot start without this library (no Python ledger fallback)." >&2
+            echo "  Install Rust, or set WORKLOAD_SHM_PREBUILT, or copy the .so into $WORKLOAD_SHM_LIB_DIR/." >&2
+            echo "  Offline: SKIP_RUST_INSTALL=1 plus a prebuilt library." >&2
             exit 1
         fi
     fi
@@ -117,6 +118,11 @@ elif command -v cargo >/dev/null 2>&1 && [[ "${SKIP_KV_CONDUCTOR_BUILD:-0}" != "
     mkdir -p "$KV_CONDUCTOR_BIN_DIR"
     cp "$KV_CONDUCTOR_DIR/target/release/kv-conductor" "$KV_CONDUCTOR_BIN"
     chmod +x "$KV_CONDUCTOR_BIN"
+    if [[ ! -x "$KV_CONDUCTOR_BIN" ]]; then
+        echo "[ERROR] kv-conductor cargo build did not produce an executable at $KV_CONDUCTOR_BIN" >&2
+        echo "  Need libzmq headers (Ubuntu: libzmq3-dev; openEuler: zeromq-devel) plus pkg-config." >&2
+        exit 1
+    fi
     echo "kv-conductor binary ready (cargo-built): $KV_CONDUCTOR_BIN"
 
 elif [[ -f "$KV_CONDUCTOR_BIN" ]]; then
@@ -168,8 +174,14 @@ elif command -v cargo >/dev/null 2>&1 && \
         cd "$WORKLOAD_SHM_DIR" || exit 1
         cargo build --release
     )
+    _shm_built="$WORKLOAD_SHM_DIR/target/release/libmindie_workload_shm.so"
+    if [[ ! -f "$_shm_built" ]]; then
+        echo "[ERROR] refusing to emit dist/motor-*.whl: cargo build --release did not produce $_shm_built." >&2
+        echo "  Coordinator cannot start without libmindie_workload_shm.so (no Python ledger fallback)." >&2
+        exit 1
+    fi
     mkdir -p "$WORKLOAD_SHM_LIB_DIR"
-    cp "$WORKLOAD_SHM_DIR/target/release/libmindie_workload_shm.so" "$WORKLOAD_SHM_LIB"
+    cp "$_shm_built" "$WORKLOAD_SHM_LIB"
     chmod +x "$WORKLOAD_SHM_LIB"
     echo "workload-shm library ready (cargo-built): $WORKLOAD_SHM_LIB"
 
@@ -177,20 +189,21 @@ elif [[ -f "$WORKLOAD_SHM_LIB" ]]; then
     echo "workload-shm library ready (existing, no rebuild): $WORKLOAD_SHM_LIB"
 
 else
-    echo "[ERROR] workload-shm .so not found and cargo unavailable."
-    echo "  A motor wheel without this library cannot start Coordinator (no Python ledger fallback)."
-    echo "  Options:"
-    echo "    1. WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so bash build.sh"
-    echo "    2. cp /path/to/libmindie_workload_shm.so $WORKLOAD_SHM_LIB_DIR/ && bash build.sh"
-    echo "    3. Unset SKIP_RUST_INSTALL and retry (build.sh installs rustup), or install cargo on PATH"
-    echo "  SKIP_RUST_BUILD=1 / SKIP_WORKLOAD_SHM_BUILD=1 only reuse an existing .so; they do not"
-    echo "  authorize a first-time build without one."
+    echo "[ERROR] refusing to emit dist/motor-*.whl: libmindie_workload_shm.so is missing and cargo is unavailable." >&2
+    echo "  Coordinator cannot start without this library (no Python ledger fallback)." >&2
+    echo "  Options:" >&2
+    echo "    1. WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so bash build.sh" >&2
+    echo "    2. cp /path/to/libmindie_workload_shm.so $WORKLOAD_SHM_LIB_DIR/ && bash build.sh" >&2
+    echo "    3. Unset SKIP_RUST_INSTALL and retry (build.sh installs rustup), or install cargo on PATH" >&2
+    echo "  SKIP_RUST_BUILD=1 / SKIP_WORKLOAD_SHM_BUILD=1 only reuse an existing .so; they do not" >&2
+    echo "  authorize a first-time build without one." >&2
     exit 1
 fi
 
 if [[ ! -f "$WORKLOAD_SHM_LIB" ]]; then
-    echo "[ERROR] $WORKLOAD_SHM_LIB is missing after the workload-shm build step."
-    echo "  cargo/prebuilt must produce libmindie_workload_shm.so before pip wheel."
+    echo "[ERROR] refusing to emit dist/motor-*.whl: $WORKLOAD_SHM_LIB is missing after the workload-shm build step." >&2
+    echo "  cargo/prebuilt must produce libmindie_workload_shm.so before pip wheel." >&2
+    echo "  Coordinator cannot start without this library (no Python ledger fallback)." >&2
     exit 1
 fi
 
@@ -211,6 +224,22 @@ if [[ -z "${WHEEL_PATH}" || ! -f "${WHEEL_PATH}" ]]; then
     echo "[ERROR] pip wheel did not produce dist/motor-*.whl" >&2
     exit 1
 fi
-PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
+if ! PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
     "from motor.coordinator.workload_shm_rs.wheel_gate import assert_motor_wheel_has_workload_shm; assert_motor_wheel_has_workload_shm(r'''${WHEEL_PATH}''')"
+then
+    echo "[ERROR] refusing to keep ${WHEEL_PATH}: archive is missing libmindie_workload_shm.so." >&2
+    echo "  Coordinator cannot start without this library (no Python ledger fallback)." >&2
+    rm -f "${WHEEL_PATH}"
+    exit 1
+fi
+if [[ -f "$KV_CONDUCTOR_BIN" ]]; then
+    if ! PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
+        "from motor.coordinator.workload_shm_rs.wheel_gate import assert_motor_wheel_has_kv_conductor; assert_motor_wheel_has_kv_conductor(r'''${WHEEL_PATH}''')"
+    then
+        echo "[ERROR] refusing to keep ${WHEEL_PATH}: kv-conductor was built but is missing from the archive." >&2
+        rm -f "${WHEEL_PATH}"
+        exit 1
+    fi
+    echo "wheel kv-conductor verified: ${WHEEL_PATH}"
+fi
 echo "wheel native lib verified: ${WHEEL_PATH}"
