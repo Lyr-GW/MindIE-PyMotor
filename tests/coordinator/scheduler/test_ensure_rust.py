@@ -8,7 +8,7 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-"""Guards CI cargo discovery: rustup outside PATH must still be found; skip must not fetch."""
+"""Guards native toolchain discovery: rustup/cargo and g++ must be found without extra scripts."""
 
 from __future__ import annotations
 
@@ -147,3 +147,45 @@ def test_skip_rust_build_shorthand_is_noop_when_unset(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert "shm=unset kv=unset" in result.stdout
+
+
+def _write_fake_gxx(bin_dir: Path) -> Path:
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    gxx = bin_dir / "g++"
+    gxx.write_text("#!/bin/sh\necho fake-g++ 1.0\n", encoding="utf-8")
+    gxx.chmod(gxx.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return gxx
+
+
+def test_motor_ensure_cxx_exports_gxx_when_c_plusplus_missing(tmp_path: Path):
+    """cc-rs looks up 'c++'; CI may only have g++. Export CXX so zmq-sys can compile."""
+    gxx = _write_fake_gxx(tmp_path / "bin")
+    env = _isolated_env(tmp_path)
+    env["PATH"] = str(gxx.parent)
+    result = subprocess.run(  # noqa: S603
+        ["/bin/bash", "-c", f"source '{_ENSURE_RUST}' && motor_ensure_cxx && printf '%s\\n' \"$CXX\""],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_SUBPROCESS_TIMEOUT_SEC,
+    )
+    assert result.returncode == 0, result.stderr
+    assert str(gxx) in result.stdout
+
+
+def test_skip_cxx_install_does_not_attempt_package_install(tmp_path: Path):
+    """Locked CI images must be able to refuse apt/dnf without touching the system."""
+    env = _isolated_env(tmp_path)
+    env["PATH"] = "/empty-path-no-compiler"
+    env["SKIP_CXX_INSTALL"] = "1"
+    result = subprocess.run(  # noqa: S603
+        ["/bin/bash", "-c", f"source '{_ENSURE_RUST}' && motor_ensure_cxx"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_SUBPROCESS_TIMEOUT_SEC,
+    )
+    assert result.returncode != 0
+    assert "SKIP_CXX_INSTALL=1" in result.stderr

@@ -61,8 +61,6 @@ WORKLOAD_SHM_LIB="$WORKLOAD_SHM_LIB_DIR/libmindie_workload_shm.so"
 
 # shellcheck disable=SC1091
 source ./scripts/ensure_rust.sh
-# shellcheck disable=SC1091
-source ./scripts/ensure_cxx.sh
 motor_apply_skip_rust_build_shorthand
 motor_source_cargo_env || true
 

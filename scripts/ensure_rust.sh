@@ -9,10 +9,11 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-# Locate or install cargo for motor native crates (workload-shm + kv-conductor).
-# Source from build.sh (same shell) so PATH changes persist.
-# Defaults use rsproxy (China). Override with RUSTUP_DIST_SERVER / RUSTUP_UPDATE_ROOT /
-# RUSTUP_INIT_URL. Set SKIP_RUST_INSTALL=1 to disable network install (offline PREBUILT).
+# Native toolchain helpers sourced by build.sh (same shell so PATH/CXX persist):
+#   motor_ensure_cargo — find rustup cargo or install it (rsproxy by default)
+#   motor_ensure_cxx   — find c++/g++ or apt/dnf install g++ (kv-conductor zmq-sys)
+# Override rustup with RUSTUP_DIST_SERVER / RUSTUP_UPDATE_ROOT / RUSTUP_INIT_URL.
+# SKIP_RUST_INSTALL=1 / SKIP_CXX_INSTALL=1 disable the matching network install.
 
 motor_source_cargo_env() {
     if command -v cargo >/dev/null 2>&1; then
@@ -86,6 +87,73 @@ motor_ensure_cargo() {
     fi
     echo "cargo ready: $(command -v cargo) ($(cargo --version 2>/dev/null || echo unknown))"
     return 0
+}
+
+motor_cxx_on_path() {
+    command -v c++ >/dev/null 2>&1 \
+        || command -v g++ >/dev/null 2>&1 \
+        || command -v clang++ >/dev/null 2>&1
+}
+
+motor_export_cxx() {
+    if [[ -n "${CXX:-}" ]] && command -v "${CXX}" >/dev/null 2>&1; then
+        export CXX
+        return 0
+    fi
+    if command -v c++ >/dev/null 2>&1; then
+        export CXX=c++
+    elif command -v g++ >/dev/null 2>&1; then
+        CXX="$(command -v g++)"
+        export CXX
+    elif command -v clang++ >/dev/null 2>&1; then
+        CXX="$(command -v clang++)"
+        export CXX
+    fi
+}
+
+motor_report_cxx() {
+    motor_export_cxx
+    local ver
+    ver="$(${CXX} --version 2>/dev/null || true)"
+    echo "c++ ready: ${CXX} (${ver%%$'\n'*})"
+}
+
+motor_install_gxx() {
+    if [[ "${SKIP_CXX_INSTALL:-0}" == "1" ]]; then
+        echo "[ERROR] C++ compiler not found and SKIP_CXX_INSTALL=1; not installing g++." >&2
+        return 1
+    fi
+
+    echo "Installing g++ (kv-conductor zmq-sys needs the c++ tool)..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends g++
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y gcc-c++
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y gcc-c++
+    else
+        echo "[ERROR] no supported package manager was found to install g++." >&2
+        echo "  Ubuntu: apt-get install -y g++   (or build-essential)" >&2
+        echo "  openEuler: dnf/yum install -y gcc-c++" >&2
+        return 1
+    fi
+}
+
+motor_ensure_cxx() {
+    if motor_cxx_on_path; then
+        motor_report_cxx
+        return 0
+    fi
+    if ! motor_install_gxx; then
+        return 1
+    fi
+    hash -r 2>/dev/null || true
+    if ! motor_cxx_on_path; then
+        echo "[ERROR] g++ install finished but c++/g++ is still not on PATH." >&2
+        return 1
+    fi
+    motor_report_cxx
 }
 
 # Convenience single knob: SKIP_RUST_BUILD=1 means "no Rust source changed since
