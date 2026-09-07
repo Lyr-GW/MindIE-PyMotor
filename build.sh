@@ -211,15 +211,35 @@ echo ""
 
 echo "Building wheel package with pip wheel (PEP517)... (VERBOSE=${VERBOSE})"
 
-# Use pep517 build interface to avoid legacy setup.py warning. if no network, need add "--no-build-isolation"
-cmd=(python -m pip wheel . --no-deps --use-pep517 -w dist -i https://pypi.tuna.tsinghua.edu.cn/simple)
-if [[ "${VERBOSE}" -eq 0 ]]; then
-  cmd+=(-q) # quiet output by default
+# Default index stays tuna (master). Override when that host returns 403, e.g.
+#   PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
+# Isolation still downloads setuptools from the index; if that fails, retry
+# --no-build-isolation (needs setuptools/wheel already installed).
+PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+if [[ -z "${PIP_TRUSTED_HOST:-}" ]]; then
+    _pip_host="${PIP_INDEX_URL#*://}"
+    PIP_TRUSTED_HOST="${_pip_host%%/*}"
 fi
+echo "pip wheel index: ${PIP_INDEX_URL} (trusted-host=${PIP_TRUSTED_HOST})"
+
+motor_pip_wheel() {
+    local cmd=(python -m pip wheel . --no-deps --use-pep517 -w dist
+        -i "${PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}")
+    if [[ "${1:-}" == "no-isolation" ]]; then
+        cmd+=(--no-build-isolation)
+    fi
+    if [[ "${VERBOSE}" -eq 0 ]]; then
+        cmd+=(-q)
+    fi
+    "${cmd[@]}"
+}
 
 rm -rf dist/
 mkdir -p dist
-"${cmd[@]}"
+if ! motor_pip_wheel isolation; then
+    echo "[WARNING] pep517 isolation failed (mirror 403/unreachable). Retrying with --no-build-isolation."
+    motor_pip_wheel no-isolation
+fi
 
 # Prefer the newest file so a leftover motor-*.whl cannot steal the gate.
 WHEEL_PATH="$(ls -t dist/motor-*.whl 2>/dev/null | head -n1 || true)"

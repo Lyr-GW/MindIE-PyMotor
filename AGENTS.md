@@ -61,6 +61,7 @@ unzip -l dist/motor-*.whl | grep -E 'kv-conductor|libmindie_workload_shm.so'
 - **ABI**：Euler 宿主机编完塞进 Ubuntu 镜像可能加载失败。Dockerfile 路径在镜像内 `bash build.sh` 后卸掉 rustup
 - **源码开发（Python）**：改代码直接生效（import 走源码目录），无需重建
 - **源码开发（Rust）**：改 `.rs` 后必须重新 `cargo build --release`；`native.py` 优先加载 `workload_shm_rs/lib/*.so`（whl）再回退 `target/release/*.so`，缺失时抛 `NativeWorkloadShmUnavailable`（不静默回退错误账本）
+- **pip 源**：`build.sh` 默认清华 `-i https://pypi.tuna.tsinghua.edu.cn/simple`。该源 403 时设 `PIP_INDEX_URL`（镜像 Dockerfile 默认华为云）；隔离拉 setuptools 失败会自动 `--no-build-isolation` 重试
 - **打包/部署**：whl 是快照，打包后才装的镜像/环境必须重新 `bash build.sh` 生成新 whl，否则旧 wheel 残留导致 NameError/ImportError
 
 ## 测试

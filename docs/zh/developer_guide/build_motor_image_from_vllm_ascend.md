@@ -1,6 +1,6 @@
 # 基于vllm-ascend安装MindIE Motor
 
-先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。默认 `bash build.sh` 同时编 kv-conductor（需 gcc/curl/libzmq）；无 libzmq 时 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`。未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。
+先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。**打包依赖 Rust 工具链（rustc + cargo）**：`bash build.sh` 会自动探测已有 cargo，找不到则联网 rustup 安装（默认国内 rsproxy 镜像），详见下文「构建依赖：Rust 工具链」。默认 `bash build.sh` 同时编 kv-conductor（需 gcc/curl/libzmq）；无 libzmq 时 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`。未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。
 
 ## 构建开发测试镜像
 
@@ -83,6 +83,38 @@ Dockerfile 的构建过程包括：
 
 ## 手动安装和离线构建
 
+### 构建依赖：Rust 工具链
+
+`bash build.sh` 会把 `libmindie_workload_shm.so` 编译进 wheel（**必需**，Coordinator 没有 Python 账本回退，缺库直接拒绝出包）；有 cargo 且装了 libzmq 时还会顺带编 `kv-conductor`（可选组件）。因此制作镜像的容器内需要 **Rust 工具链（rustc + cargo）**，以及编译所需的 C 工具链和依赖库：
+
+| 组件 | 用途 | 是否必需 |
+|---|---|---|
+| gcc / g++ / build-essential（或 `gcc gcc-c++ make`） | 链接 cdylib；kv-conductor 的 `zmq-sys` 需要 `c++` | 必需（编 kv-conductor 时必须有 g++） |
+| curl 或 wget | 下载 rustup 安装脚本 | 无 cargo 时必需 |
+| Rust（rustc + cargo，建议 stable） | 编译 `workload_shm_rs` 与 `kv_conductor` 两个 crate | 必需 |
+| libzmq 头文件 + pkg-config（Ubuntu: `libzmq3-dev pkg-config`；openEuler: `zeromq-devel pkgconf`） | 编译可选组件 `kv-conductor` | 仅打包 kv-conductor 时必需 |
+
+**在线安装 Rust（推荐国内 rsproxy 镜像）：**
+
+```bash
+export RUSTUP_DIST_SERVER=https://rsproxy.cn
+export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y
+source "$HOME/.cargo/env"
+
+rustup --version && rustc --version && cargo --version
+```
+
+`build.sh` 自身也会做同样的探测/安装：先找 `PATH` / `$HOME/.cargo` / `CARGO_HOME` 下已有的 cargo（`scripts/ensure_rust.sh`），找不到才走上面的 rustup 安装（默认 rsproxy，可用 `RUSTUP_DIST_SERVER` / `RUSTUP_UPDATE_ROOT` / `RUSTUP_INIT_URL` 换其它镜像源）。因此制作镜像的容器只要能连网并装好 `curl` + C 编译器，直接执行 `bash build.sh` 即可自动装好 Rust，不必手动预装。
+
+**离线环境（容器不能联网、必须禁止 rustup 联网下载）：**
+
+1. 在有网的机器上编译好 `.so`（需与运行镜像同一 OS/glibc），再用 `WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so bash build.sh` 直接拷入；打包 kv-conductor 同理可用 `KV_CONDUCTOR_PREBUILT=/path/to/kv-conductor`。
+2. 或者提前把编好的 `.so` 放进 `motor/coordinator/workload_shm_rs/lib/`（`kv-conductor` 放进 `motor/kv_conductor/bin/`），执行 `SKIP_RUST_INSTALL=1 bash build.sh` 禁止联网装 rustup，`build.sh` 会直接复用已有产物。
+3. 若两者都没有，`build.sh` 会在编译前 `exit 1` 并打印 `refusing to emit dist/motor-*.whl: ...`，不会打出缺库的 wheel。
+
+无 libzmq 时用 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh` 跳过可选的 kv-conductor（workload-shm 仍会照常编译，不受影响）。开关与优先级细节见仓库根 `AGENTS.md`「构建」一节。
+
 ## 依赖下载（可选）
 
 >[!NOTE]说明
@@ -104,6 +136,35 @@ tar -czvf pciutils-offline.tar.gz pciutils-offline
 ```
 
 将`/mnt/pciutils-offline.tar.gz`拷贝到制作镜像机器的`/mnt/`路径下
+
+### 下载Rust工具链（离线必需）
+
+下一步「构建MindIE Motor的whl包」要用 `bash build.sh` 编译 `libmindie_workload_shm.so`，制作镜像的机器如果不能联网，需要提前在有网环境下载好 rustup 安装包和 Rust 工具链离线包：
+
+```sh
+mkdir -p /mnt/rust-offline
+cd /mnt/rust-offline
+
+# rustup-init 本体（按目标机架构选择，这里以 aarch64 Linux 为例）
+curl --proto '=https' --tlsv1.2 -sSf -o rustup-init \
+  https://rsproxy.cn/rustup-init.sh
+
+# 用 rustup 的离线归档模式下载 stable 工具链组件到本地，供无网机器安装
+RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup \
+  rustup toolchain install stable --profile minimal
+
+tar -czvf /mnt/rust-offline.tar.gz -C "$HOME" .cargo .rustup
+```
+
+将`/mnt/rust-offline.tar.gz`和`rustup-init`拷贝到制作镜像机器的`/mnt/`路径下。制作镜像机器上解压并放到 `$HOME` 后即可直接使用（`build.sh` 会自动探测 `$HOME/.cargo`，无需再跑一次 rustup 安装）：
+
+```bash
+tar -xzvf /mnt/rust-offline.tar.gz -C "$HOME"
+source "$HOME/.cargo/env"
+rustc --version && cargo --version
+```
+
+若制作镜像机器全程不具备任何编译条件，也可以直接在**另一台与运行镜像同 OS/glibc 的机器**上编出 `.so`（和可选的 `kv-conductor` 二进制），随离线包一起拷贝，构建 whl 时改用 `WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so`（可选组件同理 `KV_CONDUCTOR_PREBUILT=/path/to/kv-conductor`），并对 `build.sh` 设置 `SKIP_RUST_INSTALL=1` 禁止联网安装 rustup。
 
 ### 下载whl依赖
 
@@ -132,7 +193,8 @@ tar -czvf packages-offline.tar.gz packages-offline
 cd /mnt/MindIE-Motor
 
 # 构建好的whl包在/mnt/MindIE-Motor/dist/路径下
-# 请在与运行镜像相同的 OS 容器内执行（需 gcc/curl）
+# 请在与运行镜像相同的 OS 容器内执行（需 gcc/curl；无 cargo 时 build.sh 会自动 rustup 安装，
+# 离线环境改用上一步下载好的 /mnt/rust-offline.tar.gz，或 WORKLOAD_SHM_PREBUILT 直接给预编译 .so）
 # 默认 bash build.sh 同时编 kv-conductor（需 libzmq）；无 libzmq 才 SKIP
 SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 
