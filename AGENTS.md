@@ -53,7 +53,7 @@ unzip -l dist/motor-*.whl | grep -E 'kv-conductor|libmindie_workload_shm.so'
 
 `libmindie_workload_shm.so` 必须存在；缺库时 `build.sh` 在 `pip wheel` 前 `exit 1`，若 archive 仍缺该成员则删除刚打出的 wheel 并报 `refusing to emit/keep`。kv-conductor 仅在本次编出二进制时强制打进 wheel。
 
-前置：仓库根目录、Python 3.11+、已装 `requirements.txt`、`curl`、C 编译器（Ubuntu：`build-essential`；openEuler：`gcc gcc-c++ make`）。打 kv-conductor 还需要 libzmq + pkg-config（Ubuntu：`libzmq3-dev pkg-config`；openEuler：`zeromq-devel pkgconf`）。无 cargo 时 `scripts/ensure_rust.sh` 会 rustup 安装（默认 rsproxy）。`.so` 必须在与运行镜像相同的 OS/glibc 里编译。
+前置：仓库根目录、Python 3.11+、已装 `requirements.txt`、`curl`、C/C++ 编译器（Ubuntu：`build-essential` / `g++`；openEuler：`gcc gcc-c++ make`）。打 kv-conductor 还需要 **g++**（`zmq-sys` 找 `c++` 工具）以及 libzmq + pkg-config（Ubuntu：`libzmq3-dev pkg-config`；openEuler：`zeromq-devel pkgconf`）。无 cargo 时 `scripts/ensure_rust.sh` 会 rustup 安装（默认 rsproxy）；无 `c++`/`g++` 时 `scripts/ensure_cxx.sh` 会用包管理器装 `g++`（`SKIP_CXX_INSTALL=1` 关闭）。`.so` 必须在与运行镜像相同的 OS/glibc 里编译。
 
 - 自动执行 `scripts/generate_proto.sh`（etcd protobuf）与两个 Rust crate 的 cargo 构建：`motor/kv_conductor`（有 cargo 且未 SKIP 时打进 wheel）与 `motor/coordinator/workload_shm_rs`（`libmindie_workload_shm.so`，**不可缺，缺则禁止出包**）
 - **cargo 探测**：`scripts/ensure_rust.sh` 先 source `$HOME/.cargo` / `CARGO_HOME`（Jenkins PATH 经常看不到 rustup），仍没有则 rustup 安装（`SKIP_RUST_INSTALL=1` 关闭）。CI 不要设 `SKIP_WORKLOAD_SHM_BUILD=1`

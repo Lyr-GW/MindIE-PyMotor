@@ -28,7 +28,7 @@ RUN set -eux; \
     if command -v apt-get >/dev/null 2>&1; then \
         apt-get update; \
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            pciutils build-essential ca-certificates curl libzmq3-dev pkg-config; \
+            pciutils build-essential g++ ca-certificates curl libzmq3-dev pkg-config; \
         rm -rf /var/lib/apt/lists/*; \
     elif command -v dnf >/dev/null 2>&1; then \
         dnf install -y pciutils gcc gcc-c++ make ca-certificates curl zeromq-devel pkgconf; \

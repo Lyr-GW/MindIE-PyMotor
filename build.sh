@@ -61,6 +61,8 @@ WORKLOAD_SHM_LIB="$WORKLOAD_SHM_LIB_DIR/libmindie_workload_shm.so"
 
 # shellcheck disable=SC1091
 source ./scripts/ensure_rust.sh
+# shellcheck disable=SC1091
+source ./scripts/ensure_cxx.sh
 motor_apply_skip_rust_build_shorthand
 motor_source_cargo_env || true
 
@@ -110,7 +112,16 @@ if [[ -n "${KV_CONDUCTOR_PREBUILT:-}" ]]; then
 
 elif command -v cargo >/dev/null 2>&1 && [[ "${SKIP_KV_CONDUCTOR_BUILD:-0}" != "1" ]]; then
     # Mode 2: build from source (always rebuilds when cargo is available).
+    # zmq-sys / zeromq-src invoke cc-rs with the 'c++' tool; CI often has rustc
+    # after rustup but no g++. Install or export CXX before cargo.
     echo "Building kv-conductor from source (cargo build --release)..."
+    if ! motor_ensure_cxx; then
+        echo "[ERROR] kv-conductor cargo build needs a C++ compiler (g++ / c++)." >&2
+        echo "  Ubuntu: apt-get install -y g++   (or build-essential)" >&2
+        echo "  openEuler: dnf/yum install -y gcc-c++" >&2
+        echo "  Offline: SKIP_CXX_INSTALL=1 plus SKIP_KV_CONDUCTOR_BUILD=1, or KV_CONDUCTOR_PREBUILT." >&2
+        exit 1
+    fi
     (
         cd "$KV_CONDUCTOR_DIR" || exit 1
         cargo build --release
