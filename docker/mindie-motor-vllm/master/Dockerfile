@@ -54,9 +54,11 @@ COPY examples ./examples
 RUN set -eux; \
     SKIP_KV_CONDUCTOR_BUILD="${SKIP_KV_CONDUCTOR_BUILD}" bash build.sh; \
     pip install --no-cache-dir --force-reinstall dist/motor*.whl; \
-    python -c "from pathlib import Path; import motor.coordinator.workload_shm_rs as p; lib=Path(p.__file__).resolve().parent/'lib'/'libmindie_workload_shm.so'; assert lib.is_file() and lib.stat().st_size>0, lib"; \
+    # -P: do not prepend WORKDIR (the copied source tree) to sys.path, so this
+    # asserts the site-packages install rather than motor/ from the build context.
+    python -P -c "from pathlib import Path; import motor.coordinator.workload_shm_rs as p; lib=Path(p.__file__).resolve().parent/'lib'/'libmindie_workload_shm.so'; assert lib.is_file() and lib.stat().st_size>0, lib"; \
     if [ "${SKIP_KV_CONDUCTOR_BUILD}" != "1" ]; then \
-        python -c "from pathlib import Path; import motor; bin=Path(motor.__file__).resolve().parent/'kv_conductor'/'bin'/'kv-conductor'; assert bin.is_file() and bin.stat().st_size>0, bin"; \
+        python -P -c "from pathlib import Path; import motor; bin=Path(motor.__file__).resolve().parent/'kv_conductor'/'bin'/'kv-conductor'; assert bin.is_file() and bin.stat().st_size>0, bin"; \
     fi; \
     rm -rf build/ motor.egg-info/ dist/ \
         /root/.cargo /root/.rustup "${HOME}/.cargo" "${HOME}/.rustup" \

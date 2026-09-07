@@ -217,12 +217,19 @@ if [[ "${VERBOSE}" -eq 0 ]]; then
   cmd+=(-q) # quiet output by default
 fi
 
+rm -rf dist/
+mkdir -p dist
 "${cmd[@]}"
 
-WHEEL_PATH="$(ls -1 dist/motor-*.whl 2>/dev/null | head -n1 || true)"
+# Prefer the newest file so a leftover motor-*.whl cannot steal the gate.
+WHEEL_PATH="$(ls -t dist/motor-*.whl 2>/dev/null | head -n1 || true)"
 if [[ -z "${WHEEL_PATH}" || ! -f "${WHEEL_PATH}" ]]; then
     echo "[ERROR] pip wheel did not produce dist/motor-*.whl" >&2
     exit 1
+fi
+_wheel_count="$(ls -1 dist/motor-*.whl 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "${_wheel_count}" -gt 1 ]]; then
+    echo "[WARNING] dist/ contains ${_wheel_count} motor-*.whl files; gating the newest: ${WHEEL_PATH}" >&2
 fi
 if ! PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
     "from motor.coordinator.workload_shm_rs.wheel_gate import assert_motor_wheel_has_workload_shm; assert_motor_wheel_has_workload_shm(r'''${WHEEL_PATH}''')"
