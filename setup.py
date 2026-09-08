@@ -27,10 +27,10 @@ def _read_version() -> str:
     return match.group(1)
 
 
-# Include the kv-conductor binary when build.sh produced it. Official packaging
-# is bash build.sh, which packs both crates when cargo + libzmq are present and
-# asserts the binary is in the wheel. SKIP_KV_CONDUCTOR_BUILD=1 (or no cargo)
-# omits it — the Python runtime handles a missing conductor gracefully.
+# Include the kv-conductor binary when build.sh produced or reused it. Official
+# packaging is bash build.sh: compile when bin/ is missing and cargo + libzmq
+# are present (existing bin skips cargo; missing zmq auto-skips; SKIP_KV_CONDUCTOR_BUILD=1
+# skips even when headers exist). The Python runtime handles a missing conductor gracefully.
 _package_data: dict[str, list[str]] = {
     "motor": ["version.info"],
 }

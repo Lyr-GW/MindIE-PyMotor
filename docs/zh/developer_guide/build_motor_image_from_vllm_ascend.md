@@ -1,6 +1,6 @@
 # 基于vllm-ascend安装MindIE Motor
 
-先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。**打包依赖 Rust 工具链（rustc + cargo）**：`bash build.sh` 会自动探测已有 cargo，找不到则联网 rustup 安装（默认国内 rsproxy 镜像），详见下文「构建依赖：Rust 工具链」。默认 `bash build.sh` 同时编 kv-conductor（需 gcc/curl/libzmq）；无 libzmq 时 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`。未改 `.rs` 用 `SKIP_RUST_BUILD=1`；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。
+先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。**首次打包依赖 Rust 工具链（rustc + cargo）**：`bash build.sh` 会自动探测已有 cargo，找不到且缺 `.so` 时则联网 rustup 安装（默认国内 rsproxy 镜像），详见下文「构建依赖：Rust 工具链」。已有 `lib/*.so` / `bin/kv-conductor` 则跳过对应 cargo；缺了才编。wheel 始终必须含 workload-shm；有 cargo + libzmq 且缺 conductor 二进制时再编 kv-conductor，缺 libzmq 时自动跳过（也可显式 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`）。改 `.rs` 后用 `SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0` 强制重编；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。官方 Dockerfile 默认两个 SKIP 为 `0`，镜像内按目标 ABI 编译。
 
 ## 构建开发测试镜像
 
@@ -85,7 +85,7 @@ Dockerfile 的构建过程包括：
 
 ### 构建依赖：Rust 工具链
 
-`bash build.sh` 会把 `libmindie_workload_shm.so` 编译进 wheel（**必需**，Coordinator 没有 Python 账本回退，缺库直接拒绝出包）；有 cargo 且装了 libzmq 时还会顺带编 `kv-conductor`（可选组件）。因此制作镜像的容器内需要 **Rust 工具链（rustc + cargo）**，以及编译所需的 C 工具链和依赖库：
+`bash build.sh` 会把 `libmindie_workload_shm.so` 打进 wheel（**必需**，Coordinator 没有 Python 账本回退，缺库直接拒绝出包）：已有 `lib/*.so` 则跳过 cargo，缺了才编。缺 `bin/kv-conductor` 且有 cargo + libzmq 时还会顺带编 kv-conductor（可选）。官方 Dockerfile 默认 `SKIP_WORKLOAD_SHM_BUILD=0` 与 `SKIP_KV_CONDUCTOR_BUILD=0`，镜像内始终按目标 ABI 编译。因此制作镜像的容器内需要 **Rust 工具链（rustc + cargo）**，以及编译所需的 C 工具链和依赖库：
 
 | 组件 | 用途 | 是否必需 |
 |---|---|---|
@@ -113,7 +113,7 @@ rustup --version && rustc --version && cargo --version
 2. 或者提前把编好的 `.so` 放进 `motor/coordinator/workload_shm_rs/lib/`（`kv-conductor` 放进 `motor/kv_conductor/bin/`），执行 `SKIP_RUST_INSTALL=1 bash build.sh` 禁止联网装 rustup，`build.sh` 会直接复用已有产物。
 3. 若两者都没有，`build.sh` 会在编译前 `exit 1` 并打印 `refusing to emit dist/motor-*.whl: ...`，不会打出缺库的 wheel。
 
-无 libzmq 时用 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh` 跳过可选的 kv-conductor（workload-shm 仍会照常编译，不受影响）。开关与优先级细节见仓库根 `AGENTS.md`「构建」一节。
+缺 libzmq 时 `build.sh` 会探测后自动跳过可选的 kv-conductor（不因此失败，也不在脚本里安装 libzmq）；仍可用 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh` 显式跳过。workload-shm 仍会照常编译，不受影响。开关与优先级细节见仓库根 `AGENTS.md`「构建」一节。
 
 ## 依赖下载（可选）
 
@@ -195,7 +195,7 @@ cd /mnt/MindIE-Motor
 # 构建好的whl包在/mnt/MindIE-Motor/dist/路径下
 # 请在与运行镜像相同的 OS 容器内执行（需 gcc/curl；无 cargo 时 build.sh 会自动 rustup 安装，
 # 离线环境改用上一步下载好的 /mnt/rust-offline.tar.gz，或 WORKLOAD_SHM_PREBUILT 直接给预编译 .so）
-# 默认 bash build.sh 同时编 kv-conductor（需 libzmq）；无 libzmq 才 SKIP
+# 缺 libzmq 时 build.sh 会自动跳过 kv-conductor；显式跳过仍可用：
 SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 
 cd /mnt/
@@ -278,7 +278,7 @@ dpkg -i *.deb
 
     pip install -r requirements.txt
 
-    # 无 libzmq 时 SKIP；有 libzmq 用 bash build.sh 同时打 kv-conductor
+    # 有 libzmq 时 bash build.sh 会打 kv-conductor；缺 zmq 自动跳过。显式跳过：
     SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
     pip install --force-reinstall ./dist/motor-*.whl
 

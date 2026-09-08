@@ -44,13 +44,14 @@ echo "Using motor_version=${MOTOR_VERSION}"
 # --- Rust toolchain (CI / Docker / host) ---
 # Jenkins often has rustup under $HOME/.cargo or /root/.cargo while the job PATH
 # does not. Nightly previously skipped native crates and shipped an empty wheel.
-# Source cargo env first; if still missing and workload-shm has no prebuilt, install
-# rustup unless SKIP_RUST_INSTALL=1 (offline packing with WORKLOAD_SHM_PREBUILT).
+# Source cargo env first. rustup only if a crate actually needs compiling:
+# missing lib/*.so or bin/kv-conductor, or an explicit SKIP_*=0 force-rebuild.
+# Existing artifacts skip cargo (and rustup). Offline: SKIP_RUST_INSTALL=1 plus
+# WORKLOAD_SHM_PREBUILT or an already-copied .so.
 #
-# Set SKIP_RUST_BUILD=1 when no Rust source changed since the last successful
-# build.sh run and you only need to repackage Python/config changes into a new
-# wheel: it skips cargo for BOTH crates and reuses lib/*.so + bin/kv-conductor
-# from the previous build (per-crate SKIP_*_BUILD env vars still override it).
+# Default: reuse lib/*.so and bin/kv-conductor when those files already exist.
+# SKIP_WORKLOAD_SHM_BUILD=0 / SKIP_KV_CONDUCTOR_BUILD=0 force a rebuild after
+# .rs changes. SKIP_RUST_BUILD=1 fills both SKIP flags if they were unset.
 
 KV_CONDUCTOR_DIR="./motor/kv_conductor"
 KV_CONDUCTOR_BIN_DIR="$KV_CONDUCTOR_DIR/bin"
@@ -64,16 +65,23 @@ source ./scripts/ensure_rust.sh
 motor_apply_skip_rust_build_shorthand
 motor_source_cargo_env || true
 
-_shm_has_input="0"
-if [[ -n "${WORKLOAD_SHM_PREBUILT:-}" || -f "$WORKLOAD_SHM_LIB" ]]; then
-    _shm_has_input="1"
+_shm_needs_cargo="0"
+if [[ -z "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
+    if [[ ! -f "$WORKLOAD_SHM_LIB" ]] || motor_var_is_explicit_zero SKIP_WORKLOAD_SHM_BUILD; then
+        _shm_needs_cargo="1"
+    fi
 fi
-if ! command -v cargo >/dev/null 2>&1; then
-    if [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" == "1" && "$_shm_has_input" == "1" ]]; then
-        echo "cargo not on PATH; reusing prebuilt/existing workload-shm library."
-    elif [[ -n "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
-        echo "cargo not on PATH; using WORKLOAD_SHM_PREBUILT."
-    else
+_kv_needs_cargo="0"
+if [[ -z "${KV_CONDUCTOR_PREBUILT:-}" && "${SKIP_KV_CONDUCTOR_BUILD:-0}" != "1" ]]; then
+    if [[ ! -f "$KV_CONDUCTOR_BIN" ]] || motor_var_is_explicit_zero SKIP_KV_CONDUCTOR_BUILD; then
+        _kv_needs_cargo="1"
+    fi
+fi
+
+if ! motor_cargo_usable; then
+    if [[ "$_shm_needs_cargo" != "1" && "$_kv_needs_cargo" != "1" ]]; then
+        echo "native artifacts already present; skip rustup."
+    elif [[ "$_shm_needs_cargo" == "1" && ! -f "$WORKLOAD_SHM_LIB" && -z "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
         echo "=== rust toolchain ==="
         if ! motor_ensure_cargo; then
             echo "[ERROR] refusing to emit dist/motor-*.whl: cargo is required to compile libmindie_workload_shm.so." >&2
@@ -82,84 +90,24 @@ if ! command -v cargo >/dev/null 2>&1; then
             echo "  Offline: SKIP_RUST_INSTALL=1 plus a prebuilt library." >&2
             exit 1
         fi
+    else
+        echo "=== rust toolchain ==="
+        if ! motor_ensure_cargo; then
+            echo "[WARNING] cargo unavailable; will reuse existing workload-shm if present and skip kv-conductor compile."
+        fi
     fi
 fi
 
-# --- Conditional kv-conductor build ---
-# Priority (unchanged by the workload-shm work below):
-#   1. KV_CONDUCTOR_PREBUILT env var — path to a pre-built binary
-#   2. Build from source via cargo (if available)
-#   3. motor/kv_conductor/bin/kv-conductor already exists (no cargo; manual copy)
-#   4. Skip — wheel built without kv-conductor (optional component)
-#
-# Set SKIP_KV_CONDUCTOR_BUILD=1 to skip cargo build even when cargo is
-# available (use the existing bin/kv-conductor, or skip if none).
-
-echo "=== kv-conductor ==="
-
-if [[ -n "${KV_CONDUCTOR_PREBUILT:-}" ]]; then
-    # Mode 1: use user-supplied pre-built binary.
-    if [[ ! -f "$KV_CONDUCTOR_PREBUILT" ]]; then
-        echo "[ERROR] KV_CONDUCTOR_PREBUILT='$KV_CONDUCTOR_PREBUILT' does not exist."
-        exit 1
-    fi
-    mkdir -p "$KV_CONDUCTOR_BIN_DIR"
-    cp "$KV_CONDUCTOR_PREBUILT" "$KV_CONDUCTOR_BIN"
-    chmod +x "$KV_CONDUCTOR_BIN"
-    echo "kv-conductor binary ready (pre-built): $KV_CONDUCTOR_BIN"
-
-elif command -v cargo >/dev/null 2>&1 && [[ "${SKIP_KV_CONDUCTOR_BUILD:-0}" != "1" ]]; then
-    # Mode 2: build from source (always rebuilds when cargo is available).
-    # zmq-sys / zeromq-src invoke cc-rs with the 'c++' tool; CI often has rustc
-    # after rustup but no g++. Install or export CXX before cargo.
-    echo "Building kv-conductor from source (cargo build --release)..."
-    if ! motor_ensure_cxx; then
-        echo "[ERROR] kv-conductor cargo build needs a C++ compiler (g++ / c++)." >&2
-        echo "  Ubuntu: apt-get install -y g++   (or build-essential)" >&2
-        echo "  openEuler: dnf/yum install -y gcc-c++" >&2
-        echo "  Offline: SKIP_CXX_INSTALL=1 plus SKIP_KV_CONDUCTOR_BUILD=1, or KV_CONDUCTOR_PREBUILT." >&2
-        exit 1
-    fi
-    (
-        cd "$KV_CONDUCTOR_DIR" || exit 1
-        cargo build --release
-    )
-    mkdir -p "$KV_CONDUCTOR_BIN_DIR"
-    cp "$KV_CONDUCTOR_DIR/target/release/kv-conductor" "$KV_CONDUCTOR_BIN"
-    chmod +x "$KV_CONDUCTOR_BIN"
-    if [[ ! -x "$KV_CONDUCTOR_BIN" ]]; then
-        echo "[ERROR] kv-conductor cargo build did not produce an executable at $KV_CONDUCTOR_BIN" >&2
-        echo "  Need libzmq headers (Ubuntu: libzmq3-dev; openEuler: zeromq-devel) plus pkg-config." >&2
-        exit 1
-    fi
-    echo "kv-conductor binary ready (cargo-built): $KV_CONDUCTOR_BIN"
-
-elif [[ -f "$KV_CONDUCTOR_BIN" ]]; then
-    # Mode 3: binary already in place (no cargo; e.g. manual copy or CI artifact).
-    echo "kv-conductor binary ready (existing, no rebuild): $KV_CONDUCTOR_BIN"
-
-else
-    # Mode 4: no binary available — skip.
-    rm -rf "$KV_CONDUCTOR_BIN_DIR"
-    echo "[WARNING] kv-conductor binary not found and cargo unavailable."
-    echo "  Options:"
-    echo "    1. KV_CONDUCTOR_PREBUILT=/path/to/kv-conductor bash build.sh"
-    echo "    2. cp /path/to/kv-conductor motor/kv_conductor/bin/ && bash build.sh"
-    echo "    3. Install Rust, or run scripts/ensure_rust.sh"
-    echo "  (kv-conductor is optional; the wheel will still ship without it.)"
-fi
-
-echo ""
+# No usable cargo means no Rust crate can compile. That is a hard failure for
+# workload-shm (unless PREBUILT / existing lib/*.so). It is not a conductor skip.
+# kv-conductor WARNING-skip is only for conductor-specific deps (libzmq / g++ for
+# zmq-sys) or a failed conductor cargo build after cargo itself is usable.
 
 # --- Required workload-shm (coordinator) build ---
-# Priority:
-#   1. WORKLOAD_SHM_PREBUILT env var — path to a pre-built .so
-#   2. build from source via cargo (unless SKIP_WORKLOAD_SHM_BUILD=1)
-#   3. motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so already present
-# Unlike kv-conductor this library is required: Coordinator has no Python ledger
-# fallback. Missing .so is a hard build error (do not emit a wheel without it).
-# SKIP_WORKLOAD_SHM_BUILD=1 only skips cargo rebuild; it does not authorize a
-# wheel without the library.
+# Default: reuse motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so
+# if it already exists. Compile only when the file is missing (or when
+# SKIP_WORKLOAD_SHM_BUILD=0 is set explicitly to force a rebuild after .rs changes).
+# PREBUILT always copies over lib/. Missing .so after this step is a hard error.
 
 echo "=== workload-shm ==="
 
@@ -173,8 +121,10 @@ if [[ -n "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
     chmod +x "$WORKLOAD_SHM_LIB"
     echo "workload-shm library ready (pre-built): $WORKLOAD_SHM_LIB"
 
-elif command -v cargo >/dev/null 2>&1 && \
-    { [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" != "1" ]] || [[ ! -f "$WORKLOAD_SHM_LIB" ]]; }; then
+elif [[ -f "$WORKLOAD_SHM_LIB" ]] && ! motor_var_is_explicit_zero SKIP_WORKLOAD_SHM_BUILD; then
+    echo "workload-shm library ready (existing, skip cargo): $WORKLOAD_SHM_LIB"
+
+elif motor_cargo_usable; then
     if [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" == "1" ]]; then
         echo "[WARNING] SKIP_WORKLOAD_SHM_BUILD=1 ignored because $WORKLOAD_SHM_LIB is missing."
     fi
@@ -195,7 +145,7 @@ elif command -v cargo >/dev/null 2>&1 && \
     echo "workload-shm library ready (cargo-built): $WORKLOAD_SHM_LIB"
 
 elif [[ -f "$WORKLOAD_SHM_LIB" ]]; then
-    echo "workload-shm library ready (existing, no rebuild): $WORKLOAD_SHM_LIB"
+    echo "workload-shm library ready (existing, no cargo): $WORKLOAD_SHM_LIB"
 
 else
     echo "[ERROR] refusing to emit dist/motor-*.whl: libmindie_workload_shm.so is missing and cargo is unavailable." >&2
@@ -214,6 +164,62 @@ if [[ ! -f "$WORKLOAD_SHM_LIB" ]]; then
     echo "  cargo/prebuilt must produce libmindie_workload_shm.so before pip wheel." >&2
     echo "  Coordinator cannot start without this library (no Python ledger fallback)." >&2
     exit 1
+fi
+
+echo ""
+
+# --- Optional kv-conductor ---
+# Default: reuse motor/kv_conductor/bin/kv-conductor if present.
+# Compile only when the binary is missing (conductor-specific skip if no zmq/g++).
+# SKIP_KV_CONDUCTOR_BUILD=0 forces cargo even when bin/ exists.
+# SKIP_KV_CONDUCTOR_BUILD=1 never compiles; omits the crate if bin/ is also missing.
+# This script never apt-installs libzmq.
+
+echo "=== kv-conductor ==="
+
+_kv_ready="0"
+
+if [[ -n "${KV_CONDUCTOR_PREBUILT:-}" ]]; then
+    if [[ ! -f "$KV_CONDUCTOR_PREBUILT" ]]; then
+        echo "[ERROR] KV_CONDUCTOR_PREBUILT='$KV_CONDUCTOR_PREBUILT' does not exist."
+        exit 1
+    fi
+    mkdir -p "$KV_CONDUCTOR_BIN_DIR"
+    cp "$KV_CONDUCTOR_PREBUILT" "$KV_CONDUCTOR_BIN"
+    chmod +x "$KV_CONDUCTOR_BIN"
+    echo "kv-conductor binary ready (pre-built): $KV_CONDUCTOR_BIN"
+    _kv_ready="1"
+
+elif [[ -f "$KV_CONDUCTOR_BIN" ]] && ! motor_var_is_explicit_zero SKIP_KV_CONDUCTOR_BUILD; then
+    echo "kv-conductor binary ready (existing, skip cargo): $KV_CONDUCTOR_BIN"
+    _kv_ready="1"
+
+elif [[ "${SKIP_KV_CONDUCTOR_BUILD:-0}" == "1" ]]; then
+    echo "SKIP_KV_CONDUCTOR_BUILD=1: skipping kv-conductor cargo build."
+
+elif motor_cargo_usable && motor_zmq_available; then
+    echo "Building kv-conductor from source (cargo build --release)..."
+    if motor_try_kv_conductor_cargo_build "$KV_CONDUCTOR_DIR" "$KV_CONDUCTOR_BIN"; then
+        echo "kv-conductor binary ready (cargo-built): $KV_CONDUCTOR_BIN"
+        _kv_ready="1"
+    else
+        echo "[WARNING] kv-conductor compile failed (libzmq / g++ / zmq-sys); omitting this optional crate."
+    fi
+
+elif motor_cargo_usable; then
+    echo "[WARNING] libzmq headers / pkg-config libzmq not found; skipping kv-conductor (conductor-only dep)."
+    echo "  Official Motor images install libzmq3-dev (or zeromq-devel) + pkg-config."
+    echo "  Explicit skip remains: SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh"
+fi
+
+if [[ "$_kv_ready" != "1" ]]; then
+    if [[ -f "$KV_CONDUCTOR_BIN" ]]; then
+        echo "kv-conductor binary ready (existing, no rebuild): $KV_CONDUCTOR_BIN"
+    else
+        rm -rf "$KV_CONDUCTOR_BIN_DIR"
+        echo "kv-conductor omitted from the wheel (optional)."
+        echo "  To pack it: install libzmq headers + pkg-config, or set KV_CONDUCTOR_PREBUILT."
+    fi
 fi
 
 echo ""
@@ -247,19 +253,26 @@ rm -rf dist/
 mkdir -p dist
 if ! motor_pip_wheel isolation; then
     echo "[WARNING] pep517 isolation failed (mirror 403/unreachable). Retrying with --no-build-isolation."
+    # Isolation usually dies before writing a wheel; wipe anyway so a partial
+    # motor-*.whl cannot sit next to the retry output. Dockerfile installs
+    # dist/motor*.whl as a glob and must see exactly one file.
+    rm -f dist/motor-*.whl
     motor_pip_wheel no-isolation
 fi
 
-# Prefer the newest file so a leftover motor-*.whl cannot steal the gate.
 WHEEL_PATH="$(ls -t dist/motor-*.whl 2>/dev/null | head -n1 || true)"
 if [[ -z "${WHEEL_PATH}" || ! -f "${WHEEL_PATH}" ]]; then
     echo "[ERROR] pip wheel did not produce dist/motor-*.whl" >&2
     exit 1
 fi
-_wheel_count="$(ls -1 dist/motor-*.whl 2>/dev/null | wc -l | tr -d ' ')"
-if [[ "${_wheel_count}" -gt 1 ]]; then
-    echo "[WARNING] dist/ contains ${_wheel_count} motor-*.whl files; gating the newest: ${WHEEL_PATH}" >&2
-fi
+# Drop any extra motor-*.whl (same-name overwrite is the common case; keep a
+# single gated file so pip install dist/motor*.whl cannot pick two archives).
+for _extra in dist/motor-*.whl; do
+    if [[ "${_extra}" != "${WHEEL_PATH}" ]]; then
+        echo "[WARNING] removing extra wheel ${_extra}; keeping gated ${WHEEL_PATH}" >&2
+        rm -f "${_extra}"
+    fi
+done
 if ! PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
     "from motor.coordinator.workload_shm_rs.wheel_gate import assert_motor_wheel_has_workload_shm; assert_motor_wheel_has_workload_shm(r'''${WHEEL_PATH}''')"
 then

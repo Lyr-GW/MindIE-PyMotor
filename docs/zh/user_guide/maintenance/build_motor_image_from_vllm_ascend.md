@@ -144,7 +144,7 @@ make build-pymotor-image \
 
      # 构建好的whl包在/mnt/MindIE-Motor/dist/路径下
      # 请在与运行镜像相同的 OS 容器内执行（需 gcc/curl）
-     # 默认 bash build.sh 同时编 kv-conductor（需 libzmq）；无 libzmq 才 SKIP
+     # 缺 libzmq 时 build.sh 会自动跳过 kv-conductor；显式跳过仍可用：
      SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
 
      cd /mnt/
@@ -227,7 +227,7 @@ docker pull quay.io/ascend/vllm-ascend:v0.13.0
 
          pip install -r requirements.txt
 
-         # 无 libzmq 时 SKIP；有 libzmq 用 bash build.sh 同时打 kv-conductor
+         # 有 libzmq 时 bash build.sh 会打 kv-conductor；缺 zmq 自动跳过。显式跳过：
          SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh
          pip install --force-reinstall ./dist/motor-*.whl
 

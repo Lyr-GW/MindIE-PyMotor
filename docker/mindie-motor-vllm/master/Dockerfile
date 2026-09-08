@@ -10,9 +10,12 @@ ARG IMAGE_VERSION=master
 ARG PIP_INDEX_URL=https://repo.huaweicloud.com/repository/pypi/simple
 ARG PIP_TRUSTED_HOST=repo.huaweicloud.com
 # Default: pack both Rust crates (workload-shm required; kv-conductor when cargo
-# + libzmq are present). Override with --build-arg SKIP_KV_CONDUCTOR_BUILD=1
-# only when the base image cannot install libzmq headers.
+# + libzmq are present). Force cargo in-image even if the build context already
+# has a host-built lib/*.so or bin/kv-conductor (glibc/ABI mismatch).
+# Override with --build-arg SKIP_KV_CONDUCTOR_BUILD=1 only when the base image
+# cannot install libzmq headers.
 ARG SKIP_KV_CONDUCTOR_BUILD=0
+ARG SKIP_WORKLOAD_SHM_BUILD=0
 
 ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST} \
@@ -52,6 +55,7 @@ COPY motor ./motor
 COPY examples ./examples
 
 RUN set -eux; \
+    SKIP_WORKLOAD_SHM_BUILD="${SKIP_WORKLOAD_SHM_BUILD}" \
     SKIP_KV_CONDUCTOR_BUILD="${SKIP_KV_CONDUCTOR_BUILD}" bash build.sh; \
     pip install --no-cache-dir --force-reinstall dist/motor*.whl; \
     # -P: do not prepend WORKDIR (the copied source tree) to sys.path, so this
