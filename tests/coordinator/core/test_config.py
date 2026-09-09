@@ -1276,3 +1276,50 @@ def test_invalid_render_timeout_is_rejected():
 
     with pytest.raises(ValueError, match="render_config.timeout_ms"):
         config.validate_config()
+
+
+def test_policy_plugin_config_from_json(_temp_json_file):
+    user_config = {
+        "motor_coordinator_config": {
+            "scheduler_config": {
+                "scheduler_type": "load_balance",
+                "policy_plugin": {
+                    "name": "acme.weighted_tokens",
+                    "options": {"load_weight": 1.0},
+                    "fallback": "round_robin",
+                },
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+    plugin = config.scheduler_config.policy_plugin
+    assert plugin is not None
+    assert plugin.name == "acme.weighted_tokens"
+    assert plugin.options == {"load_weight": 1.0}
+    assert plugin.fallback == "round_robin"
+
+
+def test_policy_plugin_reserved_name_rejected():
+    from motor.config.coordinator import PolicyPluginConfig
+
+    config = CoordinatorConfig()
+    config.scheduler_config.policy_plugin = PolicyPluginConfig(name="load_balance")
+
+    with pytest.raises(ValueError, match="reserved"):
+        config.validate_config()
+
+
+def test_policy_plugin_invalid_fallback_rejected():
+    from motor.config.coordinator import PolicyPluginConfig
+
+    config = CoordinatorConfig()
+    config.scheduler_config.policy_plugin = PolicyPluginConfig(
+        name="acme.test",
+        fallback="kv_cache_affinity",
+    )
+
+    with pytest.raises(ValueError, match="fallback"):
+        config.validate_config()

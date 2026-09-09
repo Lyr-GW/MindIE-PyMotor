@@ -475,7 +475,12 @@ motor_coordinator_config字段配置样例如下所示：
 | base_timeout_s | float | 首次熔断时长（秒），也是熔断时长指数退避的基数；每次重新熔断/探活失败按 `2^(熔断次数-1)` 倍增长。默认值：`30.0`。 |
 | max_timeout_s | float | 熔断时长上限（秒）。默认值：`300.0`。 |
 | **scheduler_config字段** |-|-|
-| scheduler_type | string | 调度类型，默认值：load_balance<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询；</li><li>kv_cache_affinity：KV Cache 亲和调度。</li></ul> |
+| scheduler_type | string | 调度类型，默认值：load_balance<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询；</li><li>kv_cache_affinity：KV Cache 亲和调度。</li></ul>未配置 `policy_plugin` 时使用。 |
+| policy_plugin | object | 可选外部调度策略插件（Entry Point 名称启用）。配置后 Inference Worker 启动时加载插件，`scheduler_type` 不参与选路；见下表。 |
+| **policy_plugin 字段** |-|-|
+| name | string | Entry Point 名称，例如 `acme.weighted_tokens`。内置名 `load_balance` / `round_robin` / `kv_cache_affinity` 保留。 |
+| options | object | 传给插件构造函数的 JSON 对象，默认 `{}`。 |
+| fallback | string | 插件运行时异常或非法输出时的内置降级策略，仅允许 `load_balance` 或 `round_robin`，默认 `load_balance`。 |
 | enable_pd_separation_fallback_to_hybrid | bool | PD 分离场景下，当不存在兼容且未熔断的 P/D pair 时，是否允许降级使用混部路由，默认值为 `true`。候选优先级为 Union → Prefill → Decode；Decode 兜底仅适用于上报 `decode_colocation` capability 的 vLLM 实例，关闭后无兼容 pair 时返回 503。 |
 | endpoint_instance_score_weight | float | endpoint 优先负载均衡时实例平均负载权重。默认值：`0.05` |
 | kv_affinity | object | KV Cache 亲和性调度参数（见下表） |

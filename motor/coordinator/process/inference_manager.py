@@ -33,6 +33,7 @@ from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.process.base import BaseProcessManager
 from motor.coordinator.process.utils import set_process_title
 from motor.coordinator.scheduler.policy.kv_cache_affinity import TokenizerManager
+from motor.coordinator.scheduler.policy.loader import PolicyLoader, PolicyLoadError, validate_policy_plugin_config
 
 logger = get_logger(__name__)
 
@@ -152,6 +153,15 @@ def run_inference_worker_proc(
         config.worker_metaserver_port = base_metaserver_port + worker_index
 
     logger.info("Inference worker process %s starting (PID: %s)", worker_index, os.getpid())
+
+    try:
+        validate_policy_plugin_config(config.scheduler_config.policy_plugin)
+        plugin_spec = config.scheduler_config.policy_plugin
+        if plugin_spec is not None and (plugin_spec.name or "").strip():
+            PolicyLoader().load(plugin_spec)
+    except PolicyLoadError as exc:
+        logger.error("Inference worker %s policy plugin load failed: %s", worker_index, exc)
+        raise
 
     # Create RequestManager first, then InferenceServer (business plane only)
     request_manager = RequestManager(config)
