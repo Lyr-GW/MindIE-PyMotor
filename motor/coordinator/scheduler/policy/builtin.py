@@ -25,7 +25,6 @@ from motor.coordinator.scheduler.policy.api import (
     RankedCandidate,
     SelectionInput,
 )
-from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
 
 
 class BuiltinLoadBalancePolicy(LoadBalancingPolicy):
@@ -65,6 +64,9 @@ class BuiltinRoundRobinPolicy(LoadBalancingPolicy):
         super().__init__(options)
         self._counter = int(self.options.get("start_counter", 0))
 
+    def set_start_counter(self, start_counter: int) -> None:
+        self._counter = int(start_counter)
+
     def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
         eligible = [
             candidate
@@ -88,55 +90,46 @@ class BuiltinKvCacheAffinityPolicy(LoadBalancingPolicy):
 
     def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
         mode = str(self.options.get("mode", KV_AFFINITY_MODE_UNIFIED)).lower()
-        overlap_credit = float(self.options.get("overlap_credit", 1.0))
         prefill_load_scale = float(self.options.get("prefill_load_scale", 1.0))
         load_weight = float(self.options.get("load_weight", 1.0))
         load_gate_topn = int(self.options.get("load_gate_topn", 0))
-        w_npu = float(self.options.get("w_npu", 1.0))
-        w_cpu = float(self.options.get("w_cpu", 1.0))
-        w_disk = float(self.options.get("w_disk", 0.0))
-        lookup = self.options.get("_instance_lookup")
-        if not callable(lookup):
+        eligible = [
+            candidate
+            for candidate in selection.candidates
+            if candidate.id not in selection.excluded and not candidate.blocked
+        ]
+        if not eligible:
             return []
-        instances = []
-        for candidate in selection.candidates:
-            if candidate.id in selection.excluded or candidate.blocked:
-                continue
-            resolved = lookup(candidate.id.instance_id, candidate.id.endpoint_id)
-            if resolved is None:
-                continue
-            instance, endpoint = resolved
-            endpoint.workload.active_tokens = candidate.active_tokens
-            instances.append(instance)
-        if not instances:
-            return []
-        unique_instances = list({inst.id: inst for inst in instances}.values())
-        req_info = self.options.get("_req_info")
-        if req_info is None:
-            return []
-        ranked_legacy = KvCacheAffinityPolicy.select_endpoint_candidates_from_list(
-            unique_instances,
-            req_info,
-            mode=mode,
-            overlap_credit=overlap_credit,
-            prefill_load_scale=prefill_load_scale,
-            load_weight=load_weight,
-            load_gate_topn=load_gate_topn,
-            w_npu=w_npu,
-            w_cpu=w_cpu,
-            w_disk=w_disk,
-            top_k=len(unique_instances) * 8,
-        )
-        if not ranked_legacy:
-            if mode == KV_AFFINITY_MODE_LOAD_GATED:
-                return BuiltinLoadBalancePolicy(options=self.options).rank(selection)
+        # Keep KVA semantics fail-closed to load_balance when conductor data is unavailable.
+        if not selection.kv_available:
             return BuiltinLoadBalancePolicy(options=self.options).rank(selection)
-        result: list[RankedCandidate] = []
-        for instance, endpoint, score in ranked_legacy:
-            cid = CandidateId(instance_id=instance.id, endpoint_id=endpoint.id)
-            if cid in selection.excluded:
-                continue
+        kv_candidates = [candidate for candidate in eligible if candidate.kv_match is not None]
+        if not kv_candidates:
+            return BuiltinLoadBalancePolicy(options=self.options).rank(selection)
+        indexed = list(enumerate(kv_candidates))
+        if mode == KV_AFFINITY_MODE_LOAD_GATED:
+            topn = load_gate_topn if load_gate_topn > 0 else 2
+            gated = sorted(indexed, key=lambda item: (item[1].active_tokens, item[0]))[: max(1, topn)]
+            ranked = sorted(
+                gated,
+                key=lambda item: (
+                    -int(item[1].kv_match.matched_tokens if item[1].kv_match is not None else 0),
+                    item[1].active_tokens,
+                    item[0],
+                ),
+            )
+            return [RankedCandidate(id=item[1].id, score=float(item[1].active_tokens)) for item in ranked]
+
+        scored: list[tuple[float, int, CandidateId]] = []
+        for order, candidate in indexed:
+            prefill_cost = (
+                float(candidate.kv_match.prefill_cost)
+                if candidate.kv_match is not None
+                else float(selection.request.prompt_tokens)
+            )
+            score = prefill_load_scale * prefill_cost + load_weight * float(candidate.active_tokens)
             if not math.isfinite(score):
                 continue
-            result.append(RankedCandidate(id=cid, score=score))
-        return result
+            scored.append((score, order, candidate.id))
+        scored.sort(key=lambda item: (item[0], item[1]))
+        return [RankedCandidate(id=candidate_id, score=score) for score, _order, candidate_id in scored]

@@ -75,6 +75,7 @@ from motor.coordinator.scheduler.policy.factory import create_load_balancing_pol
 from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProvider
 from motor.coordinator.scheduler.policy.loader import PolicyLoader
 from motor.coordinator.scheduler.policy.metrics import get_policy_metrics
+from motor.coordinator.scheduler.policy.builtin import BuiltinRoundRobinPolicy
 
 logger = get_logger(__name__)
 
@@ -695,6 +696,7 @@ class AsyncSchedulerClient:
             kv_provider=self._kv_provider,
         )
         self._policy_plugin = config.policy_plugin
+        self._policy_plugin_enabled = bool(self._policy_plugin and (self._policy_plugin.name or "").strip())
         self._policy_executor = self._build_policy_executor(config)
 
         instance_pub = (config.instance_pub_address or "").strip()
@@ -955,31 +957,21 @@ class AsyncSchedulerClient:
 
     def _sync_builtin_policy_runtime(
         self,
-        req_info: RequestInfo,
         role: PDRole,
         instances: list[Instance],
+        attempt: int,
     ) -> None:
         n = len(instances)
         start_index = (n * self._client_index) // self._client_count if n else 0
         if role not in self._instance_rr_counters:
             self._instance_rr_counters[role] = 0
         rr_counter = self._instance_rr_counters[role] + start_index
-
-        def lookup(instance_id: int, endpoint_id: int):
-            return PolicyContextBuilder.resolve_instance_endpoint(
-                instances,
-                CandidateId(instance_id=instance_id, endpoint_id=endpoint_id),
-            )
-
-        runtime = {
-            "_req_info": req_info,
-            "_instance_lookup": lookup,
-            "start_counter": rr_counter,
-        }
         for policy in (self._policy_executor.policy, self._policy_executor.fallback_policy):
-            if policy is None:
+            if not isinstance(policy, BuiltinRoundRobinPolicy):
                 continue
-            policy.options.update(runtime)
+            policy.set_start_counter(rr_counter)
+        if attempt == 0:
+            self._instance_rr_counters[role] += 1
 
     async def _policy_select_and_allocate(
         self,
@@ -1027,7 +1019,7 @@ class AsyncSchedulerClient:
                 )
             if not instances:
                 return None
-            self._sync_builtin_policy_runtime(req_info, role, instances)
+            self._sync_builtin_policy_runtime(role, instances, attempt)
             selection = self._context_builder.build(
                 req_info,
                 role,
@@ -1063,7 +1055,8 @@ class AsyncSchedulerClient:
                 meta = self._workload_reader.entry_meta(out_instance.id, out_endpoint.id)
                 if meta is None or int(meta.get("flags", 0)) & FLAG_BLOCKED:
                     excluded_ids.add(choice.id)
-                    continue
+                    selected = True
+                    break
                 committed = self._committed_workload_for(
                     role,
                     candidate_policy,
@@ -1111,7 +1104,7 @@ class AsyncSchedulerClient:
                 if status in (STATUS_BLOCKED, STATUS_SLOT_INVALID):
                     excluded_ids.add(choice.id)
                     selected = True
-                    continue
+                    break
                 logger.error(
                     "select_and_allocate unexpected cas status=%s role=%s req_id=%s",
                     status,
@@ -1174,11 +1167,14 @@ class AsyncSchedulerClient:
         global_affinity = False
         normalized_engine_type = str(required_engine_type or "").strip().lower()
         normalized_dispatch_capability = str(required_dispatch_capability or "").strip()
-        demand = (
-            Workload()
-            if (self._scheduler_type or "round_robin") == "round_robin"
-            else calculate_demand_workload(role, req_info)
-        )
+        if self._policy_plugin_enabled:
+            demand = calculate_demand_workload(role, req_info)
+        else:
+            demand = (
+                Workload()
+                if (self._scheduler_type or "round_robin") == "round_robin"
+                else calculate_demand_workload(role, req_info)
+            )
         if target_instance_id is None:
             return await self._policy_select_and_allocate(
                 role,
