@@ -13,15 +13,26 @@
 Coordinator has no Python ledger fallback: a deployable wheel must contain the
 workload-shm cdylib. kv-conductor is packed when ``build.sh`` produced the binary
 (source-dev can still load ``target/release`` without packaging).
+
+``build.sh`` also retags the pep517 ``py3-none-any`` filename with the host
+architecture so x86_64 and aarch64 artifacts do not collide.
 """
 
+import platform
 import zipfile
+from pathlib import Path
 
 # Must match native.py _LIB_BASENAME and setup.py package_data.
 WORKLOAD_SHM_WHEEL_MEMBER = "motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so"
 KV_CONDUCTOR_WHEEL_MEMBER = "motor/kv_conductor/bin/kv-conductor"
 
 _REQUIRED_NATIVE_MEMBERS = (WORKLOAD_SHM_WHEEL_MEMBER,)
+_MACHINE_ALIASES = {
+    "x86_64": "x86_64",
+    "amd64": "x86_64",
+    "aarch64": "aarch64",
+    "arm64": "aarch64",
+}
 
 
 def _archive_names(wheel_path: str) -> set[str]:
@@ -55,3 +66,51 @@ def assert_motor_wheel_has_kv_conductor(wheel_path: str) -> None:
             "refusing to emit motor wheel: kv-conductor binary was built but is "
             f"missing from the archive ({KV_CONDUCTOR_WHEEL_MEMBER})."
         )
+
+
+def resolve_motor_wheel_platform_tag(
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+) -> str:
+    """Return the PEP 427 platform tag that replaces ``any`` on this host.
+
+    Official Linux artifacts are ``linux_x86_64`` / ``linux_aarch64``. Machine
+    aliases (``amd64``, ``arm64``) are normalized so CI and ``uname -m`` agree.
+    """
+    sys_name = (system if system is not None else platform.system()).strip().lower()
+    mach = (machine if machine is not None else platform.machine()).strip().lower()
+    arch = _MACHINE_ALIASES.get(mach, mach.replace("-", "_") or "unknown")
+    if sys_name == "linux":
+        os_tag = "linux"
+    elif sys_name == "darwin":
+        os_tag = "darwin"
+    else:
+        os_tag = sys_name.replace("-", "_") or "unknown"
+    return f"{os_tag}_{arch}"
+
+
+def arch_tagged_motor_wheel_name(version: str, *, platform_tag: str | None = None) -> str:
+    """Keep the pep517 name and swap ``any`` for the host platform tag."""
+    tag = platform_tag if platform_tag is not None else resolve_motor_wheel_platform_tag()
+    return f"motor-{version}-py3-none-{tag}.whl"
+
+
+def retag_motor_wheel_filename(
+    wheel_path: str,
+    version: str,
+    *,
+    platform_tag: str | None = None,
+) -> str:
+    """Rename ``motor-*-py3-none-any.whl`` to an arch-tagged filename.
+
+    Returns the destination path. No-op when the file is already tagged.
+    """
+    src = Path(wheel_path)
+    dest = src.with_name(arch_tagged_motor_wheel_name(version, platform_tag=platform_tag))
+    if src.resolve() == dest.resolve():
+        return str(src)
+    if dest.exists():
+        dest.unlink()
+    src.rename(dest)
+    return str(dest)

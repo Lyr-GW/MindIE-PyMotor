@@ -19,9 +19,12 @@ from motor.coordinator.scheduler.runtime.workload_shm import native
 from motor.coordinator.workload_shm_rs.wheel_gate import (
     KV_CONDUCTOR_WHEEL_MEMBER,
     WORKLOAD_SHM_WHEEL_MEMBER,
+    arch_tagged_motor_wheel_name,
     assert_motor_wheel_has_kv_conductor,
     assert_motor_wheel_has_workload_shm,
     list_missing_required_native_libs,
+    resolve_motor_wheel_platform_tag,
+    retag_motor_wheel_filename,
 )
 
 
@@ -69,3 +72,52 @@ def test_assert_motor_wheel_has_kv_conductor_accepts_packaged_bin(tmp_path: Path
         archive.writestr(KV_CONDUCTOR_WHEEL_MEMBER, b"\x7fELF")
 
     assert_motor_wheel_has_kv_conductor(str(wheel))
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "expected"),
+    [
+        ("Linux", "x86_64", "linux_x86_64"),
+        ("Linux", "amd64", "linux_x86_64"),
+        ("Linux", "aarch64", "linux_aarch64"),
+        ("Linux", "arm64", "linux_aarch64"),
+        ("Darwin", "arm64", "darwin_aarch64"),
+    ],
+)
+def test_resolve_motor_wheel_platform_tag_normalizes_host(system: str, machine: str, expected: str):
+    """x86 and ARM builds must get distinct PEP 427 tags so artifacts cannot collide."""
+    assert resolve_motor_wheel_platform_tag(system=system, machine=machine) == expected
+
+
+def test_arch_tagged_motor_wheel_name_keeps_pep517_prefix():
+    """Filename stays motor-<ver>-py3-none-<tag>.whl; only the any tag is replaced."""
+    assert arch_tagged_motor_wheel_name("3.1.0", platform_tag="linux_x86_64") == (
+        "motor-3.1.0-py3-none-linux_x86_64.whl"
+    )
+    assert arch_tagged_motor_wheel_name("3.1.0", platform_tag="linux_aarch64") == (
+        "motor-3.1.0-py3-none-linux_aarch64.whl"
+    )
+
+
+def test_retag_motor_wheel_filename_replaces_any_tag(tmp_path: Path):
+    """build.sh must rename the pep517 any-wheel so x86 and ARM artifacts differ."""
+    src = tmp_path / "motor-3.1.0-py3-none-any.whl"
+    src.write_bytes(b"wheel")
+
+    dest = Path(retag_motor_wheel_filename(str(src), "3.1.0", platform_tag="linux_x86_64"))
+
+    assert dest == tmp_path / "motor-3.1.0-py3-none-linux_x86_64.whl"
+    assert dest.is_file()
+    assert not src.exists()
+    assert dest.read_bytes() == b"wheel"
+
+
+def test_retag_motor_wheel_filename_is_noop_when_already_tagged(tmp_path: Path):
+    """Re-running the gate on an already tagged wheel must not invent a second file."""
+    src = tmp_path / "motor-3.1.0-py3-none-linux_aarch64.whl"
+    src.write_bytes(b"wheel")
+
+    dest = Path(retag_motor_wheel_filename(str(src), "3.1.0", platform_tag="linux_aarch64"))
+
+    assert dest == src
+    assert src.is_file()

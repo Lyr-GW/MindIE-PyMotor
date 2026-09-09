@@ -292,3 +292,13 @@ if [[ -f "$KV_CONDUCTOR_BIN" ]]; then
     echo "wheel kv-conductor verified: ${WHEEL_PATH}"
 fi
 echo "wheel native lib verified: ${WHEEL_PATH}"
+
+# pep517 emits motor-*-py3-none-any.whl. Native .so/binaries are arch-specific,
+# so replace the "any" tag with linux_x86_64 / linux_aarch64 (or host OS+arch).
+WHEEL_PATH="$(PYTHONPATH="$(pwd)${PYTHONPATH:+:${PYTHONPATH}}" python -c \
+    "from motor.coordinator.workload_shm_rs.wheel_gate import retag_motor_wheel_filename; print(retag_motor_wheel_filename(r'''${WHEEL_PATH}''', r'''${MOTOR_VERSION}'''))")"
+if [[ -z "${WHEEL_PATH}" || ! -f "${WHEEL_PATH}" ]]; then
+    echo "[ERROR] failed to retag motor wheel with the host architecture" >&2
+    exit 1
+fi
+echo "wheel package: ${WHEEL_PATH}"
