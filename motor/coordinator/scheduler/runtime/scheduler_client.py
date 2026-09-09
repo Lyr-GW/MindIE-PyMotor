@@ -46,6 +46,7 @@ from motor.config.coordinator import (
     KV_AFFINITY_MODE_UNIFIED,
     KV_AFFINITY_MODES,
     KvAffinityConfig,
+    PolicyPluginConfig,
 )
 from motor.coordinator.fault_tolerance.precision.streak_result import (
     PrecisionStreakResult,
@@ -67,6 +68,13 @@ from motor.coordinator.domain.scheduling_pin import (
     select_endpoint_for_instance,
 )
 from motor.coordinator.models.request import RequestInfo
+from motor.coordinator.scheduler.policy.api import CandidateId
+from motor.coordinator.scheduler.policy.executor import PolicyExecutor
+from motor.coordinator.scheduler.policy.feature_provider import PolicyContextBuilder
+from motor.coordinator.scheduler.policy.factory import create_load_balancing_policy
+from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProvider
+from motor.coordinator.scheduler.policy.loader import PolicyLoader
+from motor.coordinator.scheduler.policy.metrics import get_policy_metrics
 
 logger = get_logger(__name__)
 
@@ -622,6 +630,7 @@ class SchedulerClientConfig:
     endpoint_instance_score_weight: float = 0.05
     # kv_cache_affinity tunables (see SchedulerConfig.kv_affinity).
     kv_affinity: KvAffinityConfig | None = None
+    policy_plugin: PolicyPluginConfig | None = None
     tls_config: Any | None = None
     on_instance_refreshed: OnInstanceRefreshedCallback | None = None
 
@@ -674,6 +683,19 @@ class AsyncSchedulerClient:
         self._last_instance_version: int | None = None
         self._on_instance_refreshed = config.on_instance_refreshed
         self._cb_blocked_instances: set[int] = set()
+        self._policy_metrics = get_policy_metrics()
+        self._kv_provider = KvFeatureProvider(
+            overlap_credit=self._kv_affinity_overlap_credit,
+            w_npu=self._kv_affinity_w_npu,
+            w_cpu=self._kv_affinity_w_cpu,
+            w_disk=self._kv_affinity_w_disk,
+        )
+        self._context_builder = PolicyContextBuilder(
+            is_instance_blocked=self.is_instance_blocked,
+            kv_provider=self._kv_provider,
+        )
+        self._policy_plugin = config.policy_plugin
+        self._policy_executor = self._build_policy_executor(config)
 
         instance_pub = (config.instance_pub_address or "").strip()
         self._push_subscriber = (
@@ -862,6 +884,14 @@ class AsyncSchedulerClient:
         isl: float,
     ) -> Workload:
         """Same commit formula the former ALLOCATE_ONLY handler used (R4)."""
+        pair = (instance.id, endpoint.id)
+        matched = matched_tokens_map.get(pair)
+        if matched is not None and isl > 0 and role in (PDRole.ROLE_P, PDRole.ROLE_U):
+            return calculate_committed_workload(
+                role,
+                isl,
+                matched_tokens=matched,
+            )
         if (
             candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY
             and isl > 0
@@ -873,6 +903,230 @@ class AsyncSchedulerClient:
                 matched_tokens=matched_tokens_map.get((instance.id, endpoint.id), 0.0),
             )
         return demand
+
+    def _builtin_policy_options(self) -> dict:
+        affinity = {
+            "mode": self._kv_affinity_mode,
+            "overlap_credit": self._kv_affinity_overlap_credit,
+            "prefill_load_scale": self._kv_affinity_prefill_load_scale,
+            "load_weight": self._kv_affinity_load_weight,
+            "load_gate_topn": self._kv_affinity_load_gate_topn,
+            "w_npu": self._kv_affinity_w_npu,
+            "w_cpu": self._kv_affinity_w_cpu,
+            "w_disk": self._kv_affinity_w_disk,
+        }
+        return {
+            "instance_score_weight": self._endpoint_instance_score_weight,
+            **affinity,
+        }
+
+    def _build_policy_executor(self, config: SchedulerClientConfig) -> PolicyExecutor:
+        plugin_spec = config.policy_plugin
+        if plugin_spec is not None and (plugin_spec.name or "").strip():
+            policy = PolicyLoader().load(plugin_spec)
+            policy_name = plugin_spec.name.strip()
+            fallback_name = (plugin_spec.fallback or "load_balance").strip()
+            fallback = create_load_balancing_policy(
+                fallback_name,
+                self._builtin_policy_options(),
+            )
+            return PolicyExecutor(
+                policy,
+                policy_name=policy_name,
+                fallback_policy=fallback,
+                fallback_name=fallback_name,
+            )
+        policy_name = self._scheduler_type or CANDIDATE_POLICY_ROUND_ROBIN
+        policy = create_load_balancing_policy(policy_name, self._builtin_policy_options())
+        fallback = None
+        fallback_name = None
+        if policy_name == CANDIDATE_POLICY_KV_CACHE_AFFINITY:
+            fallback = create_load_balancing_policy(
+                CANDIDATE_POLICY_LOAD_BALANCE,
+                self._builtin_policy_options(),
+            )
+            fallback_name = CANDIDATE_POLICY_LOAD_BALANCE
+        return PolicyExecutor(
+            policy,
+            policy_name=policy_name,
+            fallback_policy=fallback,
+            fallback_name=fallback_name,
+        )
+
+    def _sync_builtin_policy_runtime(
+        self,
+        req_info: RequestInfo,
+        role: PDRole,
+        instances: list[Instance],
+    ) -> None:
+        n = len(instances)
+        start_index = (n * self._client_index) // self._client_count if n else 0
+        if role not in self._instance_rr_counters:
+            self._instance_rr_counters[role] = 0
+        rr_counter = self._instance_rr_counters[role] + start_index
+
+        def lookup(instance_id: int, endpoint_id: int):
+            return PolicyContextBuilder.resolve_instance_endpoint(
+                instances,
+                CandidateId(instance_id=instance_id, endpoint_id=endpoint_id),
+            )
+
+        runtime = {
+            "_req_info": req_info,
+            "_instance_lookup": lookup,
+            "start_counter": rr_counter,
+        }
+        for policy in (self._policy_executor.policy, self._policy_executor.fallback_policy):
+            if policy is None:
+                continue
+            policy.options.update(runtime)
+
+    async def _policy_select_and_allocate(
+        self,
+        role: PDRole,
+        req_info: RequestInfo,
+        *,
+        required_engine_type: str | None,
+        required_dispatch_capability: str | None,
+        demand: Workload,
+    ) -> tuple[Instance, Endpoint, Workload] | None:
+        from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_BLOCKED
+        from motor.coordinator.scheduler.runtime.workload_shm.native import (
+            STATUS_BLOCKED,
+            STATUS_CHANGED,
+            STATUS_OK,
+            STATUS_SLOT_INVALID,
+        )
+
+        role_str = role.value if role is not None else getattr(PDRole.ROLE_U, "value", "union")
+        native = self._workload_reader.native if self._workload_reader else None
+        if native is None:
+            return None
+        candidate_policy = self._policy_executor.policy_name
+        token_ids = getattr(req_info, "token_ids", None)
+        isl = float(len(token_ids)) if isinstance(token_ids, list) and token_ids else 0.0
+        excluded_ids: set[CandidateId] = set()
+        self._context_builder.reset_kv_cache()
+        matched_tokens_map: dict[tuple[int, int], float] = {}
+
+        for attempt in range(_MAX_CAS_ALLOCATE_ATTEMPTS):
+            if attempt > 0:
+                self._policy_metrics.inc_cas_retries(candidate_policy)
+                await self._refresh_cache_from_workload_reader(role)
+            instances = self._filter_instances(
+                self._cache.get_instances(role),
+                required_engine_type,
+                required_dispatch_capability,
+            )
+            if not instances:
+                instances_dict = await self.get_available_instances(role)
+                instances = self._filter_instances(
+                    sorted(instances_dict.values(), key=lambda item: item.id),
+                    required_engine_type,
+                    required_dispatch_capability,
+                )
+            if not instances:
+                return None
+            self._sync_builtin_policy_runtime(req_info, role, instances)
+            selection = self._context_builder.build(
+                req_info,
+                role,
+                instances,
+                excluded=frozenset(excluded_ids),
+                attempt=attempt,
+                required_engine_type=required_engine_type,
+                required_dispatch_capability=required_dispatch_capability,
+                workload_reader=self._workload_reader,
+                policy_requires_kv=self._policy_executor.requires_kv_match,
+            )
+            ranked = self._policy_executor.rank(selection)
+            if not ranked:
+                return None
+            affinity_debug = getattr(req_info, "kv_affinity_debug", None)
+            if isinstance(affinity_debug, dict):
+                for (ins_id, ep_id), rec in affinity_debug.items():
+                    matched_tokens_map[(ins_id, ep_id)] = float(rec[0])
+            for candidate in selection.candidates:
+                if candidate.kv_match is not None:
+                    matched_tokens_map[(candidate.id.instance_id, candidate.id.endpoint_id)] = float(
+                        candidate.kv_match.matched_tokens
+                    )
+            selected = False
+            for choice in ranked:
+                resolved = PolicyContextBuilder.resolve_instance_endpoint(instances, choice.id)
+                if resolved is None:
+                    continue
+                out_instance, out_endpoint = resolved
+                pair = (out_instance.id, out_endpoint.id)
+                if choice.id in excluded_ids:
+                    continue
+                meta = self._workload_reader.entry_meta(out_instance.id, out_endpoint.id)
+                if meta is None or int(meta.get("flags", 0)) & FLAG_BLOCKED:
+                    excluded_ids.add(choice.id)
+                    continue
+                committed = self._committed_workload_for(
+                    role,
+                    candidate_policy,
+                    out_instance,
+                    out_endpoint,
+                    demand,
+                    matched_tokens_map,
+                    isl,
+                )
+                status, actual = native.cas_add(
+                    out_instance.id,
+                    out_endpoint.id,
+                    int(meta["generation"]),
+                    float(meta["active_tokens"]),
+                    float(committed.active_tokens),
+                    slot=meta.get("slot"),
+                )
+                if status == STATUS_OK:
+                    self._cache.patch_workload_from_shm(out_instance.id, out_endpoint.id, role, actual)
+                    meta["active_tokens"] = actual
+                    affinity_debug = getattr(req_info, "kv_affinity_debug", None)
+                    matched_load = (
+                        affinity_debug.get(pair)
+                        if (candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY and isinstance(affinity_debug, dict))
+                        else None
+                    )
+                    logger.info(
+                        "scheduled role=%s req_id=%s instance=%s endpoint=%s policy=%s matched=%s "
+                        "load=%s committed=%s score=%s attempt=%s",
+                        role_str,
+                        req_info.req_id,
+                        out_instance.id,
+                        out_endpoint.id,
+                        candidate_policy,
+                        matched_load[0] if matched_load else None,
+                        matched_load[1] if matched_load else None,
+                        committed.active_tokens,
+                        choice.score,
+                        attempt,
+                    )
+                    return (out_instance, out_endpoint, committed)
+                if status == STATUS_CHANGED:
+                    selected = True
+                    break
+                if status in (STATUS_BLOCKED, STATUS_SLOT_INVALID):
+                    excluded_ids.add(choice.id)
+                    selected = True
+                    continue
+                logger.error(
+                    "select_and_allocate unexpected cas status=%s role=%s req_id=%s",
+                    status,
+                    role_str,
+                    req_info.req_id,
+                )
+                return None
+            if not selected:
+                return None
+        logger.warning(
+            "select_and_allocate exhausted CAS retries role=%s req_id=%s",
+            role_str,
+            req_info.req_id,
+        )
+        return None
 
     async def _notify_instance_refreshed(self) -> None:
         """Fire the instance-refresh callback with the current active endpoints.
@@ -919,110 +1173,60 @@ class AsyncSchedulerClient:
 
         global_affinity = False
         normalized_engine_type = str(required_engine_type or "").strip().lower()
-        proposed_instance: Instance
-        proposed_endpoint: Endpoint
         normalized_dispatch_capability = str(required_dispatch_capability or "").strip()
-
-        if target_instance_id is not None:
-            instances = await self.get_available_instances(role)
-            instances = {
-                candidate.id: candidate
-                for candidate in self._filter_instances(
-                    list(instances.values()),
-                    normalized_engine_type or None,
-                    normalized_dispatch_capability or None,
-                )
-            }
-            instance = resolve_pinned_instance(instances, target_instance_id)
-            if instance is None:
-                logger.warning(
-                    "Pinned instance_id=%s not available for role=%s req_id=%s",
-                    target_instance_id,
-                    role_str,
-                    req_info.req_id,
-                )
-                return None
-            endpoint = select_endpoint_for_instance(
-                instance,
-                scheduler_type=self._scheduler_type or "round_robin",
-                endpoint_rr_counters=self._endpoint_rr_counters,
-                is_blocked=self.is_instance_blocked,
-            )
-            if endpoint is None:
-                logger.warning(
-                    "No endpoint on pinned instance_id=%s role=%s req_id=%s",
-                    target_instance_id,
-                    role_str,
-                    req_info.req_id,
-                )
-                return None
-            candidate_policy = self._scheduler_type or CANDIDATE_POLICY_ROUND_ROBIN
-            candidate_endpoints = [{"instance_id": instance.id, "endpoint_id": endpoint.id}]
-            proposed_instance, proposed_endpoint = instance, endpoint
-        else:
-            request_top_k = (
-                _AFFINITY_CANDIDATE_TOPK
-                if (
-                    role in _KVA_SELECT_ROLES
-                    and (self._scheduler_type or "") == "kv_cache_affinity"
-                    and self._kv_affinity_mode != KV_AFFINITY_MODE_UNIFIED
-                )
-                else 1
-            )
-            candidates, candidate_policy = await self._select_endpoint_candidates_with_policy(
-                req_info,
-                role,
-                top_k=request_top_k,
-                required_engine_type=normalized_engine_type or None,
-                required_dispatch_capability=normalized_dispatch_capability or None,
-            )
-            if not candidates:
-                return None
-            proposed_instance, proposed_endpoint, _ = candidates[0]
-            affinity_debug = getattr(req_info, "kv_affinity_debug", None)
-            global_affinity = (
-                candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY
-                and isinstance(affinity_debug, dict)
-                and any(rec[2] is not None for rec in affinity_debug.values())
-            )
-            if global_affinity:
-                allowed_instance_ids = {
-                    candidate.id
-                    for candidate in self._filter_instances(
-                        self._cache.get_instances(role),
-                        normalized_engine_type or None,
-                        normalized_dispatch_capability or None,
-                    )
-                }
-                candidate_endpoints = [
-                    {
-                        "instance_id": ins_id,
-                        "endpoint_id": ep_id,
-                        "matched_tokens": rec[0],
-                        "prefill_cost": rec[2],
-                    }
-                    for (ins_id, ep_id), rec in affinity_debug.items()
-                    if rec[2] is not None and ins_id in allowed_instance_ids
-                ]
-            elif candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY and isinstance(affinity_debug, dict):
-                candidate_endpoints = []
-                for cand_instance, cand_endpoint, _score in candidates:
-                    item = {"instance_id": cand_instance.id, "endpoint_id": cand_endpoint.id}
-                    rec = affinity_debug.get((cand_instance.id, cand_endpoint.id))
-                    if rec is not None:
-                        item["matched_tokens"] = rec[0]
-                    candidate_endpoints.append(item)
-            else:
-                candidate_endpoints = [
-                    {"instance_id": cand_instance.id, "endpoint_id": cand_endpoint.id}
-                    for cand_instance, cand_endpoint, _score in candidates
-                ]
-
         demand = (
             Workload()
             if (self._scheduler_type or "round_robin") == "round_robin"
             else calculate_demand_workload(role, req_info)
         )
+        if target_instance_id is None:
+            return await self._policy_select_and_allocate(
+                role,
+                req_info,
+                required_engine_type=normalized_engine_type or None,
+                required_dispatch_capability=normalized_dispatch_capability or None,
+                demand=demand,
+            )
+
+        proposed_instance: Instance
+        proposed_endpoint: Endpoint
+
+        instances = await self.get_available_instances(role)
+        instances = {
+            candidate.id: candidate
+            for candidate in self._filter_instances(
+                list(instances.values()),
+                normalized_engine_type or None,
+                normalized_dispatch_capability or None,
+            )
+        }
+        instance = resolve_pinned_instance(instances, target_instance_id)
+        if instance is None:
+            logger.warning(
+                "Pinned instance_id=%s not available for role=%s req_id=%s",
+                target_instance_id,
+                role_str,
+                req_info.req_id,
+            )
+            return None
+        endpoint = select_endpoint_for_instance(
+            instance,
+            scheduler_type=self._scheduler_type or "round_robin",
+            endpoint_rr_counters=self._endpoint_rr_counters,
+            is_blocked=self.is_instance_blocked,
+        )
+        if endpoint is None:
+            logger.warning(
+                "No endpoint on pinned instance_id=%s role=%s req_id=%s",
+                target_instance_id,
+                role_str,
+                req_info.req_id,
+            )
+            return None
+        candidate_policy = self._scheduler_type or CANDIDATE_POLICY_ROUND_ROBIN
+        candidate_endpoints = [{"instance_id": instance.id, "endpoint_id": endpoint.id}]
+        proposed_instance, proposed_endpoint = instance, endpoint
+
         token_ids = getattr(req_info, "token_ids", None)
         isl = float(len(token_ids)) if isinstance(token_ids, list) and token_ids else 0.0
         candidate_pairs = [(int(item["instance_id"]), int(item["endpoint_id"])) for item in candidate_endpoints]

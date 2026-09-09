@@ -222,7 +222,7 @@ def test_kv_cache_affinity_falls_back_to_load_balance_for_role_u() -> None:
 
 
 async def test_select_and_allocate_role_u_unified_forwards_top1() -> None:
-    """Unified affinity scores locally with top_k=1, then CAS-commits (no ALLOCATE RPC)."""
+    """Unified affinity uses PolicyExecutor path (no legacy candidate top_k branch)."""
     client = _build_kv_client()  # default kv_affinity_mode is unified
     client._workload_reader = Mock()
     client._workload_reader.native = Mock()
@@ -235,19 +235,18 @@ async def test_select_and_allocate_role_u_unified_forwards_top1() -> None:
         patch.object(client, "_refresh_cache_from_workload_reader", new_callable=AsyncMock),
         patch.object(
             client,
-            "_select_endpoint_candidates_with_policy",
+            "_policy_select_and_allocate",
             new_callable=AsyncMock,
-            return_value=([], "kv_cache_affinity"),
-        ) as mock_select,
+            return_value=None,
+        ) as mock_policy_select,
     ):
         await client.select_and_allocate(PDRole.ROLE_U, req_info)
 
-    mock_select.assert_awaited_once()
-    assert mock_select.await_args.kwargs["top_k"] == 1
+    mock_policy_select.assert_awaited_once()
 
 
 async def test_select_and_allocate_role_u_load_gated_uses_affinity_top_k() -> None:
-    """load_gated still proposes a ranked alternate set; Worker CAS uses affinity topK."""
+    """load_gated also routes through PolicyExecutor (full rank + CAS retry)."""
     client = _build_kv_client()
     client._kv_affinity_mode = KV_AFFINITY_MODE_LOAD_GATED
     client._workload_reader = Mock()
@@ -261,15 +260,14 @@ async def test_select_and_allocate_role_u_load_gated_uses_affinity_top_k() -> No
         patch.object(client, "_refresh_cache_from_workload_reader", new_callable=AsyncMock),
         patch.object(
             client,
-            "_select_endpoint_candidates_with_policy",
+            "_policy_select_and_allocate",
             new_callable=AsyncMock,
-            return_value=([], "kv_cache_affinity"),
-        ) as mock_select,
+            return_value=None,
+        ) as mock_policy_select,
     ):
         await client.select_and_allocate(PDRole.ROLE_U, req_info)
 
-    mock_select.assert_awaited_once()
-    assert mock_select.await_args.kwargs["top_k"] == 3
+    mock_policy_select.assert_awaited_once()
 
 
 def test_kv_cache_affinity_skips_kva_for_non_kva_roles() -> None:

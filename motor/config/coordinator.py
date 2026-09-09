@@ -368,6 +368,29 @@ class KvAffinityConfig:
 
 
 @dataclass
+class PolicyPluginConfig:
+    """External scheduling policy plugin configuration."""
+
+    name: str = ""
+    options: dict[str, Any] = field(default_factory=dict)
+    fallback: str = "load_balance"
+
+
+def _set_policy_plugin_field(obj, key: str, value: Any) -> None:
+    if value is None:
+        setattr(obj, key, None)
+        return
+    if not isinstance(value, dict):
+        setattr(obj, key, value)
+        return
+    plugin = getattr(obj, key, None) or PolicyPluginConfig()
+    for field_key, field_value in value.items():
+        if hasattr(plugin, field_key):
+            setattr(plugin, field_key, field_value)
+    setattr(obj, key, plugin)
+
+
+@dataclass
 class SchedulerConfig:
     scheduler_type: SchedulerType = field(default=SchedulerType.LOAD_BALANCE)
     enable_pd_separation_fallback_to_hybrid: bool = True
@@ -378,6 +401,8 @@ class SchedulerConfig:
     kv_affinity: KvAffinityConfig = field(default_factory=KvAffinityConfig)
     # KV event registration config for kv-conductor.
     kv_conductor_config: KvConductorConfig = field(default_factory=KvConductorConfig)
+    # Optional external scheduling policy plugin (Entry Point name).
+    policy_plugin: PolicyPluginConfig | None = None
 
 
 @dataclass
@@ -748,6 +773,7 @@ class CoordinatorConfig:
 
             scheduler_handlers = {
                 'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType),
+                'policy_plugin': _set_policy_plugin_field,
             }
 
             exception_config_data = cfg.get("exception_config", {})
@@ -953,6 +979,21 @@ class CoordinatorConfig:
         )
         if affinity.mode not in KV_AFFINITY_MODES:
             self._errors.append(f"kv_affinity.mode must be one of {KV_AFFINITY_MODES}, got {affinity.mode!r}")
+        plugin = self.scheduler_config.policy_plugin
+        if plugin is not None and (plugin.name or "").strip():
+            reserved_policy_names = frozenset({"load_balance", "round_robin", "kv_cache_affinity"})
+            fallback_policy_names = frozenset({"load_balance", "round_robin"})
+            name = plugin.name.strip()
+            if name in reserved_policy_names:
+                self._errors.append("scheduler_config.policy_plugin.name %r is reserved for built-in strategies" % name)
+            fallback = (plugin.fallback or "load_balance").strip()
+            if fallback not in fallback_policy_names:
+                self._errors.append(
+                    "scheduler_config.policy_plugin.fallback must be one of %s, got %r"
+                    % (sorted(fallback_policy_names), fallback)
+                )
+            if plugin.options is not None and not isinstance(plugin.options, dict):
+                self._errors.append("scheduler_config.policy_plugin.options must be a JSON object")
         if self.context_budget_mode not in CONTEXT_BUDGET_MODES:
             self._errors.append(
                 f"context_budget_mode must be one of {CONTEXT_BUDGET_MODES}, got {self.context_budget_mode!r}"
