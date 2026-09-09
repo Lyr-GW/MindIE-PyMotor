@@ -68,26 +68,14 @@ def assert_motor_wheel_has_kv_conductor(wheel_path: str) -> None:
         )
 
 
-def resolve_motor_wheel_platform_tag(
-    *,
-    system: str | None = None,
-    machine: str | None = None,
-) -> str:
-    """Return the PEP 427 platform tag that replaces ``any`` on this host.
+def resolve_motor_wheel_platform_tag(*, machine: str | None = None) -> str:
+    """Return the arch tag that replaces ``any`` on this host.
 
-    Official Linux artifacts are ``linux_x86_64`` / ``linux_aarch64``. Machine
-    aliases (``amd64``, ``arm64``) are normalized so CI and ``uname -m`` agree.
+    Official artifacts are ``x86_64`` / ``aarch64``. Machine aliases
+    (``amd64``, ``arm64``) are normalized so CI and ``uname -m`` agree.
     """
-    sys_name = (system if system is not None else platform.system()).strip().lower()
     mach = (machine if machine is not None else platform.machine()).strip().lower()
-    arch = _MACHINE_ALIASES.get(mach, mach.replace("-", "_") or "unknown")
-    if sys_name == "linux":
-        os_tag = "linux"
-    elif sys_name == "darwin":
-        os_tag = "darwin"
-    else:
-        os_tag = sys_name.replace("-", "_") or "unknown"
-    return f"{os_tag}_{arch}"
+    return _MACHINE_ALIASES.get(mach, mach.replace("-", "_") or "unknown")
 
 
 def arch_tagged_motor_wheel_name(version: str, *, platform_tag: str | None = None) -> str:
