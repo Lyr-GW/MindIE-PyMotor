@@ -23,12 +23,14 @@ from motor.config.coordinator import PolicyPluginConfig
 from motor.coordinator.scheduler.policy.api import (
     CandidateId,
     CandidateSnapshot,
+    KvMatch,
     LoadBalancingPolicy,
     RankedCandidate,
     RequestContext,
     SelectionInput,
 )
 from motor.coordinator.scheduler.policy.builtin import (
+    BuiltinKvCacheAffinityPolicy,
     BuiltinLoadBalancePolicy,
     BuiltinRoundRobinPolicy,
 )
@@ -188,13 +190,23 @@ def test_factory_builtin_names():
 
 def test_kv_feature_provider_unavailable():
     provider = KvFeatureProvider()
-    with patch(
-        "motor.coordinator.scheduler.policy.kv_feature_provider.ConductorApiClient.query_conductor",
-        side_effect=RuntimeError("down"),
+    instance = MagicMock()
+    instance.id = 1
+    instance.role = PDRole.ROLE_P
+    with (
+        patch(
+            "motor.coordinator.scheduler.policy.kv_feature_provider.ConductorApiClient.query_conductor",
+            side_effect=RuntimeError("down"),
+        ) as mock_query,
+        patch(
+            "motor.coordinator.scheduler.policy.kv_feature_provider.KvCacheAffinityPolicy._conductor_block_size",
+            return_value=0,
+        ),
     ):
-        matches, available = provider.build([], [], [])
+        matches, available = provider.build([1, 2, 3], [instance], [CandidateId(1, 1)])
     assert matches == {}
     assert available is False
+    mock_query.assert_called_once()
 
 
 def test_policy_metrics_render():
@@ -240,6 +252,87 @@ def test_context_builder_blocked_flag():
     )
     assert len(selection.candidates) == 1
     assert math.isclose(selection.candidates[0].active_tokens, 3.0)
+
+
+def test_builtin_kv_cache_affinity_unified_ranks_by_prefill_and_load():
+    policy = BuiltinKvCacheAffinityPolicy(options={"mode": "unified", "prefill_load_scale": 1.0, "load_weight": 1.0})
+    c1 = CandidateSnapshot(
+        id=CandidateId(1, 1),
+        active_tokens=5.0,
+        instance_active_tokens=5.0,
+        blocked=False,
+        kv_match=KvMatch(matched_tokens=8, prefill_cost=2.0, hit_ratio=0.8),
+    )
+    c2 = CandidateSnapshot(
+        id=CandidateId(2, 1),
+        active_tokens=1.0,
+        instance_active_tokens=1.0,
+        blocked=False,
+        kv_match=KvMatch(matched_tokens=5, prefill_cost=4.0, hit_ratio=0.5),
+    )
+    ranked = policy.rank(_selection(c1, c2))
+    assert [item.id for item in ranked] == [CandidateId(2, 1), CandidateId(1, 1)]
+
+
+def test_builtin_kv_cache_affinity_load_gated_limits_to_topn_then_prefers_match():
+    policy = BuiltinKvCacheAffinityPolicy(options={"mode": "load_gated", "load_gate_topn": 2})
+    c1 = CandidateSnapshot(
+        id=CandidateId(1, 1),
+        active_tokens=1.0,
+        instance_active_tokens=1.0,
+        blocked=False,
+        kv_match=KvMatch(matched_tokens=2, prefill_cost=8.0, hit_ratio=0.2),
+    )
+    c2 = CandidateSnapshot(
+        id=CandidateId(2, 1),
+        active_tokens=2.0,
+        instance_active_tokens=2.0,
+        blocked=False,
+        kv_match=KvMatch(matched_tokens=9, prefill_cost=1.0, hit_ratio=0.9),
+    )
+    c3 = CandidateSnapshot(
+        id=CandidateId(3, 1),
+        active_tokens=100.0,
+        instance_active_tokens=100.0,
+        blocked=False,
+        kv_match=KvMatch(matched_tokens=100, prefill_cost=0.0, hit_ratio=1.0),
+    )
+    selection = SelectionInput(
+        request=RequestContext(
+            request_id="r1",
+            role=PDRole.ROLE_P,
+            model_name="m",
+            prompt_tokens=10,
+            max_output_tokens=32,
+        ),
+        candidates=(c1, c2, c3),
+        excluded=frozenset(),
+        attempt=0,
+        kv_available=True,
+    )
+    ranked = policy.rank(selection)
+    assert [item.id for item in ranked] == [CandidateId(2, 1), CandidateId(1, 1)]
+
+
+def test_builtin_kv_cache_affinity_falls_back_when_kv_unavailable():
+    policy = BuiltinKvCacheAffinityPolicy(options={"mode": "unified"})
+    c1 = CandidateSnapshot(CandidateId(1, 1), 1.0, 1.0, False, kv_match=None)
+    c2 = CandidateSnapshot(CandidateId(2, 1), 2.0, 2.0, False, kv_match=None)
+    selection = SelectionInput(
+        request=RequestContext(
+            request_id="r1",
+            role=PDRole.ROLE_P,
+            model_name="m",
+            prompt_tokens=10,
+            max_output_tokens=32,
+        ),
+        candidates=(c2, c1),
+        excluded=frozenset(),
+        attempt=0,
+        kv_available=False,
+    )
+    ranked = policy.rank(selection)
+    assert [item.id for item in ranked] == [CandidateId(1, 1), CandidateId(2, 1)]
 
 
 def test_fallback_policy_names_constant():

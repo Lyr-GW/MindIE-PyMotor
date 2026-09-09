@@ -1,6 +1,6 @@
 # Coordinator 自定义调度策略插件设计
 
-> 状态：已实现（Inference Worker Entry Point 插件路径）
+> 状态：部分实现（Entry Point + `rank()` 主路径已落地，测试与可观测性持续补齐）
 >
 > 前提：[PR #822](https://gitcode.com/Ascend/MindIE-Motor/pull/822) 已合入，Coordinator 已删除独立 Scheduler
 > 进程，请求热路径由 Inference Worker 本地打分并通过 Rust schema-4 SHM CAS 完成负载分配与释放。
@@ -581,15 +581,16 @@ motor/coordinator/scheduler/policy/
 └── kv_cache_affinity.py
 ```
 
-`AsyncSchedulerClient.select_and_allocate()` 只依赖 `PolicyExecutor` 和 `WorkloadAllocator`，不再直接判断
-`load_balance` / `kv_cache_affinity` / `round_robin`。
+`AsyncSchedulerClient.select_and_allocate()` 的非 pinned 路径依赖 `PolicyExecutor` 与核心 CAS 提交逻辑，
+不再直接按 `load_balance` / `kv_cache_affinity` / `round_robin` 分叉热路径。
 
 ## 14. 兼容与演进
 
 ### 14.1 兼容策略
 
 - 保留现有 `scheduler_type`，由内置适配器创建同一 `LoadBalancingPolicy` 接口。
-- `policy_plugin` 存在时按 Entry Point 名称选择插件，其 `fallback` 显式决定降级策略；`scheduler_type` 不参与此分支。
+- `policy_plugin` 存在时，非 pinned 路径按 Entry Point 名称选择插件，其 `fallback` 显式决定降级策略；pinned
+  `target_instance_id` 仍保留 pin + 仲裁语义。
 - 内置策略保留内部工厂注册；外部插件使用固定 Entry Point group，两者最终进入同一 `PolicyExecutor`。
 - 原 `class_path` 草案由 `name` 替代；模块路径保存在插件包元数据中。
 - 内置算法公式、并列候选顺序和 committed workload 计算保持不变。

@@ -19,11 +19,12 @@ import pytest
 from motor.common.resources.http_msg_spec import EventType
 from motor.common.resources.instance import Instance, InsStatus, PDRole, ParallelConfig
 from motor.common.resources.endpoint import Endpoint, Workload, EndpointStatus, WorkloadAction
-from motor.config.coordinator import CoordinatorConfig
+from motor.config.coordinator import CoordinatorConfig, PolicyPluginConfig
 from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.domain.scheduling import UpdateWorkloadParams
 from motor.coordinator.models.request import RequestInfo
+from motor.coordinator.scheduler.policy.api import KvMatch, LoadBalancingPolicy, RankedCandidate, SelectionInput
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
     SchedulerResponseType,
@@ -36,6 +37,7 @@ from motor.coordinator.scheduler.runtime.scheduler_client import (
 )
 from motor.coordinator.scheduler.runtime.workload_shm.native import (
     STATUS_BLOCKED,
+    STATUS_CHANGED,
     STATUS_OK,
     NativeWorkloadShmUnavailable,
     load_native_library,
@@ -853,12 +855,17 @@ def native_lib():
         return None
 
 
-async def _client_with_shm(im: InstanceManager, name: str) -> tuple[AsyncSchedulerClient, WorkloadSharedMemoryOwner]:
+async def _client_with_shm(
+    im: InstanceManager,
+    name: str,
+    *,
+    client_config: SchedulerClientConfig | None = None,
+) -> tuple[AsyncSchedulerClient, WorkloadSharedMemoryOwner]:
     writer = WorkloadSharedMemoryOwner(im, max_entries=8, shm_name=name)
     writer.write_snapshot()
-    client = AsyncSchedulerClient(
-        SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
-    )
+    if client_config is None:
+        client_config = SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
+    client = AsyncSchedulerClient(client_config)
     cache = _SchedulerInstanceCache()
     instances = list(im.get_available_instances(PDRole.ROLE_P).values())
     await cache.replace_all(PDRole.ROLE_P, instances)
@@ -867,6 +874,21 @@ async def _client_with_shm(im: InstanceManager, name: str) -> tuple[AsyncSchedul
     reader.attach()
     client._workload_reader = reader
     return client, writer
+
+
+class _CapturePolicy(LoadBalancingPolicy):
+    """Policy test-double that records option keys used at runtime."""
+
+    def __init__(self, options=None):
+        super().__init__(options)
+        self.seen_option_keys: tuple[str, ...] = ()
+
+    def rank(self, selection: SelectionInput) -> list[RankedCandidate]:
+        self.seen_option_keys = tuple(sorted(self.options.keys()))
+        if not selection.candidates:
+            return []
+        ordered = sorted(selection.candidates, key=lambda candidate: candidate.active_tokens)
+        return [RankedCandidate(id=candidate.id, score=float(index)) for index, candidate in enumerate(ordered)]
 
 
 class TestSelectAndAllocateCas:
@@ -1127,3 +1149,107 @@ class TestSelectAndAllocateCas:
         finally:
             client._workload_reader.detach()
             writer.release()
+
+
+def test_sync_builtin_runtime_keeps_custom_plugin_options_isolated():
+    """Custom plugin options must not receive internal runtime objects."""
+    plugin = PolicyPluginConfig(name="acme.weighted", options={"custom_weight": 0.9}, fallback="load_balance")
+    policy = _CapturePolicy(options=plugin.options)
+    with patch(
+        "motor.coordinator.scheduler.runtime.scheduler_client.PolicyLoader.load",
+        return_value=policy,
+    ):
+        client = AsyncSchedulerClient(
+            SchedulerClientConfig(
+                scheduler_type="load_balance",
+                endpoint_instance_score_weight=0.0,
+                policy_plugin=plugin,
+            )
+        )
+    client._sync_builtin_policy_runtime(PDRole.ROLE_P, [], attempt=0)  # pylint: disable=protected-access
+    assert policy.options == {"custom_weight": 0.9}
+
+
+@pytest.mark.asyncio
+async def test_select_and_allocate_plugin_commits_demand_with_round_robin_scheduler_type():
+    """When plugin is enabled, demand accounting must ignore round-robin zero-workload shortcut."""
+    plugin = PolicyPluginConfig(name="acme.weighted", options={"custom_weight": 0.9}, fallback="round_robin")
+    policy = _CapturePolicy(options=plugin.options)
+    with patch(
+        "motor.coordinator.scheduler.runtime.scheduler_client.PolicyLoader.load",
+        return_value=policy,
+    ):
+        client = AsyncSchedulerClient(
+            SchedulerClientConfig(
+                scheduler_type="round_robin",
+                endpoint_instance_score_weight=0.0,
+                policy_plugin=plugin,
+            )
+        )
+    client._workload_reader = Mock()  # pylint: disable=protected-access
+    client._workload_reader.native = Mock()
+    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
+    client._policy_select_and_allocate = AsyncMock(return_value=None)  # pylint: disable=protected-access
+    req = RequestInfo(req_id="req-dm", req_data={}, req_len=8, api="completions", token_ids=[1, 2, 3, 4])
+    await client.select_and_allocate(PDRole.ROLE_P, req)
+    demand = client._policy_select_and_allocate.await_args.kwargs["demand"]  # pylint: disable=protected-access
+    assert demand.active_tokens == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_policy_select_and_allocate_queries_kv_only_once_across_changed_retry():
+    """KVA policy should reuse cached KvMatch across CAS CHANGED retries."""
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="kv_cache_affinity", endpoint_instance_score_weight=0.0)
+    )
+    endpoint_a = _make_endpoint(endpoint_id=10, active_tokens=1.0)
+    endpoint_b = _make_endpoint(endpoint_id=20, active_tokens=8.0)
+    inst_a = _make_instance(instance_id=1, role="prefill", endpoints={"pod-1": {10: endpoint_a}})
+    inst_b = _make_instance(instance_id=2, role="prefill", endpoints={"pod-2": {20: endpoint_b}})
+    await client._cache.replace_all(PDRole.ROLE_P, [inst_a, inst_b])  # pylint: disable=protected-access
+
+    meta_map = {
+        (1, 10): {"generation": 0, "active_tokens": 1.0, "flags": 0, "slot": 0},
+        (2, 20): {"generation": 0, "active_tokens": 8.0, "flags": 0, "slot": 1},
+    }
+    reader = Mock()
+    reader.entry_meta = Mock(side_effect=lambda iid, eid: meta_map.get((iid, eid)))
+    native = Mock()
+    cas_calls = {"count": 0}
+
+    def cas_add(iid, eid, _gen, expected, delta, slot=None):
+        del slot
+        cas_calls["count"] += 1
+        if cas_calls["count"] == 1:
+            meta_map[(iid, eid)]["active_tokens"] = float(expected) + 80.0
+            return (STATUS_CHANGED, meta_map[(iid, eid)]["active_tokens"])
+        actual = float(expected) + float(delta)
+        meta_map[(iid, eid)]["active_tokens"] = actual
+        return (STATUS_OK, actual)
+
+    native.cas_add = Mock(side_effect=cas_add)
+    reader.native = native
+    client._workload_reader = reader  # pylint: disable=protected-access
+    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
+    client._cache.patch_workload_from_shm = Mock()  # pylint: disable=protected-access
+    kv_calls = {"count": 0}
+
+    def fake_kv_build(_token_ids, _instances, candidate_ids):
+        kv_calls["count"] += 1
+        return (
+            {cid: KvMatch(matched_tokens=0, prefill_cost=4.0, hit_ratio=0.0) for cid in candidate_ids},
+            True,
+        )
+
+    client._kv_provider.build = Mock(side_effect=fake_kv_build)  # pylint: disable=protected-access
+    req = RequestInfo(req_id="req-kv-once", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+    result = await client._policy_select_and_allocate(  # pylint: disable=protected-access
+        PDRole.ROLE_P,
+        req,
+        required_engine_type=None,
+        required_dispatch_capability=None,
+        demand=Workload(active_tokens=4.0),
+    )
+    assert result is not None
+    assert cas_calls["count"] >= 2
+    assert kv_calls["count"] == 1
