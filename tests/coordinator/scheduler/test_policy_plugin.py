@@ -39,13 +39,11 @@ from motor.coordinator.scheduler.policy.feature_provider import PolicyContextBui
 from motor.coordinator.scheduler.policy.factory import create_load_balancing_policy
 from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProvider
 from motor.coordinator.scheduler.policy.loader import (
-    FALLBACK_POLICY_NAMES,
     PolicyLoadError,
     PolicyLoader,
-    RESERVED_POLICY_NAMES,
     validate_policy_plugin_config,
 )
-from motor.coordinator.scheduler.policy.metrics import PolicyMetrics
+from motor.coordinator.scheduler.policy.metrics import PolicyMetrics, append_policy_metrics, get_policy_metrics
 
 
 def _selection(*candidates: CandidateSnapshot, excluded=None) -> SelectionInput:
@@ -62,6 +60,85 @@ def _selection(*candidates: CandidateSnapshot, excluded=None) -> SelectionInput:
         attempt=0,
         kv_available=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_policy_loader_cache():
+    PolicyLoader.reset_cache()
+    get_policy_metrics().reset()
+    yield
+    PolicyLoader.reset_cache()
+    get_policy_metrics().reset()
+
+
+class _GoodPolicy(LoadBalancingPolicy):
+    def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
+        return [RankedCandidate(id=candidate.id, score=candidate.active_tokens) for candidate in selection.candidates]
+
+
+class _AsyncRankPolicy(LoadBalancingPolicy):
+    # pylint: disable=invalid-overridden-method
+    async def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
+        return []
+
+
+class _NoRankPolicy(LoadBalancingPolicy):
+    pass
+
+
+class _BoomPolicy(LoadBalancingPolicy):
+    def __init__(self, options=None) -> None:  # pylint: disable=super-init-not-called
+        raise RuntimeError("nope")
+
+    def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
+        return []
+
+
+class _BadVersionPolicy(LoadBalancingPolicy):
+    api_version = 99
+
+    def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
+        return []
+
+
+def _mock_entry(name: str, policy_cls: type, *, value: str = "pkg.mod:Cls") -> MagicMock:
+    entry = MagicMock()
+    entry.name = name
+    entry.value = value
+    entry.load.return_value = policy_cls
+    entry.dist = MagicMock()
+    entry.dist.metadata = {"Name": "pkg"}
+    entry.dist.version = "1.0"
+    return entry
+
+
+def _policy_from_rank(rank_impl):
+    class _Policy(LoadBalancingPolicy):
+        def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
+            return rank_impl(selection)
+
+    return _Policy()
+
+
+def _rank_duplicate(selection: SelectionInput) -> Sequence[RankedCandidate]:
+    cid = selection.candidates[0].id
+    return [RankedCandidate(id=cid, score=1.0), RankedCandidate(id=cid, score=2.0)]
+
+
+def _rank_boom(_selection: SelectionInput) -> Sequence[RankedCandidate]:
+    raise RuntimeError("boom")
+
+
+def _rank_empty(_selection: SelectionInput) -> Sequence[RankedCandidate]:
+    return []
+
+
+def _rank_unknown(_selection: SelectionInput) -> Sequence[RankedCandidate]:
+    return [RankedCandidate(id=CandidateId(99, 1), score=0.0)]
+
+
+def _rank_nan(selection: SelectionInput) -> Sequence[RankedCandidate]:
+    return [RankedCandidate(id=selection.candidates[0].id, score=float("nan"))]
 
 
 def test_builtin_load_balance_rank_order():
@@ -93,43 +170,33 @@ def test_builtin_round_robin_rotates():
     assert second[0].id == CandidateId(2, 1)
 
 
-def test_executor_rejects_duplicate_ids():
-    policy = BuiltinLoadBalancePolicy()
+@pytest.mark.parametrize(
+    "rank_impl",
+    [_rank_duplicate, _rank_boom, _rank_empty, _rank_unknown, _rank_nan],
+    ids=["duplicate", "exception", "empty", "unknown-id", "nan"],
+)
+def test_executor_invalid_rank_falls_back(rank_impl):
     c1 = CandidateSnapshot(CandidateId(1, 1), 1.0, 1.0, False)
-
-    class DupPolicy(LoadBalancingPolicy):
-        def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
-            return [
-                RankedCandidate(id=c1.id, score=1.0),
-                RankedCandidate(id=c1.id, score=2.0),
-            ]
-
-    executor = PolicyExecutor(DupPolicy(), policy_name="dup", fallback_policy=policy)
-    ranked = executor.rank(_selection(c1))
-    assert ranked and ranked[0].id == CandidateId(1, 1)
-
-
-def test_executor_fallback_on_exception():
-    policy = BuiltinLoadBalancePolicy()
-    c1 = CandidateSnapshot(CandidateId(1, 1), 1.0, 1.0, False)
-
-    class BrokenPolicy(LoadBalancingPolicy):
-        def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
-            raise RuntimeError("boom")
-
     executor = PolicyExecutor(
-        BrokenPolicy(),
-        policy_name="broken",
-        fallback_policy=policy,
-        fallback_name="load_balance",
+        _policy_from_rank(rank_impl),
+        policy_name="bad",
+        fallback_policy=BuiltinLoadBalancePolicy(),
     )
     ranked = executor.rank(_selection(c1))
     assert ranked and ranked[0].id == CandidateId(1, 1)
+    assert executor.last_used_fallback is True
 
 
-def test_loader_rejects_reserved_name():
+@pytest.mark.parametrize(
+    "spec",
+    [
+        PolicyPluginConfig(name="load_balance"),
+        PolicyPluginConfig(name="acme.test", fallback="kv_cache_affinity"),
+    ],
+)
+def test_loader_rejects_invalid_plugin_config(spec: PolicyPluginConfig):
     with pytest.raises(PolicyLoadError):
-        validate_policy_plugin_config(PolicyPluginConfig(name="load_balance"))
+        validate_policy_plugin_config(spec)
 
 
 def test_loader_not_installed():
@@ -138,49 +205,14 @@ def test_loader_not_installed():
 
 
 def test_loader_duplicate_entry_points():
-    entry = MagicMock()
-    entry.name = "acme.dup"
-    entry.value = "pkg.mod:Cls"
-    entry.dist = MagicMock()
+    entry = _mock_entry("acme.dup", _GoodPolicy, value="pkg.mod:Cls")
     entry.dist.metadata = {"Name": "pkg-a"}
-    entry.dist.version = "1.0"
-    entry2 = MagicMock()
-    entry2.name = "acme.dup"
-    entry2.value = "pkg2.mod:Cls"
-    entry2.dist = MagicMock()
+    entry2 = _mock_entry("acme.dup", _GoodPolicy, value="pkg2.mod:Cls")
     entry2.dist.metadata = {"Name": "pkg-b"}
     entry2.dist.version = "2.0"
-
-    class GoodPolicy(LoadBalancingPolicy):
-        def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
-            return []
-
-    with patch(
-        "motor.coordinator.scheduler.policy.loader.entry_points",
-        return_value=[entry, entry2],
-    ):
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points", return_value=[entry, entry2]):
         with pytest.raises(PolicyLoadError, match="multiple entry points"):
             PolicyLoader().load(PolicyPluginConfig(name="acme.dup"))
-
-
-def test_loader_validates_api_version():
-    class BadVersionPolicy(LoadBalancingPolicy):
-        api_version = 99
-
-        def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
-            return []
-
-    entry = MagicMock()
-    entry.name = "acme.bad"
-    entry.value = "pkg.mod:Bad"
-    entry.load.return_value = BadVersionPolicy
-    entry.dist = MagicMock()
-    entry.dist.metadata = {"Name": "pkg"}
-    entry.dist.version = "1.0"
-
-    with patch("motor.coordinator.scheduler.policy.loader.entry_points", return_value=[entry]):
-        with pytest.raises(PolicyLoadError, match="api_version"):
-            PolicyLoader().load(PolicyPluginConfig(name="acme.bad"))
 
 
 def test_factory_builtin_names():
@@ -209,21 +241,7 @@ def test_kv_feature_provider_unavailable():
     mock_query.assert_called_once()
 
 
-def test_policy_metrics_render():
-    metrics = PolicyMetrics()
-    metrics.observe_selection("acme.test", 0.01)
-    metrics.inc_errors("acme.test")
-    metrics.inc_fallback("acme.test")
-    metrics.inc_cas_retries("acme.test")
-    text = metrics.render_prometheus()
-    assert "motor_policy_selection_seconds" in text
-    assert 'policy="acme.test"' in text
-    assert "motor_policy_errors_total" in text
-    assert "motor_policy_fallback_total" in text
-    assert "motor_policy_cas_retries_total" in text
-
-
-def test_context_builder_blocked_flag():
+def test_context_builder_reads_shm_active_tokens():
     builder = PolicyContextBuilder(is_instance_blocked=lambda _i: False)
     reader = MagicMock()
     reader.entry_meta.return_value = {"active_tokens": 3.0, "flags": 0}
@@ -335,6 +353,56 @@ def test_builtin_kv_cache_affinity_falls_back_when_kv_unavailable():
     assert [item.id for item in ranked] == [CandidateId(1, 1), CandidateId(2, 1)]
 
 
-def test_fallback_policy_names_constant():
-    assert FALLBACK_POLICY_NAMES == frozenset({"load_balance", "round_robin"})
-    assert "kv_cache_affinity" in RESERVED_POLICY_NAMES
+@pytest.mark.parametrize(
+    ("policy_cls", "name", "match"),
+    [
+        (_AsyncRankPolicy, "acme.async", "synchronous"),
+        (_NoRankPolicy, "acme.norank", "does not override rank"),
+        (_BoomPolicy, "acme.boom", "Failed to construct"),
+        (_BadVersionPolicy, "acme.bad", "api_version"),
+    ],
+)
+def test_loader_rejects_invalid_policy_class(policy_cls, name, match):
+    entry = _mock_entry(name, policy_cls)
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points", return_value=[entry]):
+        with pytest.raises(PolicyLoadError, match=match):
+            PolicyLoader().load(PolicyPluginConfig(name=name))
+    assert name not in PolicyLoader._cache
+
+
+def test_load_at_startup_skips_entry_points_when_unconfigured():
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points") as mock_eps:
+        assert PolicyLoader.load_at_startup(None) is None
+        assert PolicyLoader.load_at_startup(PolicyPluginConfig(name="")) is None
+        assert PolicyLoader.load_at_startup(PolicyPluginConfig(name="   ")) is None
+        mock_eps.assert_not_called()
+
+
+def test_loader_only_loads_and_caches_configured_entry_point():
+    other = _mock_entry("other.policy", _GoodPolicy, value="other.mod:Cls")
+    configured = _mock_entry("acme.ok", _GoodPolicy, value="pkg.mod:Ok")
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points", return_value=[other, configured]):
+        first = PolicyLoader.load_at_startup(PolicyPluginConfig(name="acme.ok"))
+        second = PolicyLoader().load(PolicyPluginConfig(name="acme.ok"))
+    assert isinstance(first, _GoodPolicy)
+    assert first is second
+    configured.load.assert_called_once()
+    other.load.assert_not_called()
+
+
+def test_append_policy_metrics():
+    with patch("motor.coordinator.scheduler.policy.metrics.get_policy_metrics", return_value=PolicyMetrics()):
+        assert append_policy_metrics("up 1\n") == "up 1\n"
+    filled = PolicyMetrics()
+    filled.observe_selection("acme.append", 0.02)
+    filled.inc_errors("acme.append")
+    filled.inc_fallback("acme.append")
+    filled.inc_cas_retries("acme.append")
+    with patch("motor.coordinator.scheduler.policy.metrics.get_policy_metrics", return_value=filled):
+        text = append_policy_metrics("up 1\n")
+    assert text.startswith("up 1\n")
+    assert "motor_policy_selection_seconds" in text
+    assert "motor_policy_errors_total" in text
+    assert "motor_policy_fallback_total" in text
+    assert "motor_policy_cas_retries_total" in text
+    assert 'policy="acme.append"' in text

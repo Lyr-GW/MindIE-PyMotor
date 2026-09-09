@@ -49,6 +49,14 @@ class PolicyMetrics:
         with self._lock:
             self._cas_retries_total[policy] += count
 
+    def reset(self) -> None:
+        with self._lock:
+            self._selection_count.clear()
+            self._selection_sum_seconds.clear()
+            self._errors_total.clear()
+            self._fallback_total.clear()
+            self._cas_retries_total.clear()
+
     def render_prometheus(self) -> str:
         with self._lock:
             selection_count = dict(self._selection_count)
@@ -92,3 +100,13 @@ _metrics = PolicyMetrics()
 
 def get_policy_metrics() -> PolicyMetrics:
     return _metrics
+
+
+def append_policy_metrics(prometheus_text: str) -> str:
+    """Append process-local motor_policy_* samples to an existing exposition body."""
+    extra = get_policy_metrics().render_prometheus()
+    if not extra:
+        return prometheus_text
+    if prometheus_text and not prometheus_text.endswith("\n"):
+        prometheus_text += "\n"
+    return (prometheus_text or "") + extra

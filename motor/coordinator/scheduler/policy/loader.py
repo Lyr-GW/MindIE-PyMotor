@@ -26,8 +26,8 @@ from motor.coordinator.scheduler.policy.api import (
 logger = get_logger(__name__)
 
 SCHEDULING_POLICIES_GROUP = "mindie_motor.scheduling_policies"
-RESERVED_POLICY_NAMES = frozenset({"load_balance", "round_robin", "kv_cache_affinity"})
-FALLBACK_POLICY_NAMES = frozenset({"load_balance", "round_robin"})
+RESERVED_POLICY_NAMES = PolicyPluginConfig.RESERVED_NAMES
+FALLBACK_POLICY_NAMES = PolicyPluginConfig.FALLBACK_NAMES
 
 
 class PolicyLoadError(Exception):
@@ -87,9 +87,14 @@ def validate_policy_plugin_config(spec: PolicyPluginConfig | None) -> None:
 class PolicyLoader:
     """Discover and initialize a LoadBalancingPolicy from Entry Point metadata."""
 
+    _cache: dict[str, LoadBalancingPolicy] = {}
+
     def load(self, spec: PolicyPluginConfig) -> LoadBalancingPolicy:
         validate_policy_plugin_config(spec)
         name = spec.name.strip()
+        cached = self._cache.get(name)
+        if cached is not None:
+            return cached
         entries = [entry for entry in entry_points(group=SCHEDULING_POLICIES_GROUP) if entry.name == name]
         if not entries:
             raise PolicyLoadError(
@@ -125,7 +130,13 @@ class PolicyLoader:
             policy_cls.api_version,
             policy_cls.requires_kv_match,
         )
+        self._cache[name] = policy
         return policy
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        """Drop cached policy instances (tests and process shutdown)."""
+        cls._cache.clear()
 
     @staticmethod
     def load_at_startup(spec: PolicyPluginConfig | None) -> LoadBalancingPolicy | None:

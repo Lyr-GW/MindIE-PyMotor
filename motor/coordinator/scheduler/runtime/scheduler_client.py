@@ -53,7 +53,6 @@ from motor.coordinator.fault_tolerance.precision.streak_result import (
 )
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
-from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
 from motor.coordinator.domain.workload_calculator import (
     calculate_committed_workload,
     calculate_demand_workload,
@@ -82,9 +81,6 @@ logger = get_logger(__name__)
 # Callback signature: receives active endpoint list [(ip, port), ...], returns None
 OnInstanceRefreshedCallback = Callable[[list[tuple[str, str]]], Awaitable[None]]
 
-# Number of affinity-ranked candidates a prefill request proposes to the scheduler. The scheduler
-# re-picks among them by its authoritative workload ledger, spreading bursts across the top few.
-_AFFINITY_CANDIDATE_TOPK = 3
 _MAX_CAS_ALLOCATE_ATTEMPTS = 64
 
 
@@ -497,8 +493,6 @@ OnCircuitBreakerChangeNotify = Callable[[int, str], Awaitable[None]]
 
 # ZMQ PUB does not queue; SUB must be ready before PUB sends. Short delay after connect.
 _INSTANCE_PUB_SUB_SETTLE_MS = 150
-# Roles that should use kv_cache_affinity scheduling.
-_KVA_SELECT_ROLES = frozenset({PDRole.ROLE_P, PDRole.ROLE_U})
 
 
 class _InstancePushSubscriber:
@@ -1085,7 +1079,7 @@ class AsyncSchedulerClient:
                     )
                     logger.info(
                         "scheduled role=%s req_id=%s instance=%s endpoint=%s policy=%s matched=%s "
-                        "load=%s committed=%s score=%s attempt=%s",
+                        "load=%s committed=%s score=%s attempt=%s fallback=%s",
                         role_str,
                         req_info.req_id,
                         out_instance.id,
@@ -1096,6 +1090,7 @@ class AsyncSchedulerClient:
                         committed.active_tokens,
                         choice.score,
                         attempt,
+                        self._policy_executor.last_used_fallback,
                     )
                     return (out_instance, out_endpoint, committed)
                 if status == STATUS_CHANGED:
@@ -1884,57 +1879,30 @@ class AsyncSchedulerClient:
         req_info: RequestInfo,
         top_k: int = 1,
     ) -> tuple[list[tuple[Instance, Endpoint, float]], str]:
+        """Rank via PolicyExecutor (same path as select_and_allocate). top_k keeps test helpers."""
         if not instances:
-            return [], self._scheduler_type or CANDIDATE_POLICY_ROUND_ROBIN
-        st = self._scheduler_type or "round_robin"
-        if st == "load_balance":
-            candidates = self._select_endpoint_candidates_by_load_balance(instances, role, top_k)
-            if candidates:
-                return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-            logger.warning("load_balance failed, falling back to round-robin")
-        elif st == "kv_cache_affinity":
-            # Affinity ranking applies to KVA-eligible roles only; others fall through to
-            # the load_balance -> round_robin chain below.
-            if role in _KVA_SELECT_ROLES:
-                # Propose the top-k affinity-ranked candidates. The scheduler re-picks among them
-                # by its authoritative (fresh) workload ledger, so a burst spreads across the top
-                # candidates without a client-local in-flight overlay.
-                ranked = KvCacheAffinityPolicy.select_endpoint_candidates_from_list(
-                    instances,
-                    req_info,
-                    mode=self._kv_affinity_mode,
-                    overlap_credit=self._kv_affinity_overlap_credit,
-                    prefill_load_scale=self._kv_affinity_prefill_load_scale,
-                    load_weight=self._kv_affinity_load_weight,
-                    load_gate_topn=self._kv_affinity_load_gate_topn,
-                    w_npu=self._kv_affinity_w_npu,
-                    w_cpu=self._kv_affinity_w_cpu,
-                    w_disk=self._kv_affinity_w_disk,
-                    top_k=max(1, top_k),
-                )
-                if ranked:
-                    return ranked, CANDIDATE_POLICY_KV_CACHE_AFFINITY
-                logger.warning("kv_cache_affinity unavailable (no conductor match), falling back to load_balance")
-            candidates = self._select_endpoint_candidates_by_load_balance(instances, role, top_k)
-            if candidates:
-                return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-            logger.warning("load_balance unavailable, falling back to round-robin")
-        # Round-robin path: default policy or load_balance fallback
-        if role not in self._instance_rr_counters:
-            self._instance_rr_counters[role] = 0
-        n = len(instances)
-        start_offset = (n * self._client_index) // self._client_count if n else 0
-        counter = self._instance_rr_counters[role]
-        effective_counter = counter + start_offset
-        selected_instance, next_counter = RoundRobinPolicy.select_instance_from_list(instances, effective_counter)
-        self._instance_rr_counters[role] = next_counter - start_offset
-        if not selected_instance:
-            return [], CANDIDATE_POLICY_ROUND_ROBIN
-        selected = self._select_endpoint_for_instance(selected_instance)
-        if not selected:
-            return [], CANDIDATE_POLICY_ROUND_ROBIN
-        instance, endpoint = selected
-        return [(instance, endpoint, 0.0)], CANDIDATE_POLICY_ROUND_ROBIN
+            return [], self._policy_executor.policy_name
+        self._sync_builtin_policy_runtime(role, instances, attempt=0)
+        selection = self._context_builder.build(
+            req_info,
+            role,
+            instances,
+            excluded=frozenset(),
+            attempt=0,
+            required_engine_type=None,
+            required_dispatch_capability=None,
+            workload_reader=self._workload_reader,
+            policy_requires_kv=self._policy_executor.requires_kv_match,
+        )
+        ranked = self._policy_executor.rank(selection)
+        result: list[tuple[Instance, Endpoint, float]] = []
+        for choice in ranked[: max(1, top_k)]:
+            resolved = PolicyContextBuilder.resolve_instance_endpoint(instances, choice.id)
+            if resolved is None:
+                continue
+            instance, endpoint = resolved
+            result.append((instance, endpoint, choice.score))
+        return result, self._policy_executor.policy_name
 
     def _select_endpoint_for_instance(self, instance: Instance) -> tuple[Instance, Endpoint] | None:
         if not instance:

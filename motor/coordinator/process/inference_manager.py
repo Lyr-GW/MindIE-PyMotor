@@ -155,10 +155,9 @@ def run_inference_worker_proc(
     logger.info("Inference worker process %s starting (PID: %s)", worker_index, os.getpid())
 
     try:
-        validate_policy_plugin_config(config.scheduler_config.policy_plugin)
         plugin_spec = config.scheduler_config.policy_plugin
-        if plugin_spec is not None and (plugin_spec.name or "").strip():
-            PolicyLoader().load(plugin_spec)
+        validate_policy_plugin_config(plugin_spec)
+        PolicyLoader.load_at_startup(plugin_spec)
     except PolicyLoadError as exc:
         logger.error("Inference worker %s policy plugin load failed: %s", worker_index, exc)
         raise

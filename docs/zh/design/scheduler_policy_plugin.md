@@ -1,6 +1,7 @@
 # Coordinator 自定义调度策略插件设计
 
-> 状态：部分实现（Entry Point + `rank()` 主路径已落地，测试与可观测性持续补齐）
+> 状态：部分实现（Entry Point + `rank()` 主路径已落地；Worker 辅助选路也走同一 `rank()`；
+> 指标从 Worker metaserver `GET /metrics` 刮取。测试与示例 wheel 仍在补齐）
 >
 > 前提：[PR #822](https://gitcode.com/Ascend/MindIE-Motor/pull/822) 已合入，Coordinator 已删除独立 Scheduler
 > 进程，请求热路径由 Inference Worker 本地打分并通过 Rust schema-4 SHM CAS 完成负载分配与释放。
@@ -59,15 +60,14 @@ flowchart LR
         KvProvider[KV Feature Provider] -->|可选 KvMatch| ContextBuilder
         ContextBuilder --> Executor[PolicyExecutor]
         Loader[PolicyLoader] --> Executor
-        Executor -->|候选排序| Validator[Core Validator]
-        Validator --> Allocator[WorkloadAllocator]
-        Allocator -->|CAS add / sub| ShmReader
+        Executor -->|候选排序| SchedClient[AsyncSchedulerClient]
+        SchedClient -->|CAS add / sub| ShmReader
     end
 
     Mgmt[Mgmt 控制面] -->|成员表 / blocked / heartbeat| ShmReader
     Conductor[KV Conductor] --> KvProvider
     Package[已安装插件包的 Entry Point 元数据] -->|名称发现| Loader
-    Allocator --> Engine[vLLM / SGLang]
+    SchedClient --> Engine[vLLM / SGLang]
 ```
 
 ### 4.1 职责划分
@@ -78,7 +78,7 @@ flowchart LR
 | `PolicyContextBuilder` | 从请求、实例缓存和 SHM 构建不可变输入 |
 | `KvFeatureProvider` | 按需查询并归一化 KV Conductor 结果 |
 | `PolicyExecutor` | 调用策略、校验输出、记录指标并执行 fallback |
-| `WorkloadAllocator` | 计算 workload，执行 CAS、冲突重选和释放 |
+| `AsyncSchedulerClient._policy_select_and_allocate` | 计算 workload，执行 CAS、冲突重选和释放 |
 | 自定义策略 | 对候选进行纯计算排序 |
 
 Mgmt 不加载、不执行策略，只维护控制面和 SHM 成员信息。
@@ -352,7 +352,7 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant R as Router / RequestManager
-    participant A as WorkloadAllocator
+    participant A as AsyncSchedulerClient
     participant S as Rust SHM
 
     R->>A: release(committed workload)
@@ -377,38 +377,46 @@ class PolicyExecutor:
 
 
 class PolicyContextBuilder:
-    async def build(self, request: RequestInfo, role: PDRole) -> SelectionInput: ...
-
-
-class WorkloadAllocator:
-    async def select_and_allocate(
+    def build(
         self,
-        request: RequestInfo,
+        req_info: RequestInfo,
         role: PDRole,
-    ) -> tuple[Instance, Endpoint, Workload] | None: ...
+        instances: list[Instance],
+        *,
+        excluded: frozenset[CandidateId],
+        attempt: int,
+        required_engine_type: str | None,
+        required_dispatch_capability: str | None,
+        workload_reader,
+        policy_requires_kv: bool,
+    ) -> SelectionInput: ...
 ```
 
-`PolicyExecutor` 负责输出校验和 fallback；`WorkloadAllocator` 负责 CAS 循环，两者不进入 Mgmt 控制面。
+CAS 循环在 `AsyncSchedulerClient._policy_select_and_allocate()`，没有独立的 `WorkloadAllocator` 类。
+`PolicyExecutor` 负责输出校验和 fallback；Client 负责 CAS 提交与冲突重选。两者不进入 Mgmt 控制面。
 
 ## 8. KV 特征流程
 
 ```mermaid
 sequenceDiagram
-    participant E as PolicyExecutor
+    participant B as PolicyContextBuilder
     participant F as KvFeatureProvider
     participant C as KV Conductor
+    participant E as PolicyExecutor
     participant P as Custom Policy
 
-    E->>E: inspect requires_kv_match
+    B->>B: inspect policy_requires_kv
     alt false
-        E->>P: rank(input without KvMatch)
+        B->>E: SelectionInput without KvMatch
+        E->>P: rank
     else true
-        E->>F: build(request token IDs, candidates)
+        B->>F: build(request token IDs, candidates)
         F->>C: POST /query once
         C-->>F: per-instance / per-DP matches
         F->>F: normalize matched tokens and tier blocks
-        F-->>E: KvMatch per candidate
-        E->>P: rank(input with KvMatch)
+        F-->>B: KvMatch per candidate
+        B->>E: SelectionInput with KvMatch
+        E->>P: rank
     end
 ```
 
@@ -458,7 +466,7 @@ class WeightedPolicy(LoadBalancingPolicy):
         ranked = []
 
         for candidate in selection.candidates:
-            if candidate.id in selection.excluded:
+            if candidate.id in selection.excluded or candidate.blocked:
                 continue
             matched = candidate.kv_match.matched_tokens if candidate.kv_match else 0
             score = load_weight * candidate.active_tokens - kv_weight * matched
@@ -543,7 +551,7 @@ Motor 运行时不下载或安装插件。
 
 ## 11. 可观测性
 
-建议新增以下指标，标签仅使用低基数字段 `policy`：
+进程内 `PolicyMetrics` 记录以下指标，标签仅使用低基数字段 `policy`：
 
 | 指标 | 含义 |
 |------|------|
@@ -551,6 +559,9 @@ Motor 运行时不下载或安装插件。
 | `motor_policy_errors_total` | 策略异常或非法输出次数 |
 | `motor_policy_fallback_total` | fallback 次数 |
 | `motor_policy_cas_retries_total` | CAS 冲突重选次数 |
+
+这些计数器在 **Inference Worker 进程** 内累加。Obs 进程的 `GET /metrics` 会 append 同进程样本，但通常为空。
+生产刮取口是 **Worker metaserver `GET /metrics`**（`worker_metaserver_base_port + worker_index`）。
 
 启动日志记录 Entry Point 名称、发行包名、包版本、对象引用和 API 版本；运行时指标的 `policy` 标签使用 Entry Point
 名称，内置 fallback 使用内置策略名称。
@@ -574,8 +585,11 @@ motor/coordinator/scheduler/policy/
 ├── api.py                  # 公共 DTO 与 LoadBalancingPolicy
 ├── loader.py               # Entry Point 发现、重名/API 校验与初始化
 ├── executor.py             # 调用、输出校验、fallback、指标
-├── feature_provider.py     # SHM/KV 特征构建
-├── factory.py              # 内置策略适配
+├── metrics.py              # process-local motor_policy_* 计数
+├── feature_provider.py     # PolicyContextBuilder：SHM 快照
+├── kv_feature_provider.py  # 按需查询 KV Conductor
+├── builtin.py              # Worker 热路径内置 rank() 适配
+├── factory.py              # Mgmt 侧 BaseSchedulingPolicy 注册；Worker 创建 builtin
 ├── load_balance.py
 ├── round_robin.py
 └── kv_cache_affinity.py
@@ -583,6 +597,8 @@ motor/coordinator/scheduler/policy/
 
 `AsyncSchedulerClient.select_and_allocate()` 的非 pinned 路径依赖 `PolicyExecutor` 与核心 CAS 提交逻辑，
 不再直接按 `load_balance` / `kv_cache_affinity` / `round_robin` 分叉热路径。
+缓存/测试辅助函数 `_select_endpoint_candidates_from_list_with_policy` 同样调用 `PolicyExecutor.rank()`，
+不再调用旧的 `KvCacheAffinityPolicy.select_endpoint_candidates_from_list`。
 
 ## 14. 兼容与演进
 

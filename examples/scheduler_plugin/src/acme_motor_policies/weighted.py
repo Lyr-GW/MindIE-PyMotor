@@ -26,7 +26,7 @@ class WeightedPolicy(LoadBalancingPolicy):
         ranked: list[RankedCandidate] = []
 
         for candidate in selection.candidates:
-            if candidate.id in selection.excluded:
+            if candidate.id in selection.excluded or candidate.blocked:
                 continue
             matched = candidate.kv_match.matched_tokens if candidate.kv_match else 0
             score = load_weight * candidate.active_tokens - kv_weight * matched
