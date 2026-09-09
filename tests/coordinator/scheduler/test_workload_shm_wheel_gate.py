@@ -10,6 +10,8 @@
 
 """Guards the motor-wheel contract: deployable wheels must ship native members."""
 
+import base64
+import hashlib
 import zipfile
 from pathlib import Path
 
@@ -26,6 +28,38 @@ from motor.coordinator.workload_shm_rs.wheel_gate import (
     resolve_motor_wheel_platform_tag,
     retag_motor_wheel_filename,
 )
+
+_WHEEL_MEMBER = "motor-3.1.0.dist-info/WHEEL"
+_RECORD_MEMBER = "motor-3.1.0.dist-info/RECORD"
+
+
+def _record_sha256(data: bytes) -> str:
+    digest = hashlib.sha256(data).digest()
+    return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
+def _write_pep517_wheel(path: Path, *, tag: str = "py3-none-any") -> None:
+    """Write a minimal pep517-shaped wheel so retag can rewrite WHEEL + RECORD."""
+    wheel_body = (f"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: {tag}\n").encode()
+    record = f"{_WHEEL_MEMBER},{_record_sha256(wheel_body)},{len(wheel_body)}\n"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(_WHEEL_MEMBER, wheel_body)
+        archive.writestr(_RECORD_MEMBER, record)
+        archive.writestr("motor/__init__.py", b"")
+
+
+def _wheel_tags(path: Path) -> list[str]:
+    with zipfile.ZipFile(path) as archive:
+        text = archive.read(_WHEEL_MEMBER).decode()
+    return [line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("Tag:")]
+
+
+def _record_row(path: Path, member: str) -> str:
+    with zipfile.ZipFile(path) as archive:
+        for line in archive.read(_RECORD_MEMBER).decode().splitlines():
+            if line.split(",", 1)[0] == member:
+                return line
+    raise AssertionError(f"RECORD is missing {member}")
 
 
 def test_wheel_member_matches_runtime_loader_basename():
@@ -95,24 +129,28 @@ def test_arch_tagged_motor_wheel_name_keeps_pep517_prefix():
 
 
 def test_retag_motor_wheel_filename_replaces_any_tag(tmp_path: Path):
-    """build.sh must rename the pep517 any-wheel so x86 and ARM artifacts differ."""
+    """Filename and WHEEL Tag must both leave any; do not add a linux_ prefix."""
     src = tmp_path / "motor-3.1.0-py3-none-any.whl"
-    src.write_bytes(b"wheel")
+    _write_pep517_wheel(src)
 
     dest = Path(retag_motor_wheel_filename(str(src), "3.1.0", platform_tag="x86_64"))
 
     assert dest == tmp_path / "motor-3.1.0-py3-none-x86_64.whl"
     assert dest.is_file()
     assert not src.exists()
-    assert dest.read_bytes() == b"wheel"
+    assert _wheel_tags(dest) == ["py3-none-x86_64"]
+    with zipfile.ZipFile(dest) as archive:
+        new_wheel = archive.read(_WHEEL_MEMBER)
+    assert _record_row(dest, _WHEEL_MEMBER) == (f"{_WHEEL_MEMBER},{_record_sha256(new_wheel)},{len(new_wheel)}")
 
 
 def test_retag_motor_wheel_filename_is_noop_when_already_tagged(tmp_path: Path):
     """Re-running the gate on an already tagged wheel must not invent a second file."""
     src = tmp_path / "motor-3.1.0-py3-none-aarch64.whl"
-    src.write_bytes(b"wheel")
+    _write_pep517_wheel(src, tag="py3-none-any")
 
     dest = Path(retag_motor_wheel_filename(str(src), "3.1.0", platform_tag="aarch64"))
 
     assert dest == src
     assert src.is_file()
+    assert _wheel_tags(dest) == ["py3-none-aarch64"]
