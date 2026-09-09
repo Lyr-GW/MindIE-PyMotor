@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from motor.config.coordinator import CoordinatorConfig
+from motor.config.coordinator import CoordinatorConfig, PolicyPluginConfig
 
 
 def test_standalone_coordinator_config_needs_no_engine_or_controller_sections(tmp_path):
@@ -1302,24 +1302,18 @@ def test_policy_plugin_config_from_json(_temp_json_file):
     assert plugin.fallback == "round_robin"
 
 
-def test_policy_plugin_reserved_name_rejected():
-    from motor.config.coordinator import PolicyPluginConfig
-
+@pytest.mark.parametrize(
+    ("plugin", "match"),
+    [
+        (PolicyPluginConfig(name="load_balance"), "reserved"),
+        (PolicyPluginConfig(name="round_robin"), "reserved"),
+        (PolicyPluginConfig(name="kv_cache_affinity"), "reserved"),
+        (PolicyPluginConfig(name="acme.test", fallback="kv_cache_affinity"), "fallback"),
+    ],
+)
+def test_policy_plugin_invalid_config_rejected(plugin: PolicyPluginConfig, match: str):
     config = CoordinatorConfig()
-    config.scheduler_config.policy_plugin = PolicyPluginConfig(name="load_balance")
+    config.scheduler_config.policy_plugin = plugin
 
-    with pytest.raises(ValueError, match="reserved"):
-        config.validate_config()
-
-
-def test_policy_plugin_invalid_fallback_rejected():
-    from motor.config.coordinator import PolicyPluginConfig
-
-    config = CoordinatorConfig()
-    config.scheduler_config.policy_plugin = PolicyPluginConfig(
-        name="acme.test",
-        fallback="kv_cache_affinity",
-    )
-
-    with pytest.raises(ValueError, match="fallback"):
+    with pytest.raises(ValueError, match=match):
         config.validate_config()

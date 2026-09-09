@@ -44,10 +44,15 @@ class PolicyExecutor:
         self._fallback_policy = fallback_policy
         self._fallback_name = fallback_name or "load_balance"
         self._metrics = get_policy_metrics()
+        self._last_used_fallback = False
 
     @property
     def policy_name(self) -> str:
         return self._policy_name
+
+    @property
+    def last_used_fallback(self) -> bool:
+        return self._last_used_fallback
 
     @property
     def requires_kv_match(self) -> bool:
@@ -91,6 +96,7 @@ class PolicyExecutor:
             )
         if used_fallback:
             self._metrics.inc_fallback(self._policy_name)
+        self._last_used_fallback = used_fallback
         return ranked
 
     def _try_fallback(self, selection: SelectionInput) -> tuple[RankedCandidate, ...]:

@@ -24,7 +24,13 @@ from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.domain.scheduling import UpdateWorkloadParams
 from motor.coordinator.models.request import RequestInfo
-from motor.coordinator.scheduler.policy.api import KvMatch, LoadBalancingPolicy, RankedCandidate, SelectionInput
+from motor.coordinator.scheduler.policy.api import (
+    CandidateId,
+    KvMatch,
+    LoadBalancingPolicy,
+    RankedCandidate,
+    SelectionInput,
+)
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
     SchedulerResponseType,
@@ -106,6 +112,29 @@ def _build_instance_dict(instance_id: int = 1, role: str = "prefill") -> dict:
         endpoints={"pod1": {1: ep}},
     )
     return inst.model_dump(mode="json")
+
+
+def _attach_mock_cas_reader(client, meta_map, cas_add) -> None:
+    reader = Mock()
+    reader.entry_meta = Mock(side_effect=lambda iid, eid: meta_map.get((iid, eid)))
+    native = Mock()
+    native.cas_add = Mock(side_effect=cas_add)
+    reader.native = native
+    client._workload_reader = reader  # pylint: disable=protected-access
+    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
+    client._cache.patch_workload_from_shm = Mock()  # pylint: disable=protected-access
+
+
+async def _seed_two_prefill_candidates(client) -> dict[tuple[int, int], dict]:
+    endpoint_a = _make_endpoint(endpoint_id=10, active_tokens=1.0)
+    endpoint_b = _make_endpoint(endpoint_id=20, active_tokens=8.0)
+    inst_a = _make_instance(instance_id=1, role="prefill", endpoints={"pod-1": {10: endpoint_a}})
+    inst_b = _make_instance(instance_id=2, role="prefill", endpoints={"pod-2": {20: endpoint_b}})
+    await client._cache.replace_all(PDRole.ROLE_P, [inst_a, inst_b])  # pylint: disable=protected-access
+    return {
+        (1, 10): {"generation": 0, "active_tokens": 1.0, "flags": 0, "slot": 0},
+        (2, 20): {"generation": 0, "active_tokens": 8.0, "flags": 0, "slot": 1},
+    }
 
 
 def _build_mock_scheduler_response(
@@ -450,6 +479,8 @@ class TestAsyncSchedulerClient:
         req_info = Mock(spec=RequestInfo)
         req_info.req_id = "req-engine-filter"
         req_info.req_len = 10
+        req_info.req_data = {}
+        req_info.token_ids = None
 
         candidates, _ = await self.client._select_endpoint_candidates_with_policy(
             req_info,
@@ -463,6 +494,9 @@ class TestAsyncSchedulerClient:
     async def test_select_endpoint_candidates_filters_required_dispatch_capability(self):
         """Decode co-location must preserve LB while excluding unsupported instances."""
         self.client._scheduler_type = "load_balance"
+        self.client._policy_executor = self.client._build_policy_executor(
+            SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
+        )
         unsupported = _make_instance(
             instance_id=1,
             role="decode",
@@ -487,6 +521,8 @@ class TestAsyncSchedulerClient:
         req_info = Mock(spec=RequestInfo)
         req_info.req_id = "req-capability-filter"
         req_info.req_len = 10
+        req_info.req_data = {}
+        req_info.token_ids = None
 
         candidates, _ = await self.client._select_endpoint_candidates_with_policy(
             req_info,
@@ -1202,19 +1238,7 @@ async def test_policy_select_and_allocate_queries_kv_only_once_across_changed_re
     client = AsyncSchedulerClient(
         SchedulerClientConfig(scheduler_type="kv_cache_affinity", endpoint_instance_score_weight=0.0)
     )
-    endpoint_a = _make_endpoint(endpoint_id=10, active_tokens=1.0)
-    endpoint_b = _make_endpoint(endpoint_id=20, active_tokens=8.0)
-    inst_a = _make_instance(instance_id=1, role="prefill", endpoints={"pod-1": {10: endpoint_a}})
-    inst_b = _make_instance(instance_id=2, role="prefill", endpoints={"pod-2": {20: endpoint_b}})
-    await client._cache.replace_all(PDRole.ROLE_P, [inst_a, inst_b])  # pylint: disable=protected-access
-
-    meta_map = {
-        (1, 10): {"generation": 0, "active_tokens": 1.0, "flags": 0, "slot": 0},
-        (2, 20): {"generation": 0, "active_tokens": 8.0, "flags": 0, "slot": 1},
-    }
-    reader = Mock()
-    reader.entry_meta = Mock(side_effect=lambda iid, eid: meta_map.get((iid, eid)))
-    native = Mock()
+    meta_map = await _seed_two_prefill_candidates(client)
     cas_calls = {"count": 0}
 
     def cas_add(iid, eid, _gen, expected, delta, slot=None):
@@ -1227,11 +1251,7 @@ async def test_policy_select_and_allocate_queries_kv_only_once_across_changed_re
         meta_map[(iid, eid)]["active_tokens"] = actual
         return (STATUS_OK, actual)
 
-    native.cas_add = Mock(side_effect=cas_add)
-    reader.native = native
-    client._workload_reader = reader  # pylint: disable=protected-access
-    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
-    client._cache.patch_workload_from_shm = Mock()  # pylint: disable=protected-access
+    _attach_mock_cas_reader(client, meta_map, cas_add)
     kv_calls = {"count": 0}
 
     def fake_kv_build(_token_ids, _instances, candidate_ids):
@@ -1253,3 +1273,48 @@ async def test_policy_select_and_allocate_queries_kv_only_once_across_changed_re
     assert result is not None
     assert cas_calls["count"] >= 2
     assert kv_calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_select_and_allocate_reranks_after_cas_blocked():
+    """CAS STATUS_BLOCKED should exclude the candidate and re-call rank()."""
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
+    )
+    meta_map = await _seed_two_prefill_candidates(client)
+    cas_calls = {"count": 0}
+
+    def cas_add(iid, eid, _gen, expected, delta, slot=None):
+        del slot
+        cas_calls["count"] += 1
+        if cas_calls["count"] == 1:
+            assert (iid, eid) == (1, 10)
+            return (STATUS_BLOCKED, expected)
+        actual = float(expected) + float(delta)
+        meta_map[(iid, eid)]["active_tokens"] = actual
+        return (STATUS_OK, actual)
+
+    _attach_mock_cas_reader(client, meta_map, cas_add)
+    seen_excluded: list[frozenset[CandidateId]] = []
+    inner_rank = client._policy_executor.rank  # pylint: disable=protected-access
+
+    def wrapped_rank(selection):
+        seen_excluded.append(frozenset(selection.excluded))
+        return inner_rank(selection)
+
+    client._policy_executor.rank = wrapped_rank  # pylint: disable=protected-access
+    req = RequestInfo(req_id="req-cas-blocked", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+    result = await client._policy_select_and_allocate(  # pylint: disable=protected-access
+        PDRole.ROLE_P,
+        req,
+        required_engine_type=None,
+        required_dispatch_capability=None,
+        demand=Workload(active_tokens=4.0),
+    )
+    assert result is not None
+    assert result[0].id == 2
+    assert result[1].id == 20
+    assert cas_calls["count"] == 2
+    assert len(seen_excluded) >= 2
+    assert not seen_excluded[0]
+    assert CandidateId(1, 10) in seen_excluded[1]

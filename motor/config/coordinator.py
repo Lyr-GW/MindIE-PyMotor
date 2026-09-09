@@ -14,7 +14,7 @@ import re
 import ipaddress
 import tempfile
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any, ClassVar, Optional
 from enum import Enum
 from dataclasses import dataclass, field, asdict, is_dataclass
 
@@ -370,6 +370,9 @@ class KvAffinityConfig:
 @dataclass
 class PolicyPluginConfig:
     """External scheduling policy plugin configuration."""
+
+    RESERVED_NAMES: ClassVar[frozenset[str]] = frozenset({"load_balance", "round_robin", "kv_cache_affinity"})
+    FALLBACK_NAMES: ClassVar[frozenset[str]] = frozenset({"load_balance", "round_robin"})
 
     name: str = ""
     options: dict[str, Any] = field(default_factory=dict)
@@ -981,16 +984,14 @@ class CoordinatorConfig:
             self._errors.append(f"kv_affinity.mode must be one of {KV_AFFINITY_MODES}, got {affinity.mode!r}")
         plugin = self.scheduler_config.policy_plugin
         if plugin is not None and (plugin.name or "").strip():
-            reserved_policy_names = frozenset({"load_balance", "round_robin", "kv_cache_affinity"})
-            fallback_policy_names = frozenset({"load_balance", "round_robin"})
             name = plugin.name.strip()
-            if name in reserved_policy_names:
+            if name in PolicyPluginConfig.RESERVED_NAMES:
                 self._errors.append("scheduler_config.policy_plugin.name %r is reserved for built-in strategies" % name)
             fallback = (plugin.fallback or "load_balance").strip()
-            if fallback not in fallback_policy_names:
+            if fallback not in PolicyPluginConfig.FALLBACK_NAMES:
                 self._errors.append(
                     "scheduler_config.policy_plugin.fallback must be one of %s, got %r"
-                    % (sorted(fallback_policy_names), fallback)
+                    % (sorted(PolicyPluginConfig.FALLBACK_NAMES), fallback)
                 )
             if plugin.options is not None and not isinstance(plugin.options, dict):
                 self._errors.append("scheduler_config.policy_plugin.options must be a JSON object")
