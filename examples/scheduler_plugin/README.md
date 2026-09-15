@@ -7,7 +7,7 @@ cd examples/scheduler_plugin
 python -m pip install -e .
 ```
 
-Enable in `user_config.json`:
+`policy_plugin.name` 可写内置名（与 `scheduler_type` 等价）或 Entry Point 名称。Enable in `user_config.json`:
 
 ```json
 {

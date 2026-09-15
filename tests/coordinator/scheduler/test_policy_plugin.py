@@ -41,6 +41,9 @@ from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProv
 from motor.coordinator.scheduler.policy.loader import (
     PolicyLoadError,
     PolicyLoader,
+    effective_policy_name,
+    is_in_tree_policy,
+    resolve_load_balancing_policy,
     validate_policy_plugin_config,
 )
 from motor.coordinator.scheduler.policy.metrics import PolicyMetrics, append_policy_metrics, get_policy_metrics
@@ -190,13 +193,30 @@ def test_executor_invalid_rank_falls_back(rank_impl):
 @pytest.mark.parametrize(
     "spec",
     [
-        PolicyPluginConfig(name="load_balance"),
         PolicyPluginConfig(name="acme.test", fallback="kv_cache_affinity"),
     ],
 )
 def test_loader_rejects_invalid_plugin_config(spec: PolicyPluginConfig):
     with pytest.raises(PolicyLoadError):
         validate_policy_plugin_config(spec)
+
+
+@pytest.mark.parametrize("name", ["load_balance", "round_robin", "kv_cache_affinity"])
+def test_loader_accepts_in_tree_plugin_names(name: str):
+    validate_policy_plugin_config(PolicyPluginConfig(name=name))
+
+
+def test_load_at_startup_skips_entry_points_for_in_tree_names():
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points") as mock_eps:
+        assert PolicyLoader.load_at_startup(PolicyPluginConfig(name="load_balance")) is None
+        mock_eps.assert_not_called()
+
+
+def test_loader_load_in_tree_does_not_query_entry_points():
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points") as mock_eps:
+        policy = PolicyLoader().load(PolicyPluginConfig(name="load_balance"))
+    assert isinstance(policy, BuiltinLoadBalancePolicy)
+    mock_eps.assert_not_called()
 
 
 def test_loader_not_installed():
@@ -218,6 +238,33 @@ def test_loader_duplicate_entry_points():
 def test_factory_builtin_names():
     assert isinstance(create_load_balancing_policy("load_balance"), BuiltinLoadBalancePolicy)
     assert isinstance(create_load_balancing_policy("round_robin"), BuiltinRoundRobinPolicy)
+
+
+def test_effective_policy_name_plugin_overrides_scheduler_type():
+    plugin = PolicyPluginConfig(name="acme.weighted")
+    assert effective_policy_name("round_robin", plugin) == "acme.weighted"
+    assert effective_policy_name("load_balance", None) == "load_balance"
+    assert effective_policy_name("load_balance", PolicyPluginConfig(name="")) == "load_balance"
+    assert is_in_tree_policy("kv_cache_affinity")
+    assert not is_in_tree_policy("acme.weighted")
+
+
+def test_resolve_in_tree_policy_does_not_query_entry_points():
+    with patch("motor.coordinator.scheduler.policy.loader.entry_points") as mock_eps:
+        policy = resolve_load_balancing_policy(
+            "load_balance",
+            builtin_options={"instance_score_weight": 0.1},
+            plugin_spec=PolicyPluginConfig(name="load_balance", options={"custom": 1}),
+        )
+    assert isinstance(policy, BuiltinLoadBalancePolicy)
+    assert policy.options["instance_score_weight"] == pytest.approx(0.1)
+    assert policy.options["custom"] == 1
+    mock_eps.assert_not_called()
+
+
+def test_resolve_external_policy_requires_matching_plugin_name():
+    with pytest.raises(PolicyLoadError, match="not in-tree"):
+        resolve_load_balancing_policy("acme.missing")
 
 
 def test_kv_feature_provider_unavailable():

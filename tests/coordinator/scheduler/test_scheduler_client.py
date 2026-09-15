@@ -31,6 +31,11 @@ from motor.coordinator.scheduler.policy.api import (
     RankedCandidate,
     SelectionInput,
 )
+from motor.coordinator.scheduler.policy.builtin import (
+    BuiltinKvCacheAffinityPolicy,
+    BuiltinLoadBalancePolicy,
+    BuiltinRoundRobinPolicy,
+)
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     SchedulerResponse,
     SchedulerResponseType,
@@ -918,8 +923,10 @@ class _CapturePolicy(LoadBalancingPolicy):
     def __init__(self, options=None):
         super().__init__(options)
         self.seen_option_keys: tuple[str, ...] = ()
+        self.last_selection: SelectionInput | None = None
 
     def rank(self, selection: SelectionInput) -> list[RankedCandidate]:
+        self.last_selection = selection
         self.seen_option_keys = tuple(sorted(self.options.keys()))
         if not selection.candidates:
             return []
@@ -1206,6 +1213,72 @@ def test_sync_builtin_runtime_keeps_custom_plugin_options_isolated():
     assert policy.options == {"custom_weight": 0.9}
 
 
+def test_build_policy_executor_scheduler_type_and_plugin_name_are_equivalent():
+    via_type = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
+    )
+    via_plugin = AsyncSchedulerClient(
+        SchedulerClientConfig(
+            scheduler_type="round_robin",
+            endpoint_instance_score_weight=0.0,
+            policy_plugin=PolicyPluginConfig(name="load_balance"),
+        )
+    )
+    assert isinstance(via_type._policy_executor.policy, BuiltinLoadBalancePolicy)  # pylint: disable=protected-access
+    assert isinstance(via_plugin._policy_executor.policy, BuiltinLoadBalancePolicy)  # pylint: disable=protected-access
+    assert via_type._policy_executor.policy_name == via_plugin._policy_executor.policy_name == "load_balance"
+
+
+def test_build_policy_executor_in_tree_plugin_name_skips_entry_point_loader():
+    with patch("motor.coordinator.scheduler.runtime.scheduler_client.PolicyLoader.load") as mock_load:
+        client = AsyncSchedulerClient(
+            SchedulerClientConfig(
+                scheduler_type="round_robin",
+                endpoint_instance_score_weight=0.0,
+                policy_plugin=PolicyPluginConfig(name="kv_cache_affinity"),
+            )
+        )
+    mock_load.assert_not_called()
+    assert isinstance(client._policy_executor.policy, BuiltinKvCacheAffinityPolicy)  # pylint: disable=protected-access
+    assert isinstance(client._policy_executor.fallback_policy, BuiltinLoadBalancePolicy)  # pylint: disable=protected-access
+
+
+@pytest.mark.asyncio
+async def test_select_and_allocate_round_robin_uses_empty_demand():
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="round_robin", endpoint_instance_score_weight=0.0)
+    )
+    client._workload_reader = Mock()  # pylint: disable=protected-access
+    client._workload_reader.native = Mock()
+    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
+    client._policy_select_and_allocate = AsyncMock(return_value=None)  # pylint: disable=protected-access
+    req = RequestInfo(req_id="req-rr", req_data={}, req_len=8, api="completions", token_ids=[1, 2, 3, 4])
+    await client.select_and_allocate(PDRole.ROLE_P, req)
+    kwargs = client._policy_select_and_allocate.await_args.kwargs  # pylint: disable=protected-access
+    assert kwargs["demand"].active_tokens == pytest.approx(0.0)
+    assert kwargs["pinned_instance_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_select_and_allocate_in_tree_plugin_round_robin_uses_empty_demand():
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(
+            scheduler_type="load_balance",
+            endpoint_instance_score_weight=0.0,
+            policy_plugin=PolicyPluginConfig(name="round_robin"),
+        )
+    )
+    assert isinstance(client._policy_executor.policy, BuiltinRoundRobinPolicy)  # pylint: disable=protected-access
+    client._workload_reader = Mock()  # pylint: disable=protected-access
+    client._workload_reader.native = Mock()
+    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
+    client._policy_select_and_allocate = AsyncMock(return_value=None)  # pylint: disable=protected-access
+    req = RequestInfo(req_id="req-rr-plugin", req_data={}, req_len=8, api="completions", token_ids=[1, 2, 3, 4])
+    await client.select_and_allocate(PDRole.ROLE_P, req)
+    demand = client._policy_select_and_allocate.await_args.kwargs["demand"]  # pylint: disable=protected-access
+    assert demand.active_tokens == pytest.approx(0.0)
+
+
 @pytest.mark.asyncio
 async def test_select_and_allocate_plugin_commits_demand_with_round_robin_scheduler_type():
     """When plugin is enabled, demand accounting must ignore round-robin zero-workload shortcut."""
@@ -1230,6 +1303,57 @@ async def test_select_and_allocate_plugin_commits_demand_with_round_robin_schedu
     await client.select_and_allocate(PDRole.ROLE_P, req)
     demand = client._policy_select_and_allocate.await_args.kwargs["demand"]  # pylint: disable=protected-access
     assert demand.active_tokens == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+async def test_select_and_allocate_pin_ranks_only_target_instance():
+    """Pin filters the candidate set, then the current policy ranks those endpoints."""
+    plugin = PolicyPluginConfig(name="acme.weighted", fallback="load_balance")
+    policy = _CapturePolicy(options=plugin.options)
+    with patch(
+        "motor.coordinator.scheduler.runtime.scheduler_client.PolicyLoader.load",
+        return_value=policy,
+    ):
+        client = AsyncSchedulerClient(
+            SchedulerClientConfig(
+                scheduler_type="load_balance",
+                endpoint_instance_score_weight=0.0,
+                policy_plugin=plugin,
+            )
+        )
+    meta_map = await _seed_two_prefill_candidates(client)
+
+    def cas_add(iid, eid, _gen, expected, delta, slot=None):
+        del slot
+        actual = float(expected) + float(delta)
+        meta_map[(iid, eid)]["active_tokens"] = actual
+        return (STATUS_OK, actual)
+
+    _attach_mock_cas_reader(client, meta_map, cas_add)
+    req = RequestInfo(req_id="req-pin", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+    result = await client.select_and_allocate(PDRole.ROLE_P, req, target_instance_id=2)
+    assert result is not None
+    instance, endpoint, _committed = result
+    assert instance.id == 2
+    assert endpoint.id == 20
+    assert policy.last_selection is not None
+    seen_ids = {candidate.id.instance_id for candidate in policy.last_selection.candidates}
+    assert seen_ids == {2}
+
+
+@pytest.mark.asyncio
+async def test_select_and_allocate_forwards_pin_to_policy_path():
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="load_balance", endpoint_instance_score_weight=0.0)
+    )
+    client._workload_reader = Mock()  # pylint: disable=protected-access
+    client._workload_reader.native = Mock()
+    client._refresh_cache_from_workload_reader = AsyncMock()  # pylint: disable=protected-access
+    client._policy_select_and_allocate = AsyncMock(return_value=None)  # pylint: disable=protected-access
+    req = RequestInfo(req_id="req-pin-fwd", req_data={}, req_len=4, api="completions", token_ids=[1, 2])
+    await client.select_and_allocate(PDRole.ROLE_P, req, target_instance_id=9)
+    kwargs = client._policy_select_and_allocate.await_args.kwargs  # pylint: disable=protected-access
+    assert kwargs["pinned_instance_id"] == 9
 
 
 @pytest.mark.asyncio

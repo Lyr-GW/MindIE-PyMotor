@@ -1,7 +1,7 @@
 # Coordinator 自定义调度策略插件设计
 
-> 状态：部分实现（Entry Point + `rank()` 主路径已落地；Worker 辅助选路也走同一 `rank()`；
-> 指标从 Worker metaserver `GET /metrics` 刮取。测试与示例 wheel 仍在补齐）
+> 状态：内置名与外部插件已归一到同一名称解析；`select_and_allocate`（含 pin）走 `PolicyExecutor.rank()` + SHM CAS。
+> Worker metaserver `GET /metrics` 刮取 `motor_policy_*`。
 >
 > 前提：[PR #822](https://gitcode.com/Ascend/MindIE-Motor/pull/822) 已合入，Coordinator 已删除独立 Scheduler
 > 进程，请求热路径由 Inference Worker 本地打分并通过 Rust schema-4 SHM CAS 完成负载分配与释放。
@@ -46,7 +46,7 @@ Motor 内置 `load_balance`、`round_robin` 和 `kv_cache_affinity` 策略。新
 - **失败可降级**：运行时异常或非法输出回退到一个内置策略。
 - **进程内独立实例**：每个 `spawn` 出来的 Inference Worker 自行加载插件。
 - **按名称启用**：只加载配置指定的 Entry Point，安装插件不会自动启用策略。
-- **兼容现有配置**：未配置插件时，`scheduler_type` 行为保持不变。
+- **兼容现有配置**：`scheduler_type` 仍是策略名别名；只配它时行为不变。`policy_plugin.name` 非空时覆盖 `scheduler_type`（含 pin）。
 
 ## 4. 总体架构
 
@@ -204,7 +204,7 @@ Motor 在提交前执行以下校验：
 
 ### 6.1 配置
 
-未配置 `policy_plugin` 时继续使用 `scheduler_type`：
+未配置 `policy_plugin.name` 时继续使用 `scheduler_type`；两者解析成**同一个策略名**后再走内置工厂或 Entry Point：
 
 ```json
 {
@@ -214,7 +214,20 @@ Motor 在提交前执行以下校验：
 }
 ```
 
-启用插件：
+`policy_plugin.name` 也可写内置名，效果与 `scheduler_type` 相同：
+
+```json
+{
+  "scheduler_config": {
+    "scheduler_type": "round_robin",
+    "policy_plugin": {
+      "name": "load_balance"
+    }
+  }
+}
+```
+
+启用外部插件：
 
 ```json
 {
@@ -233,12 +246,13 @@ Motor 在提交前执行以下校验：
 
 | 字段 | 必填 | 语义 |
 |------|------|------|
-| `name` | 是 | Entry Point 名称，如 `acme.weighted_tokens` |
-| `options` | 否 | 传给策略构造函数的 JSON 对象，默认 `{}` |
-| `fallback` | 否 | 内置降级策略，默认 `load_balance` |
+| `name` | 否 | 策略名。空则使用 `scheduler_type`。内置名 `load_balance` / `round_robin` / `kv_cache_affinity` 走工厂；其它名称按 Entry Point 加载 |
+| `options` | 否 | 传给策略构造函数的 JSON 对象，默认 `{}`。内置名会与 Worker 的 `kv_affinity` / `endpoint_instance_score_weight` 合并 |
+| `fallback` | 否 | 仅外部插件使用的内置降级策略，默认 `load_balance` |
 
 `fallback` 只允许 `load_balance` 或 `round_robin`，保证降级本身无需 KV 查询，也不会递归加载插件。
-配置或插件包变更后重启 Inference Worker 生效；运行中安装包不会触发重新发现。
+内置 `kv_cache_affinity` 仍使用固定的 `load_balance` 执行器降级，不读取 `fallback`。
+`policy_plugin.name` 非空时覆盖 `scheduler_type`（含 pin 路径）。配置或插件包变更后重启 Inference Worker 生效；运行中安装包不会触发重新发现。
 
 ### 6.2 Entry Point 注册约定
 
@@ -254,7 +268,7 @@ Motor 在提交前执行以下校验：
 | 对象引用 | `acme_motor_policies.weighted:WeightedPolicy` | 插件包声明，Loader 通过 `.load()` 解析 |
 
 名称采用小写 `<提供方>.<策略名>`，允许字母、数字、下划线、点和连字符，并按名称精确匹配。
-内置名称 `load_balance`、`round_robin`、`kv_cache_affinity` 保留，外部插件不能覆盖。
+内置名称 `load_balance`、`round_robin`、`kv_cache_affinity` 由 in-tree 工厂解析，**不查询** Entry Point，外部插件不能覆盖。
 
 仅向 `PYTHONPATH` 放入 `.py` 文件不足以完成注册；开发环境使用 editable install，生产环境安装包含 Entry Point
 元数据的 wheel。部署配置只接受 `name`，原设计中的 `class_path` 不进入第一版配置。
@@ -296,12 +310,28 @@ Loader 使用 Python 3.10+ 标准库的
 
 加载规则：
 
-1. 校验 `name/options/fallback`，拒绝内置保留名称。
-2. 查询固定 group 中与 `name` 完全一致的所有条目。
-3. 零匹配时报未安装；多个匹配时报重名，列出每个来源包、版本及对象引用，不按安装顺序择一。
-4. 对唯一条目调用 `.load()`，要求结果为 `LoadBalancingPolicy` 子类。
-5. 校验 `api_version`、实际覆盖的同步 `rank()` 和布尔类型 `requires_kv_match`，再调用构造函数校验 `options`。
-6. 缓存实例供该 Worker 使用；每次请求及 CAS 重试均复用实例，不重复发现和导入。
+1. 解析有效名称：`policy_plugin.name` 非空则用它，否则用 `scheduler_type`。
+2. 内置名走工厂创建 `LoadBalancingPolicy`，不发现、不导入 Entry Point。
+3. 其它名称校验 `options/fallback` 后，查询固定 group 中与 `name` 完全一致的所有条目。
+
+```plantuml
+@startuml
+start
+:effective_name = plugin.name or scheduler_type;
+if (name in in-tree?) then (yes)
+  :create_load_balancing_policy();
+else (external)
+  :Entry Point load + validate;
+endif
+:PolicyExecutor.rank + SHM CAS;
+stop
+@enduml
+```
+
+4. 零匹配时报未安装；多个匹配时报重名，列出每个来源包、版本及对象引用，不按安装顺序择一。
+5. 对唯一条目调用 `.load()`，要求结果为 `LoadBalancingPolicy` 子类。
+6. 校验 `api_version`、实际覆盖的同步 `rank()` 和布尔类型 `requires_kv_match`，再调用构造函数校验 `options`。
+7. 外部插件实例按名称缓存供该 Worker 使用；每次请求及 CAS 重试均复用实例，不重复发现和导入。
 
 加载失败使当前 Worker 启动失败，错误包含配置名称、来源包、版本、对象引用和原始原因。运行期间单次调用失败才执行
 fallback。未选中的插件不导入，其加载错误不阻断服务。
@@ -345,7 +375,8 @@ flowchart TD
 - CAS `Changed` 后必须使用最新负载重新调用同一个策略，不能盲目提交或直接使用旧排序的第二名。
 - 同一次调度仅查询一次 KV Conductor；CAS 重试复用 KV 命中特征，只刷新 SHM 负载。
 - workload delta 由 Motor 统一计算，插件输出中不包含 delta。
-- pinned instance、路由拓扑选择和 PD 协调模式继续由 Motor 核心处理。
+- pinned `target_instance_id` 只过滤候选实例，随后走同一 `PolicyExecutor.rank()` + CAS。
+- 路由拓扑选择和 PD 协调模式继续由 Motor 核心处理。
 
 ### 7.1 释放流程
 
@@ -583,20 +614,21 @@ Conductor 原始响应。
 ```text
 motor/coordinator/scheduler/policy/
 ├── api.py                  # 公共 DTO 与 LoadBalancingPolicy
-├── loader.py               # Entry Point 发现、重名/API 校验与初始化
+├── factory.py              # Mgmt 侧 BaseSchedulingPolicy 注册；Worker 创建 builtin
+├── loader.py               # 名称解析、Entry Point 发现、重名/API 校验与初始化
 ├── executor.py             # 调用、输出校验、fallback、指标
 ├── metrics.py              # process-local motor_policy_* 计数
 ├── feature_provider.py     # PolicyContextBuilder：SHM 快照
 ├── kv_feature_provider.py  # 按需查询 KV Conductor
 ├── builtin.py              # Worker 热路径内置 rank() 适配
-├── factory.py              # Mgmt 侧 BaseSchedulingPolicy 注册；Worker 创建 builtin
 ├── load_balance.py
 ├── round_robin.py
 └── kv_cache_affinity.py
 ```
 
-`AsyncSchedulerClient.select_and_allocate()` 的非 pinned 路径依赖 `PolicyExecutor` 与核心 CAS 提交逻辑，
-不再直接按 `load_balance` / `kv_cache_affinity` / `round_robin` 分叉热路径。
+`AsyncSchedulerClient.select_and_allocate()` 的全部选路（含 `target_instance_id` pin）依赖
+`effective_policy_name()` → 同一 `PolicyExecutor` 与核心 CAS 提交逻辑，
+不再按「有无 plugin」或「是否 pin」分叉热路径。
 缓存/测试辅助函数 `_select_endpoint_candidates_from_list_with_policy` 同样调用 `PolicyExecutor.rank()`，
 不再调用旧的 `KvCacheAffinityPolicy.select_endpoint_candidates_from_list`。
 
@@ -604,9 +636,9 @@ motor/coordinator/scheduler/policy/
 
 ### 14.1 兼容策略
 
-- 保留现有 `scheduler_type`，由内置适配器创建同一 `LoadBalancingPolicy` 接口。
-- `policy_plugin` 存在时，非 pinned 路径按 Entry Point 名称选择插件，其 `fallback` 显式决定降级策略；pinned
-  `target_instance_id` 仍保留 pin + 仲裁语义。
+- 保留现有 `scheduler_type`，它是 `policy_plugin.name` 为空时的别名。
+- `policy_plugin.name` 非空时覆盖 `scheduler_type`；内置名走工厂，其它名走 Entry Point。
+  外部插件的 `fallback` 显式决定降级策略。pinned `target_instance_id` 过滤实例后仍走 `rank()`。
 - 内置策略保留内部工厂注册；外部插件使用固定 Entry Point group，两者最终进入同一 `PolicyExecutor`。
 - 原 `class_path` 草案由 `name` 替代；模块路径保存在插件包元数据中。
 - 内置算法公式、并列候选顺序和 committed workload 计算保持不变。
@@ -625,7 +657,7 @@ Rust 插件可作为后续独立方案实现，但应复用相同 DTO 和排序�
 
 ### 15.1 单元测试
 
-- Loader：唯一命中、未安装、同名不同包、保留名称、API 版本不兼容、类型错误、未覆盖或异步 `rank()`、构造失败。
+- Loader：唯一命中、未安装、同名不同包、内置名不查 Entry Point、API 版本不兼容、类型错误、未覆盖或异步 `rank()`、构造失败。
 - 发现与启用隔离：未配置插件时不发现/导入外部策略；配置一个策略时其他入口的 `.load()` 不被调用。
 - Executor：正常排序、异常、空结果、重复 ID、未知 ID、非有限 score、fallback。
 - Feature Provider：SHM 负载映射、Instance 聚合负载、KV hit/miss/unavailable。

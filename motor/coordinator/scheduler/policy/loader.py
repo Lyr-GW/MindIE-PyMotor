@@ -17,16 +17,18 @@ from importlib.metadata import entry_points
 from typing import Any
 
 from motor.common.logger import get_logger
-from motor.config.coordinator import PolicyPluginConfig
+from motor.config.coordinator import PolicyPluginConfig, SchedulerType
 from motor.coordinator.scheduler.policy.api import (
     SUPPORTED_POLICY_API_VERSION,
     LoadBalancingPolicy,
 )
+from motor.coordinator.scheduler.policy.factory import create_load_balancing_policy
 
 logger = get_logger(__name__)
 
 SCHEDULING_POLICIES_GROUP = "mindie_motor.scheduling_policies"
-RESERVED_POLICY_NAMES = PolicyPluginConfig.RESERVED_NAMES
+IN_TREE_POLICY_NAMES = PolicyPluginConfig.IN_TREE_NAMES
+RESERVED_POLICY_NAMES = IN_TREE_POLICY_NAMES
 FALLBACK_POLICY_NAMES = PolicyPluginConfig.FALLBACK_NAMES
 
 
@@ -72,9 +74,6 @@ def _validate_policy_class(policy_cls: type, *, entry_name: str, entry_value: st
 def validate_policy_plugin_config(spec: PolicyPluginConfig | None) -> None:
     if spec is None or not (spec.name or "").strip():
         return
-    name = spec.name.strip()
-    if name in RESERVED_POLICY_NAMES:
-        raise PolicyLoadError("Policy plugin name %r is reserved for built-in strategies" % name)
     fallback = (spec.fallback or "load_balance").strip()
     if fallback not in FALLBACK_POLICY_NAMES:
         raise PolicyLoadError(
@@ -82,6 +81,48 @@ def validate_policy_plugin_config(spec: PolicyPluginConfig | None) -> None:
         )
     if spec.options is not None and not isinstance(spec.options, dict):
         raise PolicyLoadError("Policy plugin options must be a JSON object")
+
+
+def is_in_tree_policy(name: str) -> bool:
+    """Return True when ``name`` is a built-in Worker strategy."""
+    return (name or "").strip() in IN_TREE_POLICY_NAMES
+
+
+def effective_policy_name(
+    scheduler_type: SchedulerType | str | None,
+    plugin: PolicyPluginConfig | None,
+) -> str:
+    """Resolve the active policy name.
+
+    ``policy_plugin.name`` wins when non-empty; otherwise ``scheduler_type`` is used.
+    Empty scheduler type follows the Worker client default of ``round_robin``.
+    """
+    if plugin is not None and (plugin.name or "").strip():
+        return plugin.name.strip()
+    if isinstance(scheduler_type, SchedulerType):
+        return scheduler_type.value
+    return str(scheduler_type or "round_robin").strip() or "round_robin"
+
+
+def resolve_load_balancing_policy(
+    name: str,
+    *,
+    builtin_options: dict[str, Any] | None = None,
+    plugin_spec: PolicyPluginConfig | None = None,
+) -> LoadBalancingPolicy:
+    """Create the policy for ``name``: in-tree factory, otherwise Entry Point load."""
+    normalized = (name or "").strip()
+    if not normalized:
+        raise ValueError("Scheduling policy name is empty")
+    if is_in_tree_policy(normalized):
+        opts = dict(builtin_options or {})
+        plugin_name = (plugin_spec.name or "").strip() if plugin_spec is not None else ""
+        if plugin_spec is not None and plugin_name == normalized and plugin_spec.options:
+            opts.update(dict(plugin_spec.options))
+        return create_load_balancing_policy(normalized, opts)
+    if plugin_spec is None or (plugin_spec.name or "").strip() != normalized:
+        raise PolicyLoadError("Scheduling policy %r is not in-tree and policy_plugin.name does not match" % normalized)
+    return PolicyLoader().load(plugin_spec)
 
 
 class PolicyLoader:
@@ -92,6 +133,8 @@ class PolicyLoader:
     def load(self, spec: PolicyPluginConfig) -> LoadBalancingPolicy:
         validate_policy_plugin_config(spec)
         name = spec.name.strip()
+        if name in IN_TREE_POLICY_NAMES:
+            return create_load_balancing_policy(name, dict(spec.options or {}))
         cached = self._cache.get(name)
         if cached is not None:
             return cached
@@ -142,5 +185,9 @@ class PolicyLoader:
     def load_at_startup(spec: PolicyPluginConfig | None) -> LoadBalancingPolicy | None:
         """Load plugin policy; raise PolicyLoadError on failure (fail-fast at worker startup)."""
         if spec is None or not (spec.name or "").strip():
+            return None
+        name = spec.name.strip()
+        if name in IN_TREE_POLICY_NAMES:
+            validate_policy_plugin_config(spec)
             return None
         return PolicyLoader().load(spec)

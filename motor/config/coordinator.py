@@ -369,9 +369,15 @@ class KvAffinityConfig:
 
 @dataclass
 class PolicyPluginConfig:
-    """External scheduling policy plugin configuration."""
+    """Scheduling policy name, options, and runtime fallback.
 
-    RESERVED_NAMES: ClassVar[frozenset[str]] = frozenset({"load_balance", "round_robin", "kv_cache_affinity"})
+    Empty ``name`` means Worker uses ``scheduler_type``. In-tree names are created
+    by the built-in factory and are never discovered via Entry Points. Any other
+    name is loaded from group ``mindie_motor.scheduling_policies``.
+    """
+
+    IN_TREE_NAMES: ClassVar[frozenset[str]] = frozenset({"load_balance", "round_robin", "kv_cache_affinity"})
+    RESERVED_NAMES: ClassVar[frozenset[str]] = IN_TREE_NAMES
     FALLBACK_NAMES: ClassVar[frozenset[str]] = frozenset({"load_balance", "round_robin"})
 
     name: str = ""
@@ -984,9 +990,6 @@ class CoordinatorConfig:
             self._errors.append(f"kv_affinity.mode must be one of {KV_AFFINITY_MODES}, got {affinity.mode!r}")
         plugin = self.scheduler_config.policy_plugin
         if plugin is not None and (plugin.name or "").strip():
-            name = plugin.name.strip()
-            if name in PolicyPluginConfig.RESERVED_NAMES:
-                self._errors.append("scheduler_config.policy_plugin.name %r is reserved for built-in strategies" % name)
             fallback = (plugin.fallback or "load_balance").strip()
             if fallback not in PolicyPluginConfig.FALLBACK_NAMES:
                 self._errors.append(

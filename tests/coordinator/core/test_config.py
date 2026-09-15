@@ -1302,18 +1302,16 @@ def test_policy_plugin_config_from_json(_temp_json_file):
     assert plugin.fallback == "round_robin"
 
 
-@pytest.mark.parametrize(
-    ("plugin", "match"),
-    [
-        (PolicyPluginConfig(name="load_balance"), "reserved"),
-        (PolicyPluginConfig(name="round_robin"), "reserved"),
-        (PolicyPluginConfig(name="kv_cache_affinity"), "reserved"),
-        (PolicyPluginConfig(name="acme.test", fallback="kv_cache_affinity"), "fallback"),
-    ],
-)
-def test_policy_plugin_invalid_config_rejected(plugin: PolicyPluginConfig, match: str):
+@pytest.mark.parametrize("name", ["load_balance", "round_robin", "kv_cache_affinity"])
+def test_policy_plugin_in_tree_name_is_accepted(name: str):
     config = CoordinatorConfig()
-    config.scheduler_config.policy_plugin = plugin
+    config.scheduler_config.policy_plugin = PolicyPluginConfig(name=name)
+    config.validate_config()
 
-    with pytest.raises(ValueError, match=match):
+
+def test_policy_plugin_invalid_fallback_rejected():
+    config = CoordinatorConfig()
+    config.scheduler_config.policy_plugin = PolicyPluginConfig(name="acme.test", fallback="kv_cache_affinity")
+
+    with pytest.raises(ValueError, match="fallback"):
         config.validate_config()
