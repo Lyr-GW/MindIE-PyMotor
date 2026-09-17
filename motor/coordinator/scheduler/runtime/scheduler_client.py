@@ -61,7 +61,7 @@ from motor.coordinator.domain.workload_calculator import (
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.policy.api import CandidateId
 from motor.coordinator.scheduler.policy.executor import PolicyExecutor
-from motor.coordinator.scheduler.policy.feature_provider import PolicyContextBuilder
+from motor.coordinator.scheduler.policy.feature_provider import KvFeatureCache, PolicyContextBuilder
 from motor.coordinator.scheduler.policy.factory import create_load_balancing_policy
 from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProvider
 from motor.coordinator.scheduler.policy.loader import (
@@ -1003,7 +1003,7 @@ class AsyncSchedulerClient:
         token_ids = getattr(req_info, "token_ids", None)
         isl = float(len(token_ids)) if isinstance(token_ids, list) and token_ids else 0.0
         excluded_ids: set[CandidateId] = set()
-        self._context_builder.reset_kv_cache()
+        kv_cache = KvFeatureCache()
         matched_tokens_map: dict[tuple[int, int], float] = {}
 
         for attempt in range(_MAX_CAS_ALLOCATE_ATTEMPTS):
@@ -1046,6 +1046,7 @@ class AsyncSchedulerClient:
                 required_dispatch_capability=required_dispatch_capability,
                 workload_reader=self._workload_reader,
                 policy_requires_kv=self._policy_executor.requires_kv_match,
+                kv_cache=kv_cache,
             )
             ranked = self._policy_executor.rank(selection)
             if not ranked:
@@ -1057,10 +1058,6 @@ class AsyncSchedulerClient:
                         req_info.req_id,
                     )
                 return None
-            affinity_debug = getattr(req_info, "kv_affinity_debug", None)
-            if isinstance(affinity_debug, dict):
-                for (ins_id, ep_id), rec in affinity_debug.items():
-                    matched_tokens_map[(ins_id, ep_id)] = float(rec[0])
             for candidate in selection.candidates:
                 if candidate.kv_match is not None:
                     matched_tokens_map[(candidate.id.instance_id, candidate.id.endpoint_id)] = float(
@@ -1091,23 +1088,18 @@ class AsyncSchedulerClient:
                     matched_tokens_map,
                     isl,
                 )
+                expected_tokens = float(meta["active_tokens"])
                 status, actual = native.cas_add(
                     out_instance.id,
                     out_endpoint.id,
                     int(meta["generation"]),
-                    float(meta["active_tokens"]),
+                    expected_tokens,
                     float(committed.active_tokens),
                     slot=meta.get("slot"),
                 )
                 if status == STATUS_OK:
                     self._cache.patch_workload_from_shm(out_instance.id, out_endpoint.id, role, actual)
                     meta["active_tokens"] = actual
-                    affinity_debug = getattr(req_info, "kv_affinity_debug", None)
-                    matched_load = (
-                        affinity_debug.get(pair)
-                        if (candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY and isinstance(affinity_debug, dict))
-                        else None
-                    )
                     logger.info(
                         "scheduled role=%s req_id=%s instance=%s endpoint=%s policy=%s matched=%s "
                         "load=%s committed=%s score=%s attempt=%s fallback=%s",
@@ -1116,8 +1108,8 @@ class AsyncSchedulerClient:
                         out_instance.id,
                         out_endpoint.id,
                         candidate_policy,
-                        matched_load[0] if matched_load else None,
-                        matched_load[1] if matched_load else None,
+                        matched_tokens_map.get(pair),
+                        expected_tokens,
                         committed.active_tokens,
                         choice.score,
                         attempt,

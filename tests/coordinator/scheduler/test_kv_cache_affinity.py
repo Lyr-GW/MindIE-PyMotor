@@ -1187,6 +1187,7 @@ class TestKvAffinityFallbackConsolidation(unittest.TestCase):
         self.assertEqual([(inst.id, ep.id) for inst, ep, _ in decode], [(3, 30)])
         self.assertEqual(union_policy, CANDIDATE_POLICY_KV_CACHE_AFFINITY)
         self.assertEqual([(inst.id, ep.id) for inst, ep, _ in union], [(4, 40)])
+        self.assertEqual(client._kv_provider.build.call_count, 2)
 
 
 class TestTokenizerManagerFunction(unittest.TestCase):

@@ -1410,16 +1410,59 @@ async def test_policy_select_and_allocate_queries_kv_only_once_across_changed_re
 
     client._kv_provider.build = Mock(side_effect=fake_kv_build)  # pylint: disable=protected-access
     req = RequestInfo(req_id="req-kv-once", req_data={}, req_len=4, api="completions", token_ids=[1, 2, 3, 4])
+    with patch("motor.coordinator.scheduler.runtime.scheduler_client.logger") as mock_logger:
+        result = await client._policy_select_and_allocate(  # pylint: disable=protected-access
+            PDRole.ROLE_P,
+            req,
+            required_engine_type=None,
+            required_dispatch_capability=None,
+            demand=Workload(active_tokens=4.0),
+        )
+    assert result is not None
+    assert cas_calls["count"] >= 2
+    assert kv_calls["count"] == 1
+    scheduled = [
+        call.args for call in mock_logger.info.call_args_list if call.args and call.args[0].startswith("scheduled ")
+    ]
+    assert scheduled
+    assert scheduled[0][6] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_policy_select_and_allocate_skips_kv_query_for_decode():
+    """unified_pd decode must not pay a sync Conductor /query."""
+    client = AsyncSchedulerClient(
+        SchedulerClientConfig(scheduler_type="kv_cache_affinity", endpoint_instance_score_weight=0.0)
+    )
+    endpoint = _make_endpoint(endpoint_id=30, active_tokens=2.0)
+    inst = _make_instance(instance_id=3, role="decode", endpoints={"pod-3": {30: endpoint}})
+    await client._cache.replace_all(PDRole.ROLE_D, [inst])  # pylint: disable=protected-access
+    meta_map = {(3, 30): {"generation": 0, "active_tokens": 2.0, "flags": 0, "slot": 0}}
+
+    def cas_add(_iid, _eid, _gen, expected, delta, slot=None):
+        del slot
+        return (STATUS_OK, float(expected) + float(delta))
+
+    _attach_mock_cas_reader(client, meta_map, cas_add)
+    client._kv_provider.build = Mock(side_effect=AssertionError("decode must not query conductor"))
+    req = RequestInfo(
+        req_id="req-kv-decode",
+        req_data={},
+        req_len=32,
+        api="completions",
+        token_ids=list(range(32)),
+    )
     result = await client._policy_select_and_allocate(  # pylint: disable=protected-access
-        PDRole.ROLE_P,
+        PDRole.ROLE_D,
         req,
         required_engine_type=None,
         required_dispatch_capability=None,
         demand=Workload(active_tokens=4.0),
     )
     assert result is not None
-    assert cas_calls["count"] >= 2
-    assert kv_calls["count"] == 1
+    assert result[0].id == 3
+    assert result[1].id == 30
+    client._kv_provider.build.assert_not_called()
 
 
 @pytest.mark.asyncio

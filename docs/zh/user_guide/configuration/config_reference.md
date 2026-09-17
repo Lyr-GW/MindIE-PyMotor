@@ -476,7 +476,7 @@ motor_coordinator_config字段配置样例如下所示：
 | max_timeout_s | float | 熔断时长上限（秒）。默认值：`300.0`。 |
 | **scheduler_config字段** |-|-|
 | scheduler_type | string | 调度类型，默认值：load_balance<ul><li>load_balance：负载均衡；</li><li>round_robin：轮询；</li><li>kv_cache_affinity：KV Cache 亲和调度。</li></ul>`policy_plugin.name` 为空时使用；与 `name` 同时配置且不同时，以 `name` 为准。 |
-| policy_plugin | object | 可选调度策略选择。`name` 可写内置名或 Entry Point 名称；见下表。 |
+| policy_plugin | object | 可选调度策略选择。`name` 可写内置名或 Entry Point 名称；见下表。未识别字段会被忽略并打 warning。 |
 | **policy_plugin 字段** |-|-|
 | name | string | 策略名。空则使用 `scheduler_type`。内置名 `load_balance` / `round_robin` / `kv_cache_affinity` 走工厂且不查 Entry Point；其它名称必须已安装对应插件 wheel。 |
 | options | object | 传给策略构造函数的 JSON 对象，默认 `{}`。内置名会与 `kv_affinity` / `endpoint_instance_score_weight` 合并。 |

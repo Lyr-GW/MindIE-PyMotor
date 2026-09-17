@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 from enum import Enum
-from dataclasses import dataclass, field, asdict, is_dataclass
+from dataclasses import dataclass, field, fields, asdict, is_dataclass
 
 from motor.common.logger import get_logger
 from motor.common.utils.env import Env
@@ -393,8 +393,12 @@ def _set_policy_plugin_field(obj, key: str, value: Any) -> None:
         setattr(obj, key, value)
         return
     plugin = getattr(obj, key, None) or PolicyPluginConfig()
+    known = {item.name for item in fields(plugin)}
+    unknown = sorted(str(field_key) for field_key in value if field_key not in known)
+    if unknown:
+        logger.warning("Unknown policy_plugin key(s) ignored: %s", ",".join(unknown))
     for field_key, field_value in value.items():
-        if hasattr(plugin, field_key):
+        if field_key in known:
             setattr(plugin, field_key, field_value)
     setattr(obj, key, plugin)
 

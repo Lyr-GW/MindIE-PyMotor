@@ -42,7 +42,7 @@ Motor 内置 `load_balance`、`round_robin` 和 `kv_cache_affinity` 策略。新
 
 - **接口最小化**：插件只接收不可变快照并返回候选排序。
 - **核心守住一致性**：候选校验、workload 计算、CAS 和回滚由 Motor 完成。
-- **按需取特征**：只有声明需要 KV 特征的策略才查询 KV Conductor。
+- **按需取特征**：只有声明需要 KV 特征的策略，且选路角色为 Prefill / Union 时，才查询 KV Conductor。Decode / Encode 实例不向 Conductor 注册，直接给 `kv_available=False`。
 - **失败可降级**：运行时异常或非法输出回退到一个内置策略。
 - **进程内独立实例**：每个 `spawn` 出来的 Inference Worker 自行加载插件。
 - **按名称启用**：只加载配置指定的 Entry Point，安装插件不会自动启用策略。
@@ -351,8 +351,8 @@ flowchart TD
     A[请求进入 Worker] --> B[从 schema-4 SHM 读取本角色负载]
     B --> C[核心过滤角色、Engine、状态和熔断]
     C --> D{策略需要 KV 特征?}
-    D -- 是 --> E[查询一次 KV Conductor]
-    D -- 否 --> F[构建 SelectionInput]
+    D -- 是且角色为 P/U --> E[查询一次 KV Conductor]
+    D -- 否或角色为 D/E --> F[构建 SelectionInput]
     E --> F
     F --> G[PolicyExecutor.rank]
     G --> H{输出有效且非空?}
@@ -373,7 +373,8 @@ flowchart TD
 关键约束：
 
 - CAS `Changed` 后必须使用最新负载重新调用同一个策略，不能盲目提交或直接使用旧排序的第二名。
-- 同一次调度仅查询一次 KV Conductor；CAS 重试复用 KV 命中特征，只刷新 SHM 负载。
+- 同一次调度仅查询一次 KV Conductor；CAS 重试复用本次 `KvFeatureCache`，只刷新 SHM 负载。Builder 不跨请求缓存。
+- Decode / Encode 选路不查询 Conductor，`kv_available=False`，内置 KVA 在策略内回退负载均衡。
 - workload delta 由 Motor 统一计算，插件输出中不包含 delta。
 - pinned `target_instance_id` 只过滤候选实例，随后走同一 `PolicyExecutor.rank()` + CAS。
 - 路由拓扑选择和 PD 协调模式继续由 Motor 核心处理。
@@ -668,7 +669,7 @@ Rust 插件可作为后续独立方案实现，但应复用相同 DTO 和排序�
 - CAS OK：选择、提交和释放守恒。
 - CAS Changed：刷新负载并再次调用插件。
 - Blocked/SlotInvalid：候选进入 `excluded` 后重选。
-- KV 策略：一次请求只查询一次 Conductor，CAS 重试不重复查询。
+- KV 策略：Prefill / Union 一次请求只查询一次 Conductor，CAS 重试不重复查询；Decode / Encode 不查询。
 - 包安装：在隔离环境安装示例 wheel，以真实 distribution metadata 发现并加载插件，验证插件名称到类的完整链路。
 - editable install：开发安装后能发现 Entry Point；裸 `.py` 文件未安装元数据时不能冒充已注册插件。
 - `multiprocessing.spawn`：每个 Worker 独立发现和加载同一包版本；同一输入在确定性策略下结果一致。

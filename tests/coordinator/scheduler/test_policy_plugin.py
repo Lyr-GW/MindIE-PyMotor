@@ -35,7 +35,7 @@ from motor.coordinator.scheduler.policy.builtin import (
     BuiltinRoundRobinPolicy,
 )
 from motor.coordinator.scheduler.policy.executor import PolicyExecutor
-from motor.coordinator.scheduler.policy.feature_provider import PolicyContextBuilder
+from motor.coordinator.scheduler.policy.feature_provider import KvFeatureCache, PolicyContextBuilder
 from motor.coordinator.scheduler.policy.factory import create_load_balancing_policy
 from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProvider
 from motor.coordinator.scheduler.policy.loader import (
@@ -317,6 +317,103 @@ def test_context_builder_reads_shm_active_tokens():
     )
     assert len(selection.candidates) == 1
     assert math.isclose(selection.candidates[0].active_tokens, 3.0)
+
+
+def _builder_instance(instance_id: int = 1, endpoint_id: int = 1) -> MagicMock:
+    instance = MagicMock()
+    instance.id = instance_id
+    instance.engine_type = "vllm"
+    instance.dispatch_capabilities = []
+    endpoint = MagicMock()
+    endpoint.id = endpoint_id
+    endpoint.workload.active_tokens = 1.0
+    instance.get_all_endpoints.return_value = [endpoint]
+    return instance
+
+
+def _builder_request(req_id: str, token_count: int = 16) -> MagicMock:
+    req = MagicMock()
+    req.req_id = req_id
+    req.req_data = {}
+    req.token_ids = list(range(token_count))
+    req.model_name = "m"
+    return req
+
+
+def test_context_builder_skips_kv_query_for_decode_role():
+    """D/E never register with Conductor; decode ranking must not pay /query."""
+    provider = MagicMock()
+    builder = PolicyContextBuilder(is_instance_blocked=lambda _i: False, kv_provider=provider)
+    reader = MagicMock()
+    reader.entry_meta.return_value = {"active_tokens": 2.0, "flags": 0}
+    selection = builder.build(
+        _builder_request("req-d"),
+        PDRole.ROLE_D,
+        [_builder_instance()],
+        excluded=frozenset(),
+        attempt=0,
+        required_engine_type=None,
+        required_dispatch_capability=None,
+        workload_reader=reader,
+        policy_requires_kv=True,
+    )
+    provider.build.assert_not_called()
+    assert selection.kv_available is False
+    assert selection.candidates[0].kv_match is None
+
+
+def test_context_builder_kv_cache_is_caller_owned():
+    """Two allocate loops must not share KvMatch just because they share a builder."""
+    provider = MagicMock()
+    provider.build.side_effect = [
+        ({CandidateId(1, 1): KvMatch(matched_tokens=4, prefill_cost=1.0, hit_ratio=0.4)}, True),
+        ({CandidateId(1, 1): KvMatch(matched_tokens=9, prefill_cost=0.0, hit_ratio=0.9)}, True),
+    ]
+    builder = PolicyContextBuilder(is_instance_blocked=lambda _i: False, kv_provider=provider)
+    reader = MagicMock()
+    reader.entry_meta.return_value = {"active_tokens": 1.0, "flags": 0}
+    cache_a = KvFeatureCache()
+    cache_b = KvFeatureCache()
+    first = builder.build(
+        _builder_request("req-a"),
+        PDRole.ROLE_P,
+        [_builder_instance()],
+        excluded=frozenset(),
+        attempt=0,
+        required_engine_type=None,
+        required_dispatch_capability=None,
+        workload_reader=reader,
+        policy_requires_kv=True,
+        kv_cache=cache_a,
+    )
+    second = builder.build(
+        _builder_request("req-b"),
+        PDRole.ROLE_P,
+        [_builder_instance()],
+        excluded=frozenset(),
+        attempt=0,
+        required_engine_type=None,
+        required_dispatch_capability=None,
+        workload_reader=reader,
+        policy_requires_kv=True,
+        kv_cache=cache_b,
+    )
+    retry_a = builder.build(
+        _builder_request("req-a"),
+        PDRole.ROLE_P,
+        [_builder_instance()],
+        excluded=frozenset(),
+        attempt=1,
+        required_engine_type=None,
+        required_dispatch_capability=None,
+        workload_reader=reader,
+        policy_requires_kv=True,
+        kv_cache=cache_a,
+    )
+    assert provider.build.call_count == 2
+    assert first.candidates[0].kv_match.matched_tokens == 4
+    assert second.candidates[0].kv_match.matched_tokens == 9
+    assert retry_a.candidates[0].kv_match.matched_tokens == 4
 
 
 def test_builtin_kv_cache_affinity_unified_ranks_by_prefill_and_load():

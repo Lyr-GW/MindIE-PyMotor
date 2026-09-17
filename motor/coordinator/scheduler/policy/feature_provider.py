@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.instance import Instance, PDRole
+from motor.coordinator.api_client.conductor_api_client import KVA_ELIGIBLE_ROLES
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.policy.api import (
     CandidateId,
@@ -25,6 +27,14 @@ from motor.coordinator.scheduler.policy.api import (
 )
 from motor.coordinator.scheduler.policy.kv_feature_provider import KvFeatureProvider
 from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_BLOCKED
+
+
+@dataclass
+class KvFeatureCache:
+    """Caller-owned KV snapshot reused across CAS retries of one allocate."""
+
+    matches: dict[CandidateId, object] | None = None
+    available: bool = False
 
 
 class PolicyContextBuilder:
@@ -38,13 +48,6 @@ class PolicyContextBuilder:
     ) -> None:
         self._is_instance_blocked = is_instance_blocked
         self._kv_provider = kv_provider
-        self._cached_kv_matches: dict[CandidateId, object] | None = None
-        self._cached_kv_available = False
-
-    def reset_kv_cache(self) -> None:
-        """Clear per-request KV features so the next build queries Conductor once."""
-        self._cached_kv_matches = None
-        self._cached_kv_available = False
 
     def build(
         self,
@@ -58,6 +61,7 @@ class PolicyContextBuilder:
         required_dispatch_capability: str | None,
         workload_reader,
         policy_requires_kv: bool,
+        kv_cache: KvFeatureCache | None = None,
     ) -> SelectionInput:
         normalized_engine = str(required_engine_type or "").strip().lower()
         normalized_capability = str(required_dispatch_capability or "").strip()
@@ -100,18 +104,22 @@ class PolicyContextBuilder:
                 candidate_ids.append(cid)
         kv_available = False
         kv_matches = {}
-        if policy_requires_kv and self._kv_provider is not None and candidate_ids:
-            if self._cached_kv_matches is None:
+        should_query_kv = (
+            policy_requires_kv and self._kv_provider is not None and bool(candidate_ids) and role in KVA_ELIGIBLE_ROLES
+        )
+        if should_query_kv:
+            cache = kv_cache if kv_cache is not None else KvFeatureCache()
+            if cache.matches is None:
                 token_ids = getattr(req_info, "token_ids", None)
                 if not isinstance(token_ids, list):
                     token_ids = []
-                self._cached_kv_matches, self._cached_kv_available = self._kv_provider.build(
+                cache.matches, cache.available = self._kv_provider.build(
                     token_ids,
                     filtered,
                     candidate_ids,
                 )
-            kv_matches = self._cached_kv_matches or {}
-            kv_available = self._cached_kv_available
+            kv_matches = cache.matches or {}
+            kv_available = cache.available
         if kv_matches:
             enriched: list[CandidateSnapshot] = []
             for candidate in candidates:

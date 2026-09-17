@@ -1309,6 +1309,33 @@ def test_policy_plugin_in_tree_name_is_accepted(name: str):
     config.validate_config()
 
 
+def test_policy_plugin_unknown_keys_are_ignored_with_warning(_temp_json_file, caplog):
+    user_config = {
+        "motor_coordinator_config": {
+            "scheduler_config": {
+                "scheduler_type": "load_balance",
+                "policy_plugin": {
+                    "name": "acme.weighted_tokens",
+                    "fallbacks": "round_robin",
+                    "unknown_key": {"load_weight": 1.0},
+                },
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    with caplog.at_level("WARNING"):
+        config = CoordinatorConfig.from_json(_temp_json_file)
+    plugin = config.scheduler_config.policy_plugin
+    assert plugin is not None
+    assert plugin.name == "acme.weighted_tokens"
+    assert plugin.fallback == "load_balance"
+    assert plugin.options == {}
+    assert "fallbacks" in caplog.text
+    assert "unknown_key" in caplog.text
+
+
 def test_policy_plugin_invalid_fallback_rejected():
     config = CoordinatorConfig()
     config.scheduler_config.policy_plugin = PolicyPluginConfig(name="acme.test", fallback="kv_cache_affinity")
