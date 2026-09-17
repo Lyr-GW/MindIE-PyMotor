@@ -23,8 +23,8 @@ MemCache 在每个 P/D 引擎节点上通过 LocalService 进程管理 DRAM 池�
 | 硬件 | 支持 Atlas 800I A2 推理服务器、Atlas 850 超节点服务器、Atlas 800I A3 超节点服务器。 |
 | 部署场景 | 仅支持 PD 分离部署场景。 |
 | 引擎 | 仅支持 vLLM 推理引擎。 |
-| 特性互斥 | 不要配置 `"backend": "ucm"`（UCM 不通过 `AscendStoreConnector` 的 backend 机制）。`AscendStoreConnector` 与 `kv_cache_store_config` 中的 `backend` 必须同为 `"memcache"`。`MooncakeConnectorV1` / `MooncakeHybridConnector` 等负责 P/D 实时传输，与 MemCache 池化后端不是同一层配置，不可混淆。 |
-| 软件依赖 | 基础能力无需额外安装（memcache_hybrid 已预装）。开启 KV events 时，memcache_hybrid 需为包含 KvEvent 功能（memcache PR #334 起）的版本；使用 `MultiConnector` 时需应用 `vllm_ascend_multi_connector_kv_events.patch` 补丁。 |
+| 特性互斥 | <ul><li>请勿将 `"backend"` 配置为 `"ucm"`，UCM 不通过 `AscendStoreConnector` 的 backend 机制接入。</li><li>`AscendStoreConnector` 与 `kv_cache_store_config` 必须配置一致，且均为 `"memcache"`。</li><li>`MooncakeConnectorV1` / `MooncakeHybridConnector` 等属于 P/D 实时传输层，与 MemCache 池化后端不是同一层配置，切勿混淆。</li></ul> |
+| 软件依赖 | 基础能力开箱即用，无需额外安装（memcache_hybrid 已预装）。开启 KV events 时，memcache_hybrid 版本需包含 KvEvent 功能（**MemCache Hybrid v1.2.0 及以后版本**，对应 memcache PR #334）；若使用 `MultiConnector`，则需应用 `vllm_ascend_multi_connector_kv_events.patch` 补丁。 |
 | 其他限制 | SSD 三级缓存尚不成熟，暂不推荐在生产环境中使用；分区操作为高危操作，选错磁盘将造成不可逆的数据丢失，需在所有启用SSD缓存的节点上执行。 |
 
 ## 特性使用
@@ -92,7 +92,7 @@ MemCache 在每个 P/D 引擎节点上通过 LocalService 进程管理 DRAM 池�
 
         >[!NOTE] 说明
         >MultiConnector 补丁（必装）：vLLM 上游未实现 MultiConnector.get_kv_connector_kv_cache_events()（TODO），kv_transfer_config.kv_connector 使用 MultiConnector 时 worker 侧 AscendStoreConnector 收集的 KV 事件会被静默丢弃，导致引擎 offload 事件到不了 kv-conductor、两阶段匹配永远缺引擎侧。vllm-ascend 已将 MultiConnector 注册替换为 AscendMultiConnector，部署时应用 examples/deployer/patch/vllm_ascend_multi_connector_kv_events.patch（为 AscendMultiConnector 补充子 connector 事件代理，一个补丁适配 v0.20.2 ~ v0.26.0）。已同步建议上游 vLLM 合入。
-        **前提**：memcache_hybrid 需为包含 KvEvent 功能（memcache PR #334 起）的版本，否则 MetaConfig 不识别 kv_events_* 字段。
+        **前提**：memcache_hybrid 需为包含 KvEvent 功能的版本（**MemCache Hybrid v1.2.0 及以后版本**，对应 memcache PR #334），否则 MetaConfig 不识别 kv_events_* 字段。
 
 5. （可选，不推荐生产）启用 SSD 三级缓存。
 
