@@ -25,7 +25,7 @@ KV 池化通过 `MultiConnector` 组合传输 Connector 和 Store Connector。�
 
 MindIE Motor 使用 `MultiConnector` 组合 P/D 传输 Connector 与 Store Connector。当前支持以下池化功能：
 
-- **基于 Mooncake 的共享 KV Pool**：P/D 均加载 `AscendStoreConnector`，并配置 `backend: "mooncake"`，分别写入和读取共享 KV Cache。详细信息请参见 [Mooncake Backend](../../features/kv_cache_store/backend/mooncake.md)。
+- **基于 Mooncake 的共享 KV Pool**：P/D 均加载 `AscendStoreConnector`，并配置 `backend: "mooncake"`，分别写入和读取共享 KV Cache。详细信息请参见 [Mooncake Backend](backend/mooncake.md)。
 - **基于 MemCache 的共享 KV Pool**：P/D 均加载 `AscendStoreConnector`，并配置 `backend: "memcache"`，分别写入和读取共享 KV Cache。详细信息请参见 [MemCache Backend](backend/memcache.md)。
 - **UCM**：通过 `UCMConnector` 的 `store_pipeline` 组合 Cache、POSIX 等 UCM Store。当前分布式 P/D 方案在 Prefill 保存和加载跨请求前缀，Decode 不加载 UCM。详细信息请参见 [MindIE Motor 中部署 UCM](../../features/kv_cache_store/backend/ucm.md)。
 
