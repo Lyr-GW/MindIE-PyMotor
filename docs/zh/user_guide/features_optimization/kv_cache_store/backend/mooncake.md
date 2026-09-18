@@ -260,6 +260,7 @@ Mooncake 池化有两种部署方式（store_mode 取值），区别在于池化
 
   NodeManager 会自动拉起 mooncake_store_service 进程，自动生成 store 配置文件。
   部署完成后：
+
    - 日志应出现 mooncake master 连接成功标志。
    - store 进程配置文件自动生成在引擎配置同目录（mooncake_store_config.json）。
    - Prefill 和 Decode 引擎均成功注册到 mooncake_master。
