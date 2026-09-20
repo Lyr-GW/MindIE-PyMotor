@@ -23,7 +23,6 @@ spec:
       schedulerName: volcano
       nodeSelector:
         accelerator: huawei-Ascend910
-        accelerator-type: module-910b-8
       terminationGracePeriodSeconds: 30
       automountServiceAccountToken: false
       securityContext:
@@ -74,16 +73,17 @@ spec:
             mountPath: /var/coredump
           - name: mnt
             mountPath: /mnt
-          - name: hccn-tool
-            mountPath: /usr/local/Ascend/driver/tools/hccn_tool
           - name: hccn-conf
             mountPath: /etc/hccn.conf
+          - name: ascend-driver
+            mountPath: /usr/local/Ascend/driver
+            readOnly: true
           - name: weight-mount
             mountPath: /mnt/weight
           - name: plog-path
             mountPath: /root/ascend/log
-          - name: driver-version
-            mountPath: /usr/local/Ascend/driver/version.info
+          - name: cache-path
+            mountPath: /root/.cache
           - name: rdma
             mountPath: /dev/infiniband
           - name: hisi-hdc
@@ -110,12 +110,12 @@ spec:
       - name: mnt
         hostPath:
           path: /mnt
-      - name: hccn-tool
-        hostPath:
-          path: /usr/local/Ascend/driver/tools/hccn_tool
       - name: hccn-conf
         hostPath:
           path: /etc/hccn.conf
+      - name: ascend-driver
+        hostPath:
+          path: /usr/local/Ascend/driver
       - name: weight-mount
         hostPath:
           path: /mnt/weight
@@ -123,10 +123,10 @@ spec:
         hostPath:
           path: /root/ascend/log
           type: DirectoryOrCreate
-      - name: driver-version
+      - name: cache-path
         hostPath:
-          path: /usr/local/Ascend/driver/version.info
-          type: File
+          path: /root/.cache
+          type: DirectoryOrCreate
       - name: rdma
         hostPath:
           path: /dev/infiniband

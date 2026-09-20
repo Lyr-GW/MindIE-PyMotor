@@ -16,6 +16,8 @@ Using FastAPI TestClient for testing
 # pylint: disable=attribute-defined-outside-init,reimported
 
 import json
+import os
+import tempfile
 import pytest
 from fastapi.testclient import TestClient
 from fastapi.responses import JSONResponse
@@ -26,13 +28,21 @@ from fastapi import FastAPI
 
 from motor.common.standby.standby_manager import StandbyRole, StandbyManager
 from motor.coordinator.api_server.management_server import ManagementServer
+from motor.coordinator.domain.instance_manager import InstanceIdConflictError
 from motor.coordinator.domain.probe import RoleHeartbeatResult
-from motor.coordinator.api_server.inference_server import InferenceServer, _validate_anthropic_request
+from motor.coordinator.api_server.inference_server import (
+    InferenceServer,
+    _validate_anthropic_request,
+    _validate_openai_request,
+    _validate_positive_int_field,
+)
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.config.coordinator import CoordinatorConfig, RateLimitConfig
 from motor.coordinator.domain import InstanceReadiness
 from motor.common.http.key_encryption import encrypt_api_key, set_default_key_encryption_by_name
+from motor.common.resources import Endpoint, Instance, InsStatus, PDRole
 from motor.coordinator.models.constants import OpenAIField
+from motor.coordinator.models.request import RequestType
 from motor.coordinator.middleware.fastapi_middleware import (
     SimpleRateLimitMiddleware,
     RateLimitConfigHolder,
@@ -169,6 +179,8 @@ class TestCoordinatorServer:
         im_instance.has_required_instances.return_value = True
         im_instance.get_required_instances_status.return_value = InstanceReadiness.REQUIRED_MET
         im_instance.refresh_instances = AsyncMock(return_value=None)
+        im_instance.validate_refresh_instances = AsyncMock(return_value=None)
+        im_instance.snapshot_instances = AsyncMock(return_value=[])
         im_mock_cls.return_value = im_instance
 
         # Mock handle_request to return appropriate JSON response
@@ -208,17 +220,43 @@ class TestCoordinatorServer:
                 request_type = "completions"
             elif request.url.path.endswith("/chat/completions"):
                 request_type = "chat_completions"
+            elif request.url.path.endswith("/responses"):
+                request_type = "responses"
 
             # Generate request_id (simulate)
             import hashlib
 
             request_id = f"req-{hashlib.md5(str(body_json).encode()).hexdigest()[:8]}"
 
-            response_data = {
-                "request_id": request_id,
-                "status": "success",
-                "data": {"input_data": input_data, "is_stream": bool(is_stream), "request_type": request_type},
-            }
+            # /v1/responses returns OpenAI-native response format (engine passthrough)
+            if request_type == "responses":
+                import time
+
+                response_data = {
+                    "id": request_id,
+                    "object": "response",
+                    "created_at": int(time.time()),
+                    "status": "completed",
+                    "model": body_json.get("model", ""),
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": str(body_json.get("input", "")),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            else:
+                response_data = {
+                    "request_id": request_id,
+                    "status": "success",
+                    "data": {"input_data": input_data, "is_stream": bool(is_stream), "request_type": request_type},
+                }
 
             return JSONResponse(content=response_data)
 
@@ -319,11 +357,18 @@ class TestCoordinatorServer:
 
     def test_readiness_endpoints_fail_when_instance_manager_ready(self):
         """Test readiness when instance manager reports ready (default mock)."""
+        start_render_health = MagicMock()
+        self.coordinator_server._mgmt._start_render_health_observer = start_render_health
+
         response = self.mgmt_client.get("/readiness")
+        repeated_response = self.mgmt_client.get("/readiness")
+
         assert response.status_code == 200
         data = response.json()
         assert data["message"] == "Coordinator is ok"
         assert data["ready"] is True
+        assert repeated_response.status_code == 200
+        start_render_health.assert_called_once_with()
 
     def test_readiness_endpoints_fail_when_enable_standby_is_master_but_instance_not_ready(self):
         """Test readiness when standby is master but instance manager not ready."""
@@ -348,7 +393,7 @@ class TestCoordinatorServer:
         assert data["ready"] is False
 
     def test_readiness_endpoints_fail_when_enable_standby_is_standby(self):
-        """Test readiness endpoints"""
+        """Standby stays not Ready (0/1) even when instances are present."""
         self.coordinator_config.standby_config.enable_master_standby = True
         self.coordinator_server._mgmt._readiness_probe._enable_master_standby = True
         standby_manager = StandbyManager(self.coordinator_config)
@@ -393,6 +438,77 @@ class TestCoordinatorServer:
         data = response.json()
         assert data["service"] == "Motor Coordinator Management Server"
         assert data["version"] == "1.0.0"
+        assert "GET /instances" in data["endpoints"]
+
+    def test_list_instances_empty(self):
+        response = self.mgmt_client.get("/instances")
+        assert response.status_code == 200
+        data = response.json()
+        assert data == {"count": 0, "instances": []}
+
+    def test_management_api_key_protects_privileged_routes_but_not_probes(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as key_file:
+            key_file.write("test-management-key\n")
+            api_key_file = key_file.name
+        try:
+            config = CoordinatorConfig()
+            config.mgmt_api_key_config.enable_api_key = True
+            config.mgmt_api_key_config.api_key_file = api_key_file
+            server = ManagementServer(config=config)
+            client = TestClient(server.management_app)
+
+            assert client.get("/startup").status_code == 200
+            assert client.get("/instances").status_code == 401
+            assert client.get("/instances", headers={"X-Motor-Management-Key": "wrong"}).status_code == 403
+            assert (
+                client.get("/instances", headers={"X-Motor-Management-Key": "test-management-key"}).status_code == 200
+            )
+            assert client.post("/instances/refresh", json={}).status_code == 401
+        finally:
+            os.remove(api_key_file)
+
+    def test_list_instances_summarizes_registered_instances(self):
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="8000", headless=False)
+        instance = Instance(
+            job_name="qwen-prefill-10.0.0.1-8000",
+            model_name="Qwen3-8B",
+            id=42,
+            role=PDRole.ROLE_P,
+            status=InsStatus.ACTIVE,
+            endpoints={"10.0.0.1": {0: endpoint}},
+        )
+        decode = Instance(
+            job_name="qwen-decode-10.0.0.2-8000",
+            model_name="Qwen3-8B",
+            id=7,
+            role=PDRole.ROLE_D,
+            status=InsStatus.ACTIVE,
+            endpoints={"10.0.0.2": {0: Endpoint(id=0, ip="10.0.0.2", business_port="8000")}},
+        )
+        self.coordinator_server.instance_manager.snapshot_instances = AsyncMock(return_value=[instance, decode])
+        self.coordinator_server.instance_manager.get_tracked_instance_pool.return_value = None
+
+        response = self.mgmt_client.get("/instances")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["count"] == 2
+        assert [item["role"] for item in data["instances"]] == ["decode", "prefill"]
+        assert data["instances"][1] == {
+            "id": 42,
+            "role": "prefill",
+            "job_name": "qwen-prefill-10.0.0.1-8000",
+            "model_name": "Qwen3-8B",
+            "status": "active",
+            "pool": "unknown",
+            "healthy": False,
+            "circuit_breaker": {
+                "state": "closed",
+                "trip_count": 0,
+                "failure_count": 0,
+                "current_timeout": 0.0,
+            },
+            "endpoints": [{"id": 0, "ip": "10.0.0.1", "business_port": "8000", "headless": False}],
+        }
 
     def test_list_models_exception(self):
         """Test list_models endpoints"""
@@ -515,6 +631,39 @@ class TestCoordinatorServer:
             assert "input_data" in data["data"], "Response data missing input_data"
             assert "is_stream" in data["data"], "Response data missing is_stream"
             assert "request_type" in data["data"], "Response data missing request_type"
+
+    def test_openai_responses_api(self):
+        """Test OpenAI Responses API — standard /v1/responses path.
+
+        The Coordinator is a transparent proxy for /v1/responses:
+        it accepts the request and forwards it to the backend engine
+        (e.g. vLLM 0.22+), which returns the OpenAI-native format.
+        The Coordinator does NOT wrap the response in request_id/status/data.
+        """
+        response = self.openai_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-4o-mini",
+                "input": "Hello there!",
+                "max_output_tokens": 64,
+            },
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+
+        assert response.status_code == 200, f"Responses API failed: {response.status_code}"
+
+        data = response.json()
+        # OpenAI-native response format: id, object, created_at, model, output
+        assert "id" in data, "Response missing id"
+        assert "object" in data, "Response missing object"
+        assert data["object"] == "response", f"Expected object='response', got '{data['object']}'"
+        assert "created_at" in data, "Response missing created_at"
+        assert "model" in data, "Response missing model"
+        assert "output" in data, "Response missing output"
+        assert isinstance(data["output"], list), "output must be an array"
+        assert len(data["output"]) > 0, "output must not be empty"
+        assert data["output"][0]["type"] == "message"
+        assert data["output"][0]["role"] == "assistant"
 
     def test_streaming_requests(self):
         """Test streaming requests"""
@@ -800,7 +949,17 @@ class TestCoordinatorServerAdvanced:
         im_instance.has_required_instances.return_value = True
         im_instance.get_required_instances_status.return_value = InstanceReadiness.REQUIRED_MET
         im_instance.refresh_instances = AsyncMock(return_value=None)
+        im_instance.validate_refresh_instances = AsyncMock(return_value=None)
+        im_instance.snapshot_instances = AsyncMock(return_value=[])
         im_mock_cls.return_value = im_instance
+        self.im_mock = im_instance
+        self.refresh_calls: list[tuple] = []
+
+        async def _capture_refresh(event, instances):
+            self.refresh_calls.append((event, instances))
+            return True
+
+        self._capture_refresh = _capture_refresh
 
         # Mock handle_request to return appropriate JSON response
         async def mock_handle_request(request, config, scheduler=None, request_manager=None, request_json=None):
@@ -839,17 +998,43 @@ class TestCoordinatorServerAdvanced:
                 request_type = "completions"
             elif request.url.path.endswith("/chat/completions"):
                 request_type = "chat_completions"
+            elif request.url.path.endswith("/responses"):
+                request_type = "responses"
 
             # Generate request_id (simulate)
             import hashlib
 
             request_id = f"req-{hashlib.md5(str(body_json).encode()).hexdigest()[:8]}"
 
-            response_data = {
-                "request_id": request_id,
-                "status": "success",
-                "data": {"input_data": input_data, "is_stream": bool(is_stream), "request_type": request_type},
-            }
+            # /v1/responses returns OpenAI-native response format (engine passthrough)
+            if request_type == "responses":
+                import time
+
+                response_data = {
+                    "id": request_id,
+                    "object": "response",
+                    "created_at": int(time.time()),
+                    "status": "completed",
+                    "model": body_json.get("model", ""),
+                    "output": [
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": str(body_json.get("input", "")),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            else:
+                response_data = {
+                    "request_id": request_id,
+                    "status": "success",
+                    "data": {"input_data": input_data, "is_stream": bool(is_stream), "request_type": request_type},
+                }
 
             return JSONResponse(content=response_data)
 
@@ -870,14 +1055,18 @@ class TestCoordinatorServerAdvanced:
         coordinator_config = CoordinatorConfig()
         coordinator_config.api_key_config.enable_api_key = True
         coordinator_config.api_key_config.valid_keys = {"sk-test123456789", "sk-coordinator2024"}
+        self.coordinator_config = coordinator_config
 
         # Create test server shell (ManagementServer + InferenceServer)
         self.coordinator_server = _TestServerShell(config=coordinator_config)
-        # Replace scheduler connection with mock to avoid ZMQ connection timeout (~15s per call)
-        self.coordinator_server._mgmt._scheduler_connection = MagicMock()
-        self.coordinator_server._mgmt._scheduler_connection.ensure_connected = AsyncMock()
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = None
-        self.coordinator_server._mgmt._scheduler_connection.disconnect = AsyncMock()
+        self.coordinator_server.instance_manager = self.im_mock
+        # Skip real ROUTER/PUB/SHM bind in TestClient lifespan
+        mgmt = self.coordinator_server._mgmt
+        mgmt._start_control_plane = AsyncMock()
+        mgmt._stop_control_plane = AsyncMock()
+        mgmt._control_plane.apply_refresh = AsyncMock(side_effect=self._capture_refresh)
+        mgmt._control_plane.scheduler = MagicMock()
+        mgmt._control_plane.scheduler.dismiss_precision_alarm_state = AsyncMock(return_value=True)
         self.coordinator_server.setup_rate_limiting()
         # Do not mock _handle_openai_request: let real handler run so validation (400), JSON/decode (500), and
         # _is_available (503) are exercised; handle_request is already patched above for 200 responses.
@@ -915,7 +1104,11 @@ class TestCoordinatorServerAdvanced:
                     "role": "prefill",
                     "endpoints": {
                         "192.168.1.1": {
-                            "0": {"id": 0, "ip": "192.168.1.1", "business_port": "8080", "mgmt_port": "18080"}
+                            "0": {
+                                "id": 0,
+                                "ip": "192.168.1.1",
+                                "business_port": "8080",
+                            }
                         }
                     },
                 }
@@ -929,6 +1122,241 @@ class TestCoordinatorServerAdvanced:
         assert data["status"] == "success", f"Refresh instances status abnormal: {data}"
         assert "request_id" in data, "Response missing request_id"
         assert "data" in data, "Response missing data field"
+
+    def test_refresh_instances_external_set_converts_minimal_topology(self):
+        """External SET resolves the omitted model name from a native engine."""
+        self.coordinator_config.aigw_model = {"id": "test-model"}
+        body = {
+            "event": "set",
+            "dispatch_capabilities": "concurrent_engine_sync",
+            "engine_type": "vllm",
+            "instances": [
+                {
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": [{"id": 0, "address": "192.168.1.10:8100"}],
+                },
+                {
+                    "id": 2,
+                    "role": "decode",
+                    "endpoints": [{"id": 0, "address": "192.168.1.20:8200"}],
+                },
+            ],
+        }
+
+        with patch(
+            "motor.coordinator.api_server.management_server.NativeEngineApiClient.query_model_ids",
+            return_value=["TEST-MODEL"],
+        ) as query_model_ids:
+            response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 200
+        query_model_ids.assert_called_once_with("192.168.1.10:8100", self.coordinator_config.infer_tls_config)
+        assert self.refresh_calls
+        event, instances = self.refresh_calls[-1]
+        assert event.value == "set"
+        assert [instance.model_name for instance in instances] == ["test-model", "test-model"]
+        assert instances[0].dispatch_capabilities == ["concurrent_engine_sync"]
+        assert [instance.job_name for instance in instances] == ["external-prefill-1", "external-decode-2"]
+        assert instances[0].parallel_config.dp_size == 1
+        assert instances[0].endpoints["192.168.1.10"][0].business_port == "8100"
+
+    def test_refresh_instances_external_without_markers_resolves_model(self):
+        """Endpoint array shape keeps a fully minimal External request distinguishable."""
+        body = {
+            "event": "set",
+            "instances": [
+                {
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": [{"id": 0, "address": "127.0.0.1:8100"}],
+                }
+            ],
+        }
+
+        with patch(
+            "motor.coordinator.api_server.management_server.NativeEngineApiClient.query_model_ids",
+            return_value=["test-model"],
+        ):
+            response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 200
+        assert self.refresh_calls
+        _, instances = self.refresh_calls[-1]
+        assert instances[0].model_name == "test-model"
+        assert instances[0].engine_type == "vllm"
+        assert instances[0].dispatch_capabilities == ["prefill_handoff_decode"]
+
+    def test_refresh_instances_external_requires_model_name_for_multi_model_engine(self):
+        body = {
+            "event": "set",
+            "instances": [
+                {
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": [{"id": 0, "address": "127.0.0.1:8100"}],
+                }
+            ],
+        }
+
+        with patch(
+            "motor.coordinator.api_server.management_server.NativeEngineApiClient.query_model_ids",
+            return_value=["model-a", "model-b"],
+        ):
+            response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 400
+        assert "provide model_name explicitly" in response.json()["detail"]
+
+    def test_refresh_instances_external_model_resolution_skips_unreachable_endpoint(self):
+        body = {
+            "event": "set",
+            "instances": [
+                {
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": [
+                        {"id": 0, "address": "127.0.0.1:8100"},
+                        {"id": 1, "address": "127.0.0.2:8100"},
+                    ],
+                }
+            ],
+        }
+
+        with patch(
+            "motor.coordinator.api_server.management_server.NativeEngineApiClient.query_model_ids",
+            side_effect=[OSError("connection refused"), ["test-model"]],
+        ) as query_model_ids:
+            response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 200
+        assert query_model_ids.call_count == 2
+        assert self.refresh_calls
+        _, instances = self.refresh_calls[-1]
+        assert instances[0].model_name == "test-model"
+
+    def test_refresh_instances_rejects_mixed_controller_and_standalone_payload(self):
+        body = {
+            "event": "set",
+            "instances": [
+                {
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": [{"id": 0, "address": "127.0.0.1:8100"}],
+                },
+                {
+                    "job_name": "test-job",
+                    "model_name": "test-model",
+                    "id": 2,
+                    "role": "decode",
+                    "endpoints": {
+                        "192.168.1.2": {
+                            "0": {
+                                "id": 0,
+                                "ip": "192.168.1.2",
+                                "business_port": "8200",
+                            }
+                        }
+                    },
+                },
+            ],
+        }
+
+        response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 400
+        assert "mixed controller and coordinator-standalone" in response.json()["detail"]
+
+    @pytest.mark.parametrize("event_name", ["add", "del"])
+    def test_refresh_instances_external_incremental_event_is_forwarded(self, event_name):
+        """External ADD/DEL only forwards Coordinator membership changes."""
+        self.coordinator_config.aigw_model = {"id": "test-model"}
+        body = {
+            "event": event_name,
+            "model_name": "test-model",
+            "dispatch_capabilities": "prefill_handoff_decode",
+            "engine_type": "vllm",
+            "instances": [
+                {
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": [{"id": 0, "address": "127.0.0.1:8100"}],
+                }
+            ],
+        }
+
+        response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 200
+        assert self.refresh_calls
+        event, instances = self.refresh_calls[-1]
+        assert event.value == event_name
+        assert instances[0].id == 1
+
+    def test_refresh_instances_external_rejects_unsupported_event(self):
+        """External protocol rejects Controller-only lifecycle events."""
+        self.coordinator_config.aigw_model = {"id": "test-model"}
+        response = self.mgmt_client.post(
+            "/instances/refresh",
+            json={
+                "event": "pause",
+                "model_name": "test-model",
+                "dispatch_capabilities": "concurrent_engine_sync",
+                "engine_type": "vllm",
+                "instances": [
+                    {
+                        "id": 1,
+                        "role": "prefill",
+                        "endpoints": [{"id": 0, "address": "127.0.0.1:8100"}],
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 400
+
+    def test_refresh_instances_rejects_duplicate_ids(self):
+        """Duplicate IDs must be rejected before list-to-dict conversion can drop an instance."""
+        self.coordinator_server._mgmt._control_plane.apply_refresh.side_effect = ValueError(
+            "duplicate instance IDs in one request"
+        )
+        instance = {
+            "job_name": "test-job",
+            "model_name": "test-model",
+            "id": 1,
+            "role": "prefill",
+            "endpoints": {},
+        }
+
+        response = self.mgmt_client.post(
+            "/instances/refresh",
+            json={"event": "set", "instances": [instance, {**instance, "job_name": "other-job"}]},
+        )
+
+        assert response.status_code == 400
+        assert "duplicate instance IDs" in response.json()["detail"]
+
+    def test_refresh_instances_returns_409_on_id_conflict(self):
+        """Existing-state ID collisions are reported as 409 from in-process apply_refresh."""
+        self.coordinator_server._mgmt._control_plane.apply_refresh.side_effect = InstanceIdConflictError(
+            "instance ID 1 already belongs to another instance"
+        )
+        body = {
+            "event": "add",
+            "instances": [
+                {
+                    "job_name": "test-job",
+                    "model_name": "test-model",
+                    "id": 1,
+                    "role": "prefill",
+                    "endpoints": {},
+                }
+            ],
+        }
+
+        response = self.mgmt_client.post("/instances/refresh", json=body)
+
+        assert response.status_code == 409
 
     def test_refresh_instances_empty_body(self):
         """Test refresh_instances with empty body"""
@@ -969,9 +1397,9 @@ class TestCoordinatorServerAdvanced:
 
     def test_precision_alarm_cleared_success(self):
         """Test precision alarm clear returns dismissed when scheduler state is cleared."""
-        scheduler_client = MagicMock()
-        scheduler_client.dismiss_precision_alarm_state = AsyncMock(return_value=True)
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = scheduler_client
+        scheduler = MagicMock()
+        scheduler.dismiss_precision_alarm_state = AsyncMock(return_value=True)
+        self.coordinator_server._mgmt._control_plane.scheduler = scheduler
 
         response = self.mgmt_client.post(
             "/precision/alarm_cleared",
@@ -982,14 +1410,14 @@ class TestCoordinatorServerAdvanced:
         data = response.json()
         assert data["status"] == "success"
         assert data["data"]["dismissed"] is True
-        scheduler_client.dismiss_precision_alarm_state.assert_awaited_once_with(
+        scheduler.dismiss_precision_alarm_state.assert_awaited_once_with(
             p_instance_id=1,
             d_instance_id=2,
         )
 
     def test_precision_alarm_cleared_fails_without_scheduler_client(self):
         """Test precision alarm clear does not report success when scheduler client is unavailable."""
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = None
+        self.coordinator_server._mgmt._control_plane.scheduler = None
 
         response = self.mgmt_client.post(
             "/precision/alarm_cleared",
@@ -1000,9 +1428,9 @@ class TestCoordinatorServerAdvanced:
 
     def test_precision_alarm_cleared_fails_when_scheduler_rejects(self):
         """Test precision alarm clear does not report success when scheduler rejects the request."""
-        scheduler_client = MagicMock()
-        scheduler_client.dismiss_precision_alarm_state = AsyncMock(return_value=False)
-        self.coordinator_server._mgmt._scheduler_connection.get_client.return_value = scheduler_client
+        scheduler = MagicMock()
+        scheduler.dismiss_precision_alarm_state = AsyncMock(return_value=False)
+        self.coordinator_server._mgmt._control_plane.scheduler = scheduler
 
         response = self.mgmt_client.post(
             "/precision/alarm_cleared",
@@ -1228,8 +1656,73 @@ class TestCoordinatorServerAdvanced:
             json=data,
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
         )
-        assert response.status_code != 400, (
-            f"Empty messages with manage=true + target=session must bypass the non-empty check, got {response.status_code}: {response.text}"
+        assert response.status_code == 200, (
+            f"Empty messages with manage=true + target=session must bypass the non-empty check "
+            f"and reach the mocked handle_request (200), got {response.status_code}: {response.text}"
+        )
+
+    def test_validate_openai_request_empty_messages_session_control_allowed(self):
+        """session_control pause/stop/compact/resume must bypass the empty-messages check."""
+        data = {
+            "model": "gpt-3.5-turbo",
+            "messages": [],
+            "agent_hint": {"session_control": {"type": "stop"}},
+        }
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/chat/completions",
+            json=data,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 200, (
+            f"Empty messages with session_control must bypass the non-empty check "
+            f"and reach the mocked handle_request (200), got {response.status_code}: {response.text}"
+        )
+
+    def test_validate_openai_request_empty_messages_session_control_start_rejected(self):
+        """'start' carries no context semantics, so empty messages must still be rejected."""
+        data = {
+            "model": "gpt-3.5-turbo",
+            "messages": [],
+            "agent_hint": {"session_control": {"type": "start"}},
+        }
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/chat/completions",
+            json=data,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 400, (
+            f"Expected 400 for empty messages with session_control=start, got: {response.status_code}"
+        )
+
+    def test_validate_openai_request_empty_messages_session_control_invalid_cm_allowed(self):
+        """session_control=stop with an INVALID raw context_management (manage_request=False)
+        must still bypass the empty-messages check.
+
+        Regression: previously the mere presence of ``context_management`` triggered the
+        mutual-exclusion branch in ``_resolve_session_control`` and dropped session_control,
+        so a request like ``session_control=stop`` + ``context_management={manage_request: False}``
+        fell through to plain inference and was rejected for empty messages — silently
+        downgrading the client's ``stop`` intent.
+        """
+        data = {
+            "model": "gpt-3.5-turbo",
+            "messages": [],
+            "agent_hint": {
+                "session_control": {"type": "stop"},
+                "context_management": {"manage_request": False, "edits": [{"type": "evict", "target": "session"}]},
+            },
+        }
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/chat/completions",
+            json=data,
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 200, (
+            f"Invalid raw context_management must NOT block session_control=stop; "
+            f"expected 200 (reaches handle_request), got {response.status_code}: {response.text}"
         )
 
     def test_validate_openai_request_invalid_message_format(self):
@@ -1280,6 +1773,69 @@ class TestCoordinatorServerAdvanced:
         )
 
         assert response.status_code == 400, f"Expected 400 for invalid role, got: {response.status_code}"
+
+    def test_validate_responses_input_empty_array(self):
+        """Test Responses validation rejects an empty input array."""
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/responses",
+            json={"model": "gpt-4o-mini", "input": []},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 400, f"Expected 400 for empty input array, got: {response.status_code}"
+
+    def test_validate_responses_input_elements_not_dict(self):
+        """Test Responses validation rejects non-dict input array elements."""
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/responses",
+            json={"model": "gpt-4o-mini", "input": [1, 2, 3]},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 400, f"Expected 400 for non-dict input elements, got: {response.status_code}"
+
+    def test_validate_responses_input_missing_role_or_content(self):
+        """Test Responses validation rejects an input item missing role or content."""
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/responses",
+            json={"model": "gpt-4o-mini", "input": [{"role": "user"}]},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 400, f"Expected 400 for missing content, got: {response.status_code}"
+
+    def test_validate_responses_input_invalid_role(self):
+        """Test Responses validation rejects an invalid message role."""
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/responses",
+            json={"model": "gpt-4o-mini", "input": [{"role": "invalid", "content": "x"}]},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 400, f"Expected 400 for invalid role, got: {response.status_code}"
+
+    def test_validate_responses_typed_non_message_item_reaches_backend(self):
+        """Test Responses validation does not apply Chat fields to typed native items."""
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-4o-mini",
+                "input": [{"type": "function_call_output", "call_id": "call-1", "output": "42"}],
+            },
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 200, f"Expected backend passthrough, got: {response.status_code}"
+
+    def test_validate_responses_input_string_is_valid(self):
+        """Test Responses validation accepts string input."""
+        inference_client = TestClient(self.coordinator_server.inference_app)
+        response = inference_client.post(
+            "/v1/responses",
+            json={"model": "gpt-4o-mini", "input": "Hello there!"},
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.valid_api_key}"},
+        )
+        assert response.status_code == 200, f"Expected 200 for string input, got: {response.status_code}"
 
     def test_handle_openai_request_unavailable_instances(self):
         """Test _handle_openai_request when instances are unavailable (503)."""
@@ -1347,11 +1903,23 @@ class TestCoordinatorServerAdvanced:
                     "role": "prefill",
                     "endpoints": {
                         "192.168.1.3": {
-                            "0": {"id": 0, "ip": "192.168.1.3", "business_port": "8080", "mgmt_port": "18080"},
-                            "1": {"id": 1, "ip": "192.168.1.3", "business_port": "8081", "mgmt_port": "18081"},
+                            "0": {
+                                "id": 0,
+                                "ip": "192.168.1.3",
+                                "business_port": "8080",
+                            },
+                            "1": {
+                                "id": 1,
+                                "ip": "192.168.1.3",
+                                "business_port": "8081",
+                            },
                         },
                         "192.168.1.4": {
-                            "2": {"id": 2, "ip": "192.168.1.4", "business_port": "9000", "mgmt_port": "19000"}
+                            "2": {
+                                "id": 2,
+                                "ip": "192.168.1.4",
+                                "business_port": "9000",
+                            }
                         },
                     },
                 }
@@ -1635,6 +2203,34 @@ class TestFastAPIMiddlewareAdvanced:
 
 @pytest.mark.asyncio
 @pytest.mark.filterwarnings("ignore::DeprecationWarning")
+async def test_render_health_observer_retries_until_ready():
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    server = object.__new__(ManagementServer)
+    server.coordinator_config = config
+    server._render_health_task = None
+
+    render_client = MagicMock()
+    render_client.health = AsyncMock(side_effect=[False, True])
+    render_client.aclose = AsyncMock()
+
+    with (
+        patch("motor.coordinator.api_server.management_server.VLLMRenderClient", return_value=render_client),
+        patch("motor.coordinator.api_server.management_server._RENDER_HEALTH_RETRY_SECONDS", 0),
+    ):
+        server._start_render_health_observer()
+        task = server._render_health_task
+        assert task is not None
+        await task
+        server._start_render_health_observer()
+
+    assert server._render_health_task is task
+    assert render_client.health.await_count == 2
+    render_client.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
 async def test_run_combined_mode(monkeypatch):
     from motor.coordinator.api_server.management_server import ManagementServer
     from motor.config.coordinator import CoordinatorConfig
@@ -1841,6 +2437,162 @@ class TestValidateAnthropicRequest:
         )
 
 
+class TestValidateOpenaiPositiveIntField:
+    """Unit tests for _validate_positive_int_field (max_tokens / max_completion_tokens)."""
+
+    def test_missing_field_is_untouched(self):
+        body = {"model": "m"}
+        _validate_positive_int_field(body, OpenAIField.MAX_TOKENS)
+        assert body == {"model": "m"}
+
+    def test_valid_positive_int_is_kept(self):
+        body = {"model": "m", "max_tokens": 128}
+        _validate_positive_int_field(body, OpenAIField.MAX_TOKENS)
+        assert body == {"model": "m", "max_tokens": 128}
+
+    @pytest.mark.parametrize("value", [0, -1, 1.5, "128", True, False])
+    def test_invalid_values_are_removed(self, value):
+        body = {"model": "m", "max_tokens": value}
+        _validate_positive_int_field(body, OpenAIField.MAX_TOKENS)
+        assert "max_tokens" not in body
+
+    def test_invalid_value_logs_warning(self, caplog):
+        body = {"model": "m", "max_tokens": 0}
+        _validate_positive_int_field(body, OpenAIField.MAX_TOKENS)
+        assert "Invalid max_tokens=0" in caplog.text
+
+    def test_openai_request_removes_invalid_max_tokens(self):
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 0,
+            "max_completion_tokens": -1,
+        }
+        _validate_openai_request(body, RequestType.OPENAI)
+        assert "max_tokens" not in body
+        assert "max_completion_tokens" not in body
+
+    def test_openai_request_keeps_valid_max_tokens(self):
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 128,
+            "max_completion_tokens": 64,
+        }
+        _validate_openai_request(body, RequestType.OPENAI)
+        assert body["max_tokens"] == 128
+        assert body["max_completion_tokens"] == 64
+
+
+class TestValidateOpenaiStreamOptions:
+    """Regression coverage for issue #566."""
+
+    @pytest.mark.parametrize("stream", [None, False])
+    @pytest.mark.parametrize(
+        "body_fields",
+        [
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"prompt": "hi"},
+        ],
+    )
+    def test_nonstream_request_with_stream_options_is_rejected(self, body_fields, stream):
+        body = {
+            "model": "m",
+            **body_fields,
+            "stream_options": {"include_usage": True},
+        }
+        if stream is not None:
+            body["stream"] = stream
+
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_openai_request(body, RequestType.OPENAI)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Stream options can only be defined when `stream=True`."
+
+    def test_stream_request_with_stream_options_is_accepted(self):
+        body = {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+
+        _validate_openai_request(body, RequestType.OPENAI)
+
+    def test_empty_stream_options_matches_upstream_acceptance(self):
+        body = {
+            "model": "m",
+            "prompt": "hi",
+            "stream": False,
+            "stream_options": {},
+        }
+
+        _validate_openai_request(body, RequestType.OPENAI)
+
+    def test_string_false_stream_matches_engine_before_validator(self):
+        body = {
+            "model": "m",
+            "prompt": "hi",
+            "stream": "false",
+            "stream_options": {"include_usage": True},
+        }
+
+        _validate_openai_request(body, RequestType.OPENAI)
+
+
+class TestValidateOpenaiPrefillGenerationParams:
+    """Cover remaining client fields overwritten by the Prefill adapter."""
+
+    @pytest.mark.parametrize(
+        ("body_fields", "field_name"),
+        [
+            ({"prompt": "hi", "min_tokens": None}, "min_tokens"),
+            ({"prompt": "hi", "stream": "invalid"}, "stream"),
+        ],
+    )
+    def test_invalid_rewritten_field_type_is_rejected(self, body_fields, field_name):
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_openai_request({"model": "m", **body_fields}, RequestType.OPENAI)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == f"Invalid {field_name} field."
+
+    @pytest.mark.parametrize(
+        "body_fields",
+        [
+            {"prompt": "hi", "min_tokens": -1},
+            {"prompt": "hi", "max_tokens": 4, "min_tokens": 5},
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+                "max_completion_tokens": 4,
+                "min_tokens": 5,
+            },
+        ],
+    )
+    def test_invalid_rewritten_field_value_is_rejected(self, body_fields):
+        with pytest.raises(HTTPException) as exc_info:
+            _validate_openai_request({"model": "m", **body_fields}, RequestType.OPENAI)
+
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.parametrize(
+        "body_fields",
+        [
+            {"prompt": "hi", "stream": "true", "max_tokens": 4, "min_tokens": 4.0},
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 8,
+                "max_completion_tokens": 4,
+                "min_tokens": 4,
+            },
+        ],
+    )
+    def test_engine_compatible_values_are_accepted(self, body_fields):
+        _validate_openai_request({"model": "m", **body_fields}, RequestType.OPENAI)
+
+
 class TestAnthropicEndpoints:
     """Integration tests for Anthropic API endpoints."""
 
@@ -1853,6 +2605,8 @@ class TestAnthropicEndpoints:
         im_instance.has_required_instances.return_value = True
         im_instance.get_required_instances_status.return_value = InstanceReadiness.REQUIRED_MET
         im_instance.refresh_instances = AsyncMock(return_value=None)
+        im_instance.validate_refresh_instances = AsyncMock(return_value=None)
+        im_instance.snapshot_instances = AsyncMock(return_value=[])
         im_mock_cls.return_value = im_instance
 
         # Mock handle_request to return appropriate response

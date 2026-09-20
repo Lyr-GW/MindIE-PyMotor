@@ -56,7 +56,7 @@ from lib.config_validator import (
     validate_pd_hybrid_config,
     validate_pd_hybrid_infer_service_template,
     validate_node_selectors,
-    enforce_virtual_inference_log_level,
+    validate_reserved_labels,
 )
 
 
@@ -115,10 +115,6 @@ def handle_update_instance_num(user_config, env_config_path=None):
 
     update_kv_store_enabled_flag(user_config)
     update_engine_base_name(user_config)
-    if env_config_path and os.path.exists(env_config_path):
-        enforce_virtual_inference_log_level(user_config, read_json(env_config_path))
-    else:
-        enforce_virtual_inference_log_level(user_config, {})
     set_env_to_shell(user_config, env_config_path, deploy_mode_arg)
 
     k8s_utils.g_generate_yaml_list = []
@@ -135,7 +131,7 @@ def handle_update_instance_num(user_config, env_config_path=None):
         infer_input = paths["infer_service_input_yaml"]
         infer_output = paths["infer_service_output_yaml"]
         if os.path.exists(infer_output):
-            update_infer_service_replicas_only(infer_output, deploy_config)
+            update_infer_service_replicas_only(infer_output, deploy_config, user_config)
         else:
             init_service_domain_name(paths, deploy_config, user_config, skip_kv_store=True)
             if not os.path.exists(infer_input):
@@ -226,11 +222,6 @@ def deploy_services(user_config, env_config_path, dry_run=False, auto_log_collec
 
     update_engine_base_name(user_config)
 
-    if env_config_path and os.path.exists(env_config_path):
-        enforce_virtual_inference_log_level(user_config, read_json(env_config_path))
-    else:
-        enforce_virtual_inference_log_level(user_config, {})
-
     deploy_mode_arg = resolve_deploy_mode_for_services(deploy_config)
     if not dry_run:
         set_env_to_shell(user_config, env_config_path, deploy_mode_arg)
@@ -238,7 +229,7 @@ def deploy_services(user_config, env_config_path, dry_run=False, auto_log_collec
         logger.info("dry-run: skip set_env_to_shell")
 
     if deploy_mode_arg != C.DEPLOY_MODE_SINGLE_CONTAINER and not dry_run:
-        validate_node_selectors(deploy_config)
+        validate_node_selectors(user_config)
 
     k8s_utils.g_generate_yaml_list = []
     paths = get_deploy_paths()
@@ -463,6 +454,7 @@ def main():
     set_user_config_path(user_config_path)
     os.makedirs(C.OUTPUT_ROOT_PATH, exist_ok=True)
     user_config = read_json(user_config_path)
+    validate_reserved_labels(user_config)
     if C.HYBRID_INSTANCES_NUM in user_config.get(C.MOTOR_DEPLOY_CONFIG, {}):
         validate_pd_hybrid_config(user_config)
         paths = get_deploy_paths()

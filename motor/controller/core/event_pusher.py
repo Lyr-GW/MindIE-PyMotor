@@ -23,6 +23,24 @@ from motor.controller.core import Observer, ObserverEvent
 logger = get_logger(__name__)
 _rl = RateLimitedLogger(logger)
 
+# Consecutive Coordinator heartbeat failures before pushing a full SET. A promoted
+# standby serves 503 until it holds the instances, so recovery time is dominated by
+# this debounce; one failure already means the master is unreachable.
+_HB_LOSS_SET_THRESHOLD = 1
+
+# After heartbeat-loss SET, keep retrying until POST /instances/refresh succeeds.
+# The demoted master stays in the Coordinator Service endpoints until kubelet's
+# readiness threshold expires, so a single burst may land on it and fail.
+_HA_SET_RETRY_DELAY_SEC = 1.0
+
+
+def _get_serving_overlay():
+    # Import after motor.controller.core finishes initialization to avoid the
+    # fault_tolerance package importing InstanceManager through FaultManager.
+    from motor.controller.fault_tolerance.serving_overlay import ServingOverlay
+
+    return ServingOverlay
+
 
 @dataclass
 class Event:
@@ -54,17 +72,25 @@ class EventPusher(Observer):
         with self.config_lock:
             self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
             self._set_sync_interval = config.event_config.coordinator_set_sync_interval
+            ft_config = config.fault_tolerance_config
+            self.enable_dp_scale_down = ft_config.enable_fault_tolerance and ft_config.enable_dp_scale_down
 
         # Track last periodic SET sync time (initialized to now so first sync fires after interval)
         self._last_set_sync_time = time.time()
 
         # Last successfully sent instance-ID fingerprint; used to suppress noisy periodic SET logs
-        self._last_sent_fingerprint: tuple[int, ...] | None = None
+        self._last_sent_fingerprint: tuple[tuple[int, tuple[int, ...]], ...] | None = None
+
+        # Coalesce consecutive incremental refresh failures into one queued SET.
+        self._failed_incremental_set_pending = False
 
         # Track whether we've already sent SET for the current ready=False period.
         # Prevents repeated SET pushes when Coordinator stays not-ready (e.g. only
         # decode instances remain after a prefill failure).
         self._ready_false_set_sent = False
+
+        # True after consecutive heartbeat losses until a SET actually succeeds.
+        self._resync_after_hb_loss = False
 
         self.event_consumer_thread = None
         self.heartbeat_detector_thread = None
@@ -80,7 +106,9 @@ class EventPusher(Observer):
         # Create event pusher threads
         self.event_consumer_thread = threading.Thread(target=self._event_consumer, daemon=True, name="EventConsumer")
         self.heartbeat_detector_thread = threading.Thread(
-            target=self._coordinator_heartbeat_detector, daemon=True, name="HeartbeatDetector"
+            target=self._coordinator_heartbeat_detector,
+            daemon=True,
+            name="HeartbeatDetector",
         )
 
         self.event_consumer_thread.start()
@@ -93,18 +121,18 @@ class EventPusher(Observer):
             self.work_condition.notify_all()
         # Only join threads that have been started
         if (
-            hasattr(self, 'event_consumer_thread')
+            hasattr(self, "event_consumer_thread")
             and self.event_consumer_thread is not None
             and self.event_consumer_thread.is_alive()
         ):
             self.event_consumer_thread.join()
         if (
-            hasattr(self, 'heartbeat_detector_thread')
+            hasattr(self, "heartbeat_detector_thread")
             and self.heartbeat_detector_thread is not None
             and self.heartbeat_detector_thread.is_alive()
         ):
             self.heartbeat_detector_thread.join()
-        if hasattr(self, 'heart_client'):
+        if hasattr(self, "heart_client"):
             self.heart_client.close()
         logger.info("EventPusher stopped.")
 
@@ -122,6 +150,23 @@ class EventPusher(Observer):
         with self.config_lock:
             self.coordinator_heartbeat_interval = config.event_config.coordinator_heartbeat_interval
             self._set_sync_interval = config.event_config.coordinator_set_sync_interval
+            ft_config = config.fault_tolerance_config
+            self.enable_dp_scale_down = ft_config.enable_fault_tolerance and ft_config.enable_dp_scale_down
+
+    def _project_instance(self, instance: ReadOnlyInstance) -> Instance | None:
+        if not self.enable_dp_scale_down:
+            return instance.to_instance()
+        return _get_serving_overlay().project(instance)
+
+    def _serving_snapshot(self) -> tuple[list[Instance], tuple]:
+        with self.lock:
+            instances = list(self.instances.values())
+        if not self.enable_dp_scale_down:
+            projected = [instance.to_instance() for instance in instances]
+            return projected, tuple(sorted(instance.id for instance in projected))
+        serving_overlay = _get_serving_overlay()
+        projected = serving_overlay.project_many(instances)
+        return projected, serving_overlay.fingerprint(projected)
 
     def update(self, instance: ReadOnlyInstance, event: ObserverEvent) -> None:
         # Event pusher will interact with coordinator and send instances.
@@ -130,7 +175,11 @@ class EventPusher(Observer):
             with self.lock:
                 self.instances[instance.job_name] = instance
             # Deep copy the instance to ensure data consistency during async HTTP sending
-            event = Event(EventType.ADD, instance.to_instance())
+            projected = self._project_instance(instance)
+            if projected is None:
+                logger.info("Instance serving view remains withdrawn: %s", instance.job_name)
+                return
+            event = Event(EventType.ADD, projected)
             logger.info("Instance ready: %s", instance.job_name)
         elif event == ObserverEvent.INSTANCE_SEPARATED:
             with self.lock:
@@ -153,9 +202,28 @@ class EventPusher(Observer):
         elif event == ObserverEvent.INSTANCE_RESUMED:
             with self.lock:
                 self.instances[instance.job_name] = instance
-            event = Event(EventType.RESUME, instance.to_instance())
+            projected = self._project_instance(instance)
+            if projected is None:
+                logger.info("Instance serving view remains withdrawn: %s", instance.job_name)
+                return
+            event = Event(EventType.RESUME, projected)
             logger.info("Instance resumed: %s", instance.job_name)
         elif event == ObserverEvent.INSTANCE_REMOVED:
+            with self.lock:
+                live = self.instances.get(instance.job_name)
+            live_id = getattr(live, "id", None) if live is not None else None
+            removed_id = getattr(instance, "id", None)
+            # A newer READY instance already occupies this job_name. Coordinator
+            # keys by instance id, so DEL of the zombie is a no-op; skip it so a
+            # future job-name-based unregister cannot drop the live instance.
+            if isinstance(live_id, int) and isinstance(removed_id, int) and live_id > removed_id:
+                logger.info(
+                    "Skip Coordinator DEL for superseded instance. job_name=%s, removed_id=%d, current_id=%d",
+                    instance.job_name,
+                    removed_id,
+                    live_id,
+                )
+                return
             event = Event(EventType.DEL, instance.to_instance())
             logger.info("Instance removed: %s", instance.job_name)
         else:
@@ -179,6 +247,8 @@ class EventPusher(Observer):
                 continue
             if event is not None:
                 event_type = event.event_type
+                if event_type == EventType.SET:
+                    self._failed_incremental_set_pending = False
                 set_fingerprint: tuple | None = None
                 if event_type == EventType.ADD:
                     event_msg = InsEventMsg(event=event_type, instances=[event.instance])
@@ -189,14 +259,9 @@ class EventPusher(Observer):
                 elif event_type == EventType.RESUME:
                     event_msg = InsEventMsg(event=event_type, instances=[event.instance])
                 elif event_type == EventType.SET:
-                    with self.lock:
-                        instances = list(self.instances.values())
-                        set_fingerprint = tuple(sorted(inst.id for inst in instances))
-
+                    instances, set_fingerprint = self._serving_snapshot()
                     if instances:
-                        event_msg = InsEventMsg(
-                            event=event_type, instances=[instance.to_instance() for instance in instances]
-                        )
+                        event_msg = InsEventMsg(event=event_type, instances=instances)
                     else:
                         logger.debug(
                             "SET event skipped: no instances in memory (Controller may have lost its own instances)."
@@ -207,12 +272,57 @@ class EventPusher(Observer):
                     continue
 
                 if event_msg is not None:
+                    success = False
                     try:
-                        CoordinatorApiClient.send_instance_refresh(event_msg)
-                        if event_type == EventType.SET:
-                            self._last_sent_fingerprint = set_fingerprint
+                        success = CoordinatorApiClient.send_instance_refresh(event_msg)
                     except Exception as e:
                         logger.error("Failed to send instance refresh event, error: %s", e)
+                    if not success:
+                        if event_type == EventType.SET and self._resync_after_hb_loss:
+                            _rl.error_window(
+                                "event_pusher.ha_set_retry",
+                                "Instance SET failed after Coordinator heartbeat loss; retrying",
+                                window_sec=60,
+                                level="WARNING",
+                            )
+                            if self.stop_event.wait(timeout=_HA_SET_RETRY_DELAY_SEC):
+                                continue
+                            self.event_queue.put(Event(EventType.SET, None))
+                            continue
+                        if event_type != EventType.SET and not self._failed_incremental_set_pending:
+                            self._failed_incremental_set_pending = True
+                            self.event_queue.put(Event(EventType.SET, None))
+                            logger.warning(
+                                "Incremental instance refresh %s failed; queued a full SET reconciliation",
+                                event_type,
+                            )
+                        continue
+                    if event_type == EventType.SET:
+                        self._last_sent_fingerprint = set_fingerprint
+                        self.is_coordinator_reset = False
+                        self._resync_after_hb_loss = False
+                    if self.enable_dp_scale_down and event_type in {EventType.ADD, EventType.RESUME, EventType.SET}:
+                        _get_serving_overlay().mark_published(event_msg.instances)
+
+    def notify_coordinator_failover(self, master_host: str | None = None) -> None:
+        """Push all instances after a Coordinator reported it became master.
+
+        The promoted standby starts with an empty Scheduler pool. The mgmt
+        Service still routes to the isolated old master (or to no Ready
+        endpoint), so SET must target the reporting pod IP when we have it.
+        """
+        CoordinatorApiClient.set_refresh_host(master_host)
+        self._resync_after_hb_loss = True
+        self._enqueue_full_instance_set()
+        logger.warning(
+            "Coordinator reported a master switch; pushing all instances now. refresh_host=%s",
+            master_host or "service-dns",
+        )
+
+    def _enqueue_full_instance_set(self) -> None:
+        """Queue a full-instance SET so the new Coordinator master can become ready."""
+        self.event_queue.put(Event(EventType.SET, None))
+        logger.debug("Controller will reset coordinator instance info.")
 
     def _coordinator_heartbeat_detector(self) -> None:
         """
@@ -224,6 +334,7 @@ class EventPusher(Observer):
         not_ready_log_counter = 0
 
         while not self.stop_event.is_set():
+            refresh_host = CoordinatorApiClient.get_refresh_host()
             try:
                 params = {"status": "normal"}
                 response = CoordinatorApiClient.query_status(params)
@@ -253,19 +364,33 @@ class EventPusher(Observer):
                 if self.is_coordinator_reset:
                     # SET event means push all instances to coordinator,
                     # so job_name is not a instance job_name, it is "coordinator_restart".
-                    event = Event(EventType.SET, None)
-                    self.event_queue.put(event)
+                    self._enqueue_full_instance_set()
                     self.is_coordinator_reset = False
                     hb_loss_cnt = 0
-                    logger.debug("Controller will reset coordinator instance info.")
 
+            except StopIteration:
+                raise
             except Exception as e:
+                # Drop Keep-Alive immediately: the next SET must not reuse a TCP
+                # connection pinned to the isolated master Coordinator pod.
+                CoordinatorApiClient.reset_refresh_client()
+                if refresh_host:
+                    CoordinatorApiClient.clear_refresh_host(refresh_host)
                 # Only count heartbeat loss after we've successfully connected at least once
                 if self.is_first_heartbeat_success:
                     hb_loss_cnt += 1
-                    if hb_loss_cnt >= 2:
+                    if hb_loss_cnt >= _HB_LOSS_SET_THRESHOLD:
+                        # Queue SET now. Waiting for the next successful heartbeat
+                        # leaves the promoted standby with an empty instance pool
+                        # until K8s endpoints catch up and /readiness succeeds.
+                        # Keep retrying until SET succeeds: the first burst often
+                        # still load-balances to the demoted master pod.
                         self.is_coordinator_reset = True
-                        logger.warning("Coordinator heartbeat lost. Possible restart detected.")
+                        already_resyncing = self._resync_after_hb_loss
+                        self._resync_after_hb_loss = True
+                        if not already_resyncing:
+                            self._enqueue_full_instance_set()
+                            logger.warning("Coordinator heartbeat lost. Possible restart detected.")
                         hb_loss_cnt = 0
                     # Rate-limit repeated connection-failure logs via error_window.
                     _rl.error_window(
@@ -290,10 +415,12 @@ class EventPusher(Observer):
                     event = Event(EventType.SET, None)
                     self.event_queue.put(event)
                     self._last_set_sync_time = now
-                    with self.lock:
-                        fingerprint = tuple(sorted(inst.id for inst in self.instances.values()))
+                    _, fingerprint = self._serving_snapshot()
                     if fingerprint != self._last_sent_fingerprint:
-                        logger.info("Periodic SET sync triggered (interval=%ds)", self._set_sync_interval)
+                        logger.info(
+                            "Periodic SET sync triggered (interval=%ds)",
+                            self._set_sync_interval,
+                        )
 
             with self.config_lock:
                 heartbeat_interval = self.coordinator_heartbeat_interval

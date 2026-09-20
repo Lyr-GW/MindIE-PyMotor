@@ -5,7 +5,7 @@ nav:
   - 用户指南:
       - 简介: user_guide/README.md
       - 用户手册目录: user_guide/menu_user_manual.md
-      - 快速开始: user_guide/quick_start_motor.md
+      - 快速开始: user_guide/quick_start.md
       - 环境准备: user_guide/environment_preparation.md
       - 通信矩阵: user_guide/communication_matrix_motor.md
       - 服务部署:
@@ -17,6 +17,11 @@ nav:
           - Docker 部署:
               - 单容器部署: user_guide/deployment/docker/single_container.md
               - 多容器部署: user_guide/deployment/docker/multi_container.md
+          - Slurm 部署:
+              - 概述: user_guide/deployment/slurm/README.md
+              - 环境准备: user_guide/deployment/slurm/environment_preparation.md
+              - 服务部署: user_guide/deployment/slurm/service_deployment.md
+          - Coordinator 独立部署: user_guide/deployment/standalone.md
           - 部署案例:
               - ModelArts 与元戎:
                   - 简介: user_guide/deployment/cases/ModelArts&yuanrong/README.md
@@ -33,6 +38,7 @@ nav:
               - 概述: user_guide/features/kv_cache_store/README.md
               - MemCache 后端: user_guide/features/kv_cache_store/backend/memcache.md
               - Mooncake 后端: user_guide/features/kv_cache_store/backend/mooncake.md
+              - UCM 部署: user_guide/features/kv_cache_store/backend/ucm.md
               - Yuanrong 后端: user_guide/features/kv_cache_store/backend/yuanrong.md
           - 手动扩缩容: user_guide/features/manual_scaling.md
           - 主备倒换: user_guide/features/fault_tolerance/standby.md
@@ -43,6 +49,7 @@ nav:
           - 虚推健康探测: user_guide/features/sim_inference.md
           - 故障场景重调度: user_guide/features/fault_tolerance/rescheduler.md
           - 精度检测: user_guide/features/precision_detection.md
+          - 数据混淆推理（PMCC）: user_guide/features/data_obfuscation.md
       - 服务维护:
           - 镜像制作: user_guide/maintenance/build_motor_image_from_vllm_ascend.md
           - 常用维护技巧: user_guide/maintenance/maintenance_tips.md
@@ -53,7 +60,6 @@ nav:
           - 管理接口: user_guide/api/management_interfaces.md
           - 指标接口: user_guide/api/metrics_interfaces.md
           - 服务运行状态观测接口: user_guide/api/observability_interface.md
-          - 容器快照内部接口: user_guide/api/engine_server_interfaces.md
   - 设计文档:
       - 概述: design/README.md
       - PD 分离: design/pd_disaggregation.md
@@ -64,6 +70,7 @@ nav:
           - 主备倒换: design/fault_tolerance/standby.md
           - 精度检测: design/fault_tolerance/precision_detection.md
       - KV Conductor: design/kv_conductor.md
+      - Coordinator 调度热路径 Rust 重构: design/coordinator_scheduler_rust.md
       - 扩缩容: design/scaling.md
       - CRD 部署设计: design/crd_deployment.md
       - Metrics 可观测性: design/metrics.md
@@ -75,5 +82,4 @@ nav:
       - 组件设计:
           - Controller: developer_guide/components/controller.md
           - Coordinator: developer_guide/components/coordinator.md
-          - Engine Server: developer_guide/components/engine_server.md
           - Node Manager: developer_guide/components/node_manager.md

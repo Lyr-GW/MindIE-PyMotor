@@ -54,7 +54,6 @@ def _make_endpoint_config(
         deploy_config=deploy_config,
         host="127.0.0.1",
         port=8000,
-        mgmt_port=9001,
         role="union",
         node_rank=node_rank,
         master_dp_ip=master_dp_ip,
@@ -83,6 +82,19 @@ def test_no_pcp_params_when_nnodes_is_one():
     assert "node_rank" not in flattened
     assert "master_addr" not in flattened
     assert "headless" not in flattened
+
+
+def test_snapshot_config_enables_auto_checkpoint_for_vllm_cli():
+    endpoint_config = _make_endpoint_config()
+    endpoint_config.snapshot_metadata = "/snapshot/metadata.json"
+    endpoint_config.enable_auto_checkpoint = True
+
+    flattened = VLLMConfig(endpoint_config=endpoint_config)._flatten_config()
+
+    assert flattened["snapshot_config"] == {
+        "snapshot_metadata": "/snapshot/metadata.json",
+        "enable_auto_checkpoint": True,
+    }
 
 
 def test_no_pcp_params_when_nnodes_gt_1_but_no_master_port():
@@ -396,3 +408,39 @@ def test_mooncake_connector_preserves_pp_layer_partition():
     assert extra["prefill"]["tp_size"] == 16
     assert "pp_size" in extra["prefill"]
     assert "pp_size" in extra["decode"]
+
+
+def test_access_log_endpoints_excluded_by_default():
+    """Health, metrics, and FT polling are excluded from access logs by default."""
+    endpoint_config = _make_endpoint_config()
+    config = VLLMConfig(endpoint_config=endpoint_config)
+    config.initialize()
+    flattened = config._flatten_config()
+
+    expected = "/health,/metrics,/snapshot/health,/v1/fault_tolerance/status"
+    assert flattened["disable_access_log_for_endpoints"] == expected
+    cli_args = config.get_cli_args()
+    assert cli_args[cli_args.index("--disable-access-log-for-endpoints") + 1] == expected
+
+
+def test_access_log_endpoints_user_override_wins():
+    """A user-set access-log exclusion list overrides the default."""
+    endpoint_config = _make_endpoint_config()
+    endpoint_config.deploy_config.engine_config.set("disable_access_log_for_endpoints", "/ping")
+    config = VLLMConfig(endpoint_config=endpoint_config)
+    config.initialize()
+    flattened = config._flatten_config()
+
+    assert flattened["disable_access_log_for_endpoints"] == "/ping"
+
+
+def test_access_log_endpoints_dash_style_user_override_wins():
+    """vLLM-native dash style key wins and must not duplicate the default into two args."""
+    endpoint_config = _make_endpoint_config()
+    endpoint_config.deploy_config.engine_config.set("disable-access-log-for-endpoints", "/v1/models")
+    config = VLLMConfig(endpoint_config=endpoint_config)
+    config.initialize()
+    flattened = config._flatten_config()
+
+    assert "disable_access_log_for_endpoints" not in flattened
+    assert flattened["disable-access-log-for-endpoints"] == "/v1/models"

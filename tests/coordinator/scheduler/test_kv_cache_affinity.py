@@ -20,7 +20,17 @@ import pytest
 from copy import deepcopy
 
 from motor.common.resources.instance import PDRole
-from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy, TokenizerManager
+from motor.config.coordinator import (
+    CoordinatorConfig,
+    CONTEXT_BUDGET_ON,
+    SchedulerType,
+)
+from motor.coordinator.scheduler.policy.kv_cache_affinity import (
+    adapt_context_budget,
+    KvCacheAffinityPolicy,
+    TokenizerManager,
+)
+from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.api_client.conductor_api_client import TENANT_ID
 from motor.coordinator.scheduler.policy.utils import (
     preprocess_input,
@@ -46,7 +56,6 @@ def _make_endpoint(ep_id: int, active_tokens: float = 0.0) -> Endpoint:
         id=ep_id,
         ip="127.0.0.1",
         business_port="8000",
-        mgmt_port="8001",
         workload=Workload(active_tokens=active_tokens),
     )
 
@@ -185,10 +194,13 @@ class TestKvCacheAffinityPolicy(unittest.TestCase):
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor')
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
     def test_select_endpoint_from_list_no_instance_data(self, mock_tokenizer_manager, mock_query_conductor):
-        """Test select_endpoint_from_list function - no instance data"""
+        """Tenant has no data for any of our instances: fall back to load_balance (return None)."""
         # Preparing Test Data
         mock_instance = Mock()
         mock_instance.id = "instance-5"
+        ep = _make_endpoint(0)
+        mock_instance.endpoints = {"group": {0: ep}}
+        mock_instance.get_all_endpoints.return_value = (ep,)
         instances = [mock_instance]
 
         mock_req_info = Mock()
@@ -199,7 +211,7 @@ class TestKvCacheAffinityPolicy(unittest.TestCase):
         mock_tokenizer.encode.return_value = list(range(2048))
         mock_tokenizer_manager.return_value = mock_tokenizer
 
-        # Mock ConductorApiClient return value
+        # Conductor reports only unrelated instances; none of ours appear in tenant.
         mock_query_conductor.return_value = {
             TENANT_ID: {"vllm-prefill-instance-6": {"GPU": 100, "DP": {"endpoint-1": 50}}}
         }
@@ -212,11 +224,57 @@ class TestKvCacheAffinityPolicy(unittest.TestCase):
 
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor')
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
+    def test_select_endpoint_partial_tenant_includes_unindexed_instances(
+        self, mock_tokenizer_manager, mock_query_conductor
+    ):
+        """Regression: partial tenant hit lets unindexed instances score as zero-match.
+
+        Mirrors the P-node load imbalance: tenant only lists instances that already have KV
+        blocks; the rest must still participate (matched_tokens=0) instead of being skipped.
+        """
+        ep_indexed = _make_endpoint(0, active_tokens=500.0)
+        inst_indexed = Mock()
+        inst_indexed.id = "indexed"
+        inst_indexed.endpoints = {"group": {0: ep_indexed}}
+        inst_indexed.get_all_endpoints.return_value = (ep_indexed,)
+
+        ep_unindexed = _make_endpoint(0, active_tokens=0.0)
+        inst_unindexed = Mock()
+        inst_unindexed.id = "unindexed"
+        inst_unindexed.endpoints = {"group": {0: ep_unindexed}}
+        inst_unindexed.get_all_endpoints.return_value = (ep_unindexed,)
+
+        instances = [inst_indexed, inst_unindexed]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(2048))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+
+        mock_query_conductor.return_value = {TENANT_ID: {"vllm-prefill-indexed": {"DP": {"0": 100}}}}
+
+        result = KvCacheAffinityPolicy.select_endpoint_from_list(instances, mock_req_info, load_weight=1.0)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0].id, "unindexed")
+        self.assertEqual(result[1].id, 0)
+
+    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor')
+    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
     def test_select_endpoint_from_list_no_selected_instance(self, mock_tokenizer_manager, mock_query_conductor):
-        """Test the select_endpoint_from_list method. No instance is selected."""
+        """Endpoint missing from the reported DP map still matches with zero prefix and is picked.
+
+        With the zero-match fix, "conductor knows the instance but not this endpoint" is no
+        longer a bail-out: the endpoint scores with matched_tokens=0 and can be selected.
+        """
         # Preparing Test Data
         mock_instance = Mock()
         mock_instance.id = "instance-7"
+        ep = _make_endpoint(0)
+        mock_instance.endpoints = {"group": {0: ep}}
+        mock_instance.get_all_endpoints.return_value = (ep,)
         instances = [mock_instance]
 
         mock_req_info = Mock()
@@ -228,13 +286,17 @@ class TestKvCacheAffinityPolicy(unittest.TestCase):
         mock_tokenizer_manager.return_value = mock_tokenizer
 
         # Mock the return value of ConductorApiClient.
-        mock_query_conductor.return_value = {TENANT_ID: {"instance-7": {"GPU": 100, "DP": {"endpoint-1": 50}}}}
+        mock_query_conductor.return_value = {
+            TENANT_ID: {"vllm-prefill-instance-7": {"GPU": 100, "DP": {"endpoint-1": 50}}}
+        }
 
         # Performing the test
         result = KvCacheAffinityPolicy.select_endpoint_from_list(instances, mock_req_info)
 
         # verification result
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertEqual(result[0].id, "instance-7")
+        self.assertEqual(result[1].id, 0)
 
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor')
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
@@ -432,6 +494,58 @@ class TestKvCacheAffinityPolicy(unittest.TestCase):
             120,
         )
 
+    def test_tier_hit_tokens_from_exclusive_blocks(self):
+        """Per-medium block counts convert to HBM/CPU/Disk token hits."""
+        self.assertEqual(
+            KvCacheAffinityPolicy._tier_hit_tokens(
+                {"npu_blocks": 6, "cpu_blocks": 1, "disk_blocks": 2, "matched_tokens": 800},
+                block_size=128,
+            ),
+            (768, 128, 256),
+        )
+
+    def test_tier_hit_tokens_unavailable_without_blocks(self):
+        """Legacy int / matched_tokens-only payloads omit tier breakdown."""
+        self.assertIsNone(KvCacheAffinityPolicy._tier_hit_tokens(200, block_size=128))
+        self.assertIsNone(
+            KvCacheAffinityPolicy._tier_hit_tokens({"matched_tokens": 120}, block_size=128),
+        )
+
+    @patch.object(KvCacheAffinityPolicy, "_conductor_block_size", return_value=128)
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+    def test_kv_affinity_debug_stashes_tier_hit_tokens(
+        self, mock_tokenizer_manager, mock_query_conductor, _mock_block_size
+    ):
+        """Selection caches exclusive HBM/CPU/Disk hit tokens for the scheduled log."""
+        ep = _make_endpoint(0, active_tokens=10.0)
+        mock_instance = Mock()
+        mock_instance.id = "inst"
+        mock_instance.endpoints = {"group": {0: ep}}
+        mock_instance.get_all_endpoints.return_value = (ep,)
+        instances = [mock_instance]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(1000))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+
+        mock_query_conductor.return_value = {
+            TENANT_ID: {
+                "vllm-prefill-inst": {
+                    "DP": {
+                        "0": {"npu_blocks": 6, "cpu_blocks": 1, "disk_blocks": 0, "matched_tokens": 800},
+                    }
+                }
+            }
+        }
+
+        result = KvCacheAffinityPolicy.select_endpoint_from_list(instances, mock_req_info, load_weight=0.0)
+        self.assertIsNotNone(result)
+        debug = mock_req_info.kv_affinity_debug[(mock_instance.id, ep.id)]
+        self.assertEqual(debug[3], (768, 128, 0))
+
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor')
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
     def test_select_endpoint_mixed_dp_format_old_and_new(self, mock_tokenizer_manager, mock_query_conductor):
@@ -543,6 +657,138 @@ class TestKvCacheAffinityPolicy(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result[1].id, 0)  # endpoint with the longer cached prefix
 
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+    def test_hit_rate_threshold_zero_keeps_affinity_on_low_match(self, mock_tokenizer_manager, mock_query_conductor):
+        """Default threshold 0 disables the gate: a low prefix hit still uses affinity ranking."""
+        ep_a = _make_endpoint(0, active_tokens=50.0)
+        ep_b = _make_endpoint(1, active_tokens=50.0)
+        mock_instance = Mock()
+        mock_instance.id = "inst"
+        mock_instance.endpoints = {"group": {0: ep_a, 1: ep_b}}
+        mock_instance.get_all_endpoints.return_value = (ep_a, ep_b)
+        instances = [mock_instance]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(1000))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+        mock_query_conductor.return_value = {TENANT_ID: {"vllm-prefill-inst": {"DP": {"0": 100, "1": 50}}}}
+
+        result = KvCacheAffinityPolicy.select_endpoint_from_list(
+            instances, mock_req_info, load_weight=0.0, hit_rate_threshold=0.0
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1].id, 0)
+
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+    def test_hit_rate_above_threshold_keeps_affinity(self, mock_tokenizer_manager, mock_query_conductor):
+        """Best prefix hit rate above the threshold keeps affinity and prefers the longer match."""
+        ep_a = _make_endpoint(0, active_tokens=50.0)
+        ep_b = _make_endpoint(1, active_tokens=50.0)
+        mock_instance = Mock()
+        mock_instance.id = "inst"
+        mock_instance.endpoints = {"group": {0: ep_a, 1: ep_b}}
+        mock_instance.get_all_endpoints.return_value = (ep_a, ep_b)
+        instances = [mock_instance]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(1000))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+        mock_query_conductor.return_value = {TENANT_ID: {"vllm-prefill-inst": {"DP": {"0": 800, "1": 100}}}}
+
+        result = KvCacheAffinityPolicy.select_endpoint_from_list(
+            instances, mock_req_info, load_weight=0.0, hit_rate_threshold=0.5
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1].id, 0)
+
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+    def test_hit_rate_at_or_below_threshold_falls_back(self, mock_tokenizer_manager, mock_query_conductor):
+        """Equal or lower than the threshold declines affinity so the caller can use load_balance."""
+        ep_a = _make_endpoint(0, active_tokens=10.0)
+        ep_b = _make_endpoint(1, active_tokens=50.0)
+        mock_instance = Mock()
+        mock_instance.id = "inst"
+        mock_instance.endpoints = {"group": {0: ep_a, 1: ep_b}}
+        mock_instance.get_all_endpoints.return_value = (ep_a, ep_b)
+        instances = [mock_instance]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(1000))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+        mock_query_conductor.return_value = {TENANT_ID: {"vllm-prefill-inst": {"DP": {"0": 500, "1": 100}}}}
+
+        ranked = KvCacheAffinityPolicy.select_endpoint_candidates_from_list(
+            instances, mock_req_info, load_weight=0.0, hit_rate_threshold=0.5, top_k=2
+        )
+        self.assertEqual(ranked, [])
+
+        result = KvCacheAffinityPolicy.select_endpoint_from_list(
+            instances, mock_req_info, load_weight=0.0, hit_rate_threshold=0.5
+        )
+        self.assertIsNone(result)
+
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+    def test_hit_rate_threshold_uses_best_endpoint_not_the_worst(self, mock_tokenizer_manager, mock_query_conductor):
+        """The gate compares the cluster-best hit rate, not every endpoint individually."""
+        ep_a = _make_endpoint(0, active_tokens=50.0)
+        ep_b = _make_endpoint(1, active_tokens=50.0)
+        mock_instance = Mock()
+        mock_instance.id = "inst"
+        mock_instance.endpoints = {"group": {0: ep_a, 1: ep_b}}
+        mock_instance.get_all_endpoints.return_value = (ep_a, ep_b)
+        instances = [mock_instance]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(1000))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+        mock_query_conductor.return_value = {TENANT_ID: {"vllm-prefill-inst": {"DP": {"0": 800, "1": 50}}}}
+
+        result = KvCacheAffinityPolicy.select_endpoint_from_list(
+            instances, mock_req_info, load_weight=0.0, hit_rate_threshold=0.5
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result[1].id, 0)
+
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
+    @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+    def test_load_gated_hit_rate_below_threshold_falls_back(self, mock_tokenizer_manager, mock_query_conductor):
+        """load_gated uses the same hit-rate gate before the two-stage ranking."""
+        from motor.config.coordinator import KV_AFFINITY_MODE_LOAD_GATED
+
+        ep = _make_endpoint(0, active_tokens=10.0)
+        mock_instance = Mock()
+        mock_instance.id = "inst"
+        mock_instance.endpoints = {"group": {0: ep}}
+        mock_instance.get_all_endpoints.return_value = (ep,)
+        instances = [mock_instance]
+
+        mock_req_info = Mock()
+        mock_req_info.req_data = {"prompt": "hello"}
+        mock_tokenizer = Mock()
+        mock_tokenizer.encode.return_value = list(range(1000))
+        mock_tokenizer_manager.return_value = mock_tokenizer
+        mock_query_conductor.return_value = {TENANT_ID: {"vllm-prefill-inst": {"DP": {"0": 100}}}}
+
+        ranked = KvCacheAffinityPolicy.select_endpoint_candidates_from_list(
+            instances,
+            mock_req_info,
+            mode=KV_AFFINITY_MODE_LOAD_GATED,
+            hit_rate_threshold=0.5,
+        )
+        self.assertEqual(ranked, [])
+
     def test_select_instance(self):
         """Test _select_instance function"""
         result = self.policy._select_instance()
@@ -580,6 +826,43 @@ class TestKvCacheAffinityTokenizationUtils(unittest.TestCase):
         self.assertEqual(processed[0]["content"], "hi")
         self.assertEqual(processed[1]["content"], "no")
         # Original input must remain unchanged (deepcopy semantics).
+        self.assertIsInstance(messages[0]["content"], list)
+
+    def test_preprocess_messages_for_standard_coerces_tool_call_arguments(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "foo", "arguments": '{"a": 1}'},
+                    }
+                ],
+            }
+        ]
+        processed = preprocess_messages_for_standard(messages)
+        self.assertIsInstance(processed[0]["tool_calls"][0]["function"]["arguments"], dict)
+        self.assertEqual(processed[0]["tool_calls"][0]["function"]["arguments"], {"a": 1})
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["arguments"], '{"a": 1}')
+
+    def test_preprocess_messages_for_standard_pops_empty_tool_calls(self):
+        messages = [{"role": "assistant", "content": "ok", "tool_calls": []}]
+        processed = preprocess_messages_for_standard(messages)
+        self.assertNotIn("tool_calls", processed[0])
+        self.assertEqual(messages[0]["tool_calls"], [])
+
+    def test_preprocess_messages_for_standard_flattens_tool_role_list_content(self):
+        messages = [
+            {
+                "role": "tool",
+                "content": [{"type": "text", "text": "Weather data"}],
+                "tool_call_id": "call_1",
+            }
+        ]
+        processed = preprocess_messages_for_standard(messages)
+        self.assertEqual(processed[0]["content"], "Weather data")
         self.assertIsInstance(messages[0]["content"], list)
 
     def test_preprocess_messages_for_dsv4_flattens_messages_and_sorts_tools(self):
@@ -652,6 +935,31 @@ class TestTokenizerManagerDsv4(unittest.TestCase):
             {"tokenize": True, "drop_thinking": True, "reasoning_effort": "none", "enable_thinking": True},
         )
 
+    def test_build_standard_chat_template_kwargs(self):
+        build = TokenizerManager._build_standard_chat_template_kwargs
+        self.assertEqual(
+            build(None, tokenize=True),
+            {"add_generation_prompt": True, "tokenize": True, "return_dict": False},
+        )
+        self.assertEqual(
+            build(None, tokenize=False),
+            {"add_generation_prompt": True, "tokenize": False},
+        )
+        req_data = {
+            "reasoning_effort": "none",
+            "chat_template_kwargs": {"foo": 1},
+            "continue_final_message": True,
+        }
+        kwargs = build(req_data, tokenize=True)
+        self.assertFalse(kwargs["add_generation_prompt"])
+        self.assertTrue(kwargs["continue_final_message"])
+        self.assertEqual(kwargs["foo"], 1)
+        self.assertEqual(kwargs["reasoning_effort"], "none")
+        self.assertFalse(kwargs["enable_thinking"])
+
+        thinking_kwargs = build({"thinking": {"type": "disabled"}}, tokenize=True)
+        self.assertFalse(thinking_kwargs["enable_thinking"])
+
     def test_apply_chat_template_dsv4_passes_preprocessed_inputs_and_kwargs(self):
         tokenizer = Mock()
         tokenizer.apply_chat_template.return_value = [1, 2, 3]
@@ -711,9 +1019,12 @@ class TestTokenizerManagerDsv4(unittest.TestCase):
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor')
     @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
     def test_select_endpoint_load_aware_no_instance_data(self, mock_tokenizer_manager, mock_query_conductor):
-        """load_weight > 0: with no matching instance data, fall back (return None)."""
+        """load_weight > 0: tenant has no data for our instances, fall back (return None)."""
         mock_instance = Mock()
         mock_instance.id = "inst"
+        ep = _make_endpoint(0)
+        mock_instance.endpoints = {"group": {0: ep}}
+        mock_instance.get_all_endpoints.return_value = (ep,)
         instances = [mock_instance]
 
         mock_req_info = Mock()
@@ -967,6 +1278,70 @@ class TestTokenizerManagerDsv4(unittest.TestCase):
         self.assertEqual(ids2, [7, 8, 9])
         mock_tokenizer.encode.assert_called_once()
 
+    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
+    def test_responses_input_is_tokenized_without_changing_native_body(self, mock_tokenizer_manager):
+        """Responses uses a scheduling-only message view while preserving engine input."""
+        tokenizer_manager = Mock()
+        tokenizer_manager.apply_chat_template.return_value = [11, 12, 13]
+        mock_tokenizer_manager.return_value = tokenizer_manager
+        native_body = {
+            "model": "qwen3",
+            "instructions": "Answer briefly.",
+            "input": "Hello",
+        }
+        req = Mock()
+        req.req_data = native_body.copy()
+        req.token_ids = None
+        req.effective_entry_api.return_value = "v1/responses"
+
+        ids = KvCacheAffinityPolicy._ensure_token_ids(req)
+
+        self.assertEqual(ids, [11, 12, 13])
+        tokenizer_manager.apply_chat_template.assert_called_once_with(
+            [
+                {"role": "system", "content": "Answer briefly."},
+                {"role": "user", "content": "Hello"},
+            ],
+            None,
+            req_data=native_body,
+        )
+        self.assertEqual(req.req_data, native_body)
+
+    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
+    def test_ensure_token_ids_prefers_obfuscated_engine_tokens(self, mock_tokenizer_manager):
+        """KV Conductor must hash the same physical token IDs that entered the protected model."""
+        req = Mock()
+        req.req_data = {"prompt": "hi"}
+        req.token_ids = [7, 8, 9]
+        req.engine_token_ids = [107, 108, 109]
+
+        self.assertEqual(KvCacheAffinityPolicy._ensure_token_ids(req), [107, 108, 109])
+        mock_tokenizer_manager.assert_not_called()
+
+    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.attach_block_offsets')
+    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager')
+    def test_ensure_token_ids_attaches_chat_block_offsets(self, mock_tokenizer_manager, mock_attach_block_offsets):
+        """Chat tokenization must keep the server-side block-offset translation wired in."""
+        messages = [{"role": "user", "content": "hi"}]
+        tools = [{"type": "function", "function": {"name": "lookup"}}]
+        tokenizer_manager = mock_tokenizer_manager.return_value
+        tokenizer_manager.apply_chat_template.return_value = [7, 8, 9]
+        tokenizer_manager.tokenizer = object()
+
+        req = Mock()
+        req.req_data = {"messages": messages, "tools": tools}
+        req.token_ids = None
+
+        token_ids = KvCacheAffinityPolicy._ensure_token_ids(req)
+
+        self.assertEqual(token_ids, [7, 8, 9])
+        mock_attach_block_offsets.assert_called_once_with(
+            req,
+            messages,
+            tools,
+            tokenizer=tokenizer_manager.tokenizer,
+        )
+
 
 class TestKvAffinityFallbackConsolidation(unittest.TestCase):
     """Consolidated kv_cache_affinity -> load_balance -> round_robin fallback chain (#5)."""
@@ -1050,6 +1425,64 @@ class TestKvAffinityFallbackConsolidation(unittest.TestCase):
         self.assertEqual(cands, [(inst, ep, 1.0)])
         lb.assert_called_once()
 
+    def test_prefill_low_hit_rate_falls_back_to_load_balance_without_conductor_warning(self):
+        """Affinity declining on hit_rate_threshold returns [] and falls back without a conductor warning."""
+        from motor.coordinator.scheduler.runtime.zmq_protocol import CANDIDATE_POLICY_LOAD_BALANCE
+
+        client = self._make_client()
+        inst, ep = Mock(), Mock()
+        req = Mock()
+        req.req_data = {"prompt": "x"}
+        with (
+            patch(self._AFFINITY, return_value=[]),
+            patch.object(
+                client,
+                "_select_endpoint_candidates_by_load_balance",
+                return_value=[(inst, ep, 1.0)],
+            ) as lb,
+            patch("motor.coordinator.scheduler.runtime.scheduler_client.logger.warning") as warn,
+        ):
+            cands, policy = client._select_endpoint_candidates_from_list_with_policy(
+                [Mock()], PDRole.ROLE_P, req, top_k=1
+            )
+        self.assertEqual(policy, CANDIDATE_POLICY_LOAD_BALANCE)
+        self.assertEqual(cands, [(inst, ep, 1.0)])
+        lb.assert_called_once()
+        self.assertFalse(
+            any("no conductor match" in str(call.args[0]) for call in warn.call_args_list),
+            "low hit-rate fallback must not be logged as a conductor failure",
+        )
+
+    def test_client_clamps_hit_rate_threshold(self):
+        """Scheduler client stores kv_affinity.hit_rate_threshold clamped to [0, 1]."""
+        from motor.coordinator.scheduler.runtime.scheduler_client import (
+            AsyncSchedulerClient,
+            SchedulerClientConfig,
+        )
+        from motor.config.coordinator import KvAffinityConfig
+
+        client = AsyncSchedulerClient(
+            SchedulerClientConfig(
+                scheduler_type="kv_cache_affinity",
+                kv_affinity=KvAffinityConfig(hit_rate_threshold=0.35),
+            )
+        )
+        self.assertEqual(client._kv_affinity_hit_rate_threshold, 0.35)
+
+        clamped = AsyncSchedulerClient(
+            SchedulerClientConfig(
+                scheduler_type="kv_cache_affinity",
+                kv_affinity=KvAffinityConfig(hit_rate_threshold=1.5),
+            )
+        )
+        self.assertEqual(clamped._kv_affinity_hit_rate_threshold, 1.0)
+
+        req = Mock()
+        req.req_data = {"prompt": "x"}
+        with patch(self._AFFINITY, return_value=[(Mock(), Mock(), 0.0)]) as affinity:
+            client._select_endpoint_candidates_from_list_with_policy([Mock()], PDRole.ROLE_P, req, top_k=1)
+        self.assertEqual(affinity.call_args.kwargs["hit_rate_threshold"], 0.35)
+
     def test_non_prefill_role_uses_load_balance_without_affinity(self):
         """Non-prefill roles never consult conductor affinity; they use the same fallback path."""
         from motor.coordinator.scheduler.runtime.zmq_protocol import CANDIDATE_POLICY_LOAD_BALANCE
@@ -1103,23 +1536,27 @@ class TestTokenizerManagerFunction(unittest.TestCase):
     def tearDown(self):
         _reset_tokenizer_manager_singleton()
 
-    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.CoordinatorConfig')
-    @patch('transformers.AutoTokenizer')
-    def test_init_with_model_path(self, mock_auto_tokenizer, mock_config_class):
+    @patch('motor.config.coordinator.CoordinatorConfig')
+    def test_init_with_model_path(self, mock_config_class):
         """Test tokenizer manager"""
         mock_config = Mock()
         mock_config.scheduler_config.kv_conductor_config.conductor_service = "test_service"
         mock_config.scheduler_config.kv_conductor_config.model_path = "/path/to/model"
+        mock_config.scheduler_config.kv_conductor_config.engine_type = "vllm"
+        mock_config.tracer_config.endpoint = ""
         mock_config_class.return_value = mock_config
 
         # Mock tokenizer
         mock_tokenizer = Mock()
         mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
         mock_tokenizer.encode.return_value = [4, 5, 6]
-        mock_auto_tokenizer.from_pretrained.return_value = mock_tokenizer
+        transformers_mod = Mock()
+        transformers_mod.AutoTokenizer.from_pretrained.return_value = mock_tokenizer
 
         # Create TokenizerManager
-        tokenizer_manager = TokenizerManager(mock_config)
+        with patch.dict("sys.modules", {"transformers": transformers_mod}):
+            with patch.object(TokenizerManager, "_is_deepseek_v4_model", return_value=False):
+                tokenizer_manager = TokenizerManager(mock_config)
 
         # Verifying Initialization
         self.assertTrue(hasattr(tokenizer_manager, '_initialized'))
@@ -1152,27 +1589,28 @@ class TestTokenizerManagerFunction(unittest.TestCase):
         # verification result
         self.assertEqual(result, [])
 
-    @patch('motor.coordinator.scheduler.policy.kv_cache_affinity.CoordinatorConfig')
-    @patch('transformers.AutoTokenizer')
-    def test_dsv4_tokenizer_only_for_vllm_engine(self, mock_auto_tokenizer, mock_config_class):
+    @patch('motor.config.coordinator.CoordinatorConfig')
+    def test_dsv4_tokenizer_only_for_vllm_engine(self, mock_config_class):
         """DeepSeek V4 vLLM tokenizer must only be used when engine_type=vllm."""
         mock_config = Mock()
-        mock_config.prefill_kv_event_config.conductor_service = "test_service"
-        mock_config.prefill_kv_event_config.model_path = "/path/to/model"
-        mock_config.prefill_kv_event_config.engine_type = "sglang"
+        mock_config.scheduler_config.kv_conductor_config.conductor_service = "test_service"
+        mock_config.scheduler_config.kv_conductor_config.model_path = "/path/to/model"
+        mock_config.scheduler_config.kv_conductor_config.engine_type = "sglang"
         mock_config.tracer_config.endpoint = ""
         mock_config_class.return_value = mock_config
 
         # If the code accidentally tries to import vllm.tokenizers.deepseek_v4 on sglang,
         # environments without vllm installed would crash. We assert we fall back to transformers.
-        with patch.object(TokenizerManager, "_is_deepseek_v4_model", return_value=True):
-            mock_tokenizer = Mock()
-            mock_auto_tokenizer.from_pretrained.return_value = mock_tokenizer
-            manager = TokenizerManager(mock_config)
+        mock_tokenizer = Mock()
+        transformers_mod = Mock()
+        transformers_mod.AutoTokenizer.from_pretrained.return_value = mock_tokenizer
+        with patch.dict("sys.modules", {"transformers": transformers_mod}):
+            with patch.object(TokenizerManager, "_is_deepseek_v4_model", return_value=True):
+                manager = TokenizerManager(mock_config)
 
         self.assertIs(manager.tokenizer, mock_tokenizer)
         self.assertFalse(manager._is_dsv4)
-        mock_auto_tokenizer.from_pretrained.assert_called_once()
+        transformers_mod.AutoTokenizer.from_pretrained.assert_called_once()
 
 
 class TestTokenizerManagerInitialize(unittest.TestCase):
@@ -1264,17 +1702,39 @@ class TestExchangeArguments:
             assert tool["function"]["arguments"]["tool"] == f"tool{i + 1}"
             assert tool["function"]["arguments"]["value"] == i + 1
 
+    def test_empty_tool_calls_are_dropped(self):
+        message = {"role": "assistant", "content": "ok", "tool_calls": []}
+        exchange_arguments(message)
+        assert "tool_calls" not in message
+
+    def test_missing_or_empty_arguments_become_empty_dict(self):
+        message = {
+            "tool_calls": [
+                {"type": "function", "function": {"name": "a"}},
+                {"type": "function", "function": {"name": "b", "arguments": ""}},
+                {"type": "function", "function": {"name": "c", "arguments": None}},
+            ]
+        }
+        exchange_arguments(message)
+        for item in message["tool_calls"]:
+            assert item["function"]["arguments"] == {}
+
+    def test_tool_calls_string_is_ignored(self):
+        message = {"tool_calls": "not-a-list"}
+        original = deepcopy(message)
+        exchange_arguments(message)
+        assert message == original
+
 
 class TestExchangeToolContent:
     """Test exchange_tool_content function"""
 
     def test_tool_role_with_string_content(self):
-        """Test: role is tool, content is str"""
+        """vLLM keeps tool-role string content as a plain string."""
         message = {"role": "tool", "content": "Tool execution result"}
+        original = deepcopy(message)
         exchange_tool_content(message)
-
-        expected = "{'type': 'text', 'text': 'Tool execution result'}"
-        assert message["content"] == expected
+        assert message == original
 
     def test_tool_role_with_dict_content(self):
         """Test: role is tool, content is dict"""
@@ -1305,11 +1765,27 @@ class TestExchangeToolContent:
         assert message == original
 
     def test_empty_string_content(self):
-        """Test: content is "" """
+        """Empty string stays an empty string (vLLM does not wrap it)."""
         message = {"role": "tool", "content": ""}
         exchange_tool_content(message)
-        expected = "{'type': 'text', 'text': ''}"
-        assert message["content"] == expected
+        assert message["content"] == ""
+
+    def test_tool_role_list_of_text_parts_joins_to_string(self):
+        message = {
+            "role": "tool",
+            "content": [{"type": "text", "text": "Weather data"}, {"type": "text", "text": "25C"}],
+        }
+        exchange_tool_content(message)
+        assert message["content"] == "Weather data\n25C"
+
+    def test_tool_role_list_with_non_text_is_kept(self):
+        message = {
+            "role": "tool",
+            "content": [{"type": "tool_reference", "name": "get_weather"}],
+        }
+        original = deepcopy(message)
+        exchange_tool_content(message)
+        assert message == original
 
 
 class TestExchangeTools:
@@ -1381,8 +1857,8 @@ class TestPreprocessInput:
 
         # test tool_calls arguments exchange
         assert isinstance(processed_messages[1]["tool_calls"][0]["function"]["arguments"], dict)
-        # test tool role content exchange
-        assert processed_messages[2]["content"] == "{'type': 'text', 'text': 'Weather data'}"
+        # vLLM keeps tool-role string content as a plain string
+        assert processed_messages[2]["content"] == "Weather data"
         assert processed_tools is None
 
     def test_with_tools(self):
@@ -1472,7 +1948,8 @@ class TestPreprocessInput:
 
         for msg in processed_messages[3:]:
             if msg["role"] == "tool":
-                assert "type" in msg["content"] and "text" in msg["content"]
+                assert isinstance(msg["content"], str)
+                assert "type" not in msg["content"]
 
         # test tool processe
         for tool in processed_tools:
@@ -1556,13 +2033,64 @@ class TestApplyChatTemplateStandard(unittest.TestCase):
         _, kwargs = mock_tokenizer.apply_chat_template.call_args
         self.assertIsNone(kwargs.get("tools"))
 
+    def test_standard_path_coerces_tool_call_argument_strings(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1, 2, 3]
+        messages = [
+            {
+                "role": "assistant",
+                "content": "ok",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "foo", "arguments": '{"a": 1}'},
+                    }
+                ],
+            }
+        ]
+        tools = [{"type": "function", "function": {"name": "foo", "parameters": {}}}]
+        result = manager.apply_chat_template(messages, tools)
+        self.assertEqual(result, [1, 2, 3])
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        conversation = kwargs["conversation"]
+        self.assertEqual(conversation[0]["tool_calls"][0]["function"]["arguments"], {"a": 1})
+        self.assertEqual(messages[0]["tool_calls"][0]["function"]["arguments"], '{"a": 1}')
+
+    def test_standard_path_forwards_chat_template_kwargs(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        req_data = {
+            "chat_template_kwargs": {"enable_thinking": False, "foo": 1},
+            "reasoning_effort": "none",
+        }
+        manager.apply_chat_template([{"role": "user", "content": "hi"}], None, req_data)
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertFalse(kwargs.get("enable_thinking"))
+        self.assertEqual(kwargs.get("reasoning_effort"), "none")
+        self.assertEqual(kwargs.get("foo"), 1)
+        self.assertTrue(kwargs.get("tokenize"))
+        self.assertTrue(kwargs.get("add_generation_prompt"))
+
+    def test_standard_path_maps_thinking_type_to_enable_thinking(self) -> None:
+        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
+        mock_tokenizer.apply_chat_template.return_value = [1]
+        manager.apply_chat_template(
+            [{"role": "user", "content": "hi"}],
+            None,
+            {"thinking": {"type": "enabled"}},
+        )
+        _, kwargs = mock_tokenizer.apply_chat_template.call_args
+        self.assertTrue(kwargs.get("enable_thinking"))
+
     def test_standard_exception_fallback_still_passes_tools(self) -> None:
-        """If primary call raises, fallback retries with the SAME tools (never silently drops it)."""
-        side_effects = [RuntimeError("first failure"), [9, 9, 9, 9]]
+        """If primary STANDARD raises, fallback uses preprocess (tokenize=False) and keeps tools."""
+        side_effects = [RuntimeError("first failure"), "rendered prompt"]
         manager, mock_tokenizer = _build_tokenizer_manager(
             openai_standard="STANDARD",
             apply_chat_template_side_effect=side_effects,
         )
+        mock_tokenizer.encode.return_value = [9, 9, 9, 9]
 
         messages = [{"role": "user", "content": "hi"}]
         tools = [{"type": "function", "function": {"name": "f", "parameters": {}}}]
@@ -1570,8 +2098,13 @@ class TestApplyChatTemplateStandard(unittest.TestCase):
         self.assertEqual(result, [9, 9, 9, 9])
 
         self.assertEqual(mock_tokenizer.apply_chat_template.call_count, 2)
-        for _, kwargs in mock_tokenizer.apply_chat_template.call_args_list:
-            self.assertEqual(kwargs.get("tools"), tools)
+        first_kwargs = mock_tokenizer.apply_chat_template.call_args_list[0].kwargs
+        second_kwargs = mock_tokenizer.apply_chat_template.call_args_list[1].kwargs
+        self.assertEqual(first_kwargs.get("tools"), tools)
+        self.assertTrue(first_kwargs.get("tokenize"))
+        self.assertEqual(second_kwargs.get("tools"), tools)
+        self.assertFalse(second_kwargs.get("tokenize", True))
+        mock_tokenizer.encode.assert_called_once_with("rendered prompt")
 
     def test_total_failure_returns_empty_list(self) -> None:
         """Both primary and fallback failing -> empty list (let scheduler fall back to LB)."""
@@ -1650,23 +2183,27 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
     def tearDown(self) -> None:
         _reset_tokenizer_manager_singleton()
 
-    def _stub_tokenizer_manager(self, ids_with_tools, ids_without_tools):
+    def _stub_tokenizer_client(self, ids_with_tools, ids_without_tools):
         """Patch TokenizerManager().apply_chat_template so it differentiates tools/no-tools."""
-        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
 
         def _apply(*args, **kwargs):
             tools = kwargs.get("tools")
+            if tools is None and len(args) >= 2:
+                tools = args[1]
             return ids_with_tools if tools else ids_without_tools
 
-        mock_tokenizer.apply_chat_template.side_effect = _apply
-        return manager
+        patcher = patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+        mock_client_cls = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_client_cls.return_value.apply_chat_template.side_effect = _apply
+        return mock_client_cls
 
     @patch.object(KvCacheAffinityPolicy, "_conductor_block_size", return_value=16)
     @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
     def test_query_conductor_receives_tokens_including_tools(self, mock_query, _mock_block_size) -> None:
         ids_with_tools = list(range(20))
         ids_without_tools = list(range(5))
-        self._stub_tokenizer_manager(ids_with_tools, ids_without_tools)
+        self._stub_tokenizer_client(ids_with_tools, ids_without_tools)
 
         instance = Mock()
         instance.id = 1
@@ -1704,8 +2241,10 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
     @patch("motor.coordinator.scheduler.policy.kv_cache_affinity.ConductorApiClient.query_conductor")
     def test_tokenize_total_failure_falls_back_to_empty_ids(self, mock_query, _mock_block_size) -> None:
         """If both tokenize attempts fail, encoded_ids must be [] and conductor queried with []."""
-        manager, mock_tokenizer = _build_tokenizer_manager(openai_standard="STANDARD")
-        mock_tokenizer.apply_chat_template.side_effect = RuntimeError("boom")
+        patcher = patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager")
+        mock_client_cls = patcher.start()
+        self.addCleanup(patcher.stop)
+        mock_client_cls.return_value.apply_chat_template.side_effect = RuntimeError("boom")
 
         instance = Mock()
         instance.id = 1
@@ -1724,3 +2263,89 @@ class TestKvCacheAffinityWithToolsEndToEnd(unittest.TestCase):
         mock_query.assert_called_once()
         sent_instances, sent_ids = mock_query.call_args[0]
         self.assertEqual(sent_ids, [])
+
+
+def _context_budget_config(scheduler_type: SchedulerType = SchedulerType.KV_CACHE_AFFINITY):
+    config = CoordinatorConfig()
+    config.scheduler_config.scheduler_type = scheduler_type
+    config.context_budget_mode = CONTEXT_BUDGET_ON
+    config.aigw_model = {"p_max_seqlen": 16, "d_max_seqlen": 20}
+    return config
+
+
+def _context_budget_request(req_data: dict, token_count: int = 5) -> RequestInfo:
+    return RequestInfo(
+        req_id="context-budget",
+        req_data=req_data,
+        req_len=token_count,
+        token_ids=list(range(token_count)),
+        api="/v1/chat/completions" if "messages" in req_data else "/v1/completions",
+    )
+
+
+def test_context_budget_clamps_only_active_chat_field():
+    req_info = _context_budget_request(
+        {
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 50,
+            "max_completion_tokens": 20,
+        }
+    )
+
+    adapt_context_budget(req_info, _context_budget_config())
+
+    assert req_info.req_data["max_completion_tokens"] == 11
+    assert req_info.req_data["max_tokens"] == 50
+
+
+@pytest.mark.parametrize(
+    "scheduler_type",
+    [
+        SchedulerType.LOAD_BALANCE,
+        SchedulerType.ROUND_ROBIN,
+        SchedulerType.KV_CACHE_AFFINITY,
+    ],
+)
+def test_context_budget_clamps_completion_max_tokens(scheduler_type):
+    req_info = _context_budget_request({"prompt": "hello", "max_tokens": 50})
+
+    adapt_context_budget(req_info, _context_budget_config(scheduler_type))
+
+    assert req_info.req_data["max_tokens"] == 11
+
+
+def test_load_balance_context_budget_tokenizes_when_token_ids_are_missing():
+    req_info = RequestInfo(
+        req_id="context-budget",
+        req_data={"prompt": "hello", "max_tokens": 50},
+        req_len=5,
+        api="/v1/completions",
+    )
+
+    with patch("motor.coordinator.scheduler.policy.kv_cache_affinity.TokenizerManager") as mock_client_cls:
+        mock_client_cls.return_value.encode.return_value = list(range(5))
+        adapt_context_budget(req_info, _context_budget_config(SchedulerType.LOAD_BALANCE))
+
+    assert req_info.token_ids == list(range(5))
+    mock_client_cls.return_value.encode.assert_called_once_with("hello")
+
+
+def test_context_budget_is_disabled_by_default():
+    req_info = _context_budget_request({"prompt": "hello", "max_tokens": 50})
+    config = _context_budget_config()
+    config.context_budget_mode = "off"
+
+    adapt_context_budget(req_info, config)
+
+    assert req_info.req_data["max_tokens"] == 50
+
+
+def test_context_budget_leaves_exhausted_prompt_to_engine_validation():
+    req_info = _context_budget_request(
+        {"prompt": "hello", "max_tokens": 8},
+        token_count=16,
+    )
+
+    adapt_context_budget(req_info, _context_budget_config())
+
+    assert req_info.req_data["max_tokens"] == 8

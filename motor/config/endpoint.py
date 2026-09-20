@@ -8,7 +8,6 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import argparse
 import json
 import os
 from dataclasses import dataclass, field
@@ -17,7 +16,7 @@ from typing import Any
 
 from motor.common.logger import get_logger
 from motor.common.resources.dispatch import DISPATCH_PROFILE_KEY
-from motor.config.config_utils import _update_engine_server_tls_config
+from motor.config.config_utils import _update_native_engine_tls_config
 from motor.config.resolver import ConfigResolver, normalize_keys
 from motor.config.tls_config import TLSConfig
 from motor.common import engine_constants as constants
@@ -115,8 +114,11 @@ class HealthCheckConfig:
     # HTTP endpoint starts accepting connections.
     startup_timeout: int = 1800
     npu_usage_threshold: int = 3
+    # Motor virtual inference (vLLM DP0 only); SGLang uses native generative GET /health instead.
     enable_virtual_inference: bool = False
     max_failure_count: int = 6
+    # Per-request timeout for vLLM POST /v1/completions virtual inference probes.
+    virtual_inference_timeout: float = 5.0
 
     @staticmethod
     def _as_positive_int(name: str, value: Any) -> int:
@@ -127,12 +129,25 @@ class HealthCheckConfig:
             raise ValueError(f"{name} must be >= 1, got {value}")
         return value
 
+    @staticmethod
+    def _as_positive_float(name: str, value: Any) -> float:
+        # bool is a subclass of int; reject it to avoid true/false silently becoming 1.0/0.0.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a number, got {value!r}")
+        value = float(value)
+        if value <= 0:
+            raise ValueError(f"{name} must be > 0, got {value}")
+        return value
+
     def __post_init__(self):
         self.health_collector_timeout = self._as_positive_int("health_collector_timeout", self.health_collector_timeout)
         self.health_collector_timeout_retry_attempts = self._as_positive_int(
             "health_collector_timeout_retry_attempts", self.health_collector_timeout_retry_attempts
         )
         self.startup_timeout = self._as_positive_int("startup_timeout", self.startup_timeout)
+        self.virtual_inference_timeout = self._as_positive_float(
+            "virtual_inference_timeout", self.virtual_inference_timeout
+        )
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HealthCheckConfig":
@@ -176,7 +191,7 @@ class DeployConfig:
                 "union": MOTOR_ENGINE_UNION_CONFIG_KEY,
             }
             data = raw_data.get(key_map.get(role, ""), {})
-            _update_engine_server_tls_config(data, raw_data)
+            _update_native_engine_tls_config(data, raw_data)
 
             resolver = ConfigResolver(data)
 
@@ -266,66 +281,14 @@ class EndpointConfig:
     master_dp_ip: str | None = None
     dp_rpc_port: int | None = None
     port: int = 8000
-    mgmt_port: int = 9001
     instance_id: int = 0
     dp_rank: int = 0
     node_rank: int = 0
     config_path: str | None = None
     d2d_peer_ips: str | None = None
     deploy_config: DeployConfig = None
-
     snapshot_metadata: str | None = None
-
-    @classmethod
-    def parse_cli_args(cls) -> argparse.Namespace:
-        parser = argparse.ArgumentParser(description="EngineServer - Universal Inference Engine Service")
-        parser.add_argument("--host", help="EngineServer endpoint host")
-        parser.add_argument("--role", help="PD separate role, prefill/decode/union")
-        parser.add_argument("--kv-port", type=int, help="kv port")
-        parser.add_argument("--lookup-rpc-port", type=int, help="lookup rpc port")
-        parser.add_argument("--master-dp-ip", type=str, help="Master DP ip for distributed setup")
-        parser.add_argument("--dp-rpc-port", type=int, help="dp rpc port")
-        parser.add_argument("--port", type=int, help="EngineServer business interface port")
-        parser.add_argument("--mgmt-port", type=int, dest="mgmt_port", help="EngineServer management interface port")
-        parser.add_argument("--instance-id", type=int, default=0, help="Engine instance id")
-        parser.add_argument("--dp-rank", type=int, default=0, help="DP parallel rank")
-        parser.add_argument("--node-rank", type=int, default=0, help="PCP node rank (assigned by Motor Controller)")
-        parser.add_argument("--config-path", help="Path to engine-specific configuration file (JSON format)")
-        parser.add_argument(
-            "--d2d-peer-ips",
-            type=str,
-            default=None,
-            help="Comma-separated IPs of peer instances for D2D weight transfer",
-        )
-        parser.add_argument(
-            "--snapshot-metadata",
-            default=None,
-            help="Snapshot metadata file (JSON format), enable snapshot function",
-        )
-        return parser.parse_args()
-
-    @classmethod
-    def init_endpoint_config(cls) -> 'EndpointConfig':
-        cli_args = cls.parse_cli_args()
-        endpoint_config = cls(
-            host=cli_args.host,
-            role=cli_args.role,
-            kv_port=cli_args.kv_port,
-            lookup_rpc_port=cli_args.lookup_rpc_port,
-            master_dp_ip=cli_args.master_dp_ip,
-            dp_rpc_port=cli_args.dp_rpc_port,
-            port=cli_args.port,
-            mgmt_port=cli_args.mgmt_port,
-            instance_id=cli_args.instance_id,
-            config_path=cli_args.config_path,
-            dp_rank=cli_args.dp_rank,
-            d2d_peer_ips=cli_args.d2d_peer_ips,
-            node_rank=cli_args.node_rank,
-            snapshot_metadata=cli_args.snapshot_metadata,
-        )
-        endpoint_config.validate()
-        endpoint_config.load_deploy_config()
-        return endpoint_config
+    enable_auto_checkpoint: bool = False
 
     def validate(self):
         if self.role not in supported_role:
@@ -334,7 +297,6 @@ class EndpointConfig:
             raise ValueError(f"instance_id {self.instance_id} illegal.")
         ip_valid_check(self.host)
         port_valid_check(int(self.port))
-        port_valid_check(int(self.mgmt_port))
         if self.dp_rank < 0 or self.dp_rank > 65535:
             raise ValueError(f"{self.dp_rank} is not supported.")
         if not os.path.exists(self.config_path):
@@ -385,28 +347,3 @@ class EndpointConfig:
         self.engine_type = str(self.deploy_config.engine_type)
         if self.engine_type not in supported_engine:
             raise ValueError(f"engine type {self.engine_type} is not supported.")
-
-    def update_engine_config(self):
-        split_str = "*:"
-        kv_events_config = self.deploy_config.engine_config.get("kv-events-config", None)
-        if kv_events_config is None:
-            return
-        endpoint = kv_events_config.get("endpoint", None)
-        if endpoint is None:
-            return
-        endpoint_info = endpoint.split(split_str)
-        if len(endpoint_info) != 2:
-            return
-        kv_events_config["endpoint"] = endpoint_info[0] + split_str + str(int(endpoint_info[1]) + self.dp_rank)
-
-        replay_endpoint = kv_events_config.get("replay_endpoint", None)
-        if replay_endpoint is None:
-            return
-        replay_endpoint_info = replay_endpoint.split(split_str)
-        if len(replay_endpoint_info) != 2:
-            return
-        kv_events_config["replay_endpoint"] = (
-            replay_endpoint_info[0] + split_str + str(int(replay_endpoint_info[1]) + self.dp_rank)
-        )
-
-        self.deploy_config.engine_config.set("kv-events-config", kv_events_config)

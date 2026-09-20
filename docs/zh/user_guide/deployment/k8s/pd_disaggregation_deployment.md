@@ -1,6 +1,6 @@
 # PD分离服务部署指导
 
-本文档通过**完整详细**的部署案例，指导开发者体验基于 Motor 的 PD 分离服务部署，并指导生产环境配置优化实践。
+本文档通过**完整详细**的部署案例，指导开发者体验基于 Motor 的 PD 分离服务部署，并指导生产环境配置优化实践。若底层引擎为 **SGLang**，请优先参阅 [SGLang PD 分离服务部署指导](./pd_disaggregation_sglang.md)。
 
 ## 950系列服务器预检查（其他系列服务器可跳过检查）
 
@@ -22,7 +22,7 @@
    - **方式一**：下载官方完整的 MindIE Motor 镜像
      进入 [昇腾官方镜像仓库](https://www.hiascend.com/developer/ascendhub)，搜索 `motor`，按设备型号选择对应 MindIE Motor 镜像。
    - **方式二**：在已有镜像中安装 MindIE Motor
-     基础镜像已安装 CANN、vLLM、vllm-ascend 等组件，可参考 [从 vllm-ascend 构建 MindIE Motor 镜像](../../maintenance/build_motor_image_from_vllm_ascend.md#基于vllm-ascendsglang镜像安装mindie-motor) 额外安装 MindIE Motor。
+     基础镜像已安装 CANN、vLLM、vllm Ascend 等组件，可参考 [从 vllm Ascend 构建 MindIE Motor 镜像](../../maintenance/build_motor_image_from_vllm_ascend.md#基于vllm-ascendsglang镜像安装mindie-motor) 额外安装 MindIE Motor。
 
    获取镜像后，请使用以下命令将镜像加载至服务器：
 
@@ -53,13 +53,9 @@
 
    更多 `examples` 目录内容，详见章末附录。
 
----
-
 ## 生成配置文件
 
 参考 [MindIE Motor 配置自动生成指导](https://gitcode.com/Ascend/MindIE-Motor/blob/master/examples/infer_engines/vllm/models/README.md)，自动生成配置文件 `user_config.json` 与 `env.json`。
-
----
 
 ## 服务部署与验证
 
@@ -132,11 +128,9 @@
    bash delete.sh <namespace>
    ```
 
----
-
 ## 特性配置指导
 
-上文 `user_config.json` 与 `env.json` 全量示例已默认开启主备倒换、异常实例重启、服务限流、虚推、KV 亲和性调度、KV 池化等能力。若只需调整某项能力，可对照本节做最小配置修改。
+上文 `user_config.json` 与 `env.json` 全量示例已默认开启主备倒换、异常实例重启、服务限流、KV 亲和性调度、KV 池化等能力。若只需调整某项能力，可对照本节做最小配置修改。
 
 ### 主备倒换
 
@@ -188,25 +182,30 @@ P/D 实例出现异常时，重启推理实例，避免实例长时间处于异�
 - **关闭**：删除 `rate_limit_config` 配置块，或将 `enable_rate_limit` 设为 `false`。
 - **注意**：字段详细说明请参见[motor_coordinator_config](../../configuration/config_reference.md#motor_coordinator_config)中的**rate_limit_config字段**。
 
-### 虚推健康检查 (Virtual Inference Health Check)
+### 原生引擎健康探测
 
-探测服务健康状态，避免静默故障带来业务损失。静默故障表现为：部分进程卡死，服务看似无问题，但无法正常推理。
+NodeManager 负责原生引擎的就绪探测、进程监管和虚推健康探测：
 
-- **原理**：业务流量较小时发送轻量级推理请求；业务流量较大时查看 NPU 计算核心使用率。不健康的 P/D 实例会被重启以消除静默故障。
-- **开启**：
-   P 和 D 实例需要单独开启虚推功能：P 实例虚推健康检查开启方式如下，D 实例的开启方式相同。
+- **就绪探测**：轮询原生引擎业务端口的 `/health`，在 `startup_timeout` 窗口内保持 STARTING，成功后才允许调度。
+- **进程存活**：监管原生引擎进程组；主进程或工作进程异常退出时触发实例恢复。
+- **vLLM 虚推**：对 DP0 实例发送轻量级推理请求，并结合 AI Cube 利用率识别静默故障；达到失败阈值后降级状态，但不直接杀进程。
+- **SGLang 健康探测**：使用 SGLang 原生生成式 `GET /health`，不创建 Motor 虚推 monitor。
+- **软件故障**：引擎提供 `/fault_tolerance/status` 时，可由 EngineFtManager 补充软件故障上报。
 
   ```json
   "motor_engine_prefill_config": {
     "health_check_config": {
       "enable_virtual_inference": true,
-      "npu_usage_threshold": 10
+      "npu_usage_threshold": 10,
+      "health_collector_timeout": 5,
+      "health_collector_timeout_retry_attempts": 3,
+      "startup_timeout": 1800
     }
   }
   ```
 
-- **关闭**：删除 `health_check_config` 配置块，或将 `enable_virtual_inference` 设为 `false`。
-- **注意**：虚推**仅允许在 ERROR 日志级别下开启**（`ASCEND_GLOBAL_LOG_LEVEL=3`，未配置默认即为 ERROR）。若在 `env.json` 中显式配置为非 ERROR，`deploy.py` 会强制关闭虚推并打印 warning。该功能使用详情请参见[虚推健康检查](../../features/sim_inference.md)。
+- **关闭 vLLM 虚推**：将 `enable_virtual_inference` 设为 `false`；这不会关闭 SGLang 原生生成式 `GET /health`。
+- **日志级别限制**：vLLM 虚推仅允许在最终引擎环境 `ASCEND_GLOBAL_LOG_LEVEL=3`（未配置时默认为 ERROR）时开启。详情参见[虚推健康探测](../../features/sim_inference.md)。
 
 ### KV Cache 亲和调度
 
@@ -243,6 +242,40 @@ P/D 实例出现异常时，重启推理实例，避免实例长时间处于异�
 - **关闭**：删除上述配置项。
 - **注意**：需要确保镜像中已安装 KV Conductor 组件，该功能使用详情请参见 [KV Cache 亲和性调度](../../features/kvcache_affinity.md)。
 
+### PD 异构（PR / DT）调度
+
+Ascend950 机器分为 PR、DT 两类：PR 使用白鹭内存，DT 使用 HBM。HBM 带宽更大、性能更好，更适合 Decode；Prefill 可部署在 PR 上。因此 **PR + DT 组网** 时，需要把 P 实例调度到 PR 节点、D 实例调度到 DT 节点。
+
+- **原理**：在 PD 分离的 Prefill / Decode Pod 上追加 `huawei.com/npu.chip.name` 到 `nodeSelector`，与节点上已有的芯片标签匹配。
+- **开启**：在 Prefill / Decode 各自配置中填写对应字段；不填则不加该条 `nodeSelector`。
+
+  ```json
+  "motor_engine_prefill_config": {
+    "npu_chip_name": "Ascend950PR"
+  },
+  "motor_engine_decode_config": {
+    "npu_chip_name": "Ascend950DT"
+  }
+  ```
+
+- **关闭**：删除上述字段或不填。
+- **注意**：仅 Kubernetes PD 分离生效。`hardware_type` 为 `Ascend950` 时基础 `nodeSelector` 为 `accelerator: huawei-npu`；芯片名标签是额外一条。全 PR 或全 DT 组网无需填写。Docker 部署无调度器，异构由人工按机器形态分配容器完成，参见 [Docker多容器PD分离部署](../docker/multi_container.md) 中的「PR / DT 异构部署」章节。
+- **特性约束**：开启后 Prefill 只能调度到 PR 节点、Decode 只能调度到 DT 节点。依赖「把 P 腾出的节点拿去跑 D」或「D 占用 PR 节点」的能力不可用；同角色恢复/扩容也只能使用对应类型的空闲节点。
+
+  | 特性 | PR+DT 异构 | 说明 |
+  |------|------------|------|
+  | ScaleP2D（缩P保D） | 不支持 | 停掉 P 后释放的是 PR 节点，D 仍只能调度到 DT，无法占用这些节点完成恢复 |
+  | MindCluster 实例重调度、容器快照默认重调度 | 受限 | P 只能再调度到空闲 PR，D 只能再到空闲 DT；对应类型没有空闲节点时无法恢复 |
+  | 自动弹性扩缩容 | 受限 | 只能按角色在 PR / DT 上分别增减；不能靠缩 P 把 PR 资源转给 D 扩容 |
+  | 手动扩缩容 | 受限 | 同上，扩 P 需要空闲 PR，扩 D 需要空闲 DT |
+  | 异常实例原地重启、引擎重拉 | 支持 | 仍在原 Pod / 原节点，不换卡类型 |
+  | Controller / Coordinator 主备倒换 | 支持 | 管理面不使用 PR/DT `nodeSelector` |
+  | Coordinator 故障场景请求重调度 | 支持 | 将请求转到其他健康实例，不改变 P/D 的节点类型绑定 |
+  | 故障隔离、虚推健康探测、token 级重推 | 支持 | 不依赖跨 PR/DT 占节点 |
+  | KV Cache 亲和调度、KV 池化、服务限流、Tracing | 支持 | 与卡类型调度无关 |
+
+  建议在 PR+DT 组网下保持 `enable_scale_p2d` 为 `false`。实例重调度与弹性扩缩容仅在对应类型节点有空闲容量时按原能力工作。
+
 ### KV 池化
 
 通过 `MultiConnector` 将 KV 缓存卸载到共享池，支持跨实例复用，降低显存压力。
@@ -251,8 +284,6 @@ P/D 实例出现异常时，重启推理实例，避免实例长时间处于异�
 - **开启**：参数较多，篇幅有限，详见 [KV 池化部署指南](../../features/kv_cache_store/README.md)。
 - **关闭**：改用非 `MultiConnector` 的单一 connector，并删除根节点 `kv_cache_pool_config`。
 - **注意**：详见 [KV 池化部署指南](../../features/kv_cache_store/README.md)。
-
----
 
 ## 附录
 

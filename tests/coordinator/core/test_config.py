@@ -15,13 +15,46 @@ import time
 
 import pytest
 
-from motor.config.coordinator import CoordinatorConfig
+from motor.config.coordinator import CoordinatorConfig, SchedulerConfig, SchedulerType
+
+
+def test_standalone_coordinator_config_needs_no_engine_or_controller_sections(tmp_path):
+    """A single-model standalone file loads without control-plane sections."""
+    config_path = tmp_path / "standalone.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "motor_coordinator_config": {
+                    "aigw": {"id": "test-model", "p_max_seqlen": 4096, "d_max_seqlen": 4096},
+                    "scheduler_config": {"scheduler_type": "load_balance"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = CoordinatorConfig.from_json(str(config_path))
+
+    assert config.get_aigw_models()["id"] == "test-model"
+
+
+def test_controller_integration_enabled_is_ignored_when_present(tmp_path):
+    """Legacy standalone configs may still carry the removed key; it is ignored."""
+    config_path = tmp_path / "legacy-standalone.json"
+    config_path.write_text(
+        json.dumps({"motor_coordinator_config": {"controller_integration_enabled": False}}),
+        encoding="utf-8",
+    )
+
+    config = CoordinatorConfig.from_json(str(config_path))
+
+    assert not hasattr(config, "controller_integration_enabled")
 
 
 @pytest.fixture
 def _temp_json_file():
     """Fixture for temporary JSON file that gets cleaned up."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.coordinator.json', delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".coordinator.json", delete=False) as f:
         _fpath = f.name
 
     yield _fpath
@@ -67,6 +100,7 @@ COMPLETE_CONFIG = {
         "read_timeout": 15,
         "write_timeout": 15,
         "keep_alive_timeout": 60,
+        "engine_client_keepalive_expiry": 3.0,
     },
     "api_key_config": {
         "enable_api_key": True,
@@ -116,10 +150,199 @@ def test_default_config_initialization():
     assert not hasattr(config.scheduler_config, "deploy_mode")
     assert config.scheduler_config.scheduler_type.value == "load_balance"
     assert config.timeout_config.request_timeout == 30
+    assert config.timeout_config.engine_client_keepalive_expiry == 3.0
     assert config.api_key_config.enable_api_key is False
+    assert config.mgmt_api_key_config.enable_api_key is False
     assert config.rate_limit_config.enable_rate_limit is False
     assert config.api_config.coordinator_api_infer_port == 1025
     assert config.api_config.coordinator_api_mgmt_port == 1026
+    assert config.token_obfuscation_config.enable is False
+    assert config.token_obfuscation_config.vocab_size == 0
+    assert config.token_obfuscation_config.seed_content == ""
+    assert config.token_obfuscation_config.token_white_list == []
+
+
+def test_token_obfuscation_requires_vocab_size_or_model_dir() -> None:
+    """Unset vocab_size is read from config.json; without a model directory it must be given."""
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.token_white_list = [151643]
+
+    with pytest.raises(ValueError, match="vocab_size must be explicitly configured or resolvable"):
+        config.validate_config()
+
+
+def test_token_obfuscation_vocab_size_optional_with_model_dir() -> None:
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.token_white_list = [151643]
+    config.engine_model_paths = ["/data/weights/model-obf"]
+
+    config.validate_config()
+
+
+def test_token_obfuscation_vocab_size_rejects_multiple_model_dirs() -> None:
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.token_white_list = [151643]
+    config.engine_model_paths = ["/data/weights/a-obf", "/data/weights/b-obf"]
+
+    with pytest.raises(ValueError, match="vocab_size must be explicitly configured or resolvable"):
+        config.validate_config()
+
+    config.token_obfuscation_config.model_path = "/data/weights/a-obf"
+    config.validate_config()
+
+
+def test_token_obfuscation_requires_explicit_white_list() -> None:
+    """The white list is model-specific, so it must not be preset in code."""
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.vocab_size = 151936
+
+    with pytest.raises(ValueError, match="token_white_list must be explicitly configured"):
+        config.validate_config()
+
+    config.token_obfuscation_config.token_white_list = [151643, 198]
+    config.validate_config()
+
+
+def test_token_obfuscation_rejects_white_list_out_of_vocab() -> None:
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.vocab_size = 100
+    config.token_obfuscation_config.token_white_list = [99]
+    config.validate_config()
+
+    config.token_obfuscation_config.token_white_list = [100]
+    with pytest.raises(ValueError, match="integer token ids within vocab_size"):
+        config.validate_config()
+
+
+def test_token_obfuscation_requires_render() -> None:
+    config = CoordinatorConfig()
+    config.token_obfuscation_config.enable = True
+
+    with pytest.raises(ValueError, match="requires render_config.enable=true"):
+        config.validate_config()
+
+
+def test_token_obfuscation_requires_explicit_seed() -> None:
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.enable = True
+
+    with pytest.raises(ValueError, match="seed_content must be explicitly configured"):
+        config.validate_config()
+
+
+def test_image_obfuscation_requires_render() -> None:
+    """Image permutation runs on the Render payload, so Render must be enabled."""
+    config = CoordinatorConfig()
+    config.token_obfuscation_config.image_config.enable = True
+
+    with pytest.raises(ValueError, match="image_config requires render_config.enable=true"):
+        config.validate_config()
+
+
+def test_image_obfuscation_requires_explicit_seed() -> None:
+    """Image client permutes the same seed, so an empty seed must be rejected too."""
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.image_config.enable = True
+
+    with pytest.raises(ValueError, match="seed_content must be explicitly configured"):
+        config.validate_config()
+
+
+def test_image_obfuscation_requires_geometry_or_model_dir() -> None:
+    """Unset geometry is read from the served weights directory; without one it must be given."""
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.image_config.enable = True
+
+    with pytest.raises(ValueError, match=r"image_config requires explicit geometry \(patch_size"):
+        config.validate_config()
+
+
+def test_image_obfuscation_geometry_optional_with_model_dir() -> None:
+    """A served model directory makes the geometry optional (resolved from the model files)."""
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.image_config.enable = True
+    config.engine_model_paths = ["/data/weights/model-obf"]
+
+    config.validate_config()
+
+
+def test_image_obfuscation_model_path_makes_geometry_optional() -> None:
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    config.token_obfuscation_config.image_config.enable = True
+    config.token_obfuscation_config.image_config.model_path = "/data/weights/model-obf"
+
+    config.validate_config()
+
+
+def test_image_obfuscation_explicit_geometry_wins_over_model_dir() -> None:
+    """Explicitly configured fields stay untouched, so no model directory is required."""
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    image_config = config.token_obfuscation_config.image_config
+    image_config.enable = True
+    image_config.patch_size = 16
+    image_config.merge_size = 2
+    image_config.temporal_patch_size = 2
+    image_config.longest_edge = 16777216
+    image_config.shortest_edge = 65536
+
+    config.validate_config()
+
+
+def test_image_obfuscation_rejects_inverted_edge_range() -> None:
+    config = CoordinatorConfig()
+    config.render_config.enable = True
+    config.token_obfuscation_config.seed_content = "seed"
+    image_config = config.token_obfuscation_config.image_config
+    image_config.enable = True
+    image_config.patch_size = 16
+    image_config.merge_size = 2
+    image_config.temporal_patch_size = 2
+    image_config.shortest_edge = 16777216
+    image_config.longest_edge = 65536
+
+    with pytest.raises(ValueError, match="longest_edge must be greater than or equal to shortest_edge"):
+        config.validate_config()
+
+
+def test_from_json_collects_engine_model_paths(_temp_json_file) -> None:
+    """Engine sections expose the served weights directory for data-obfuscation auto-reading."""
+    raw = {
+        "motor_coordinator_config": {"scheduler_config": {"deploy_mode": "single_node"}},
+        "motor_engine_prefill_config": {"engine_config": {"model": "/data/weights/shared-obf"}},
+        "motor_engine_decode_config": {"engine_config": {"model": "/data/weights/shared-obf"}},
+        "motor_engine_union_config": {"model_config": {"model_path": "/data/weights/legacy-obf"}},
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(raw, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.engine_model_paths == ["/data/weights/shared-obf", "/data/weights/legacy-obf"]
 
 
 def test_from_json_success(_temp_json_file):
@@ -134,6 +357,10 @@ def test_from_json_success(_temp_json_file):
             "header_name": "X-API-Key",
             "key_prefix": "Bearer ",
         },
+        "mgmt_api_key_config": {
+            "enable_api_key": True,
+            "api_key_file": "/run/secrets/motor-mgmt-api-key",
+        },
         "rate_limit_config": {
             "enable_rate_limit": True,
             "max_requests": 100,
@@ -142,7 +369,7 @@ def test_from_json_success(_temp_json_file):
         },
     }
 
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(test_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -151,6 +378,8 @@ def test_from_json_success(_temp_json_file):
     assert config.exception_config.max_retry == 10
     assert not hasattr(config.scheduler_config, "deploy_mode")
     assert config.api_key_config.enable_api_key is True
+    assert config.mgmt_api_key_config.enable_api_key is True
+    assert config.mgmt_api_key_config.api_key_file == "/run/secrets/motor-mgmt-api-key"
     assert config.rate_limit_config.enable_rate_limit is True
     assert config.config_path == _temp_json_file
 
@@ -162,7 +391,7 @@ def test_from_json_migrates_deprecated_recompute_config(_temp_json_file, caplog)
             "recompute_max_retry": 9,
         }
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(test_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -180,7 +409,7 @@ def test_new_reschedule_config_takes_precedence_over_deprecated_alias(_temp_json
             "reschedule_config": {"enable": True},
         }
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(test_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -212,7 +441,7 @@ def test_from_json_maps_hybrid_instances(_temp_json_file):
             "engine_config": {"max_model_len": 2048},
         },
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -223,6 +452,118 @@ def test_from_json_maps_hybrid_instances(_temp_json_file):
     assert config.deploy_config.hybrid_pod_npu_num == 4
     assert config.deploy_config.p_instances_num == 3
     assert config.deploy_config.d_instances_num == 3
+
+
+def test_from_json_builds_aigw_from_union_config(_temp_json_file):
+    """PD hybrid: auto-build aigw metadata from motor_engine_union_config."""
+    user_config = {
+        "motor_coordinator_config": {},
+        "motor_engine_union_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "qwen3-8B",
+                "max_model_len": 4096,
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.aigw_model is not None
+    assert config.aigw_model["id"] == "qwen3-8B"
+    assert config.aigw_model["object"] == "model"
+    assert config.aigw_model["owned_by"] == "motor"
+    assert config.aigw_model["p_max_seqlen"] == 4096
+    assert config.aigw_model["d_max_seqlen"] == 4096
+    assert config.aigw_model["slo_ttft"] == 1000
+    assert config.aigw_model["slo_tpot"] == 50
+
+
+def test_from_json_builds_aigw_from_pd_over_union(_temp_json_file):
+    """When both PD and union exist, prefer prefill/decode for aigw (same as historical PD path)."""
+    user_config = {
+        "motor_coordinator_config": {},
+        "motor_engine_prefill_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "pd-model",
+                "max_model_len": 8192,
+            },
+        },
+        "motor_engine_decode_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "pd-model",
+                "max_model_len": 4096,
+            },
+        },
+        "motor_engine_union_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "union-model",
+                "max_model_len": 2048,
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.aigw_model["id"] == "pd-model"
+    assert config.aigw_model["p_max_seqlen"] == 8192
+    assert config.aigw_model["d_max_seqlen"] == 4096
+
+
+def test_from_json_explicit_aigw_merges_with_union_defaults(_temp_json_file):
+    """Explicit aigw fields are kept; missing fields still filled from union path."""
+    user_config = {
+        "motor_coordinator_config": {
+            "aigw": {
+                "id": "custom-id",
+                "slo_ttft": 2000,
+            }
+        },
+        "motor_engine_union_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "qwen3-8B",
+                "max_model_len": 2048,
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.aigw_model["id"] == "custom-id"
+    assert config.aigw_model["p_max_seqlen"] == 2048
+    assert config.aigw_model["d_max_seqlen"] == 2048
+    assert config.aigw_model["slo_ttft"] == 2000
+    assert config.aigw_model["slo_tpot"] == 50
+
+
+def test_from_json_union_missing_engine_config_logs_available_keys(_temp_json_file, caplog):
+    """Union without engine_config should warn with available section keys."""
+    user_config = {
+        "motor_coordinator_config": {},
+        "motor_engine_union_config": {
+            "engine_type": "vllm",
+            "model_config": {"model_name": "qwen3-8B"},
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    with caplog.at_level("WARNING"):
+        config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.aigw_model is None
+    assert any("Failed to build aigw model metadata" in record.message for record in caplog.records)
+    assert any("engine_config" in record.message and "Available keys" in record.message for record in caplog.records)
 
 
 def test_from_json_maps_pd_fallback_switch_from_scheduler_config(_temp_json_file):
@@ -237,7 +578,7 @@ def test_from_json_maps_pd_fallback_switch_from_scheduler_config(_temp_json_file
             }
         },
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -247,7 +588,7 @@ def test_from_json_maps_pd_fallback_switch_from_scheduler_config(_temp_json_file
 
 def test_from_json_with_invalid_json(_temp_json_file):
     """Test loading configuration from invalid JSON file"""
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         f.write("invalid json content")
 
     # Should use default configuration instead of raising exception
@@ -385,6 +726,106 @@ def test_precision_detection_config_validation_non_positive_probe_timeout():
         c.validate_config()
 
 
+def test_circuit_config_defaults():
+    """Absent ``circuit_config`` keeps the historical enable/3/30s/300s behavior."""
+    config = CoordinatorConfig()
+    assert config.circuit_config.enable is True
+    assert config.circuit_config.failure_threshold == 3
+    assert config.circuit_config.base_timeout_s == 30.0
+    assert config.circuit_config.max_timeout_s == 300.0
+
+
+def test_from_json_loads_circuit_config_top_level(_temp_json_file):
+    """``circuit_config`` merges from flat coordinator JSON."""
+    test_config = {
+        "circuit_config": {
+            "enable": False,
+            "failure_threshold": 5,
+            "base_timeout_s": 10.0,
+            "max_timeout_s": 120.0,
+        }
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(test_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+    assert config.circuit_config.enable is False
+    assert config.circuit_config.failure_threshold == 5
+    assert config.circuit_config.base_timeout_s == 10.0
+    assert config.circuit_config.max_timeout_s == 120.0
+
+
+def test_from_json_loads_circuit_config_motor_coordinator_wrapper(_temp_json_file):
+    """``circuit_config`` loads from ``motor_coordinator_config`` user config shape."""
+    wrapped = {
+        "motor_coordinator_config": {
+            "circuit_config": {
+                "enable": False,
+                "failure_threshold": 5,
+                "base_timeout_s": 10.0,
+                "max_timeout_s": 120.0,
+            }
+        }
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(wrapped, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+    assert config.circuit_config.enable is False
+    assert config.circuit_config.failure_threshold == 5
+    assert config.circuit_config.base_timeout_s == 10.0
+    assert config.circuit_config.max_timeout_s == 120.0
+
+
+def test_from_json_absent_circuit_config_keeps_defaults(_temp_json_file):
+    """A user config without ``circuit_config`` leaves defaults untouched."""
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump({"motor_coordinator_config": {"exception_config": {"max_retry": 2}}}, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+    assert config.circuit_config.enable is True
+    assert config.circuit_config.failure_threshold == 3
+    assert config.circuit_config.base_timeout_s == 30.0
+    assert config.circuit_config.max_timeout_s == 300.0
+
+
+def test_circuit_config_validation_non_positive_failure_threshold():
+    with pytest.raises(ValueError, match="circuit_config.failure_threshold"):
+        c = CoordinatorConfig()
+        c.circuit_config.failure_threshold = 0
+        c.validate_config()
+
+
+def test_circuit_config_validation_non_positive_base_timeout():
+    with pytest.raises(ValueError, match="circuit_config.base_timeout_s"):
+        c = CoordinatorConfig()
+        c.circuit_config.base_timeout_s = 0
+        c.validate_config()
+
+
+def test_circuit_config_validation_non_positive_max_timeout():
+    with pytest.raises(ValueError, match="circuit_config.max_timeout_s"):
+        c = CoordinatorConfig()
+        c.circuit_config.max_timeout_s = 0
+        c.validate_config()
+
+
+def test_circuit_config_validation_base_exceeds_max():
+    with pytest.raises(ValueError, match="circuit_config.base_timeout_s must be <= "):
+        c = CoordinatorConfig()
+        c.circuit_config.base_timeout_s = 300.0
+        c.circuit_config.max_timeout_s = 30.0
+        c.validate_config()
+
+
+def test_circuit_config_validation_base_equals_max_ok():
+    """base == max is a valid configuration (no doubling possible)."""
+    c = CoordinatorConfig()
+    c.circuit_config.base_timeout_s = 60.0
+    c.circuit_config.max_timeout_s = 60.0
+    c.validate_config()
+
+
 def test_config_validation_success():
     """Test successful configuration validation"""
     config = CoordinatorConfig()
@@ -392,11 +833,21 @@ def test_config_validation_success():
     config.validate_config()
 
 
+def test_config_validation_rejects_enabled_management_auth_without_key_file():
+    config = CoordinatorConfig()
+    config.mgmt_api_key_config.enable_api_key = True
+
+    with pytest.raises(ValueError, match="api_key_file cannot be empty"):
+        config.validate_config()
+
+
 @pytest.mark.parametrize(
     "param,value,expected_error",
     [
         ("log_max_line_length", -1, "log_max_line_length must be greater than 0"),
         ("max_retry", -1, "max_retry cannot be negative"),
+        ("max_retry", "abc", "max_retry must be a number, got str"),
+        ("max_retry", True, "max_retry must be a number, got bool"),
         ("retry_delay", -0.1, "retry_delay must be greater than 0"),
         ("first_token_timeout", -1, "first_token_timeout must be greater than 0"),
         ("infer_timeout", 0, "infer_timeout must be greater than 0"),
@@ -405,6 +856,7 @@ def test_config_validation_success():
         ("read_timeout", -1, "read_timeout must be greater than 0"),
         ("write_timeout", 0, "write_timeout must be greater than 0"),
         ("keep_alive_timeout", -1, "keep_alive_timeout must be greater than 0"),
+        ("engine_client_keepalive_expiry", 0, "engine_client_keepalive_expiry must be greater than 0"),
         ("coordinator_api_infer_port", 0, "coordinator_api_infer_port must be in range 1-65535"),
         ("coordinator_api_mgmt_port", 65536, "coordinator_api_mgmt_port must be in range 1-65535"),
         ("max_requests", -1, "max_requests must be greater than 0"),
@@ -425,7 +877,14 @@ def test_config_validation_errors(param, value, expected_error):
             setattr(config.logging_config, param, value)
         elif param in ["max_retry", "retry_delay", "first_token_timeout", "infer_timeout"]:
             setattr(config.exception_config, param, value)
-        elif param in ["request_timeout", "connection_timeout", "read_timeout", "write_timeout", "keep_alive_timeout"]:
+        elif param in [
+            "request_timeout",
+            "connection_timeout",
+            "read_timeout",
+            "write_timeout",
+            "keep_alive_timeout",
+            "engine_client_keepalive_expiry",
+        ]:
             setattr(config.timeout_config, param, value)
         elif param in ["coordinator_api_infer_port", "coordinator_api_mgmt_port"]:
             setattr(config.api_config, param, value)
@@ -440,6 +899,43 @@ def test_config_validation_errors(param, value, expected_error):
         elif param in ["query_encoding"]:
             setattr(config.scheduler_config.kv_conductor_config, param, value)
         config.validate_config()
+
+
+def test_worker_metaserver_base_port_defaults_to_12000():
+    config = CoordinatorConfig()
+    assert config.inference_workers_config.worker_metaserver_base_port == 12000
+    config.validate_config()
+
+
+def test_worker_metaserver_base_port_zero_is_disabled():
+    config = CoordinatorConfig()
+    config.inference_workers_config.worker_metaserver_base_port = 0
+    config.validate_config()
+
+
+def test_worker_metaserver_base_port_overflow_is_rejected():
+    config = CoordinatorConfig()
+    config.inference_workers_config.num_workers = 4
+    config.inference_workers_config.worker_metaserver_base_port = 65534
+    with pytest.raises(ValueError, match="worker_metaserver_base_port \\+ num_workers - 1"):
+        config.validate_config()
+
+
+def test_worker_metaserver_startup_allows_unspecified_listen_host_without_pod_ip(monkeypatch):
+    """Listen 0.0.0.0 is valid; unreachable callback host is checked only on Trigger."""
+    monkeypatch.delenv("POD_IP", raising=False)
+    config = CoordinatorConfig()
+    config.api_config.coordinator_api_host = "0.0.0.0"
+
+    config.validate_config()
+
+
+def test_worker_metaserver_accepts_pod_ip_with_unspecified_listen_host(monkeypatch):
+    monkeypatch.setenv("POD_IP", "10.0.0.8")
+    config = CoordinatorConfig()
+    config.api_config.coordinator_api_host = "0.0.0.0"
+
+    config.validate_config()
 
 
 def test_config_validation_query_encoding_defaults_ok():
@@ -473,40 +969,46 @@ def test_config_validation_multiple_errors():
 def test_to_dict():
     """Test configuration serialization to dict"""
     config = CoordinatorConfig()
+    config.engine_model_paths = ["/data/weights/model-obf"]
     config_dict = config.to_dict()
+
+    # Internal fields derived from the engine sections stay out of the public configuration
+    assert "engine_model_paths" not in config_dict
+    assert "config_path" not in config_dict
 
     # Check that all config sections are present
     expected_keys = [
-        'logging_config',
-        'prometheus_metrics_config',
-        'exception_config',
-        'scheduler_config',
-        'inference_workers_config',
-        'infer_tls_config',
-        'mgmt_tls_config',
-        'etcd_tls_config',
-        'timeout_config',
-        'api_key_config',
-        'rate_limit_config',
-        'standby_config',
-        'etcd_config',
-        'aigw_model',
-        'api_config',
+        "logging_config",
+        "prometheus_metrics_config",
+        "exception_config",
+        "scheduler_config",
+        "inference_workers_config",
+        "infer_tls_config",
+        "mgmt_tls_config",
+        "etcd_tls_config",
+        "timeout_config",
+        "api_key_config",
+        "mgmt_api_key_config",
+        "rate_limit_config",
+        "standby_config",
+        "etcd_config",
+        "aigw_model",
+        "api_config",
     ]
 
     for key in expected_keys:
         assert key in config_dict
 
     # Check that internal fields are not present
-    assert 'config_path' not in config_dict
-    assert 'last_modified' not in config_dict
+    assert "config_path" not in config_dict
+    assert "last_modified" not in config_dict
 
     # Check enum serialization
-    assert 'deploy_mode' not in config_dict['scheduler_config']
-    assert config_dict['scheduler_config']['scheduler_type'] == 'load_balance'
-    assert config_dict['exception_config']['reschedule_config']['enable'] is False
-    assert 'recompute_enabled' not in config_dict['exception_config']
-    assert 'recompute_max_retry' not in config_dict['exception_config']
+    assert "deploy_mode" not in config_dict["scheduler_config"]
+    assert config_dict["scheduler_config"]["scheduler_type"] == "load_balance"
+    assert config_dict["exception_config"]["reschedule_config"]["enable"] is False
+    assert "recompute_enabled" not in config_dict["exception_config"]
+    assert "recompute_max_retry" not in config_dict["exception_config"]
 
 
 def test_save_to_json(_temp_json_file):
@@ -519,12 +1021,12 @@ def test_save_to_json(_temp_json_file):
     assert success is True
 
     # Verify saved content
-    with open(_temp_json_file, 'r', encoding="utf-8") as f:
+    with open(_temp_json_file, "r", encoding="utf-8") as f:
         saved_data = json.load(f)
 
-    assert saved_data['logging_config']['log_level'] == 'DEBUG'
-    assert saved_data['exception_config']['max_retry'] == 10
-    assert 'deploy_mode' not in saved_data['scheduler_config']
+    assert saved_data["logging_config"]["log_level"] == "DEBUG"
+    assert saved_data["exception_config"]["max_retry"] == 10
+    assert "deploy_mode" not in saved_data["scheduler_config"]
 
 
 def test_save_to_json_invalid_path():
@@ -578,7 +1080,7 @@ def test_config_summary_includes_hybrid_fields(_temp_json_file):
             "engine_config": {"max_model_len": 2048},
         },
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -618,7 +1120,7 @@ def test_config_summary_pd_disaggregation_fields(_temp_json_file):
             "engine_config": {"max_model_len": 2048},
         },
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -648,7 +1150,7 @@ def test_reload_config(_temp_json_file):
     """Test configuration reload functionality"""
     # Create initial config
     initial_config = {"exception_config": {"max_retry": 5}}
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(initial_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -656,7 +1158,7 @@ def test_reload_config(_temp_json_file):
 
     # Modify config file
     updated_config = {"exception_config": {"max_retry": 10}}
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(updated_config, f)
 
     # Force update file modification time
@@ -672,7 +1174,7 @@ def test_reload_config(_temp_json_file):
 def test_reload_config_file_not_modified(_temp_json_file):
     """Test reload when config file is not modified"""
     initial_config = {"exception_config": {"max_retry": 5}}
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(initial_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -712,7 +1214,7 @@ def test_from_json_maps_union_kv_events_to_prefill_kv_event_config(_temp_json_fi
         },
         "kv_conductor_config": {"http_server_port": 14444},
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -752,7 +1254,7 @@ def test_from_json_prefill_kv_event_prefers_prefill_over_union(_temp_json_file):
         },
         "kv_conductor_config": {"http_server_port": 13333},
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -775,7 +1277,7 @@ def test_from_json_union_without_kv_events_skips_auto_merge(_temp_json_file):
             },
         },
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -800,7 +1302,7 @@ def test_from_json_maps_prefill_kv_events_regression(_temp_json_file):
         },
         "kv_conductor_config": {"http_server_port": 15555},
     }
-    with open(_temp_json_file, 'w', encoding="utf-8") as f:
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
         json.dump(user_config, f)
 
     config = CoordinatorConfig.from_json(_temp_json_file)
@@ -826,6 +1328,7 @@ def test_from_json_loads_nested_kv_affinity(_temp_json_file):
                 "w_npu": 1.0,
                 "w_cpu": 0.5,
                 "w_disk": 0.25,
+                "hit_rate_threshold": 0.3,
             },
         }
     }
@@ -842,6 +1345,7 @@ def test_from_json_loads_nested_kv_affinity(_temp_json_file):
     assert affinity.w_npu == 1.0
     assert affinity.w_cpu == 0.5
     assert affinity.w_disk == 0.25
+    assert affinity.hit_rate_threshold == 0.3
 
 
 def test_from_json_migrates_legacy_flat_kv_affinity_keys(_temp_json_file, caplog):
@@ -884,3 +1388,195 @@ def test_from_json_nested_kv_affinity_wins_over_legacy_flat(_temp_json_file):
     affinity = config.scheduler_config.kv_affinity
     assert affinity.mode == "unified"
     assert affinity.load_weight == 1.5
+
+
+def test_kv_affinity_hit_rate_threshold_default_and_validation():
+    """hit_rate_threshold defaults to 0 and must stay in [0, 1]."""
+    config = CoordinatorConfig()
+    assert config.scheduler_config.kv_affinity.hit_rate_threshold == 0.0
+    config.validate_config()
+
+    config.scheduler_config.kv_affinity.hit_rate_threshold = 1.0
+    config.validate_config()
+
+    config.scheduler_config.kv_affinity.hit_rate_threshold = -0.1
+    with pytest.raises(ValueError, match="kv_affinity.hit_rate_threshold cannot be negative"):
+        config.validate_config()
+
+    config.scheduler_config.kv_affinity.hit_rate_threshold = 1.1
+    with pytest.raises(ValueError, match="kv_affinity.hit_rate_threshold must be in \\[0, 1\\]"):
+        config.validate_config()
+
+
+def test_invalid_context_budget_mode_is_rejected():
+    config = CoordinatorConfig()
+    config.context_budget_mode = "truncate"
+
+    with pytest.raises(ValueError, match="context_budget_mode"):
+        config.validate_config()
+
+
+def test_context_budget_on_requires_model_metadata():
+    config = CoordinatorConfig()
+    config.context_budget_mode = "on"
+
+    with pytest.raises(ValueError, match="kv_conductor_config.model_path"):
+        config.validate_config()
+
+
+def test_context_budget_reuses_engine_model_config_without_kv_events(_temp_json_file):
+    """All schedulers can reuse engine sections for tokenizer path and context limits."""
+    user_config = {
+        "motor_coordinator_config": {
+            "context_budget_mode": "on",
+            "scheduler_config": {
+                "scheduler_type": "load_balance",
+                "kv_conductor_config": {
+                    "conductor_service": "manual-conductor",
+                },
+            },
+        },
+        "motor_engine_prefill_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "glm-5.2",
+                "model": "/mnt/weight/glm-5.2",
+                "max_model_len": 8192,
+            },
+        },
+        "motor_engine_decode_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "glm-5.2",
+                "model": "/mnt/weight/glm-5.2",
+                "max_model_len": 4096,
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.scheduler_config.scheduler_type.value == "load_balance"
+    assert config.context_budget_mode == "on"
+    assert config.scheduler_config.kv_conductor_config.model_path == "/mnt/weight/glm-5.2"
+    assert config.scheduler_config.kv_conductor_config.conductor_service == "manual-conductor"
+    assert config.aigw_model["p_max_seqlen"] == 8192
+    assert config.aigw_model["d_max_seqlen"] == 4096
+
+
+def test_render_config_reuses_engine_model_metadata_without_kv_events(_temp_json_file):
+    user_config = {
+        "motor_coordinator_config": {
+            "render_config": {
+                "enable": True,
+                "endpoint": {"host": "127.0.0.1", "port": 8200},
+                "timeout_ms": 1500,
+                "renderer_num_workers": 7,
+                "image_name": "vllm-render-cpu:test",
+            },
+        },
+        "motor_engine_union_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "served_model_name": "qwen",
+                "model": "/mnt/weight/qwen",
+                "max_model_len": 4096,
+            },
+        },
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(user_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+
+    assert config.render_config.enable is True
+    assert config.render_config.renderer_num_workers == 7
+    assert config.scheduler_config.kv_conductor_config.model_path == "/mnt/weight/qwen"
+
+
+def test_invalid_render_timeout_is_rejected():
+    config = CoordinatorConfig()
+    config.render_config.timeout_ms = 0
+
+    with pytest.raises(ValueError, match="render_config.timeout_ms"):
+        config.validate_config()
+
+
+@pytest.mark.parametrize("num_workers", [0, True, "4"])
+def test_invalid_render_worker_count_is_rejected(num_workers):
+    config = CoordinatorConfig()
+    config.render_config.renderer_num_workers = num_workers
+
+    with pytest.raises(ValueError, match="render_config.renderer_num_workers"):
+        config.validate_config()
+
+
+def test_from_json_loads_dp_stats_window(_temp_json_file):
+    test_config = {
+        "scheduler_config": {
+            "scheduler_type": "load_balance",
+            "dp_stats_window": 120,
+        }
+    }
+    with open(_temp_json_file, "w", encoding="utf-8") as f:
+        json.dump(test_config, f)
+
+    config = CoordinatorConfig.from_json(_temp_json_file)
+    assert config.scheduler_config.dp_stats_window == 120
+
+
+def test_coordinator_config_accepts_nested_scheduler_config_kwargs():
+    """Kwargs construction must work; a leaked object.__new__ on the class breaks it."""
+    assert CoordinatorConfig.__dict__.get("__new__") is not object.__new__
+    config = CoordinatorConfig(
+        scheduler_config=SchedulerConfig(
+            scheduler_type=SchedulerType.LOAD_BALANCE,
+            dp_stats_window=30,
+        )
+    )
+    assert config.scheduler_config.scheduler_type == SchedulerType.LOAD_BALANCE
+    assert config.scheduler_config.dp_stats_window == 30
+
+
+def test_capacity_planning_validation_default_passes():
+    config = CoordinatorConfig()
+    config.validate_config()
+
+
+def test_capacity_planning_validation_fraction_fields():
+    for field in ("target_utilization", "kv_target_utilization", "ema_alpha", "pd_ratio_smooth_alpha"):
+        config = CoordinatorConfig()
+        setattr(config.prometheus_metrics_config.capacity_planning, field, 1.5)
+        with pytest.raises(ValueError, match=f"capacity_planning.{field}"):
+            config.validate_config()
+
+
+def test_capacity_planning_validation_decay_range():
+    config = CoordinatorConfig()
+    config.prometheus_metrics_config.capacity_planning.capacity_decay = 1.0
+    with pytest.raises(ValueError, match="capacity_planning.capacity_decay"):
+        config.validate_config()
+
+
+def test_capacity_planning_validation_negative_prior():
+    config = CoordinatorConfig()
+    config.prometheus_metrics_config.capacity_planning.decode_tps_capacity_prior = -1.0
+    with pytest.raises(ValueError, match="capacity_planning.decode_tps_capacity_prior"):
+        config.validate_config()
+
+
+def test_capacity_planning_validation_window_cycles():
+    config = CoordinatorConfig()
+    config.prometheus_metrics_config.capacity_planning.capacity_window_cycles = 0
+    with pytest.raises(ValueError, match="capacity_planning.capacity_window_cycles"):
+        config.validate_config()
+
+
+def test_capacity_planning_validation_pd_ratio_bounds():
+    config = CoordinatorConfig()
+    config.prometheus_metrics_config.capacity_planning.pd_ratio_min = 5.0
+    config.prometheus_metrics_config.capacity_planning.pd_ratio_max = 2.0
+    with pytest.raises(ValueError, match="pd_ratio_min <= pd_ratio_max"):
+        config.validate_config()

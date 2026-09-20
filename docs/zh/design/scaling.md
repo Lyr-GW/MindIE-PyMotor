@@ -13,9 +13,9 @@ MindIE Motor 提供两种实例扩缩容方式，满足不同运维场景的需�
 
 自动弹性扩缩容功能支持根据推理实例的实时负载自动调整 Prefill 和 Decode 实例数量。当请求量上升时自动扩容，当负载回落时自动缩容，在保障服务 SLA 的同时提升资源利用率。
 
-核心机制：Infer Operator 为推理实例创建 HPA（Horizontal Pod Autoscaler）资源，HPA 通过 External Metrics Adaptor 获取 MindIE Motor 汇聚的引擎级负载指标（如排队请求数、TPS、KV Cache 使用率等），按用户配置的扩缩容阈值自动调整实例副本数。
+核心机制：Infer Operator 为推理实例创建 HPA（Horizontal Pod Autoscaler）资源，HPA 通过 External Metrics Adaptor 或 Prometheus Adapter 获取 MindIE Motor 汇聚的引擎级负载指标（如排队请求数、TPS、KV Cache 使用率等），按用户配置的扩缩容阈值自动调整实例副本数。
 
-支持 Atlas 800I A2 / A3 系列推理服务器，前置依赖 Infer Operator 部署与 External Metrics Adaptor（用于将 Motor 指标转换为 Kubernetes External Metrics）。
+支持 Atlas 800I A2 推理服务器 / Atlas 800I A3 超节点服务器，前置依赖 Infer Operator 部署，以及 External Metrics Adaptor 或 Prometheus Adapter 之一（用于将 Motor 指标转换为 Kubernetes External Metrics）。
 
 ### 1.2 工作原理
 
@@ -39,7 +39,7 @@ MindIE Motor 提供两种实例扩缩容方式，满足不同运维场景的需�
 ```
 
 1. MindIE Motor Coordinator 从所有引擎 Pod 采集 Prometheus 指标，按语义聚合后通过 `/metrics` 端点暴露。
-2. External Metrics Adaptor 周期性从 Coordinator 拉取指标，转换为 Kubernetes External Metrics API。
+2. External Metrics Adaptor 周期性从 Coordinator 拉取指标，转换为 Kubernetes External Metrics API；或走 Prometheus Adapter 路径（Coordinator -> Prometheus -> Prometheus Adapter -> External Metrics API），两条路径并行支持。
 3. HPA 从 External Metrics API 获取负载数据，与用户配置的目标阈值对比。
 4. 当指标持续超出阈值时，HPA 通知 Infer Operator 增加副本；低于阈值时减少副本。
 
@@ -123,9 +123,17 @@ scalingPolicy:
           averageValue: "0.8"
 ```
 
+#### 1.3.4 HPA 契约指标与 PD 配比信号
+
+除原始引擎指标外，Motor Coordinator 在 `/metrics` 上直接暴露一组面向 HPA 的**契约指标**：容量规划利用率（`motor:prefill_utilization` / `motor:decode_utilization`，需求速率 /（当前实例数 × 单实例容量估计），>1 表示供给不足，HPA target 即目标利用率 ρ）、容量规划推导的所需实例数（`motor:prefill_replicas_required` / `motor:decode_replicas_required`）、入口请求速率（`motor:request_rate`）、Prefill 时延分位数（`vllm:request_prefill_time_seconds` p50/p95/p99）以及 PD 配比信号（`motor:pd_ratio_current` / `motor:pd_ratio_suggested`）。契约指标在输出渲染层同时以无冒号别名（`:` → `_`，如 `motor_prefill_utilization`）暴露，适配 K8s External Metrics 命名习惯；别名的生成同样由 Motor Coordinator 完成，External Metrics Adaptor 无需做名称映射或二次计算（指标语义详见[指标接口](../user_guide/api/metrics_interfaces.md)）。
+
+契约指标背后的容量规划模型同样归属 Motor Coordinator：需求侧由入口完成请求统计推导到达率 λ 与平均输入/输出长度，供给侧在线标定单实例容量（`C_p` 取纯 prefill 处理吞吐的 EMA，`C_d` 取单实例 generation TPS 峰值学习并带衰减下限 floor），再按 `N_p = ⌈λ·L̄_in/(C_p·ρ)⌉`、`N_d = max(吞吐约束, KV 约束)` 推导所需实例数。这一归属划分与前述解耦原则一致：需求推导、容量标定、实例数推导、配比建议等语义计算属于"指标聚合"，由 Motor 负责；而阈值判断、扩缩容执行、配比调整仍完全在 HPA / 外部控制器侧。特别地，`motor:pd_ratio_suggested` 只是基于所需实例数之比的**建议信号**（经指数平滑与区间裁剪），Motor 不依据它修改任何实例数量或 K8s 资源——参考执行方式（CronJob 定期按建议配比调整 InferServiceSet role replicas）见[自动弹性扩缩容](../user_guide/features/auto_scaling.md)。容量规划算法的正确性由仓库内合成闭环仿真测试（`tests/coordinator/core/`）回归保障。
+
 ### 1.4 扩缩容策略配置
 
-在 `examples/deployer/yaml_template/infer_service_template.yaml` 中，为 Prefill 和 Decode 角色的配置块下添加 `scalingPolicy`：
+在 `examples/deployer/yaml_template/infer_service_template.yaml` 中，为 Prefill 和 Decode 角色的配置块下添加 `scalingPolicy`。
+
+以下示例对应 External Metrics Adaptor 路径，`external.metric` 下无需配置 `selector`：
 
 ```yaml
 roles:
@@ -180,6 +188,25 @@ roles:
       # ... 其余配置保持不变 ...
 ```
 
+使用 Prometheus Adapter 路径时，需在 `external.metric` 下新增 `selector.matchLabels`，以 Adapter 暴露的标签限定指标范围：
+
+```yaml
+metrics:
+- type: External
+  external:
+    metric:
+      name: vllm_total_requests
+      selector:
+        matchLabels:
+          infer_huawei_com_inferservice_name: vllm-0
+          kubernetes_namespace: mindie-motor
+    target:
+      type: AverageValue
+      averageValue: "5"
+```
+
+模板中的 `kubernetes_namespace` 与 `infer_huawei_com_inferservice_name` 只是占位值：deployer 生成 `infer_service.yaml` 时，会把 `kubernetes_namespace` 更新为 `user_config.json` 中的 `motor_deploy_config.job_id`，把 `infer_huawei_com_inferservice_name` 更新为 `<InferServiceSet 名>-0`；仅更新实例数的手动扩缩容路径也会按当前 `job_id` 回填这两个标签。未配置这两个标签时不会自动注入。
+
 **scalingPolicy 参数说明：**
 
 | 参数 | 说明 | 取值 |
@@ -187,13 +214,16 @@ roles:
 | `scalingPolicy.type` | 弹性扩缩容策略类型 | 当前仅支持 `HPA` |
 | `scalingPolicy.spec.minReplicas` | 缩容下限，实例数不会低于此值 | 正整数 |
 | `scalingPolicy.spec.maxReplicas` | 扩容上限，实例数不会超过此值 | 正整数，且 ≥ minReplicas |
-| `scalingPolicy.spec.metrics[].type` | 指标类型 | `External`（由 External Metrics Adaptor 提供） |
-| `scalingPolicy.spec.metrics[].external.metric.name` | 外部指标名称 | 需与 Adaptor 暴露的指标名一致 |
+| `scalingPolicy.spec.metrics[].type` | 指标类型 | `External`（由 External Metrics Adaptor 或 Prometheus Adapter 提供） |
+| `scalingPolicy.spec.metrics[].external.metric.name` | 外部指标名称 | 需与所选指标接入组件暴露的指标名一致 |
+| `scalingPolicy.spec.metrics[].external.metric.selector` | 指标选择器 | 仅 Prometheus Adapter 场景需要配置；External Metrics Adaptor 场景无需新增 |
+| `scalingPolicy.spec.metrics[].external.metric.selector.matchLabels.kubernetes_namespace` | 指标所属命名空间 | 仅 Prometheus Adapter 场景配置。模板包含此标签时，deployer 生成 YAML 会将其更新为 `motor_deploy_config.job_id` |
+| `scalingPolicy.spec.metrics[].external.metric.selector.matchLabels.infer_huawei_com_inferservice_name` | 指标所属 InferService | 仅 Prometheus Adapter 场景配置。模板包含此标签时，deployer 按 `<InferServiceSet 名>-0` 自动更新；缺失时不注入 |
 | `scalingPolicy.spec.metrics[].external.target.type` | 目标值类型 | `AverageValue`（Pod 平均值） |
 | `scalingPolicy.spec.metrics[].external.target.averageValue` | 目标平均值阈值 | 按指标量纲设定 |
 
 > [!NOTE]
-> `scalingPolicy.spec.metrics[].external.metric.name` 需填写 External Metrics Adaptor 暴露的指标名。Adaptor 可能对 MindIE Motor 原始 Prometheus 指标名（如 `vllm:num_requests_waiting`）做映射或重命名。部署 Adaptor 后，可通过以下命令查看实际暴露的指标列表：
+> `scalingPolicy.spec.metrics[].external.metric.name` 需填写所选指标接入组件暴露的指标名。External Metrics Adaptor 或 Prometheus Adapter 都可能对 MindIE Motor 原始 Prometheus 指标名（如 `vllm:num_requests_waiting`）做映射或重命名。部署后，可通过以下命令查看实际暴露的指标列表：
 >
 > ```bash
 > kubectl get --raw /apis/external.metrics.k8s.io/v1beta1 | grep -E "vllm:|motor:"

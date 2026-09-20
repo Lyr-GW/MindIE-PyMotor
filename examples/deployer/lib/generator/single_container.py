@@ -35,6 +35,7 @@ from lib.generator.storage import (
     get_storage_entries,
     build_storage_pvc_docs,
 )
+from lib.generator.render import configure_render_sidecar
 
 
 def generate_yaml_single_container(input_yaml, output_file, user_config):
@@ -91,7 +92,7 @@ def generate_yaml_single_container(input_yaml, output_file, user_config):
     elif hardware_type in C.HARDWARE_TYPE_A3:
         apply_node_selector_by_hardware(pod_spec, hardware_type)
         k8s_utils.apply_sp_block_annotation(deployment_data[C.SPEC][C.TEMPLATE][C.METADATA], npu_num, hardware_type)
-    elif hardware_type in C.HARDWARE_TYPE_950I_A5:
+    elif hardware_type in C.HARDWARE_TYPE_A5:
         apply_node_selector_by_hardware(pod_spec, hardware_type)
         apply_a5_engine_pod_config(pod_spec, container, deploy_config)
         apply_a5_workload(deployment_data, deploy_config)
@@ -102,9 +103,10 @@ def generate_yaml_single_container(input_yaml, output_file, user_config):
     storage_entries = get_storage_entries(user_config)
     apply_storage_volumes(sc_pod_spec, container, user_config, storage_entries)
     apply_dshm_size(sc_pod_spec, user_config)
+    configure_render_sidecar(sc_pod_spec, user_config)
+    k8s_utils.apply_additional_labels_annotations(deployment_data, user_config.get(C.MOTOR_COORDINATOR_CONFIG, {}))
     if storage_entries:
         # Embed the PVC(s) as extra documents so `kubectl apply -f` creates them with the pod.
         pvc_template = os.path.join(os.path.dirname(input_yaml), "storage_pvc_template.yaml")
         data.extend(build_storage_pvc_docs(pvc_template, user_config, storage_entries))
-
     write_yaml(data, output_file, False)

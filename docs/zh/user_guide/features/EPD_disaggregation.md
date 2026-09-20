@@ -47,7 +47,7 @@ MindIE Motor部署EPD分离只需修改user_config.json配置文件后，通过d
 
 ### 配置user_config.json
 
-以[MindIE Motor快速开始](../quick_start_motor.md)中实例user_config.json为参考基线，适配EPD分离部署的配置
+以[MindIE Motor快速开始](../quick_start.md)中实例user_config.json为参考基线，适配EPD分离部署的配置
 
 ```json
 {
@@ -120,7 +120,7 @@ MindIE Motor部署EPD分离只需修改user_config.json配置文件后，通过d
         "ec_connector_extra_config": {"shared_storage_path": "/mnt/share/patch/ec_cache"}
       },
       "kv_transfer_config": {
-        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_connector": "MooncakeConnectorV1",
         "kv_buffer_device": "npu",
         "kv_role": "kv_producer",
         "kv_parallel_size": 1,
@@ -149,7 +149,7 @@ MindIE Motor部署EPD分离只需修改user_config.json配置文件后，通过d
       "no-enable-prefix-caching": true,
       "allowed-local-media-path": "/mnt/share/patch/media_path/",
       "kv_transfer_config": {
-        "kv_connector": "MooncakeLayerwiseConnector",
+        "kv_connector": "MooncakeConnectorV1",
         "kv_buffer_device": "npu",
         "kv_role": "kv_consumer",
         "kv_parallel_size": 1,

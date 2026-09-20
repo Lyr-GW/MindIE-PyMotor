@@ -39,6 +39,8 @@ def _normalize_address(address: str) -> str:
 logger = get_logger(__name__)
 
 Canceller = Callable[[str], None]
+# uvicorn/vLLM defaults to a 5s server keep-alive timeout, so retire idle client connections earlier.
+CLIENT_KEEPALIVE_EXPIRY = 3.0
 
 
 def _extract_error_message(response: Any, fallback: str) -> str:
@@ -79,6 +81,7 @@ class SafeHTTPSClient:
         tls_config: TLSConfig | None = None,
         mode: ConnectionMode = ConnectionMode.SHORT,
         timeout: float = 5,
+        headers: dict[str, str] | None = None,
     ):
         self.protocol = protocol
         self.timeout = timeout
@@ -108,6 +111,8 @@ class SafeHTTPSClient:
                 'Content-Type': 'application/json',
             }
         )
+        if headers:
+            self.session.headers.update(headers)
         logger.debug(
             "SafeHTTPSClient initialized. address=%s, tls=%s, mode=%s, timeout=%s",
             address,
@@ -279,7 +284,12 @@ class AsyncSafeHTTPSClient:
     """Async HTTP client factory for HTTPClientPool to create httpx.AsyncClient."""
 
     @staticmethod
-    def create_client(address: str, tls_config: TLSConfig | None = None, **client_kwargs):
+    def create_client(
+        address: str,
+        tls_config: TLSConfig | None = None,
+        keepalive_expiry: float = CLIENT_KEEPALIVE_EXPIRY,
+        **client_kwargs,
+    ):
         verify = True
 
         normalized = _normalize_address(address)
@@ -293,6 +303,7 @@ class AsyncSafeHTTPSClient:
             client_kwargs['limits'] = httpx.Limits(
                 max_connections=None,
                 max_keepalive_connections=None,
+                keepalive_expiry=keepalive_expiry,
             )
 
         logger.debug(

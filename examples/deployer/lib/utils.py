@@ -21,7 +21,6 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import uuid
-import yaml as ym
 
 import lib.constant as C
 
@@ -43,6 +42,8 @@ def write_json(file_path, data):
 
 def write_yaml(data, output_file, single_doc=True):
     """Write to YAML file"""
+    import yaml as ym
+
     logger.info(f"Writing YAML to {output_file}")
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
@@ -55,6 +56,8 @@ def write_yaml(data, output_file, single_doc=True):
 
 def load_yaml(input_yaml, single_doc):
     """Load YAML file"""
+    import yaml as ym
+
     with open(input_yaml, 'r', encoding="utf-8") as f:
         if single_doc:
             data = ym.safe_load(f)
@@ -309,6 +312,32 @@ def apply_controller_observability_node_port(service_data, deploy_config):
     apply_service_node_port(service_data, deploy_config, C.CONTROLLER_OBSERVABILITY_NODE_PORT)
 
 
+def resolve_workload_image(user_config, component_config=None):
+    """Use component image_name when set, otherwise motor_deploy_config.image_name."""
+    if isinstance(component_config, dict):
+        override = str(component_config.get(C.IMAGE_NAME) or "").strip()
+        if override:
+            return override
+    return user_config[C.MOTOR_DEPLOY_CONFIG][C.IMAGE_NAME]
+
+
+def get_pd_heterogeneous_chip_name(user_config, node_type):
+    field_map = {
+        C.NODE_TYPE_P: (C.MOTOR_ENGINE_PREFILL_CONFIG, C.NPU_CHIP_NAME_KEY),
+        C.NODE_TYPE_D: (C.MOTOR_ENGINE_DECODE_CONFIG, C.NPU_CHIP_NAME_KEY),
+    }
+    if node_type not in field_map:
+        return None
+    section_key, field = field_map[node_type]
+    section = user_config.get(section_key) or {}
+    if not isinstance(section, dict):
+        return None
+    value = section.get(field)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
 def apply_node_selector_override(pod_spec, deploy_config, selector_key):
     selector = deploy_config.get(selector_key, {})
     if not selector:
@@ -404,3 +433,19 @@ def get_deploy_paths():
         "storage_pvc_input_yaml": os.path.join(C.DEPLOY_YAML_ROOT_PATH, 'storage_pvc_template.yaml'),
         "storage_pvc_output_yaml": os.path.join(C.OUTPUT_ROOT_PATH, 'mindie_motor_storage_pvc.yaml'),
     }
+
+
+def get_config_key(role_or_type):
+    dic = {
+        C.NODE_TYPE_P: C.MOTOR_ENGINE_PREFILL_CONFIG,
+        C.NODE_TYPE_D: C.MOTOR_ENGINE_DECODE_CONFIG,
+        C.NODE_TYPE_E: C.MOTOR_ENGINE_ENCODE_CONFIG,
+        C.NODE_TYPE_U: C.MOTOR_ENGINE_UNION_CONFIG,
+        C.ROLE_PREFILL: C.MOTOR_ENGINE_PREFILL_CONFIG,
+        C.ROLE_DECODE: C.MOTOR_ENGINE_DECODE_CONFIG,
+        C.ROLE_ENCODE: C.MOTOR_ENGINE_ENCODE_CONFIG,
+        C.ROLE_UNION: C.MOTOR_ENGINE_UNION_CONFIG,
+        C.ROLE_KV_STORE: C.KV_CACHE_STORE_CONFIG,
+        C.ROLE_KV_CONDUCTOR: C.KV_CONDUCTOR_CONFIG,
+    }
+    return dic[role_or_type]

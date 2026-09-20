@@ -51,6 +51,10 @@ HTTP_SERVER_PORT = "http_server_port"
 RE_REGISTER_INTERVAL_SEC = "re_register_interval_sec"
 DEFAULT_RE_REGISTER_INTERVAL_SEC = 30
 MODEL_PATH = "model_path"
+CONTEXT_BUDGET_MODE = "context_budget_mode"
+CONTEXT_BUDGET_ON = "on"
+RENDER_CONFIG = "render_config"
+ENABLE = "enable"
 SSL_ENABLE = "ssl_enable"
 SSL_CA_CERTS = "ssl_ca_certs"
 SSL_CERTFILE = "ssl_certfile"
@@ -58,6 +62,12 @@ SSL_KEYFILE = "ssl_keyfile"
 ADDITIONAL_CONFIG = "additional_config"
 KV_TRANSFER_CONFIG = "kv_transfer_config"
 KV_CONNECTOR_EXTRA_CONFIG = "kv_connector_extra_config"
+ENGINE_MODEL_PATH_SECTIONS = (
+    "motor_engine_prefill_config",
+    "motor_engine_decode_config",
+    "motor_engine_encode_config",
+    "motor_engine_union_config",
+)
 DEPLOY_CONFIG = "deploy_config"
 P_INSTANCES_NUM = "p_instances_num"
 D_INSTANCES_NUM = "d_instances_num"
@@ -140,7 +150,7 @@ def _update_tls_config(
             updated_config[tls_key] = tls_config[tls_key]
 
 
-def _update_engine_server_tls_config(
+def _update_native_engine_tls_config(
     updated_config: dict[str, Any],
     user_config_data: dict[str, Any],
 ) -> None:
@@ -203,6 +213,28 @@ def _update_instances_num(
     }
 
 
+def resolve_engine_model_paths(user_config_data: dict[str, Any]) -> list[str]:
+    """Collect the distinct served model directories declared by engine sections.
+
+    Used by data-obfuscation to read model-side parameters (image geometry) when the user does
+    not configure them explicitly; the result is order-preserving and de-duplicated so a PD
+    deployment sharing one weights directory yields a single entry. Engine-specific key variants
+    and the legacy ``model_config.model_path`` fallback are owned by ``ConfigResolver``, so this
+    helper is limited to the multi-section walk and de-duplication.
+    """
+    if not isinstance(user_config_data, dict):
+        return []
+    paths: list[str] = []
+    for section_name in ENGINE_MODEL_PATH_SECTIONS:
+        section = user_config_data.get(section_name)
+        if not isinstance(section, dict):
+            continue
+        model = ConfigResolver(section).get_model_path()
+        if isinstance(model, str) and model.strip() and model not in paths:
+            paths.append(model)
+    return paths
+
+
 def _resolve_re_register_interval_sec(user_config_data: dict[str, Any]) -> int:
     motor_coordinator_config = user_config_data.get(ConfigKey.MOTOR_COORDINATOR.value)
     if not isinstance(motor_coordinator_config, dict):
@@ -235,8 +267,11 @@ def _build_prefill_kv_event_from_engine_section(
         return None
 
     kv_events_config = engine_config.get(KV_EVENTS_CONFIG)
-    if not isinstance(kv_events_config, dict):
+    tokenizer_metadata_needed = _is_context_budget_enabled(user_config_data) or _is_render_enabled(user_config_data)
+    if not isinstance(kv_events_config, dict) and not tokenizer_metadata_needed:
         return None
+    if not isinstance(kv_events_config, dict):
+        kv_events_config = {}
 
     resolver = ConfigResolver(engine_section)
     return {
@@ -247,6 +282,21 @@ def _build_prefill_kv_event_from_engine_section(
         MODEL_PATH: resolver.get_model_path(""),
         RE_REGISTER_INTERVAL_SEC: _resolve_re_register_interval_sec(user_config_data),
     }
+
+
+def _is_context_budget_enabled(user_config_data: dict[str, Any]) -> bool:
+    coordinator_config = user_config_data.get(ConfigKey.MOTOR_COORDINATOR.value)
+    if not isinstance(coordinator_config, dict):
+        return False
+    return coordinator_config.get(CONTEXT_BUDGET_MODE) == CONTEXT_BUDGET_ON
+
+
+def _is_render_enabled(user_config_data: dict[str, Any]) -> bool:
+    coordinator_config = user_config_data.get(ConfigKey.MOTOR_COORDINATOR.value)
+    if not isinstance(coordinator_config, dict):
+        return False
+    render_config = coordinator_config.get(RENDER_CONFIG)
+    return isinstance(render_config, dict) and render_config.get(ENABLE) is True
 
 
 def _select_kv_event_engine_section(user_config_data: dict[str, Any]) -> dict[str, Any] | None:
@@ -274,7 +324,10 @@ def _update_prefill_kv_event_config(updated_config: dict[str, Any], user_config_
         if prefill_kv_event is None:
             return
 
-        updated_config[PREFILL_KV_EVENT_CONFIG] = prefill_kv_event
+        existing = updated_config.get(PREFILL_KV_EVENT_CONFIG)
+        merged = dict(existing) if isinstance(existing, dict) else {}
+        merged.update(prefill_kv_event)
+        updated_config[PREFILL_KV_EVENT_CONFIG] = merged
     except Exception as e:
         logger.warning("Failed to get kv event engine config: %s", e)
 
@@ -383,6 +436,25 @@ def resolve_config_json_path(json_path: str | None) -> tuple[str | None, Path | 
     if json_path is None:
         json_path = Env.user_config_path
     return json_path, Path(json_path) if json_path else None
+
+
+def has_motor_controller_config(json_path: str | None = None) -> bool:
+    """Return whether the user config file includes motor_controller_config."""
+    _, config_path = resolve_config_json_path(json_path)
+    if not config_path or not config_path.exists():
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if not content:
+                return False
+            raw = json.loads(content)
+            if not isinstance(raw, dict):
+                return False
+            return ConfigKey.MOTOR_CONTROLLER.value in raw
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Failed to inspect motor_controller_config presence: %s", e)
+        return False
 
 
 def apply_config_path_metadata(config: Any, config_path: Path | None) -> None:

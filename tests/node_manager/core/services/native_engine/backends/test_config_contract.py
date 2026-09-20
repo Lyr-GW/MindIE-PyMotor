@@ -16,7 +16,6 @@ pre-move CLI contract.
 
 import copy
 import json
-import sys
 
 import pytest
 
@@ -81,7 +80,6 @@ def _endpoint_config(
         role=role,
         host=host,
         port=port,
-        mgmt_port=9001,
         master_dp_ip=master_dp_ip,
         dp_rank=dp_rank,
         node_rank=node_rank,
@@ -116,6 +114,8 @@ def test_vllm_union_cli_golden_preserves_order_types_and_precedence():
         json.dumps({"rope_type": "yarn", "factor": 2.0}),
         "--tensor-parallel-size",
         "8",
+        "--disable-access-log-for-endpoints",
+        "/health,/metrics,/snapshot/health,/v1/fault_tolerance/status",
         "--model",
         "/models/glm-test",
         "--served-model-name",
@@ -173,6 +173,8 @@ def test_vllm_pd_cli_golden_injects_handoff_metadata(role, kv_role):
     assert config.get_cli_args() == [
         "--kv-transfer-config",
         json.dumps(expected_kv),
+        "--disable-access-log-for-endpoints",
+        "/health,/metrics,/snapshot/health,/v1/fault_tolerance/status",
         "--model",
         "/models/glm-test",
         "--served-model-name",
@@ -318,17 +320,6 @@ def test_vllm_builder_output_is_stable_across_repeated_initialization():
     assert endpoint == first_endpoint
 
 
-def test_vllm_convert_preserves_process_argv(monkeypatch):
-    endpoint = _endpoint_config(engine_type="vllm")
-    config = VLLMConfig(endpoint_config=endpoint)
-    config.initialize()
-    monkeypatch.setattr(sys, "argv", ["contract-test", "--original"])
-
-    config.convert()
-
-    assert sys.argv == ["contract-test", "--original"]
-
-
 def test_sglang_union_cli_golden():
     endpoint = _endpoint_config(
         engine_type="sglang",
@@ -430,7 +421,7 @@ def test_factory_rejects_unknown_engine_type_before_importing_builder():
     endpoint = _endpoint_config(engine_type="unknown")
 
     with pytest.raises(ValueError, match="Unsupported engine type: unknown"):
-        ConfigFactory(endpoint).parse()
+        ConfigFactory(endpoint).build_cli_config()
 
 
 @pytest.mark.parametrize(

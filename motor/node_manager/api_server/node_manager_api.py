@@ -11,10 +11,13 @@
 import asyncio
 import json
 import os
+import signal
 import socket
 import logging
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from typing import Any
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import Response
 import uvicorn
@@ -25,8 +28,8 @@ from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.core.heartbeat_manager import HeartbeatManager
 from motor.common.logger import ApiAccessFilter, get_logger
 from motor.common.resources.http_msg_spec import StartCmdMsg
-from motor.node_manager.core.engine_manager import EngineManager
-from motor.node_manager.core.daemon import Daemon
+from motor.node_manager.core.register_manager import RegisterManager
+from motor.node_manager.core.daemon import Daemon, EngineRestartInProgressError, EngineRestartParamError
 from motor.node_manager.core.api_ready_event import clear_api_ready, mark_api_ready, wait_until_api_ready
 from motor.common.resources.instance import PDRole
 from motor.common.utils.snapshot_utils import is_restored_from_host_side_snapshot
@@ -51,17 +54,150 @@ MAX_CONCURRENT_THREADS = 10
 thread_semaphore = asyncio.Semaphore(MAX_CONCURRENT_THREADS)
 
 
+def _require_ft_proxy(action: str) -> tuple[Any, NodeManagerConfig]:
+    """Return the local FT manager when the proxy feature is enabled."""
+    try:
+        daemon = Daemon()
+        config = daemon.config
+        if not config.fault_tolerance_config.enable_dp_scale_down_proxy:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="DP scale-down proxy is disabled")
+        return daemon.engine_ft_manager, config
+    except HTTPException:
+        raise
+    except Exception as err:
+        logger.error("Failed to prepare engine FT %s request: %s", action, err)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Engine FT %s failed" % action,
+        ) from err
+
+
+async def _parse_ft_payload(request: Request, action: str) -> dict:
+    """Parse one FT request and reject malformed client input with HTTP 400."""
+    try:
+        payload = await request.json()
+    except Exception as err:
+        logger.error("Failed to parse engine FT %s request: %s", action, err)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON body for engine FT %s" % action,
+        ) from err
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be a JSON object")
+    return payload
+
+
+def _require_int_list(payload: dict, field_name: str, *, allow_empty: bool = False) -> list[int]:
+    value = payload.get(field_name)
+    if (
+        not isinstance(value, list)
+        or (not allow_empty and not value)
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in value)
+    ):
+        detail = "'%s' must be %sa list of integer DP ranks" % (
+            field_name,
+            "an empty or " if allow_empty else "a non-empty ",
+        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+    return value
+
+
+async def _ft_request_context(request: Request, action: str) -> tuple[dict, Any, NodeManagerConfig]:
+    """Parse and gate one NodeManager FT proxy request."""
+    payload = await _parse_ft_payload(request, action)
+    manager, config = _require_ft_proxy(action)
+    return payload, manager, config
+
+
+async def _run_ft_operation(action: str, operation: Callable[..., Any], *args: Any) -> Any:
+    """Run one blocking FT operation and preserve the public 502 contract."""
+    try:
+        return await asyncio.to_thread(operation, *args)
+    except Exception as err:
+        logger.error("Failed to %s engine FT request: %s", action, err)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Engine FT %s failed" % action,
+        ) from err
+
+
+@app.post("/node-manager/fault-tolerance/status")
+async def fault_tolerance_status(request: Request):
+    """Proxy local engine FT status; engine HTTP details stay in NodeManager."""
+    payload, manager, config = await _ft_request_context(request, "status query")
+    return await _run_ft_operation(
+        "status query",
+        manager.query,
+        _require_int_list(payload, "endpoint_ids"),
+        config.fault_tolerance_config.poll_timeout_sec,
+    )
+
+
+@app.post("/node-manager/fault-tolerance/apply")
+async def fault_tolerance_apply(request: Request):
+    """Apply FT instruction after NodeManager adds its configured DP store port."""
+    payload, manager, config = await _ft_request_context(request, "apply")
+    endpoint_ids = _require_int_list(payload, "endpoint_ids")
+    instruction = payload.get("instruction")
+    if instruction not in {"retry", "scale_down"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported FT instruction")
+    params = payload.get("params", {})
+    if not isinstance(params, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'params' must be a JSON object")
+    await _run_ft_operation(
+        "apply",
+        manager.apply,
+        endpoint_ids,
+        instruction,
+        params,
+        payload.get("request_id", ""),
+        config.fault_tolerance_config.poll_timeout_sec,
+        config.basic_config.parallel_config.dp_master_port,
+    )
+    return {"status": "accepted"}
+
+
+@app.post("/node-manager/fault-tolerance/guard")
+async def fault_tolerance_guard(request: Request):
+    """Freeze local suicide before Controller starts the distributed transaction."""
+    manager, _ = _require_ft_proxy("guard")
+    payload = await _parse_ft_payload(request, "guard")
+    await _run_ft_operation(
+        "guard",
+        manager.guard,
+        payload.get("request_id"),
+        payload.get("lease_sec"),
+    )
+    return {"status": "guarded"}
+
+
+@app.post("/node-manager/fault-tolerance/finalize")
+async def fault_tolerance_finalize(request: Request):
+    """Commit local retired ranks, or abort the local scale-down guard."""
+    payload, manager, _ = await _ft_request_context(request, "finalize")
+    commit = payload.get("commit") is True
+    retired_endpoint_ids = _require_int_list(payload, "retired_endpoint_ids", allow_empty=not commit)
+    await _run_ft_operation(
+        "finalize",
+        manager.finalize,
+        payload.get("request_id"),
+        retired_endpoint_ids,
+        commit,
+    )
+    return {"status": "committed" if commit else "aborted"}
+
+
 @app.post("/node-manager/start")
 async def start_instance(request: Request):
     """post instance and role info"""
     try:
         payload = await request.json()
         start_msg = StartCmdMsg(**payload)
-        engine_manager = EngineManager()
+        register_manager = RegisterManager()
 
         async with thread_semaphore:
             try:
-                parsed_ok = await asyncio.to_thread(engine_manager.parse_start_cmd, start_msg)
+                parsed_ok = await asyncio.to_thread(register_manager.parse_start_cmd, start_msg)
             except Exception as inner_err:
                 logger.error("Failed to parse start command: %s", inner_err)
                 raise HTTPException(
@@ -77,13 +213,16 @@ async def start_instance(request: Request):
         # Use start_msg.master_dp_ip to update snapshot metadata for engine resume
         # Update endpoint and set started after restore flag
         if is_restored_from_host_side_snapshot():
-            await asyncio.to_thread(EngineManager().engine_resume_prepare, start_msg)
+            await asyncio.to_thread(RegisterManager().engine_resume_prepare, start_msg)
+            # Registration order may assign a different endpoint.id block than at
+            # cold start; rekey supervisor runtimes before HB probes with new ids.
+            await asyncio.to_thread(Daemon().rebind_engine_endpoints_after_restore, start_msg.endpoints)
             HeartbeatManager().update_endpoint(start_msg)
             HeartbeatManager().set_started_after_restore(True)
             return {}
 
         # If snapshot mode is not disabled, prepare snapshot runtime directories and metadata file for engine suspend
-        await asyncio.to_thread(EngineManager().engine_suspend_prepare)
+        await asyncio.to_thread(RegisterManager().engine_suspend_prepare)
 
         daemon = Daemon()
         try:
@@ -93,7 +232,7 @@ async def start_instance(request: Request):
                 start_msg.endpoints,
                 start_msg.instance_id,
                 start_msg.master_dp_ip,
-                engine_manager.d2d_peer_ips,
+                register_manager.d2d_peer_ips,
                 start_msg.node_rank,
             )
         except Exception as pull_err:
@@ -113,8 +252,9 @@ async def start_instance(request: Request):
             ) from ls_err
 
         HeartbeatManager().update_endpoint(start_msg)
-        HeartbeatManager().start()
-        engine_manager.start()
+        # Gate the engine-status probing on the Daemon's engine-ready handoff
+        # (mgmt ports up) — the HeartbeatManager has no readiness logic.
+        HeartbeatManager().start(engine_ready_event=daemon.engine_ready_event)
         return {}
 
     except HTTPException as http_err:
@@ -127,13 +267,27 @@ async def start_instance(request: Request):
         ) from err
 
 
+def _self_terminate() -> None:
+    """SIGTERM this process: the Application treats it as a graceful shutdown
+    and exits (-1) — k8s then restarts the pod.
+    """
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
 @app.post("/node-manager/stop")
 async def stop_instance(request: Request):
-    """
-    Stop all engine processes by invoking Daemon.exit_daemon().
+    """Stop all engine processes, then terminate this NodeManager.
+
+    The Controller dispatches ``/node-manager/stop`` as the "suicide"
+    instruction: engine stop followed by process exit (-1), which k8s turns
+    into a pod restart. Used for instance teardown and for partial-loss
+    coordination (the surviving NodeManagers of a cross-machine instance exit
+    so the whole instance restarts together).
     """
     try:
         await asyncio.to_thread(Daemon().stop)
+        # Delayed so the 200 response is sent before the process exits.
+        threading.Timer(0.5, _self_terminate).start()
         content = {"message": "All engine processes stopped successfully."}
         return Response(status_code=status.HTTP_200_OK, content=json.dumps(content))
     except Exception as err:
@@ -141,6 +295,70 @@ async def stop_instance(request: Request):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to stop engine processes"
         ) from err
+
+
+@app.post("/node-manager/engine-restart")
+async def engine_restart(request: Request):
+    """Controller-driven engine relaunch without container restart.
+
+    Body: ``{"action": "restart"|"abort", "instance_id": int?}``
+
+    - ``restart``: kill and re-pull all engine subprocesses in place
+      (``Daemon.restart_engine`` — resolves the launch params, freezes
+      suicide, suspends/resumes the EngineFtManager; KV store untouched).
+      Returns 200 once the processes were spawned (model loading continues
+      asynchronously — completion is polled by the Controller via
+      ``/node-manager/status``).
+    - ``abort``: unfreeze the suicide counter — the heartbeat mechanism
+      resumes counting ABNORMAL reports and the pod restarts via k8s
+      (fallback path when engine relaunch failed).
+
+    Forcing this NodeManager to exit (partial-loss coordination) is not an
+    engine-restart concern — the Controller uses ``/node-manager/stop``.
+    """
+    try:
+        payload = await request.json()
+    except Exception as err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body") from err
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be a JSON object")
+
+    action = payload.get("action")
+    if action not in ("restart", "abort"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'action' must be 'restart' or 'abort'")
+
+    daemon = Daemon()
+    if action == "abort":
+        daemon.unfreeze_suicide()
+        logger.info("Engine restart aborted: suicide arbitration unfrozen (container restart fallback)")
+        return {"message": "abort accepted"}
+
+    # Only reject during an actual snapshot restore: is_started_after_restore
+    # is False in the normal (non-snapshot) deployment, so it alone must
+    # not gate the relaunch.
+    if is_restored_from_host_side_snapshot() and not HeartbeatManager().is_started_after_restore():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Snapshot restore in progress, engine restart not supported",
+        )
+
+    instance_id = payload.get("instance_id")
+    try:
+        await asyncio.to_thread(daemon.restart_engine, instance_id)
+    except EngineRestartInProgressError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Engine restart already in progress")
+    except EngineRestartParamError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="No engine start recorded, nothing to restart"
+        )
+    except Exception as err:
+        logger.error("Failed to restart engines: %s", err)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Engine restart failed: {err}"
+        ) from err
+
+    logger.info("Engines restarted in place for instance %s", instance_id)
+    return {"message": "engine restart accepted"}
 
 
 @app.post("/node-manager/pause")
@@ -193,13 +411,19 @@ async def _check_node_manager_ready() -> bool:
 
 
 @app.get("/node-manager/status")
-async def get_instance_status():
+async def get_instance_status(relaxed: bool = False):
     """
     Check if all endpoints managed by this node manager are in normal status.
-    Returns True if all endpoints are normal, False if any endpoint is abnormal.
+
+    ``relaxed=true`` (used by the engine-relaunch flow) returns True when no
+    endpoint is ABNORMAL — a freshly relaunched engine reports INITIAL while
+    loading its model, which counts as recovering, not failed.
     """
     try:
-        is_normal = await _check_node_manager_ready()
+        if relaxed:
+            is_normal = await asyncio.to_thread(HeartbeatManager().check_all_endpoints_recovering)
+        else:
+            is_normal = await _check_node_manager_ready()
         return {"status": is_normal}
     except Exception as err:
         logger.error("Failed to check endpoints status: %s", err)
@@ -275,7 +499,11 @@ class NodeManagerAPI:
         """
         return wait_until_api_ready(timeout=timeout)
 
-    async def stop(self):
+    def stop(self):
+        # Synchronous on purpose: Application.stop_all_modules calls
+        # module.stop() without awaiting — an async stop would produce a
+        # coroutine-never-awaited warning on shutdown. The teardown itself
+        # is sync (stop_sync), so the async wrapper was redundant.
         self.stop_sync()
 
     def stop_sync(self):
@@ -310,7 +538,7 @@ class NodeManagerAPI:
 
             logger.info("Node Manager server started: https://%s", format_address(self.host, self.port))
         else:
-            logger.info("Node Manager server stated: http://%s", format_address(self.host, self.port))
+            logger.info("Node Manager server started: http://%s", format_address(self.host, self.port))
 
         self.server = uvicorn.Server(config)
         try:

@@ -28,14 +28,14 @@ mock_config.api_config = MagicMock()
 with patch('motor.config.node_manager.NodeManagerConfig.from_json', return_value=mock_config):
     from motor.common.resources.endpoint import Endpoint, EndpointStatus
     from motor.common.resources.http_msg_spec import StartCmdMsg
-    from motor.node_manager.core.engine_manager import EngineManager
+    from motor.node_manager.core.register_manager import RegisterManager
     from motor.node_manager.core.heartbeat_manager import HeartbeatManager
     from motor.config.node_manager import NodeManagerConfig
 
 
-def _clear_engine_manager_singleton() -> None:
-    if hasattr(EngineManager, "_instances") and EngineManager in EngineManager._instances:
-        del EngineManager._instances[EngineManager]
+def _clear_register_manager_singleton() -> None:
+    if hasattr(RegisterManager, "_instances") and RegisterManager in RegisterManager._instances:
+        del RegisterManager._instances[RegisterManager]
 
 
 class TestHeartBeatManager:
@@ -47,7 +47,7 @@ class TestHeartBeatManager:
         with (
             patch('motor.config.node_manager.safe_open') as mock_safe_open,
             patch('threading.Thread') as mock_thread_class,
-            patch('motor.node_manager.core.heartbeat_manager.EngineManager') as mock_engine_manager_cls,
+            patch('motor.node_manager.core.heartbeat_manager.RegisterManager') as mock_register_manager_cls,
             patch.dict(
                 'os.environ',
                 {
@@ -61,10 +61,10 @@ class TestHeartBeatManager:
             mock_safe_open.side_effect = create_config_mock(config_data)
             mock_thread = MagicMock()
             mock_thread_class.return_value = mock_thread
-            mock_engine_manager = MagicMock()
-            mock_engine_manager.is_engine_checkpoint_done.return_value = True
-            mock_engine_manager_cls.return_value = mock_engine_manager
-            _clear_engine_manager_singleton()
+            mock_register_manager = MagicMock()
+            mock_register_manager.is_engine_checkpoint_done.return_value = True
+            mock_register_manager_cls.return_value = mock_register_manager
+            _clear_register_manager_singleton()
             # clear HeartBeatManager instance (HeartbeatManager is still singleton)
             if hasattr(HeartbeatManager, '_instances') and HeartbeatManager in HeartbeatManager._instances:
                 try:
@@ -84,8 +84,8 @@ class TestHeartBeatManager:
     def _sample_endpoints_fixture(self):
         """return sample endpoints"""
         return [
-            Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL),
-            Endpoint(id=2, ip="192.168.1.2", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL),
+            Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL),
+            Endpoint(id=2, ip="192.168.1.2", business_port="8080", status=EndpointStatus.NORMAL),
         ]
 
     @pytest.fixture(name="sample_start_cmd_msg")
@@ -160,14 +160,13 @@ class TestHeartBeatManager:
 
         assert heart_beat_manager._endpoints_generation == before + 1
 
-    @patch('motor.node_manager.core.heartbeat_manager.Daemon')
+    @patch('motor.node_manager.core.daemon.Daemon')
     def test_engine_metrics_targets_exclude_headless(self, mock_daemon, heart_beat_manager):
-        routable = Endpoint(id=1, ip="10.0.0.1", business_port="8001", mgmt_port="9001")
+        routable = Endpoint(id=1, ip="10.0.0.1", business_port="8001")
         headless = Endpoint(
             id=2,
             ip="10.0.0.2",
             business_port="8002",
-            mgmt_port="9002",
             headless=True,
         )
         mock_daemon.return_value.get_engine_metrics_target.return_value = "https://10.0.0.1:8001/metrics"
@@ -179,7 +178,7 @@ class TestHeartBeatManager:
         assert targets == ["https://10.0.0.1:8001/metrics"]
         mock_daemon.return_value.get_engine_metrics_target.assert_called_once_with(routable)
 
-    @patch('motor.node_manager.core.heartbeat_manager.Daemon')
+    @patch('motor.node_manager.core.daemon.Daemon')
     def test_refresh_native_engine_status_success(self, mock_daemon, heart_beat_manager, sample_endpoints):
         """READY native runtimes map to normal endpoint status."""
         from motor.node_manager.core.services.native_engine.models import RuntimeState
@@ -195,8 +194,55 @@ class TestHeartBeatManager:
 
         assert heart_beat_manager._endpoints[0].status == EndpointStatus.NORMAL
         assert heart_beat_manager._endpoints[1].status == EndpointStatus.NORMAL
+        assert heart_beat_manager.is_within_grace_period() is False
 
-    @patch('motor.node_manager.core.heartbeat_manager.Daemon')
+    @patch('motor.node_manager.core.daemon.Daemon')
+    def test_refresh_native_engine_status_passes_instance_id(self, mock_daemon, heart_beat_manager, sample_endpoints):
+        """runtime refresh must pass the snapshotted instance_id down to the daemon."""
+        from motor.node_manager.core.services.native_engine.models import RuntimeState
+
+        mock_daemon.return_value.get_engine_runtime_state.return_value = RuntimeState.READY
+
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = sample_endpoints.copy()
+            heart_beat_manager._instance_id = 42
+
+        heart_beat_manager._refresh_native_engine_status()
+
+        calls = mock_daemon.return_value.get_engine_runtime_state.call_args_list
+        assert len(calls) == 2
+        for call in calls:
+            assert call.args[1] == 42
+
+    @patch('motor.node_manager.core.daemon.Daemon')
+    def test_refresh_native_engine_status_snapshots_instance_id_once(
+        self, mock_daemon, heart_beat_manager, sample_endpoints, sample_start_cmd_msg
+    ):
+        """instance_id is snapshotted under lock together with endpoints/generation."""
+        from motor.node_manager.core.services.native_engine.models import RuntimeState
+
+        mock_daemon.return_value.get_engine_runtime_state.return_value = RuntimeState.READY
+        endpoint = sample_endpoints[0]
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [endpoint]
+            heart_beat_manager._instance_id = 7
+
+        seen_instance_ids = []
+
+        def probe(*args, **kwargs):
+            seen_instance_ids.append(args[1])
+            heart_beat_manager.update_endpoint(sample_start_cmd_msg)
+            return RuntimeState.READY
+
+        mock_daemon.return_value.get_engine_runtime_state.side_effect = probe
+
+        heart_beat_manager._refresh_native_engine_status()
+
+        # The probe ran against the snapshotted instance_id=7 even though the
+        # mid-probe update_endpoint reset _instance_id to the start-cmd value.
+        assert seen_instance_ids == [7]
+
+    @patch('motor.node_manager.core.daemon.Daemon')
     def test_refresh_native_engine_status_keeps_initial_while_loading(self, mock_daemon, heart_beat_manager):
         from motor.node_manager.core.services.native_engine.models import RuntimeState
 
@@ -205,7 +251,6 @@ class TestHeartBeatManager:
             id=1,
             ip="192.168.1.1",
             business_port="8080",
-            mgmt_port="9090",
             status=EndpointStatus.INITIAL,
         )
         with heart_beat_manager._endpoint_lock:
@@ -215,7 +260,7 @@ class TestHeartBeatManager:
 
         assert heart_beat_manager._endpoints[0].status == EndpointStatus.INITIAL
 
-    @patch('motor.node_manager.core.heartbeat_manager.Daemon')
+    @patch('motor.node_manager.core.daemon.Daemon')
     def test_refresh_headless_process_liveness_reports_wait2start(self, mock_daemon, heart_beat_manager):
         from motor.node_manager.core.services.native_engine.models import RuntimeState
 
@@ -224,7 +269,6 @@ class TestHeartBeatManager:
             id=1,
             ip="192.168.1.2",
             business_port="8080",
-            mgmt_port="9090",
             status=EndpointStatus.INITIAL,
             headless=True,
         )
@@ -235,7 +279,7 @@ class TestHeartBeatManager:
 
         assert heart_beat_manager._endpoints[0].status == EndpointStatus.WAIT2START
 
-    @patch('motor.node_manager.core.heartbeat_manager.Daemon')
+    @patch('motor.node_manager.core.daemon.Daemon')
     def test_refresh_native_engine_status_discards_stale_probe_write_back(
         self, mock_daemon, heart_beat_manager, sample_start_cmd_msg
     ):
@@ -246,7 +290,6 @@ class TestHeartBeatManager:
             id=0,
             ip="10.0.0.28",
             business_port="8080",
-            mgmt_port="9090",
             status=EndpointStatus.NORMAL,
         )
 
@@ -288,7 +331,7 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
             ]
 
         mock_sleep.side_effect = mock_stop_sleep
@@ -320,7 +363,7 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()  # Ensure stop_event is not set initially
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
             ]
 
         mock_sleep.side_effect = mock_stop_sleep
@@ -420,34 +463,34 @@ class TestHeartBeatManager:
         heart_beat_manager.start()
         assert heart_beat_manager._thread_started is True
 
-    @patch('motor.node_manager.core.heartbeat_manager.EngineManager')
-    def test_reregister_success(self, mock_engine_manager_class, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.RegisterManager')
+    def test_reregister_success(self, mock_register_manager_class, heart_beat_manager):
         """test _reregister success"""
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.post_reregister_msg.return_value = True
-        mock_engine_manager_class.return_value = mock_engine_manager
+        mock_register_manager = MagicMock()
+        mock_register_manager.post_reregister_msg.return_value = True
+        mock_register_manager_class.return_value = mock_register_manager
 
         heart_beat_manager._reregister()
 
-        mock_engine_manager.post_reregister_msg.assert_called_once()
+        mock_register_manager.post_reregister_msg.assert_called_once()
 
-    @patch('motor.node_manager.core.heartbeat_manager.EngineManager')
-    def test_reregister_failure(self, mock_engine_manager_class, heart_beat_manager):
+    @patch('motor.node_manager.core.heartbeat_manager.RegisterManager')
+    def test_reregister_failure(self, mock_register_manager_class, heart_beat_manager):
         """test _reregister failure"""
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.post_reregister_msg.return_value = False
-        mock_engine_manager_class.return_value = mock_engine_manager
+        mock_register_manager = MagicMock()
+        mock_register_manager.post_reregister_msg.return_value = False
+        mock_register_manager_class.return_value = mock_register_manager
 
         heart_beat_manager._reregister()
 
-        mock_engine_manager.post_reregister_msg.assert_called_once()
+        mock_register_manager.post_reregister_msg.assert_called_once()
 
     @patch('motor.node_manager.core.heartbeat_manager.threading.Thread')
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
     @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    @patch('motor.node_manager.core.heartbeat_manager.EngineManager')
+    @patch('motor.node_manager.core.heartbeat_manager.RegisterManager')
     def test_reregister_triggered_on_503(
-        self, mock_engine_manager_class, mock_report_heartbeat, mock_sleep, mock_thread_class, heart_beat_manager
+        self, mock_register_manager_class, mock_report_heartbeat, mock_sleep, mock_thread_class, heart_beat_manager
     ):
         """test that reregister is triggered when 503 error occurs"""
         call_count = {"count": 0}
@@ -460,10 +503,10 @@ class TestHeartBeatManager:
         # Mock report_heartbeat to raise 503 error
         mock_report_heartbeat.side_effect = Exception("503 Service Unavailable")
 
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.is_engine_checkpoint_done.return_value = True
-        mock_engine_manager.post_reregister_msg.return_value = True
-        mock_engine_manager_class.return_value = mock_engine_manager
+        mock_register_manager = MagicMock()
+        mock_register_manager.is_engine_checkpoint_done.return_value = True
+        mock_register_manager.post_reregister_msg.return_value = True
+        mock_register_manager_class.return_value = mock_register_manager
 
         mock_reregister_thread = MagicMock()
         mock_thread_class.return_value = mock_reregister_thread
@@ -477,14 +520,14 @@ class TestHeartBeatManager:
 
         heart_beat_manager._report_heartbeat_loop()
 
-        # Verify that reregister was called (via EngineManager)
-        mock_engine_manager.post_reregister_msg.assert_called()
+        # Verify that reregister was called (via RegisterManager)
+        mock_register_manager.post_reregister_msg.assert_called()
 
     @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
     @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    @patch('motor.node_manager.core.heartbeat_manager.EngineManager')
+    @patch('motor.node_manager.core.heartbeat_manager.RegisterManager')
     def test_reregister_lock_thread_safety(
-        self, mock_engine_manager_class, mock_report_heartbeat, mock_sleep, heart_beat_manager
+        self, mock_register_manager_class, mock_report_heartbeat, mock_sleep, heart_beat_manager
     ):
         """test that _reregister_lock prevents concurrent reregister attempts"""
         call_count = {"count": 0}
@@ -494,11 +537,11 @@ class TestHeartBeatManager:
                 heart_beat_manager.stop_event.set()
             call_count["count"] += 1
 
-        # Mock EngineManager
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.is_engine_checkpoint_done.return_value = True
-        mock_engine_manager.post_reregister_msg.return_value = True
-        mock_engine_manager_class.return_value = mock_engine_manager
+        # Mock RegisterManager
+        mock_register_manager = MagicMock()
+        mock_register_manager.is_engine_checkpoint_done.return_value = True
+        mock_register_manager.post_reregister_msg.return_value = True
+        mock_register_manager_class.return_value = mock_register_manager
 
         # Mock report_heartbeat to raise 503 error
         mock_report_heartbeat.side_effect = Exception("503 Service Unavailable")
@@ -508,7 +551,7 @@ class TestHeartBeatManager:
         # pod_ip is already set during initialization
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
             ]
 
         mock_sleep.side_effect = mock_stop_sleep
@@ -531,224 +574,6 @@ class TestHeartBeatManager:
 
         assert heart_beat_manager.stop_event.is_set() is True
 
-    def test_initial_suicide_flag(self, heart_beat_manager):
-        """test that suicide flag is initially False"""
-        assert heart_beat_manager.should_suicide() is False
-        assert heart_beat_manager._consecutive_abnormal_count == 0
-
-    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    def test_consecutive_abnormal_heartbeat_counting(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
-        """test that consecutive abnormal heartbeats are counted correctly"""
-        call_count = {"count": 0}
-
-        def mock_stop_sleep(seconds):
-            call_count["count"] += 1
-            if call_count["count"] >= 6:  # Run 6 times to test 5 consecutive abnormal
-                heart_beat_manager.stop_event.set()
-
-        mock_report_heartbeat.return_value = None
-
-        # Set endpoint info with abnormal status
-        heart_beat_manager._job_name = "test_job"
-        heart_beat_manager._instance_id = 1
-        heart_beat_manager.stop_event.clear()
-
-        with heart_beat_manager._endpoint_lock:
-            heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
-            ]
-
-        mock_sleep.side_effect = mock_stop_sleep
-
-        # Run the heartbeat loop
-        heart_beat_manager._report_heartbeat_loop()
-
-        # After 5 consecutive abnormal heartbeats, suicide flag should be set
-        assert heart_beat_manager.should_suicide() is True
-        assert heart_beat_manager._consecutive_abnormal_count >= 5
-
-    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    def test_abnormal_count_reset_on_normal_status(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
-        """test that abnormal count resets when status returns to normal"""
-        call_count = {"count": 0}
-
-        def mock_stop_sleep(seconds):
-            call_count["count"] += 1
-            # Change status to normal after first iteration
-            if call_count["count"] == 1:
-                with heart_beat_manager._endpoint_lock:
-                    if heart_beat_manager._endpoints:
-                        heart_beat_manager._endpoints[0].status = EndpointStatus.NORMAL
-            if call_count["count"] >= 3:
-                heart_beat_manager.stop_event.set()
-
-        mock_report_heartbeat.return_value = None
-
-        heart_beat_manager._job_name = "test_job"
-        heart_beat_manager._instance_id = 1
-        heart_beat_manager.stop_event.clear()
-
-        # Start with abnormal status
-        with heart_beat_manager._endpoint_lock:
-            heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
-            ]
-
-        mock_sleep.side_effect = mock_stop_sleep
-
-        heart_beat_manager._report_heartbeat_loop()
-
-        # After status returns to normal, count should be reset
-        assert heart_beat_manager._consecutive_abnormal_count == 0
-        assert heart_beat_manager.should_suicide() is False
-
-    def test_update_endpoint_resets_abnormal_count(self, heart_beat_manager, sample_start_cmd_msg):
-        """test that updating endpoint resets abnormal count and suicide flag"""
-        # Set abnormal count and suicide flag first
-        with heart_beat_manager._abnormal_count_lock:
-            heart_beat_manager._consecutive_abnormal_count = 5
-        with heart_beat_manager._suicide_lock:
-            heart_beat_manager._should_suicide = True
-
-        # Update endpoint should reset both
-        heart_beat_manager.update_endpoint(sample_start_cmd_msg)
-
-        assert heart_beat_manager._consecutive_abnormal_count == 0
-        assert heart_beat_manager.should_suicide() is False
-
-    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    def test_suicide_flag_set_after_five_abnormal_heartbeats(
-        self, mock_report_heartbeat, mock_sleep, heart_beat_manager
-    ):
-        """test that suicide flag is set exactly after 5 consecutive abnormal heartbeats"""
-        call_count = {"count": 0}
-
-        def mock_stop_sleep(seconds):
-            call_count["count"] += 1
-            if call_count["count"] >= 5:
-                heart_beat_manager.stop_event.set()
-
-        mock_report_heartbeat.return_value = None
-
-        heart_beat_manager._job_name = "test_job"
-        heart_beat_manager._instance_id = 1
-        heart_beat_manager.stop_event.clear()
-
-        with heart_beat_manager._endpoint_lock:
-            heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
-            ]
-
-        mock_sleep.side_effect = mock_stop_sleep
-
-        # Initially suicide flag should be False
-        assert heart_beat_manager.should_suicide() is False
-
-        heart_beat_manager._report_heartbeat_loop()
-
-        # After 5 consecutive abnormal heartbeats, suicide flag should be True
-        assert heart_beat_manager.should_suicide() is True
-        assert heart_beat_manager._consecutive_abnormal_count == 5
-
-    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    def test_multiple_endpoints_abnormal_triggers_suicide(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
-        """test that if any endpoint is abnormal, it counts towards suicide"""
-        call_count = {"count": 0}
-
-        def mock_stop_sleep(seconds):
-            call_count["count"] += 1
-            if call_count["count"] >= 5:
-                heart_beat_manager.stop_event.set()
-
-        mock_report_heartbeat.return_value = None
-
-        heart_beat_manager._job_name = "test_job"
-        heart_beat_manager._instance_id = 1
-        heart_beat_manager.stop_event.clear()
-
-        # Set multiple endpoints, one abnormal
-        with heart_beat_manager._endpoint_lock:
-            heart_beat_manager._endpoints = [
-                Endpoint(
-                    id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL
-                ),
-                Endpoint(id=2, ip="192.168.1.2", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL),
-            ]
-
-        mock_sleep.side_effect = mock_stop_sleep
-
-        heart_beat_manager._report_heartbeat_loop()
-
-        # Even with one endpoint abnormal, suicide should be triggered after 5 consecutive reports
-        assert heart_beat_manager.should_suicide() is True
-
-    @patch('motor.node_manager.core.heartbeat_manager.time.sleep')
-    @patch('motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat')
-    def test_abnormal_triggers_suicide_when_report_fails(self, mock_report_heartbeat, mock_sleep, heart_beat_manager):
-        """endpoint stays abnormal but Controller heartbeat report fails should still trigger suicide"""
-        call_count = {"count": 0}
-
-        def mock_stop_sleep(seconds):
-            call_count["count"] += 1
-            if call_count["count"] >= 5:
-                heart_beat_manager.stop_event.set()
-
-        mock_report_heartbeat.side_effect = Exception("Connection refused")
-
-        heart_beat_manager._job_name = "test_job"
-        heart_beat_manager._instance_id = 1
-        heart_beat_manager.stop_event.clear()
-
-        with heart_beat_manager._endpoint_lock:
-            heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.ABNORMAL)
-            ]
-
-        mock_sleep.side_effect = mock_stop_sleep
-
-        heart_beat_manager._report_heartbeat_loop()
-
-        assert heart_beat_manager.should_suicide() is True
-        assert heart_beat_manager._consecutive_abnormal_count == 5
-
-    @patch('motor.node_manager.core.heartbeat_manager.threading.Thread')
-    def test_should_suicide_thread_safety(self, mock_thread_class, heart_beat_manager):
-        """test that should_suicide method is thread-safe"""
-
-        # Set suicide flag
-        with heart_beat_manager._suicide_lock:
-            heart_beat_manager._should_suicide = True
-
-        # Verify flag is set
-        assert heart_beat_manager.should_suicide() is True
-
-        # Test that the lock protects the flag correctly
-        # We'll test by calling should_suicide multiple times and verifying consistency
-        results = []
-        for _ in range(10):
-            results.append(heart_beat_manager.should_suicide())
-
-        # All calls should get the same result (True)
-        assert len(results) == 10
-        assert all(results), f"All results should be True, got {results}"
-
-        # Test concurrent access simulation by checking lock behavior
-        # Reset flag and test again
-        with heart_beat_manager._suicide_lock:
-            heart_beat_manager._should_suicide = False
-
-        results2 = []
-        for _ in range(10):
-            results2.append(heart_beat_manager.should_suicide())
-
-        # All calls should get False now
-        assert len(results2) == 10
-        assert all(r is False for r in results2), f"All results should be False, got {results2}"
-
     def test_is_started_after_restore_defaults_false(self, heart_beat_manager):
         assert heart_beat_manager.is_started_after_restore() is False
 
@@ -756,37 +581,37 @@ class TestHeartBeatManager:
         heart_beat_manager.set_started_after_restore(True)
         assert heart_beat_manager.is_started_after_restore() is True
 
-    @patch("motor.node_manager.core.heartbeat_manager.EngineManager")
-    def test_register_after_restore_success(self, mock_engine_manager_class, heart_beat_manager):
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.post_register_msg.return_value = True
-        mock_engine_manager_class.return_value = mock_engine_manager
+    @patch("motor.node_manager.core.heartbeat_manager.RegisterManager")
+    def test_register_after_restore_success(self, mock_register_manager_class, heart_beat_manager):
+        mock_register_manager = MagicMock()
+        mock_register_manager.post_register_msg.return_value = True
+        mock_register_manager_class.return_value = mock_register_manager
 
         heart_beat_manager._register_after_restore()
 
-        mock_engine_manager.register_prepare_after_restore.assert_called_once()
-        mock_engine_manager.post_register_msg.assert_called_once()
+        mock_register_manager.register_prepare_after_restore.assert_called_once()
+        mock_register_manager.post_register_msg.assert_called_once()
         assert heart_beat_manager._is_registered_after_restore is True
 
-    @patch("motor.node_manager.core.heartbeat_manager.EngineManager")
-    def test_register_after_restore_prepare_failure(self, mock_engine_manager_class, heart_beat_manager):
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.register_prepare_after_restore.side_effect = RuntimeError("metadata missing")
-        mock_engine_manager_class.return_value = mock_engine_manager
+    @patch("motor.node_manager.core.heartbeat_manager.RegisterManager")
+    def test_register_after_restore_prepare_failure(self, mock_register_manager_class, heart_beat_manager):
+        mock_register_manager = MagicMock()
+        mock_register_manager.register_prepare_after_restore.side_effect = RuntimeError("metadata missing")
+        mock_register_manager_class.return_value = mock_register_manager
 
         heart_beat_manager._register_after_restore()
 
-        mock_engine_manager.post_register_msg.assert_not_called()
+        mock_register_manager.post_register_msg.assert_not_called()
         assert heart_beat_manager._is_registered_after_restore is False
         assert heart_beat_manager._register_after_restore_retry_count == 1
 
     @patch("motor.node_manager.core.heartbeat_manager.is_restored_from_host_side_snapshot", return_value=True)
     @patch("motor.node_manager.core.heartbeat_manager.time.sleep")
     @patch("motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat")
-    @patch("motor.node_manager.core.heartbeat_manager.EngineManager")
+    @patch("motor.node_manager.core.heartbeat_manager.RegisterManager")
     def test_report_heartbeat_loop_registers_before_reporting(
         self,
-        mock_engine_manager_class,
+        mock_register_manager_class,
         mock_report_heartbeat,
         mock_sleep,
         _mock_restored,
@@ -800,11 +625,11 @@ class TestHeartBeatManager:
             if call_count["count"] >= 2:
                 heart_beat_manager.stop_event.set()
 
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.is_engine_checkpoint_done.return_value = True
-        mock_engine_manager.register_prepare_after_restore.return_value = None
-        mock_engine_manager.post_register_msg.return_value = True
-        mock_engine_manager_class.return_value = mock_engine_manager
+        mock_register_manager = MagicMock()
+        mock_register_manager.is_engine_checkpoint_done.return_value = True
+        mock_register_manager.register_prepare_after_restore.return_value = None
+        mock_register_manager.post_register_msg.return_value = True
+        mock_register_manager_class.return_value = mock_register_manager
         mock_report_heartbeat.return_value = None
         mock_sleep.side_effect = mock_stop_sleep
 
@@ -813,17 +638,17 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
             ]
 
         heart_beat_manager._report_heartbeat_loop()
 
-        mock_engine_manager.register_prepare_after_restore.assert_called_once()
-        mock_engine_manager.post_register_msg.assert_called_once()
+        mock_register_manager.register_prepare_after_restore.assert_called_once()
+        mock_register_manager.post_register_msg.assert_called_once()
         mock_report_heartbeat.assert_called_once()
 
     @patch("motor.node_manager.core.heartbeat_manager.is_restored_from_host_side_snapshot", return_value=True)
-    @patch("motor.node_manager.core.heartbeat_manager.Daemon")
+    @patch('motor.node_manager.core.daemon.Daemon')
     def test_refresh_native_engine_status_keeps_status_before_start_after_restore(
         self, mock_daemon, _mock_restored, heart_beat_manager, sample_endpoints
     ):
@@ -843,9 +668,9 @@ class TestHeartBeatManager:
     @patch("motor.node_manager.core.heartbeat_manager.is_restored_from_host_side_snapshot", return_value=False)
     @patch("motor.node_manager.core.heartbeat_manager.time.sleep")
     @patch("motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat")
-    @patch("motor.node_manager.core.heartbeat_manager.EngineManager")
+    @patch("motor.node_manager.core.heartbeat_manager.RegisterManager")
     def test_report_heartbeat_skipped_until_checkpoint_done(
-        self, mock_engine_manager_class, mock_report_heartbeat, mock_sleep, _mock_restored, heart_beat_manager
+        self, mock_register_manager_class, mock_report_heartbeat, mock_sleep, _mock_restored, heart_beat_manager
     ):
         call_count = {"count": 0}
 
@@ -854,9 +679,9 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
 
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.is_engine_checkpoint_done.return_value = False
-        mock_engine_manager_class.return_value = mock_engine_manager
+        mock_register_manager = MagicMock()
+        mock_register_manager.is_engine_checkpoint_done.return_value = False
+        mock_register_manager_class.return_value = mock_register_manager
         mock_sleep.side_effect = mock_stop_sleep
 
         heart_beat_manager._job_name = "test_job"
@@ -864,20 +689,20 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
             ]
 
         heart_beat_manager._report_heartbeat_loop()
 
         mock_report_heartbeat.assert_not_called()
-        mock_engine_manager.is_engine_checkpoint_done.assert_called()
+        mock_register_manager.is_engine_checkpoint_done.assert_called()
 
     @patch("motor.node_manager.core.heartbeat_manager.is_restored_from_host_side_snapshot", return_value=False)
     @patch("motor.node_manager.core.heartbeat_manager.time.sleep")
     @patch("motor.node_manager.core.heartbeat_manager.ControllerApiClient.report_heartbeat")
-    @patch("motor.node_manager.core.heartbeat_manager.EngineManager")
+    @patch("motor.node_manager.core.heartbeat_manager.RegisterManager")
     def test_report_heartbeat_resumes_after_checkpoint_done(
-        self, mock_engine_manager_class, mock_report_heartbeat, mock_sleep, _mock_restored, heart_beat_manager
+        self, mock_register_manager_class, mock_report_heartbeat, mock_sleep, _mock_restored, heart_beat_manager
     ):
         call_count = {"count": 0}
 
@@ -886,9 +711,9 @@ class TestHeartBeatManager:
             if call_count["count"] >= 1:
                 heart_beat_manager.stop_event.set()
 
-        mock_engine_manager = MagicMock()
-        mock_engine_manager.is_engine_checkpoint_done.return_value = True
-        mock_engine_manager_class.return_value = mock_engine_manager
+        mock_register_manager = MagicMock()
+        mock_register_manager.is_engine_checkpoint_done.return_value = True
+        mock_register_manager_class.return_value = mock_register_manager
         mock_report_heartbeat.return_value = None
         mock_sleep.side_effect = mock_stop_sleep
 
@@ -897,9 +722,54 @@ class TestHeartBeatManager:
         heart_beat_manager.stop_event.clear()
         with heart_beat_manager._endpoint_lock:
             heart_beat_manager._endpoints = [
-                Endpoint(id=1, ip="192.168.1.1", business_port="8080", mgmt_port="9090", status=EndpointStatus.NORMAL)
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
             ]
 
         heart_beat_manager._report_heartbeat_loop()
 
         mock_report_heartbeat.assert_called_once()
+
+    # -- endpoint-state facts (consumed by the Daemon's suicide arbitration) ----
+
+    def test_has_abnormal_endpoints_true(self, heart_beat_manager):
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.ABNORMAL)
+            ]
+        assert heart_beat_manager.has_abnormal_endpoints() is True
+
+    def test_has_abnormal_endpoints_false(self, heart_beat_manager):
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.NORMAL)
+            ]
+        assert heart_beat_manager.has_abnormal_endpoints() is False
+
+    def test_retired_endpoint_is_excluded_from_suicide_facts(self, heart_beat_manager):
+        with heart_beat_manager._endpoint_lock:
+            heart_beat_manager._endpoints = [
+                Endpoint(id=1, ip="192.168.1.1", business_port="8080", status=EndpointStatus.ABNORMAL),
+                Endpoint(id=2, ip="192.168.1.1", business_port="8082", status=EndpointStatus.NORMAL),
+            ]
+
+        heart_beat_manager.retire_endpoints([1])
+
+        assert heart_beat_manager.has_abnormal_endpoints() is False
+        assert heart_beat_manager.abnormal_endpoint_ids() == []
+        assert heart_beat_manager.normal_endpoint_ids() == [2]
+        assert [endpoint.id for endpoint in heart_beat_manager.get_active_endpoints()] == [2]
+        assert heart_beat_manager.check_all_endpoints_normal() is True
+
+        heart_beat_manager.retire_endpoints([2])
+        assert heart_beat_manager.check_all_endpoints_normal() is True
+
+    def test_endpoints_generation_increments_on_update(self, heart_beat_manager, sample_start_cmd_msg):
+        gen_before = heart_beat_manager.endpoints_generation()
+        heart_beat_manager.update_endpoint(sample_start_cmd_msg)
+        assert heart_beat_manager.endpoints_generation() == gen_before + 1
+
+    def test_grace_period_state(self, heart_beat_manager):
+        heart_beat_manager._is_within_grace_period = True
+        assert heart_beat_manager.is_within_grace_period() is True
+        heart_beat_manager._is_within_grace_period = False
+        assert heart_beat_manager.is_within_grace_period() is False

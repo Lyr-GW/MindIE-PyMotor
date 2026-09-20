@@ -15,13 +15,14 @@ from enum import Enum
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from motor.common.resources.instance import ParallelConfig, PDRole
+from motor.common.resources.instance import FtCapabilitySnapshot, ParallelConfig, PDRole
 from motor.common.resources.dispatch import (
     DISPATCH_PROFILE_KEY,
     DispatchPlan,
     DispatchProfile,
     classify_vllm_dispatch_profile,
     dispatch_capabilities_for_profile,
+    supports_vllm_decode_colocation,
 )
 from motor.config.resolver import ConfigResolver
 from motor.config.tls_config import TLSConfig
@@ -55,6 +56,9 @@ MOTOR_ENGINE_PREFILL_CONFIG_KEY = "motor_engine_prefill_config"
 MOTOR_ENGINE_DECODE_CONFIG_KEY = "motor_engine_decode_config"
 MOTOR_ENGINE_UNION_CONFIG_KEY = "motor_engine_union_config"
 MOTOR_CONTAINER_SNAPSHOT_CONFIG_KEY = "motor_container_snapshot_config"
+MOTOR_CONTROLLER_CONFIG_KEY = "motor_controller_config"
+FAULT_TOLERANCE_CONFIG_KEY = "fault_tolerance_config"
+VLLM_STARTUP_ACCELERATION_CONFIG_KEY = "vllm_startup_acceleration_config"
 ENGINE_CONFIG_KEY = "engine_config"
 KV_TRANSFER_CONFIG_KEY = "kv_transfer_config"
 KV_CONNECTOR_KEY = "kv_connector"
@@ -86,21 +90,14 @@ logger = get_logger(__name__)
 class HardwareType(str, Enum):
     TYPE_800I_A2 = "800I-A2"
     TYPE_800I_A3 = "800I-A3"
-    # A5 系列
-    TYPE_350_ATLAS_8 = "350-Atlas-8"
-    TYPE_350_ATLAS_16 = "350-Atlas-16"
-    TYPE_350_ATLAS_4P_8 = "350-Atlas-4p-8"
-    TYPE_350_ATLAS_4P_16 = "350-Atlas-4p-16"
-    TYPE_850_ATLAS_8P_8 = "850-Atlas-8p-8"
-    TYPE_850_SUPERPOD_ATLAS_8 = "850-SuperPod-Atlas-8"
-    TYPE_950_SUPERPOD_ATLAS_8 = "950-SuperPod-Atlas-8"
+    TYPE_ASCEND950 = "Ascend950"
 
     def __repr__(self) -> str:
         return str.__repr__(self.value)
 
     @classmethod
     def is_a5(cls, hardware_type: str) -> bool:
-        return hardware_type in {member.value for member in cls if member not in (cls.TYPE_800I_A2, cls.TYPE_800I_A3)}
+        return hardware_type == cls.TYPE_ASCEND950.value
 
 
 @dataclass
@@ -113,6 +110,7 @@ class BasicConfig:
     model_name: str = ""
     engine_type: str | None = None
     dispatch_capabilities: list[str] = field(default_factory=list)
+    ft_capability: FtCapabilitySnapshot = field(default_factory=FtCapabilitySnapshot)
     hardware_type: HardwareType = HardwareType.TYPE_800I_A3
 
     # Heartbeat sending configuration
@@ -149,12 +147,11 @@ class APIConfig:
 
 @dataclass
 class EndpointConfig:
-    # EngineServer's number
+    # Native engine endpoint count
     endpoint_num: int = 0
 
-    # EngineServer's Port configuration
+    # Native engine endpoint port configuration
     base_port: int = 10000
-    mgmt_ports: list[str] = field(default_factory=list)
     service_ports: list[str] = field(default_factory=list)
     bootstrap_port: int | None = None
 
@@ -198,8 +195,8 @@ class SingleContainerNodemanagerConfig:
             config.dp_rpc_port = int(union_parallel_config["dp_rpc_port"]) + index
             return config
 
-        p_instances_num = user_config_data['motor_deploy_config']['p_instances_num']
-        d_instances_num = user_config_data['motor_deploy_config']['d_instances_num']
+        p_instances_num = user_config_data["motor_deploy_config"]["p_instances_num"]
+        d_instances_num = user_config_data["motor_deploy_config"]["d_instances_num"]
         encode_section = user_config_data.get(MOTOR_ENGINE_ENCODE_CONFIG_KEY, {})
         prefill_section = user_config_data[MOTOR_ENGINE_PREFILL_CONFIG_KEY]
         decode_section = user_config_data[MOTOR_ENGINE_DECODE_CONFIG_KEY]
@@ -228,7 +225,7 @@ class SingleContainerNodemanagerConfig:
         lookup_rpc_port_offset = 0
         dp_rpc_port_offset = 0
 
-        if Env.role == 'prefill':
+        if Env.role == "prefill":
             config.node_manager_port_offset = index
             config.base_port_offset = index * d_dp_size * 2
             config.device_offset = index * p_world_size
@@ -236,7 +233,7 @@ class SingleContainerNodemanagerConfig:
             kv_port_offset = config.device_offset
             lookup_rpc_port_offset = index
             dp_rpc_port_offset = index
-        elif Env.role == 'decode':
+        elif Env.role == "decode":
             config.node_manager_port_offset = d_node_manager_port_offset
             config.base_port_offset = d_base_port_offset
             config.device_offset = d_device_offset
@@ -244,7 +241,7 @@ class SingleContainerNodemanagerConfig:
             kv_port_offset = config.device_offset
             lookup_rpc_port_offset = p_instances_num + index
             dp_rpc_port_offset = p_instances_num + index
-        elif Env.role == 'encode':
+        elif Env.role == "encode":
             config.node_manager_port_offset = e_node_manager_port_offset
             config.base_port_offset = e_base_port_offset
             config.device_offset = e_device_offset
@@ -290,12 +287,35 @@ class NodeManagerFaultToleranceConfig:
     """Fault tolerance configuration for NodeManager"""
 
     enable_fault_tolerance: bool = False
-    poll_interval_sec: float = 5.0
-    #: Polling interval for engine FT status (vLLM /fault_tolerance/status).
-    poll_timeout_sec: float = 5.0
+    # Internal execution gate derived from the Controller-level switches in
+    # the shared user_config. It is not a NodeManager user-facing switch.
+    enable_dp_scale_down_proxy: bool = False
+    #: Polling interval for engine FT status (vLLM /v1/fault_tolerance/status).
+    poll_interval_sec: float = 1.0
     #: HTTP timeout for a single status poll.
+    poll_timeout_sec: float = 5.0
+    # Consecutive transport failures must reach this threshold before the
+    # runtime engine is reported DEAD.
     max_poll_failures: int = 3
-    #: Consecutive poll failures before the engine is reported as dead.
+    #: In-place engine relaunch (container keeps running). Mirrors the
+    #: Controller-side switch of the same name — the NodeManager holds its
+    #: own copy because the two run in separate processes with separate
+    #: configs. Disabling it restores the legacy behavior: a dead engine is
+    #: reported but the suicide arbitration is not frozen, so the pod
+    #: self-terminates (k8s restarts the container) instead.
+    enable_engine_relaunch: bool = True
+    #: Suicide-freeze window after a successful death report while waiting
+    #: for the Controller to dispatch the relaunch. Must cover the worst-case
+    #: dispatch latency: death report (~15s) + strategy-center cycle
+    #: (strategy_center_check_interval, default 10s) + serial probe/dispatch
+    #: per NodeManager (retries + backoff). A false alarm unfreezes when the
+    #: deadline expires.
+    engine_restart_wait_timeout_sec: float = 180.0
+    #: Suicide-freeze window while engines are being re-pulled. Must exceed
+    #: the Controller relaunch completion timeout (600s) plus margin; the
+    #: deadline (not a boolean) keeps the container-restart fallback alive
+    #: even when the abort message is lost.
+    engine_restart_freeze_sec: float = 720.0
 
 
 @dataclass
@@ -319,6 +339,33 @@ class KVCacheStoreConfig:
     # "standalone" / "inprocess" — the only user-facing config key for memcache.
     local_config_path: str = "/usr/local/Ascend/pyMotor/conf/mmc-local-inprocess.conf"
 
+    # --- Mooncake ---
+    store_mode: str = ""
+    # "" / "embedded" (default): engines contribute memory themselves.
+    # "standalone": the daemon runs a dedicated store process; engines are pure requesters.
+    global_segment_size: str = ""
+    # Pool memory contributed by this pod, e.g. "600GB"; consumed by the engine
+    # connector in embedded mode, by the store process in standalone mode.
+    local_buffer_size: str = ""
+    # Engine-side staging buffer in standalone mode (default "1GB"); the store always uses 0.
+    store_http_port: int = 0
+    # REST port of mooncake_store_service (its --port arg). 0 = ephemeral port:
+    # the API has no consumer in Motor deployments and only needs to bind
+    # successfully, so let the kernel pick a free port to avoid conflicts
+    # (hostNetwork pods on the same node share the host port space).
+    metadata_server: str = "P2PHANDSHAKE"
+    protocol: str = "ascend"
+    device_name: str = ""
+
+
+@dataclass
+class VLLMStartupAccelerationConfig:
+    """vLLM startup acceleration settings owned by NodeManager."""
+
+    enable_startup_plan: bool = False
+    enable_graph_reuse: bool = False
+    cache_root: str = ""
+
 
 @dataclass
 class NodeManagerConfig:
@@ -335,6 +382,9 @@ class NodeManagerConfig:
     fault_tolerance_config: NodeManagerFaultToleranceConfig = field(default_factory=NodeManagerFaultToleranceConfig)
     port_allocator_config: PortAllocatorConfig = field(default_factory=PortAllocatorConfig)
     kv_cache_store_config: KVCacheStoreConfig = field(default_factory=KVCacheStoreConfig)
+    vllm_startup_acceleration_config: VLLMStartupAccelerationConfig = field(
+        default_factory=VLLMStartupAccelerationConfig
+    )
 
     # Internal fields
     config_path: str | None = field(default=None, init=False)
@@ -386,7 +436,10 @@ class NodeManagerConfig:
             cls._update_from_config_data(config, config_data)
             cls._set_native_bootstrap_port(config, raw)
         else:
-            logger.warning("Config file does not exist, using default configuration: %s", config_path_obj)
+            logger.warning(
+                "Config file does not exist, using default configuration: %s",
+                config_path_obj,
+            )
 
         cls._set_device_count_from_config(config, raw)
         cls._parse_kv_cache_store_config(config, raw)
@@ -454,6 +507,24 @@ class NodeManagerConfig:
         else:
             config_data = {}
 
+        # Controller is the single source of truth for the Motor feature
+        # switch. NodeManager derives a private proxy gate from the same
+        # user_config so customers never configure a second P/D switch.
+        controller_config = user_cfg.get(MOTOR_CONTROLLER_CONFIG_KEY, {})
+        if not isinstance(controller_config, dict):
+            controller_config = {}
+        controller_ft = controller_config.get(FAULT_TOLERANCE_CONFIG_KEY, {})
+        if not isinstance(controller_ft, dict):
+            controller_ft = {}
+        proxy_enabled = controller_ft.get("enable_fault_tolerance", True) in (True, 1) and controller_ft.get(
+            "enable_dp_scale_down", False
+        ) in (True, 1)
+        node_manager_ft = config_data.get(FAULT_TOLERANCE_CONFIG_KEY)
+        if not isinstance(node_manager_ft, dict):
+            node_manager_ft = {}
+            config_data[FAULT_TOLERANCE_CONFIG_KEY] = node_manager_ft
+        node_manager_ft["enable_dp_scale_down_proxy"] = proxy_enabled
+
         if BASIC_CONFIG_KEY not in config_data:
             config_data[BASIC_CONFIG_KEY] = {}
 
@@ -461,6 +532,7 @@ class NodeManagerConfig:
         config_data[BASIC_CONFIG_KEY][MODEL_NAME_KEY] = resolver.get_model_name("")
         config_data[BASIC_CONFIG_KEY][ENGINE_TYPE_KEY] = engine_config.get(ENGINE_TYPE_KEY)
         config_data[BASIC_CONFIG_KEY][DISPATCH_CAPABILITIES_KEY] = cls._infer_dispatch_capabilities(engine_config)
+        config_data[BASIC_CONFIG_KEY]["ft_capability"] = cls._infer_ft_capability(engine_config).model_dump()
         config_data[BASIC_CONFIG_KEY][HARDWARE_TYPE_KEY] = user_cfg["motor_deploy_config"][HARDWARE_TYPE_KEY]
 
         # Read nnodes from engine_config for cross-node PCP support
@@ -472,6 +544,16 @@ class NodeManagerConfig:
 
         if Env.role in ("encode", "prefill", "decode", "union", "both"):
             config_data[BASIC_CONFIG_KEY]["parallel_config"] = resolver.get_parallel_config()
+            # Keep the DP store port in NodeManager's local configuration.  The
+            # Controller deliberately does not need to know this engine detail.
+            dp_port = engine_cfg.get(
+                "data_parallel_master_port",
+                engine_cfg.get("data-parallel-master-port", 29500),
+            )
+            try:
+                config_data[BASIC_CONFIG_KEY]["parallel_config"]["dp_master_port"] = int(dp_port)
+            except (TypeError, ValueError):
+                raise ValueError("data_parallel_master_port must be an integer")
             config_data[BASIC_CONFIG_KEY][ENABLE_MULTI_ENDPOINTS_KEY] = resolver.get_enable_multi_endpoints()
 
         # Adjust local_world_size for cross-node PCP/PP. Only PCP and PP ranks can span
@@ -565,9 +647,9 @@ class NodeManagerConfig:
                 native_engine_config,
                 explicit_profile=engine_config.get(DISPATCH_PROFILE_KEY),
             )
-            # The native vLLM runtime implements only the explicit handoff contract.
-            # Do not advertise trigger/concurrent support that runtime validation rejects.
-            capabilities = dispatch_capabilities_for_profile(profile) if profile == DispatchProfile.HANDOFF else []
+            capabilities = dispatch_capabilities_for_profile(profile)
+            if supports_vllm_decode_colocation(native_engine_config):
+                capabilities.append(DispatchPlan.DECODE_COLOCATION.value)
             if not capabilities and profile == DispatchProfile.UNKNOWN:
                 logger.warning(
                     "Unable to infer vLLM dispatch capability from kv_transfer_config. "
@@ -575,6 +657,63 @@ class NodeManagerConfig:
                 )
             return capabilities
         return []
+
+    @staticmethod
+    def _infer_ft_capability(engine_section: dict[str, Any]) -> FtCapabilitySnapshot:
+        """Normalize static control-plane gates; the engine owns actual expert placement."""
+        engine_type = str(engine_section.get(ENGINE_TYPE_KEY, "")).strip().lower()
+        native = engine_section.get(ENGINE_CONFIG_KEY, {})
+        if not isinstance(native, dict):
+            native = {}
+
+        enabled = any(native.get(key) in (True, 1) for key in ("enable_fault_tolerance", "enable-fault-tolerance"))
+        external_lb = any(
+            native.get(key) in (True, 1) for key in ("data_parallel_external_lb", "data-parallel-external-lb")
+        )
+        ft_config = native.get("fault_tolerance_config", native.get("fault-tolerance-config", {}))
+        if isinstance(ft_config, str):
+            try:
+                ft_config = json.loads(ft_config)
+            except json.JSONDecodeError:
+                ft_config = {}
+        auto_recovery = isinstance(ft_config, dict) and ft_config.get(
+            "auto_recovery", ft_config.get("auto-recovery", False)
+        ) in (True, 1)
+        additional_config = native.get("additional_config", native.get("additional-config", {}))
+        if isinstance(additional_config, str):
+            try:
+                additional_config = json.loads(additional_config)
+            except json.JSONDecodeError:
+                additional_config = {}
+        fused_mc2_enabled = isinstance(additional_config, dict) and additional_config.get(
+            "enable_fused_mc2", additional_config.get("enable-fused-mc2", 0)
+        ) in (True, 1)
+        eplb_enabled = any(native.get(key) in (True, 1) for key in ("enable_eplb", "enable-eplb"))
+        eplb_config = native.get("eplb_config", native.get("eplb-config", {}))
+        if isinstance(eplb_config, str):
+            try:
+                eplb_config = json.loads(eplb_config)
+            except json.JSONDecodeError:
+                eplb_config = {}
+        raw_redundancy = (
+            eplb_config.get("num_redundant_experts", eplb_config.get("num-redundant-experts", 0))
+            if isinstance(eplb_config, dict)
+            else 0
+        )
+        try:
+            num_redundant_experts = int(raw_redundancy)
+        except (TypeError, ValueError):
+            num_redundant_experts = 0
+        num_redundant_experts = max(0, num_redundant_experts)
+        return FtCapabilitySnapshot(
+            enabled=enabled,
+            scale_down_supported=engine_type == ENGINE_TYPE_VLLM and enabled,
+            external_lb=external_lb,
+            auto_recovery=auto_recovery,
+            fused_mc2_enabled=fused_mc2_enabled,
+            eplb_enabled=eplb_enabled,
+            num_redundant_experts=num_redundant_experts,
+        )
 
     @classmethod
     def _update_from_config_data(cls, config: "NodeManagerConfig", cfg: dict[str, Any]):
@@ -603,6 +742,12 @@ class NodeManagerConfig:
         if "port_allocator_config" in cfg:
             update_config_from_dict(config.port_allocator_config, cfg["port_allocator_config"])
 
+        if VLLM_STARTUP_ACCELERATION_CONFIG_KEY in cfg:
+            startup_config = cfg[VLLM_STARTUP_ACCELERATION_CONFIG_KEY]
+            if not isinstance(startup_config, dict):
+                raise ValueError(f"{VLLM_STARTUP_ACCELERATION_CONFIG_KEY} must be an object")
+            update_config_from_dict(config.vllm_startup_acceleration_config, startup_config)
+
         if "endpoint_config" in cfg:
             update_config_from_dict(config.endpoint_config, cfg["endpoint_config"])
 
@@ -617,6 +762,9 @@ class NodeManagerConfig:
                 pc = basic_cfg["parallel_config"]
                 if isinstance(pc, dict):
                     config.basic_config.parallel_config = ParallelConfig(**pc)
+            ft_capability = basic_cfg.get("ft_capability")
+            if isinstance(ft_capability, dict):
+                config.basic_config.ft_capability = FtCapabilitySnapshot(**ft_capability)
 
         if config.single_container_config.single_container_flag:
             config.api_config.node_manager_port += config.single_container_config.node_manager_port_offset
@@ -645,7 +793,6 @@ class NodeManagerConfig:
                 config.basic_config.device_num = 0
                 config.endpoint_config.endpoint_num = 0
                 config.endpoint_config.service_ports = []
-                config.endpoint_config.mgmt_ports = []
                 return
 
             if config.single_container_config.single_container_flag:
@@ -660,7 +807,6 @@ class NodeManagerConfig:
             config.basic_config.device_num = 0
             config.endpoint_config.endpoint_num = 0
             config.endpoint_config.service_ports = []
-            config.endpoint_config.mgmt_ports = []
 
     @classmethod
     def _parse_kv_cache_store_config(cls, config: "NodeManagerConfig", raw: dict | None):
@@ -706,12 +852,35 @@ class NodeManagerConfig:
         if config_path:
             kcfg.local_config_path = config_path
 
+        # --- Mooncake ---
+        if kcfg.backend == "mooncake":
+            if "store_mode" in kv:
+                kcfg.store_mode = kv["store_mode"]
+            if kcfg.store_mode not in ("", "embedded", "standalone"):
+                logger.warning(
+                    "kv_cache_store_config.store_mode=%r is invalid, falling back to 'embedded'",
+                    kcfg.store_mode,
+                )
+                kcfg.store_mode = "embedded"
+            kcfg.global_segment_size = kv.get("global_segment_size", "") or kcfg.global_segment_size
+            kcfg.local_buffer_size = kv.get("local_buffer_size", "") or kcfg.local_buffer_size
+            kcfg.metadata_server = kv.get("metadata_server", "") or kcfg.metadata_server
+            kcfg.protocol = kv.get("protocol", "") or kcfg.protocol
+            if "device_name" in kv:
+                kcfg.device_name = kv["device_name"]
+            store_http_port = kv.get("store_http_port", 0)
+            if store_http_port:
+                kcfg.store_http_port = int(store_http_port)
+
     @classmethod
     def _set_device_count_for_single_container(cls, config: "NodeManagerConfig"):
         """Set device count for single container mode using parallel_config.world_size"""
         device_count = config.basic_config.parallel_config.world_size
         if device_count > 0:
-            logger.info("Single container mode: using world_size %d from parallel_config", device_count)
+            logger.info(
+                "Single container mode: using world_size %d from parallel_config",
+                device_count,
+            )
             config.basic_config.device_num = device_count
         else:
             logger.warning("Single container mode: world_size is 0, falling back to single_container_config.device_num")
@@ -763,14 +932,10 @@ class NodeManagerConfig:
         config.endpoint_config.service_ports = [
             str(config.endpoint_config.base_port + i * 2) for i in range(config.endpoint_config.endpoint_num)
         ]
-        config.endpoint_config.mgmt_ports = [
-            str(config.endpoint_config.base_port + i * 2 + 1) for i in range(config.endpoint_config.endpoint_num)
-        ]
 
         logger.info(
-            "Generate endpoint ports successfully: endpoint_num: %d, mgmt_ports: %s, service_ports: %s.",
+            "Generate endpoint ports successfully: endpoint_num: %d, service_ports: %s.",
             config.endpoint_config.endpoint_num,
-            config.endpoint_config.mgmt_ports,
             config.endpoint_config.service_ports,
         )
 
@@ -793,8 +958,24 @@ class NodeManagerConfig:
         if self.basic_config.heartbeat_interval_seconds <= 0:
             errors.append("heartbeat_interval_seconds must be greater than 0")
 
-        if self.snapshot_config.enable_snapshot:
-            errors.append("Native engine runtime does not support snapshot yet; enable_snapshot must be false")
+        if self.snapshot_config.enable_snapshot and self.basic_config.engine_type != ENGINE_TYPE_VLLM:
+            errors.append("Native Snapshot currently supports only the vllm engine type")
+
+        startup_config = self.vllm_startup_acceleration_config
+        if not isinstance(startup_config.enable_startup_plan, bool):
+            errors.append("enable_startup_plan must be a boolean")
+
+        if not isinstance(startup_config.enable_graph_reuse, bool):
+            errors.append("enable_graph_reuse must be a boolean")
+
+        if startup_config.enable_startup_plan or startup_config.enable_graph_reuse:
+            if self.basic_config.engine_type != ENGINE_TYPE_VLLM:
+                errors.append("vLLM startup acceleration supports only the vllm engine type")
+
+        if not isinstance(startup_config.cache_root, str):
+            errors.append("cache_root must be a string")
+        elif startup_config.cache_root and not Path(startup_config.cache_root).is_absolute():
+            errors.append("cache_root must be an absolute path when specified")
 
         # Validate logging configuration
         valid_log_levels = ["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -803,6 +984,14 @@ class NodeManagerConfig:
 
         if self.logging_config.log_max_line_length <= 0:
             errors.append("log_max_line_length must be greater than 0")
+
+        # Validate fault tolerance configuration
+        ft_config = self.fault_tolerance_config
+        if not (60 <= ft_config.engine_restart_wait_timeout_sec <= 3600):
+            errors.append("engine_restart_wait_timeout_sec must be in range 60-3600")
+
+        if not (120 <= ft_config.engine_restart_freeze_sec <= 7200):
+            errors.append("engine_restart_freeze_sec must be in range 120-7200")
 
         raise_if_config_errors(errors)
 
@@ -826,6 +1015,8 @@ class NodeManagerConfig:
         # Handle BaseModel objects that can't be serialized by asdict
         if hasattr(self.basic_config.parallel_config, "model_dump"):
             config_dict["basic_config"]["parallel_config"] = self.basic_config.parallel_config.model_dump()
+        if hasattr(self.basic_config.ft_capability, "model_dump"):
+            config_dict["basic_config"]["ft_capability"] = self.basic_config.ft_capability.model_dump()
 
         # Remove internal fields that shouldn't be in the output
         config_dict.pop("config_path", None)
@@ -871,7 +1062,8 @@ class NodeManagerConfig:
             "  Snapshot Configuration:\n"
             f"    ├─ Snapshot Enable:     "
             f"{'Enabled' if self.snapshot_config.enable_snapshot else 'Disabled'}\n"
-            f"    └─ Metadata Path:     {self.snapshot_config.snapshot_metadata_path or '(default)'}\n"
+            f"    └─ Metadata Path:     "
+            f"{(self.snapshot_config.snapshot_metadata_path or '(default)') if self.snapshot_config.enable_snapshot else '(disabled)'}\n"
             "\n"
             "  Parallel Configuration:\n"
             f"    ├─ TP Size:          TP={self.basic_config.parallel_config.tp_size}\n"
@@ -887,6 +1079,8 @@ class NodeManagerConfig:
             f"    ├─ Service:              {self.kv_cache_store_config.service or '(env: KVS_MASTER_SERVICE)'}\n"
             f"    ├─ Deploy Mode:          {self.kv_cache_store_config.mode}\n"
             f"    ├─ Runtime Mode:         {self.kv_cache_store_config.local_service_mode or '(default)'}\n"
+            f"    ├─ Store Mode:           {self.kv_cache_store_config.store_mode or '(embedded)'}\n"
+            f"    ├─ Global Segment Size:  {self.kv_cache_store_config.global_segment_size or '(default)'}\n"
             f"    ├─ Port:                 {self.kv_cache_store_config.port}\n"
             f"    └─ Local Config Path:    {self.kv_cache_store_config.local_config_path}\n"
             f"{'=' * 80}"

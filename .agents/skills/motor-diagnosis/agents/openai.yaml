@@ -1,0 +1,6 @@
+interface:
+  display_name: "Motor Diagnosis"
+  short_description: "Route Motor failures and unexplained performance misses"
+  default_prompt: "Use $motor-diagnosis to preserve evidence and route this Motor failure or unexplained performance-miss diagnosis request."
+policy:
+  allow_implicit_invocation: true

@@ -8,9 +8,9 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import argparse
-from abc import ABC, abstractmethod
-from typing import Protocol
+from collections.abc import Mapping
+from copy import deepcopy
+from typing import Any, Protocol
 
 from motor.common.logger import get_logger
 from motor.config.endpoint import EndpointConfig
@@ -22,36 +22,6 @@ from motor.node_manager.core.services.native_engine.models import (
 )
 
 logger = get_logger(__name__)
-
-supported_engine = ["vllm", "sglang"]
-supported_role = ["prefill", "decode", "union"]
-
-
-class IConfig(ABC):
-    @abstractmethod
-    def initialize(self):
-        pass
-
-    @abstractmethod
-    def validate(self):
-        pass
-
-    @abstractmethod
-    def convert(self):
-        pass
-
-    @abstractmethod
-    def get_args(self) -> argparse.Namespace | None:
-        pass
-
-    @abstractmethod
-    def get_endpoint_config(self) -> EndpointConfig | None:
-        pass
-
-    @abstractmethod
-    def get_cli_args(self) -> list[str]:
-        """Return the CLI argument list suitable for native engine launch (vllm serve / sglang.launch_server)."""
-        pass
 
 
 class NativeEngineBackend(Protocol):
@@ -80,12 +50,10 @@ class BaseNativeEngineBackend:
             )
         self._validate_endpoint_config(endpoint_config)
 
-        # Import lazily so ConfigFactory can type against IConfig without a module cycle.
+        # Import lazily to keep backend selection independent from engine-specific config modules.
         from motor.node_manager.core.services.native_engine.config_factory import ConfigFactory
 
         config = ConfigFactory(endpoint_config=endpoint_config).build_cli_config()
-        config.convert()
-        config.validate()
         health_config = endpoint_config.deploy_config.health_check_config
         return LaunchSpec(
             command=CommandSpec(
@@ -93,13 +61,14 @@ class BaseNativeEngineBackend:
                 env=context.environment,
             ),
             probe=ProbeSpec(
-                path="/health",
+                path="/snapshot/health" if endpoint_config.snapshot_metadata is not None else "/health",
                 timeout_seconds=float(health_config.health_collector_timeout),
                 startup_timeout_seconds=float(health_config.startup_timeout),
                 max_attempts=health_config.health_collector_timeout_retry_attempts,
                 tls_config=endpoint_config.deploy_config.infer_tls_config,
                 process_only=context.headless,
             ),
+            deploy_config=endpoint_config.deploy_config,
         )
 
     def _validate_context(self, context: LaunchContext) -> None:
@@ -120,13 +89,46 @@ def build_endpoint_config(context: LaunchContext, engine_type: str) -> EndpointC
         master_dp_ip=context.master_dp_ip,
         dp_rpc_port=context.dp_rpc_port,
         port=context.business_port,
-        mgmt_port=context.mgmt_port,
         instance_id=context.instance_id,
         dp_rank=context.dp_rank,
         node_rank=context.node_rank,
         config_path=context.config_path,
         d2d_peer_ips=",".join(context.d2d_peer_ips) if context.d2d_peer_ips else None,
+        snapshot_metadata=context.snapshot_metadata,
+        enable_auto_checkpoint=(context.snapshot_metadata is not None),
     )
     endpoint_config.validate()
     endpoint_config.load_deploy_config()
+    if context.engine_config_overrides:
+        _merge_engine_config_overrides(
+            endpoint_config.deploy_config.engine_config.configs,
+            context.engine_config_overrides,
+        )
     return endpoint_config
+
+
+def _merge_engine_config_overrides(
+    target: dict[str, Any],
+    overrides: Mapping[str, Any],
+    path: str = "engine_config",
+) -> None:
+    """Merge Motor-owned launch overrides without discarding unrelated native settings."""
+    for key, value in overrides.items():
+        key_path = "%s.%s" % (path, key)
+        if isinstance(value, Mapping):
+            current = target.get(key)
+            if current is None:
+                current = {}
+                target[key] = current
+            if not isinstance(current, dict):
+                raise ValueError("%s must be an object when a Motor-managed override is applied" % key_path)
+            _merge_engine_config_overrides(current, value, key_path)
+            continue
+        if key in target and target[key] != value:
+            logger.warning(
+                "Motor-managed engine configuration overrides %s=%r with %r",
+                key_path,
+                target[key],
+                value,
+            )
+        target[key] = deepcopy(value)

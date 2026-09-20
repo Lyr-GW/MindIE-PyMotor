@@ -1,4 +1,4 @@
-# MindIE PyMotor Cloud-Native Helm Chart
+# MindIE Motor Cloud-Native Helm Chart
 
 This chart packages `examples/cloud_native_deploy` as direct Helm operations. It creates the deployer ConfigMap, ServiceAccount, cluster-scoped RBAC, and one deploy/scale/cleanup Job selected by `operation`.
 
@@ -27,3 +27,7 @@ helm uninstall pymotor --namespace mindie
 ```
 
 The cleanup script deletes Deployments and Services in the namespace configured by `userConfig.motor_deploy_config.job_id`. Use a dedicated namespace for each deployment.
+
+## Autoscaling (HPA)
+
+Set the optional `scalingPolicy` value to render an HPA `scalingPolicy` field into the InferServiceSet engine roles (prefill/decode/union). It is injected into the deployer `user_config` as the `scaling_policy` section; each role entry accepts `min_replicas`, `max_replicas`, `metric` (defaults to `motor_prefill_utilization` / `motor_decode_utilization` by role), and `target` (default `0.8`). When left empty, no `scalingPolicy` is rendered and the deploy artifacts stay unchanged. See `values.yaml` for an example and `docs/zh/user_guide/features/auto_scaling.md` for the full HPA setup (External Metrics Adaptor, recommended metrics).

@@ -95,7 +95,7 @@ IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的
 
 - 非流式响应示例：
 
-  ```JSON
+  ```json
   {
     "id": "chatcmpl-xxx",
     "object": "chat.completion",
@@ -144,6 +144,108 @@ IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的
   | choices[].message.role | string | 角色，固定为`assistant`。 |
   | choices[].message.content | string | 生成内容。 |
   | choices[].finish_reason | string/null | 结束原因，如`stop`、`length`等。 |
+
+---
+
+## OpenAI Responses 接口
+
+**接口功能**
+
+提供与 OpenAI Responses API（`/v1/responses`）兼容的文本生成入口，适用于统一的响应式生成场景。
+
+**接口格式**
+
+请求类型：**POST**
+> URL：`http(s)://{IP}:{Port}/v1/responses`
+
+IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的ip端口与配置)
+
+**请求参数**
+
+| 参数名 | 类型 | 说明 |
+|---|---|---|
+| model | string | 必选；模型名称。 |
+| input | string/array | 必选；文本或 Responses input-item 数组，数组项类型以部署的后端引擎为准。 |
+| stream | boolean | 可选；是否流式输出，默认为false。<ul><li>true：流式;</li><li>false：非流式。</li></ul> |
+| instructions | string | 可选；模型需要遵循的系统指令。 |
+| max_output_tokens | integer | 可选；最多生成的输出 token 数。 |
+
+请求由 Coordinator 原样转发给原生支持 Responses API 的后端引擎。当前 Coordinator 额外支持从纯文本`input`、文本消息数组和`instructions`中提取调度信息，用于现有的 PD、负载及 KV 亲和性调度，不会把原始请求改写成 Chat Completions。非 message 类型的 input item 由后端引擎按其原生 Responses schema 校验。
+
+> **响应格式说明**：Coordinator 作为透明代理，响应内容由后端推理引擎直接返回，不做二次包装。
+> 实际返回格式和可选字段取决于部署环境中的推理引擎版本；上线前必须确认该引擎原生提供`POST /v1/responses`。
+> 本接口当前只新增“创建并推理”能力，不包含`GET /v1/responses/{id}`、`POST /v1/responses/{id}/cancel`和后台任务状态存储。
+> 纯文本请求可参与 KV 亲和性调度；图片、工具调用等非文本输入仍会原样转发，但不会使用本接口新增的 KV 前缀提取逻辑。
+> 下方响应样例为 OpenAI 标准格式，供参考。
+
+**使用样例**
+
+- 非流式使用样例：
+
+  ```bash
+  curl -X POST "http://{IP}:{Port}/v1/responses" \\
+    -H "Content-Type: application/json" \\
+    -H "Authorization: Bearer {API_KEY}" \\
+    -d '{
+      "model": "qwen3",
+      "input": "Hello there!"
+    }'
+  ```
+
+- 流式使用样例：
+
+  ```bash
+  curl -N -X POST "http://{IP}:{Port}/v1/responses" \\
+    -H "Content-Type: application/json" \\
+    -H "Authorization: Bearer {API_KEY}" \\
+    -d '{
+      "model": "qwen3",
+      "input": "Hello there!",
+      "stream": true
+    }'
+  ```
+
+**响应样例**
+
+```JSON
+{
+  "id": "resp_xxx",
+  "object": "response",
+  "created_at": 1765856304,
+  "status": "completed",
+  "model": "qwen3",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hello there!"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**输出说明**
+
+- 非流式响应参数说明：
+
+  | 参数名 | 类型 | 说明 |
+  |---|---|---|
+  | id | string | 本次请求ID。 |
+  | object | string | 返回对象类型：`response`。 |
+  | created_at | integer | 创建时间戳（秒）。 |
+  | status | string | Response状态，如`completed`。 |
+  | model | string | 模型名称。 |
+  | output | array | 输出内容列表。 |
+  | output[].type | string | 输出类型，如`message`。 |
+  | output[].role | string | 输出角色，通常为`assistant`。 |
+  | output[].content | array | 输出内容片段列表。 |
+  | output[].content[].type | string | 内容类型，如`output_text`。 |
+  | output[].content[].text | string | 生成文本。 |
 
 ---
 
@@ -217,7 +319,7 @@ IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的
 
 - 非流式响应样例（非流式）：
 
-  ```JSON
+  ```json
   {
     "id": "cmpl-xxx-0",
     "object": "text_completion",
@@ -258,8 +360,6 @@ IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的
   | choices[].index | integer | 序号。 |
   | choices[].text | string | 生成文本。 |
   | choices[].finish_reason | string/null | 结束原因，如`stop`、`length`等。 |
-
----
 
 ## Anthropic Messages 接口
 
@@ -362,7 +462,7 @@ IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的
 
 - 非流式响应样例：
 
-  ```JSON
+  ```json
   {
     "id": "msg_xxx",
     "type": "message",
@@ -433,8 +533,6 @@ IP与端口参见[业务接口的IP/端口与配置](./README.md#业务接口的
   | `message_delta` | 消息增量，包含 `stop_reason` 和最终 usage。 |
   | `message_stop` | 消息结束。 |
 
----
-
 ## Anthropic Count Tokens 接口
 
 **接口功能**
@@ -474,7 +572,7 @@ curl -X POST "http://{IP}:{Port}/v1/messages/count_tokens" \
 
 **响应样例**
 
-```JSON
+```json
 {
   "input_tokens": 10,
   "context_management": {

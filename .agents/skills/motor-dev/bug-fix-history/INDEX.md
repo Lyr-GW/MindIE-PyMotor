@@ -1,0 +1,64 @@
+# Bug Fix History — 索引
+
+> motor-dev skill 的**持续学习沉淀库**。调试前**先读本索引**（轻量，每条一行），命中关键词后
+> 再按需读取对应案例文件（渐进式披露，避免长上下文）。修复完成后按模板新增案例。
+
+## 使用规则
+
+### 记录时机（什么时候写）
+
+- **修复循环完成**：写测试 → 写代码 → 跑测试 → 失败 → 修复 → 重跑通过，整个循环闭环后
+- **日志定位确认**：用户给出日志 → 定位出真实问题 → 修复 + 测试拦截验证通过后
+- 必须是**已验证**的结论（测试通过或用户确认），禁止固化猜测
+
+### 防噪音规则（什么时候不写）
+
+- 简单 typo / 变量拼写错误 / 一次性环境问题
+- 无法复现、未验证的假设
+- 与已有案例关键词重合 → 更新原案例而非新增
+- 无测试拦截也无复现场景的孤立修复（无法验证，无学习价值）
+
+### 案例上限
+
+每个模块目录最多保留 **10 个**案例，超出时删除最旧/价值最低的（保留有测试拦截的），并同步更新本索引。
+
+## 新增案例流程
+
+1. 按模块放入 `bug-fix-history/<module>/<short-name>.md`（命名用 kebab-case，如 `negative-workload.md`）
+2. 案例文件使用模板（见下），**只含案例正文**
+3. 在本索引追加一行（格式见索引表）
+4. 若 `INDEX.md` 或 `SKILL.md` 中有引用，同步更新
+
+## 模板
+
+```markdown
+# [YYYY-MM-DD] <一句话标题（问题现象）>
+
+- **现象 (Symptom)**：日志/报错/可观察行为。贴关键日志行。
+- **根因 (Root cause)**：代码层面的根本原因（含文件:行号）。
+- **为什么会写出 (Why)**：认知层面的教训——错误的假设？遗漏的边界？对 API/协议的误解？
+- **修复 (Fix)**：改了什么（文件、关键 diff）。
+- **测试拦截 (Test interception)**：新增/修改的测试用例，它如何防止回归。
+- **场景 (Scenario)**：什么条件下会再次触发（输入、配置、拓扑）。
+- **关键词 (Keywords)**：3-5 个检索词（模块、组件、错误特征）。
+```
+
+## 案例索引
+
+| 日期 | 模块 | 案例 | 文件 | 关键词 |
+|------|------|------|------|--------|
+| 2026-09-16 | kv_conductor | 节点 pool replay 身份和格式分流不一致导致事件丢失 | [node-pool-replay-identity.md](kv_conductor/node-pool-replay-identity.md) | YuanRong, replay, backend_id, IpOnly, EventSource |
+| 2026-09-08 | deployer | Slurm 各容器生成不同 service_id | [slurm-service-id-per-task.md](deployer/slurm-service-id-per-task.md) | Slurm, service_id, set_env_docker, tzdata, Apptainer |
+| 2026-08-21 | kv_conductor | MultiConnector 顶层配置下引擎 offload 事件被静默丢弃 | `kv_conductor/multi-connector-kv-events-dropped.md` | MultiConnector、offload 事件丢失、两阶段匹配、kv_transfer_config |
+| 2026-08-24 | coordinator | 实例注册接受 ID 碰撞和不完整引擎就绪 | [instance-registration-validation.md](coordinator/instance-registration-validation.md) | CRC32 collision, instance ID, Endpoint extra fields, empty models |
+| 2026-08-24 | coordinator | Coordinator models 与 domain 包循环导入 | [domain-model-circular-import.md](coordinator/domain-model-circular-import.md) | circular import, domain __init__, models.request, lazy exports |
+| 2026-08-25 | controller | 增量实例刷新失败后未及时收敛 | [incremental-refresh-set-fallback.md](controller/incremental-refresh-set-fallback.md) | EventPusher, incremental refresh, SET reconciliation, fingerprint |
+| 2026-09-02 | controller | A2 linkdown 被降成 L2 无法自杀 | [a2-linkdown-nm-suicide.md](controller/a2-linkdown-nm-suicide.md) | A2, linkdown, 0x81078603, NmSuicide, PreSeparateNPU |
+| 2026-09-03 | coordinator | Responses input items were rejected by Chat message validation | [responses-developer-role-rejected.md](coordinator/responses-developer-role-rejected.md) | coordinator, responses, input-item, developer-role, function-call-output, validation, HTTP-400 |
+| 2026-09-04 | coordinator | SHM CAS 分配成功后被取消，active_tokens 永久泄漏 | [workload-ledger-orphan-leak.md](coordinator/workload-ledger-orphan-leak.md) | active_tokens leak, CancelledError, cas_add rollback, pop_residual_workloads |
+| 2026-09-09 | kv_conductor | map 格式 BlockStored 无法解析 | `kv_conductor/map-block-stored.md` | BlockStored, msgspec, map, deserialize_any |
+| 2026-09-09 | kv_conductor | CPU/Disk 订阅器误按 vLLM 事件解析 | `kv_conductor/event-source-routing.md` | ZmqSubscriber, EventSource, PoolEvent, CPU, Disk |
+| 2026-09-16 | kv_conductor | HBM→CPU 续查未按 (instance_id, dp_rank) 对齐导致跨 DP 虚高 cpu_blocks | `kv_conductor/hbm-cpu-continuation-same-dp.md` | lower_tier_lookup, continuation, instance_id, dp_rank, IpOnly, cpu_blocks |
+| 2026-09-15 | controller | DP 缩容等待状态和瞬时故障导致路由冻结或误缩容 | [dp-scale-down-state-safety.md](controller/dp-scale-down-state-safety.md) | DP scale-down, WAITING_ENGINE_FAULT, false DEAD, engine relaunch, serving overlay |
+| 2026-09-15 | node_manager | NodeManager FT 代理契约漂移导致请求失败或退役状态不一致 | [ft-proxy-contract-drift.md](node_manager/ft-proxy-contract-drift.md) | NodeManager, FT proxy, retry, retired endpoint, HTTP 400 |
+| 2026-09-09 | coordinator | PD 分离请求在 Decode 才因 Prefill 改写字段被拒绝 | [pd-stream-options-late-rejection.md](coordinator/pd-stream-options-late-rejection.md) | coordinator, PD separation, stream_options, min_tokens, Decode HTTP-400, KV cache expiry |

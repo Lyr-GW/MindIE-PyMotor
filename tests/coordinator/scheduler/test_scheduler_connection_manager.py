@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 # MindIE is licensed under Mulan PSL v2.
 # You can use this software according to the terms and conditions of the Mulan PSL v2.
@@ -14,12 +13,10 @@
 import unittest
 from unittest.mock import Mock, AsyncMock, patch
 import asyncio
-import pytest
 
 from motor.coordinator.scheduler.runtime.scheduler_connection_manager import (
     SchedulerConnectionManager,
     _CONNECT_MAX_RETRIES,
-    _CONNECT_RETRY_SLEEP,
 )
 
 
@@ -58,23 +55,30 @@ class TestSchedulerConnectionManager(unittest.TestCase):
         self.assertEqual(self.mock_client.connect.call_count, 2)
 
     def test_connect_all_retries_fail(self):
-        """Connect exhausts all retries without success."""
+        """Connect exhausts all retries without success (background reconnect cancelled below)."""
         self.mock_client.connect = AsyncMock(return_value=False)
+
+        async def scenario():
+            await self.manager.connect()
+            task = self.manager._reconnect_task
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
         with patch(
             "motor.coordinator.scheduler.runtime.scheduler_connection_manager.asyncio.sleep",
             return_value=None,
         ):
-            asyncio.run(self.manager.connect())
+            asyncio.run(scenario())
         self.assertFalse(self.manager._connected)
-        self.assertEqual(
-            self.mock_client.connect.call_count, _CONNECT_MAX_RETRIES
-        )
+        self.assertEqual(self.mock_client.connect.call_count, _CONNECT_MAX_RETRIES)
 
     def test_connect_with_exception(self):
         """Connect retries after an exception and eventually succeeds."""
-        self.mock_client.connect = AsyncMock(
-            side_effect=[Exception("Connection refused"), True]
-        )
+        self.mock_client.connect = AsyncMock(side_effect=[Exception("Connection refused"), True])
         with patch(
             "motor.coordinator.scheduler.runtime.scheduler_connection_manager.asyncio.sleep",
             return_value=None,
@@ -131,3 +135,66 @@ class TestSchedulerConnectionManager(unittest.TestCase):
         """get_client returns None when not connected."""
         self.manager._connected = False
         self.assertIsNone(self.manager.get_client())
+
+    def test_connect_all_retries_fail_starts_background_reconnect(self):
+        """After the initial retries are exhausted, a background task keeps retrying until success."""
+        self.mock_client.connect = AsyncMock(side_effect=[False, False, False, True])
+
+        async def scenario():
+            await self.manager.connect()
+            self.assertFalse(self.manager._connected)
+            self.assertIsNotNone(self.manager._reconnect_task)
+            await self.manager._reconnect_task
+
+        with patch(
+            "motor.coordinator.scheduler.runtime.scheduler_connection_manager.asyncio.sleep",
+            return_value=None,
+        ):
+            asyncio.run(scenario())
+        self.assertTrue(self.manager._connected)
+        self.assertEqual(self.mock_client.connect.call_count, 4)
+
+    def test_disconnect_cancels_background_reconnect_task(self):
+        """disconnect() must not leave an orphaned reconnect loop retrying forever."""
+        self.mock_client.connect = AsyncMock(return_value=False)
+
+        async def scenario():
+            await self.manager.connect()
+            task = self.manager._reconnect_task
+            self.assertIsNotNone(task)
+            await self.manager.disconnect()
+            self.assertIsNone(self.manager._reconnect_task)
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            self.assertTrue(task.done())
+
+        with patch(
+            "motor.coordinator.scheduler.runtime.scheduler_connection_manager.asyncio.sleep",
+            return_value=None,
+        ):
+            asyncio.run(scenario())
+
+    def test_from_config_logs_dp_stats_only_on_inference_worker_zero(self):
+        """Obs (worker_index None) and non-zero workers must not dump global SHM tokens."""
+        from motor.config.coordinator import CoordinatorConfig
+
+        with patch(
+            "motor.coordinator.scheduler.runtime.scheduler_connection_manager.SchedulerClient",
+        ) as mock_cls:
+            mock_cls.return_value = Mock()
+            config = CoordinatorConfig()
+            config.worker_index = 0
+            SchedulerConnectionManager.from_config(config)
+            self.assertTrue(mock_cls.call_args[0][0].log_dp_stats)
+
+            mock_cls.reset_mock()
+            config.worker_index = 1
+            SchedulerConnectionManager.from_config(config)
+            self.assertFalse(mock_cls.call_args[0][0].log_dp_stats)
+
+            mock_cls.reset_mock()
+            config.worker_index = None
+            SchedulerConnectionManager.from_config(config)
+            self.assertFalse(mock_cls.call_args[0][0].log_dp_stats)

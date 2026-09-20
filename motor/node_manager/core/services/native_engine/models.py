@@ -9,11 +9,14 @@
 # See the Mulan PSL v2 for more details.
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
+from typing import Any
 
 from motor.common.resources.instance import PDRole
+from motor.config.endpoint import DeployConfig
 from motor.config.tls_config import TLSConfig
 
 
@@ -27,7 +30,6 @@ class LaunchContext:
     node_rank: int
     host: str
     business_port: int
-    mgmt_port: int
     config_path: str
     master_dp_ip: str | None
     kv_port: int | None
@@ -36,10 +38,17 @@ class LaunchContext:
     d2d_peer_ips: tuple[str, ...]
     environment: Mapping[str, str]
     headless: bool = False
+    snapshot_metadata: str | None = None
+    engine_config_overrides: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "d2d_peer_ips", tuple(self.d2d_peer_ips))
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+        object.__setattr__(
+            self,
+            "engine_config_overrides",
+            MappingProxyType(deepcopy(dict(self.engine_config_overrides))),
+        )
 
 
 @dataclass(frozen=True)
@@ -73,10 +82,18 @@ class ProbeSpec:
 
 @dataclass(frozen=True)
 class LaunchSpec:
-    """Command and readiness probe built from one validated engine config."""
+    """Command and readiness probe built from one validated engine config.
+
+    ``deploy_config`` is the already-loaded and validated role-specific deploy
+    configuration the backend consumed while building the launch spec. It lets
+    NodeManager-owned features (e.g. virtual inference) read the health check
+    configuration without re-loading the config file; it may be None when a
+    backend does not load a deploy config.
+    """
 
     command: CommandSpec
     probe: ProbeSpec
+    deploy_config: DeployConfig | None = None
 
 
 class RuntimeState(str, Enum):

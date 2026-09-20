@@ -8,18 +8,22 @@
 # MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
 # See the Mulan PSL v2 for more details.
 
-import argparse
 import json
 from typing import Any
 from dataclasses import dataclass, field
 
 from motor.config.endpoint import EndpointConfig
-from motor.node_manager.core.services.native_engine.backends.base import IConfig
 from motor.common.logger import get_logger
 from motor.common.utils.net import format_address
 from motor.common import engine_constants as constants
 
 logger = get_logger(__name__)
+
+# High-frequency endpoint paths excluded from the vLLM uvicorn access log by default:
+# NodeManager health/FT probes and metrics scraping fire frequently and would
+# otherwise flood the api-server log. Per-instance override via engine_config
+# key disable_access_log_for_endpoints.
+DEFAULT_ACCESS_LOG_EXCLUDED_ENDPOINTS = "/health,/metrics,/snapshot/health,/v1/fault_tolerance/status"
 
 
 def _add_argument_to_list(arg_list: list, key: str, value: Any):
@@ -56,8 +60,7 @@ def _get_default_mapping() -> dict[str, str]:
 
 
 @dataclass
-class VLLMConfig(IConfig):
-    args: argparse.Namespace | None = None
+class VLLMConfig:
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
     kv_transfer_config: str | None = None
@@ -74,32 +77,6 @@ class VLLMConfig(IConfig):
         if role in (constants.PREFILL_ROLE, constants.DECODE_ROLE):
             self._process_kv_transfer_config()
         self._process_d2d_config()
-
-    def validate(self):
-        if self.args is not None:
-            from vllm.entrypoints.openai.cli_args import validate_parsed_serve_args
-
-            validate_parsed_serve_args(self.args)
-
-    def convert(self):
-        arg_list = self._get_param_list()
-        logger.info(f'engine server parsed arg_list: {arg_list}')
-
-        try:
-            from vllm.utils import FlexibleArgumentParser
-        except ImportError:
-            from vllm.utils.argparse_utils import FlexibleArgumentParser
-        from vllm.entrypoints.openai.cli_args import make_arg_parser
-
-        parser = FlexibleArgumentParser(description="vLLM parser")
-        parser = make_arg_parser(parser)
-        self.args = parser.parse_args(arg_list)
-
-    def get_args(self) -> argparse.Namespace:
-        return self.args
-
-    def get_endpoint_config(self) -> EndpointConfig:
-        return self.endpoint_config
 
     def get_cli_args(self) -> list[str]:
         """Return CLI args for native 'vllm serve' command."""
@@ -270,6 +247,17 @@ class VLLMConfig(IConfig):
 
         flattened.update(deploy_config.engine_config.configs)
 
+        # Default: keep health probes and metrics scraping out of the api-server access
+        # log. A user-set value in engine_config wins; accept vLLM's native dash style too.
+        if "disable-access-log-for-endpoints" not in flattened and "disable_access_log_for_endpoints" not in flattened:
+            flattened["disable_access_log_for_endpoints"] = DEFAULT_ACCESS_LOG_EXCLUDED_ENDPOINTS
+            logger.info(
+                "Motor default: suppress vLLM uvicorn access logs for %s to avoid "
+                "health-probe / metrics-scraping log spam; override via engine_config "
+                "disable_access_log_for_endpoints",
+                DEFAULT_ACCESS_LOG_EXCLUDED_ENDPOINTS,
+            )
+
         model_config = deploy_config.model_config
         for server_key, vllm_key in self.mapping.items():
             if hasattr(model_config, server_key):
@@ -289,6 +277,11 @@ class VLLMConfig(IConfig):
             flattened.setdefault("prefill_context_parallel_size", parallel_config.pcp_size)
 
         flattened.update({"host": self.endpoint_config.host, "port": self.endpoint_config.port})
+        if self.endpoint_config.snapshot_metadata is not None:
+            flattened["snapshot_config"] = {
+                "snapshot_metadata": self.endpoint_config.snapshot_metadata,
+                "enable_auto_checkpoint": self.endpoint_config.enable_auto_checkpoint,
+            }
         if self.data_parallel_address is not None:
             flattened["data_parallel_address"] = self.data_parallel_address
             flattened["data_parallel_rpc_port"] = self.data_parallel_rpc_port

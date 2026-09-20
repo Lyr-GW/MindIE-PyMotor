@@ -11,7 +11,7 @@
 import asyncio
 import time
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -20,7 +20,10 @@ from fastapi.responses import JSONResponse, Response
 
 import motor.common.utils.error as cancel_error
 from motor.common.utils.error import RequestCancelledError
+from motor.common.utils.env import Env
+from motor.common.utils.net import format_address, is_unspecified_host
 from motor.common.resources.endpoint import WorkloadAction
+from motor.common.resources.dispatch import DispatchPlan
 from motor.common.resources.instance import PDRole
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain import (
@@ -30,6 +33,27 @@ from motor.coordinator.domain import (
 )
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
+from motor.coordinator.render.models import TokenizedRequest
+from motor.coordinator.render.streaming_response import StreamingDerenderProcessor, StreamingRenderSession
+from motor.coordinator.render.vllm_render_client import VLLMRenderClient
+from motor.coordinator.router.token_only import (
+    active_token_only_request,
+    build_token_only_batch,
+    build_response_ready_callbacks,
+    build_streaming_derender_processor,
+    build_streaming_render_session,
+    build_trigger_token_only_decode_request,
+    build_trigger_token_only_prefill_request,
+    finish_token_only_response,
+    gather_generate_responses,
+    is_token_only_unsupported,
+    merge_token_only_streams,
+    require_kv_transfer,
+    run_token_only_or_fallback,
+    select_token_only_requests,
+    token_only_request_id,
+    token_only_requests_for_attempt,
+)
 from motor.coordinator.router.dispatch_session import (
     AttemptContext,
     AttemptState,
@@ -43,7 +67,6 @@ from motor.coordinator.router.rescheduler.rescheduler import (
     RetryRequestPlan,
 )
 from motor.coordinator.router.workload import WorkloadActionHandler
-from motor.coordinator.router.precision_sample.request import inject_logprobs
 from motor.coordinator.router.adapters.completion_to_chat import (
     adapt_completion_nonstream_to_chat,
     is_completion_like_body,
@@ -52,11 +75,17 @@ from motor.coordinator.router.adapters.pd_protocol import (
     ADAPTERS,
     CoordinationMode,
     EngineEndpointMetadata,
+    EngineLegSpec,
+    EnginePhase,
     EngineProtocolError,
     EngineRequest,
+    GenerationConstraint,
+    KVTransferDescriptor,
     LegContext,
+    NATIVE_GENERATE_API,
     PDProtocolAdapter,
     PrefillMetadata,
+    VllmProtocolAdapter,
 )
 from motor.coordinator.router.adapters.stream import (
     parse_stream_chunk_json,
@@ -75,6 +104,8 @@ from motor.coordinator.router.upstream_error import (
 )
 
 _SGLANG_PROTOCOL_ADAPTER = ADAPTERS["sglang"]
+_TRIGGER_CAPABILITY = DispatchPlan.CONCURRENT_ENGINE_SYNC.value
+_HANDOFF_CAPABILITY = DispatchPlan.PREFILL_HANDOFF_DECODE.value
 
 
 @dataclass(frozen=True)
@@ -152,10 +183,22 @@ class UnifiedPDRouter(BaseRouter):
         self._stream_body_sent = False
         self._active_retry_plan: RetryRequestPlan | None = None
         self._hybrid_stream_fallback_attempted = False  # A request is only allowed to fallback once.
+        self._pd_uses_trigger: bool | None = None
+        self._render_client: VLLMRenderClient | None = None
+        self._streaming_render_session: StreamingRenderSession | None = None
         # Task -> its bookkeeping record (dedup key, logging context, computed work item).
         self._release_records: dict[asyncio.Task[bool], _ReleaseTaskRecord] = {}
         # Dedup reverse index: release key -> the single in-flight task for that key.
         self._release_inflight: dict[ReleaseKey, asyncio.Task[bool]] = {}
+
+    def set_render_client(self, render_client: VLLMRenderClient | None) -> None:
+        """Attach the request worker's shared Render/Derender client."""
+        self._render_client = render_client
+
+    def _get_streaming_render_session(self) -> StreamingRenderSession | None:
+        if self._streaming_render_session is None:
+            self._streaming_render_session = build_streaming_render_session(self.req_info, self._render_client)
+        return self._streaming_render_session
 
     def _capture_prompt_tokens_details(self, body: dict[str, Any]) -> None:
         candidates = [body]
@@ -229,22 +272,23 @@ class UnifiedPDRouter(BaseRouter):
 
     @staticmethod
     def _adapter_for_attempt(attempt: AttemptContext | None) -> PDProtocolAdapter | None:
-        if attempt is None or attempt.prefill_resource is None:
+        if attempt is None:
             return None
-        engine_type = getattr(attempt.prefill_resource.instance, "engine_type", None)
+        resource = attempt.prefill_resource or attempt.decode_resource
+        if resource is None:
+            return None
+        engine_type = getattr(resource.instance, "engine_type", None)
         if not isinstance(engine_type, str):
             return None
-        normalized = engine_type.strip().lower()
-        return ADAPTERS.get(normalized)
+        return ADAPTERS.get(engine_type.strip().lower())
 
     @staticmethod
     def _require_adapter_for_attempt(attempt: AttemptContext) -> PDProtocolAdapter:
         adapter = UnifiedPDRouter._adapter_for_attempt(attempt)
         if adapter is not None:
             return adapter
-        engine_type = None
-        if attempt.prefill_resource is not None:
-            engine_type = getattr(attempt.prefill_resource.instance, "engine_type", None)
+        resource = attempt.prefill_resource or attempt.decode_resource
+        engine_type = getattr(resource.instance, "engine_type", None) if resource is not None else None
         raise RuntimeError(f"Unsupported native engine type for P/D coordination: {engine_type!r}")
 
     @staticmethod
@@ -280,12 +324,17 @@ class UnifiedPDRouter(BaseRouter):
     async def handle_request(self) -> Response:
         await self.do_encode()
         self.is_meta = False
+        uses_trigger = await self._pd_cluster_uses_trigger()
+        if uses_trigger:
+            self._ensure_trigger_metaserver()
         if self.req_info.req_data.get("stream", False):
-            self._stream_commit_controller = StreamCommitController.requiring({"prefill", "decode"})
+            commit_parts = {"decode"} if uses_trigger else {"prefill", "decode"}
+            self._stream_commit_controller = StreamCommitController.requiring(commit_parts)
             return CommitAwareStreamingResponse(
                 self._generate_stream_response(),
                 self._stream_commit_controller,
                 on_first_body_sent=self._mark_stream_body_sent,
+                timeout=self._stream_overall_timeout(),
             )
         return await self._generate_response()
 
@@ -298,7 +347,7 @@ class UnifiedPDRouter(BaseRouter):
         return self.rescheduler.can_resume_after_visible_output(self.req_info.req_data)
 
     def _build_hybrid_fallback_router(self) -> PDHybridRouter:
-        return PDHybridRouter(
+        hybrid = PDHybridRouter(
             self.req_info,
             self.config,
             scheduler=self._scheduler,
@@ -306,6 +355,8 @@ class UnifiedPDRouter(BaseRouter):
             workload_action_handler=self._workload_action_handler,
             sampling_manager=self._sampling_manager,
         )
+        hybrid.set_render_client(self._render_client)
+        return hybrid
 
     async def _hybrid_fallback_feasible(self) -> bool:
         """True when decode pool is exhausted (no unblocked D) but a hybrid candidate exists.
@@ -395,6 +446,7 @@ class UnifiedPDRouter(BaseRouter):
                 req_data=self.req_info.req_data.copy(),
                 attempt_id=fallback_attempt_id,
                 mark_unified_ready=_mark_unified_ready,
+                render_session=self._get_streaming_render_session(),
             )
         ) as fallback_stream:
             async for chunk in fallback_stream:
@@ -438,6 +490,8 @@ class UnifiedPDRouter(BaseRouter):
                 attempt_id=fallback_attempt_id,
                 api=replay_api,
                 is_resume=True,
+                retry_plan=retry_plan,
+                render_session=self._get_streaming_render_session(),
             )
         ) as fallback_stream:
             async for chunk in fallback_stream:
@@ -453,6 +507,10 @@ class UnifiedPDRouter(BaseRouter):
                 for attempt_index in range(max_retry):
                     attempt: AttemptContext | None = None
                     cleanup_reason = AttemptStopReason.OTHER
+                    render_session = self._get_streaming_render_session()
+                    if render_session is not None:
+                        render_session.begin_attempt()
+                    render_attempt_visible = False
                     try:
                         self._active_retry_plan = None
                         if attempt_index > 0:
@@ -476,6 +534,7 @@ class UnifiedPDRouter(BaseRouter):
                         attempt.transition(AttemptState.DISPATCHING)
                         async with aclosing(self._run_stream_attempt(attempt, coordination_mode)) as attempt_stream:
                             async for chunk in attempt_stream:
+                                render_attempt_visible = True
                                 attempt.transition(AttemptState.FIRST_VISIBLE)
                                 yield chunk
                         await self._release_attempt(attempt, wait=False)
@@ -488,12 +547,18 @@ class UnifiedPDRouter(BaseRouter):
                                 attempt.attempt_seq,
                             )
                         attempt.transition(AttemptState.DONE)
+                        if render_session is not None:
+                            render_session.finish_attempt(True)
                         self.logger.info(trace_obj.set_end_and_ttft_tpot())
                         return
                     except GeneratorExit:
                         cleanup_reason = AttemptStopReason.CLIENT_DISCONNECT
+                        if render_session is not None:
+                            render_session.finish_attempt(render_attempt_visible)
                         raise
                     except (asyncio.CancelledError, Exception) as e:
+                        if render_session is not None:
+                            render_session.finish_attempt(render_attempt_visible)
                         error, retry = await self._process_response_error(
                             attempt,
                             attempt_index,
@@ -628,6 +693,8 @@ class UnifiedPDRouter(BaseRouter):
             return AttemptStopReason.PEER_FAILED
         if reason == cancel_error.CLIENT_DISCONNECT:
             return AttemptStopReason.CLIENT_DISCONNECT
+        if reason == cancel_error.INFER_TIMEOUT:
+            return AttemptStopReason.TIMEOUT
         return AttemptStopReason.OTHER
 
     @staticmethod
@@ -638,6 +705,11 @@ class UnifiedPDRouter(BaseRouter):
 
     async def _create_attempt(self, session: PDDispatchSession) -> AttemptContext:
         attempt_seq = session._attempt_seq + 1
+        if await self._pd_cluster_uses_trigger():
+            self._ensure_trigger_metaserver()
+            d_resource = await self._prepare_attempt_resource(PDRole.ROLE_D, attempt_seq)
+            return session.new_attempt(None, d_resource, self.config)
+
         p_resource = await self._prepare_attempt_resource(PDRole.ROLE_P, attempt_seq)
 
         # Handoff connectors (CPCD-style) do not need a concrete decode endpoint while prefill runs.
@@ -652,14 +724,22 @@ class UnifiedPDRouter(BaseRouter):
                 attempt_seq,
                 required_engine_type=str(p_resource.instance.engine_type),
             )
-        except Exception as e:
+        except BaseException as e:
             error_message = (
                 f"Unified PD D allocation failed after P allocated "
-                f"req_id={self.req_info.req_id} attempt={attempt_seq}: {e}"
+                f"req_id={self.req_info.req_id} attempt={attempt_seq}: {e!r}"
             )
             self.req_info.trace_obj.set_trace_error_message(error_message)
             self.logger.warning(error_message)
-            await self._release_attempt_resource(p_resource, attempt_seq, WorkloadAction.RELEASE_TOKENS)
+            self._submit_release_attempt_resource_background(p_resource, attempt_seq, WorkloadAction.RELEASE_TOKENS)
+            try:
+                await self._drain_release_tasks()
+            except asyncio.CancelledError:
+                self.logger.warning(
+                    "Unified PD cancelled while draining P release after D allocation failure req_id=%s attempt=%s",
+                    self.req_info.req_id,
+                    attempt_seq,
+                )
             raise
         return session.new_attempt(p_resource, d_resource, self.config)
 
@@ -675,11 +755,166 @@ class UnifiedPDRouter(BaseRouter):
         adapter = ADAPTERS.get(engine_type.strip().lower())
         return adapter is not None and adapter.coordination_mode == CoordinationMode.HANDOFF
 
+    async def _pd_cluster_uses_trigger(self) -> bool:
+        if self._pd_uses_trigger is not None:
+            return self._pd_uses_trigger
+        self._pd_uses_trigger = await self._detect_vllm_trigger_cluster()
+        return self._pd_uses_trigger
+
+    async def _detect_vllm_trigger_cluster(self) -> bool:
+        p_plans = await self._vllm_dispatch_plans(PDRole.ROLE_P)
+        d_plans = await self._vllm_dispatch_plans(PDRole.ROLE_D)
+        combined = p_plans | d_plans
+        if not combined:
+            return False
+        if _TRIGGER_CAPABILITY in combined and _HANDOFF_CAPABILITY in combined:
+            raise HTTPException(
+                status_code=503,
+                detail="Mixed vLLM handoff and layerwise/trigger P/D instances are not supported",
+            )
+        return combined == {_TRIGGER_CAPABILITY}
+
+    async def _vllm_dispatch_plans(self, role: PDRole) -> set[str]:
+        get_instances = getattr(self._scheduler, "get_local_instances", None)
+        if get_instances is None:
+            get_instances = getattr(self._scheduler, "get_available_instances", None)
+        if get_instances is None:
+            return set()
+        get_unblocked = getattr(self._scheduler, "get_unblocked_instances", None)
+        unblocked_ids = set(await get_unblocked(role)) if get_unblocked is not None else None
+        instances = await get_instances(role)
+        plans: set[str] = set()
+        for inst in instances.values():
+            if unblocked_ids is not None and inst.id not in unblocked_ids:
+                continue
+            if str(getattr(inst, "engine_type", "") or "").strip().lower() != "vllm":
+                continue
+            caps = list(getattr(inst, "dispatch_capabilities", None) or [])
+            if _TRIGGER_CAPABILITY in caps:
+                plans.add(_TRIGGER_CAPABILITY)
+            else:
+                plans.add(_HANDOFF_CAPABILITY)
+        return plans
+
+    def _ensure_trigger_metaserver(self) -> None:
+        port = getattr(self.config, "worker_metaserver_port", None)
+        if not isinstance(port, int) or isinstance(port, bool) or port <= 0:
+            raise HTTPException(
+                status_code=503,
+                detail=("layerwise/trigger PD requires inference_workers_config.worker_metaserver_base_port > 0"),
+            )
+
+    def _trigger_metaserver_url(self, attempt: AttemptContext) -> str:
+        host = Env.pod_ip or self.config.api_config.coordinator_api_host
+        if is_unspecified_host(host):
+            self.logger.error(
+                "Trigger metaserver callback host is unreachable: advertised_host=%s. "
+                "Wildcard listen addresses (0.0.0.0/::) cannot be used as Decode callback targets; "
+                "set POD_IP or a concrete coordinator_api_host",
+                host,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Trigger metaserver requires POD_IP or a concrete coordinator_api_host",
+            )
+        port = self.config.worker_metaserver_port
+        return f"http://{format_address(host, port)}/v1/metaserver?attempt={attempt.attempt_seq}"
+
+    def _bind_trigger_attempt(self, attempt: AttemptContext) -> None:
+        self.req_info._trigger_attempt = attempt
+
+    async def _trigger_decode_request_for_attempt(
+        self,
+        attempt: AttemptContext,
+        sampling_state: dict,
+    ) -> tuple[dict[str, Any], str]:
+        adapter = self._require_adapter_for_attempt(attempt)
+        if not isinstance(adapter, VllmProtocolAdapter):
+            raise RuntimeError(f"Trigger decode requires vLLM adapter, got {adapter.engine_type}")
+        req, api = self._base_request_for_attempt(PDRole.ROLE_D)
+        context = replace(
+            self._native_leg_context(attempt, PDRole.ROLE_D, api),
+            engine_request_id=self.req_info.req_id,
+        )
+        engine_request = adapter.build_trigger_decode_request(req, context, self._trigger_metaserver_url(attempt))
+        return engine_request.body, engine_request.api
+
+    def _select_active_token_only_request(
+        self,
+        *,
+        allow_streaming: bool = False,
+        require_render_client: bool = True,
+    ) -> TokenizedRequest | None:
+        requests = token_only_requests_for_attempt(
+            self.req_info,
+            self._render_client,
+            allow_streaming=allow_streaming,
+            retry_plan=self._active_retry_plan if allow_streaming else None,
+            require_render_client=require_render_client,
+        )
+        return active_token_only_request(requests, self.req_info._trigger_batch_index) if requests else None
+
+    def _tokenized_trigger_decode_request_for_attempt(
+        self,
+        attempt: AttemptContext,
+    ) -> EngineRequest | None:
+        stream = bool(self.req_info.req_data.get("stream", False))
+        tokenized = self._select_active_token_only_request(allow_streaming=stream)
+        if tokenized is None:
+            return None
+        adapter = self._require_adapter_for_attempt(attempt)
+        if not isinstance(adapter, VllmProtocolAdapter):
+            return None
+        context = replace(
+            self._native_leg_context(attempt, PDRole.ROLE_D, self.req_info.entry_api),
+            engine_request_id=token_only_request_id(
+                self.req_info.req_id,
+                prompt_index=self.req_info._trigger_batch_index,
+            ),
+        )
+        return build_trigger_token_only_decode_request(
+            adapter,
+            tokenized,
+            context,
+            self._trigger_metaserver_url(attempt),
+            stream=stream,
+        )
+
+    def _tokenized_trigger_prefill_request(
+        self,
+        attempt: AttemptContext,
+        kv_transfer_params: dict[str, Any],
+    ) -> EngineRequest | None:
+        tokenized = self._select_active_token_only_request(
+            allow_streaming=True,
+            require_render_client=False,
+        )
+        if tokenized is None:
+            return None
+        adapter = self._require_adapter_for_attempt(attempt)
+        if not isinstance(adapter, VllmProtocolAdapter):
+            return None
+        context = replace(
+            self._native_leg_context(attempt, PDRole.ROLE_P, self.req_info.entry_api),
+            engine_request_id=token_only_request_id(
+                self.req_info.req_id,
+                prompt_index=self.req_info._trigger_batch_index,
+            ),
+        )
+        return build_trigger_token_only_prefill_request(
+            adapter,
+            tokenized,
+            context,
+            kv_transfer_params,
+        )
+
     async def _run_stream_attempt(
         self, attempt: AttemptContext, coordination_mode: CoordinationMode
     ) -> AsyncGenerator[str, None]:
         if coordination_mode == CoordinationMode.HANDOFF:
             run_func = self._run_handoff_stream_attempt
+        elif coordination_mode == CoordinationMode.TRIGGER:
+            run_func = self._run_trigger_stream_attempt
         else:
             run_func = self._run_bootstrap_stream_attempt
         async with aclosing(run_func(attempt)) as attempt_stream:
@@ -690,9 +925,10 @@ class UnifiedPDRouter(BaseRouter):
     async def _run_bootstrap_stream_attempt(self, attempt: AttemptContext) -> AsyncGenerator[str, None]:
         attempt.transition(AttemptState.ACTIVE)
         p_req, p_api = self._request_for_attempt(attempt, PDRole.ROLE_P)
-        d_req, d_api = self._request_for_attempt(attempt, PDRole.ROLE_D)
         stream_adapter_state = {}
         sampling_state = self._init_sampling_state()
+        d_req, d_api = await self._decode_request_for_attempt(attempt, sampling_state)
+        await self._claim_decode_precision_sample(attempt, d_req, sampling_state, tokenized_decode=None)
         async with (
             self._client_for(attempt.prefill_resource) as p_client,
             self._client_for(attempt.decode_resource) as d_client,
@@ -748,6 +984,15 @@ class UnifiedPDRouter(BaseRouter):
     ) -> AsyncGenerator[str, None]:
         queue = asyncio.Queue(maxsize=1)
         terminal = asyncio.get_running_loop().create_future()
+        stream_derender = (
+            build_streaming_derender_processor(
+                self.req_info,
+                self._render_client,
+                self._get_streaming_render_session(),
+            )
+            if d_api.strip("/") == NATIVE_GENERATE_API
+            else None
+        )
         self._start_stream_decode_task(
             attempt,
             queue,
@@ -762,6 +1007,7 @@ class UnifiedPDRouter(BaseRouter):
                 queue,
                 terminal,
                 stream_adapter_state,
+                stream_derender=stream_derender,
                 sampling_state=sampling_state,
                 prefill_task=prefill_task,
                 release_prefill_on_stream=release_prefill_on_stream,
@@ -769,6 +1015,11 @@ class UnifiedPDRouter(BaseRouter):
         ) as queue_stream:
             async for chunk in queue_stream:
                 yield chunk
+        if stream_derender is not None:
+            self.logger.info(
+                "token-only generate and derender success request_id=%s prompt_count=1 stream=true",
+                self.req_info.req_id,
+            )
 
     def _start_stream_decode_task(
         self,
@@ -817,6 +1068,7 @@ class UnifiedPDRouter(BaseRouter):
         terminal: asyncio.Future,
         stream_adapter_state: dict,
         *,
+        stream_derender: StreamingDerenderProcessor | None = None,
         sampling_state: dict | None = None,
         prefill_task: asyncio.Task | None = None,
         release_prefill_on_stream: bool = False,
@@ -883,6 +1135,8 @@ class UnifiedPDRouter(BaseRouter):
                         release_prefill_on_stream = False
                     if sampling_state is not None:
                         value = self._collect_logprobs_from_stream_chunk(value, sampling_state)
+                    if stream_derender is not None:
+                        value = await stream_derender.process(value)
                     if self.config.exception_config.reschedule_enabled:
                         # process_stream_chunk already merges prompt_tokens_details into any usage
                         # block while it parses, so the standalone merge would only re-parse every
@@ -930,14 +1184,269 @@ class UnifiedPDRouter(BaseRouter):
     ) -> dict[str, Any]:
         if coordination_mode == CoordinationMode.HANDOFF:
             return await self._run_handoff_nonstream_attempt(attempt)
-        else:
-            return await self._run_bootstrap_nonstream_attempt(attempt)
+        if coordination_mode == CoordinationMode.TRIGGER:
+            return await self._run_trigger_nonstream_attempt(attempt)
+        return await self._run_bootstrap_nonstream_attempt(attempt)
+
+    async def _run_trigger_stream_attempt(self, attempt: AttemptContext) -> AsyncGenerator[str, None]:
+        self._bind_trigger_attempt(attempt)
+        attempt.transition(AttemptState.ACTIVE)
+        stream_adapter_state = {}
+        sampling_state = self._init_sampling_state()
+        d_req, d_api = await self._trigger_decode_request_for_attempt(attempt, sampling_state)
+        tokenized_decode = self._tokenized_trigger_decode_request_for_attempt(attempt)
+        if tokenized_decode is not None:
+            d_req, d_api = tokenized_decode.body, tokenized_decode.api
+        await self._claim_decode_precision_sample(attempt, d_req, sampling_state, tokenized_decode=tokenized_decode)
+        async with self._client_for(attempt.decode_resource) as d_client:
+            async with aclosing(
+                self._run_stream_decode_phase(
+                    attempt,
+                    d_client,
+                    d_api,
+                    d_req,
+                    stream_adapter_state,
+                    sampling_state=sampling_state,
+                )
+            ) as decode_stream:
+                async for chunk in decode_stream:
+                    yield chunk
+
+    @staticmethod
+    def _reset_trigger_batch_item(attempt: AttemptContext) -> None:
+        attempt.prefill_task = None
+        attempt.decode_task = None
+        attempt.prefill_dispatched = False
+        attempt.prefill_completed = False
+        attempt.decode_dispatched = False
+        attempt.decode_completed = False
+
+    async def _run_trigger_completion_batch(
+        self,
+        attempt: AttemptContext,
+        tokenized_requests: list[TokenizedRequest],
+        sampling_state: dict,
+    ) -> dict[str, Any]:
+        generate_responses = []
+        d_instance_id = attempt.decode_resource.instance.id
+        self.req_info._trigger_batch_active = True
+        decode_requests: list[EngineRequest] = []
+        try:
+            for index, tokenized in enumerate(tokenized_requests):
+                self.req_info._trigger_batch_index = index
+                self.req_info.token_ids = list(tokenized.prompt_token_ids)
+                tokenized_decode = self._tokenized_trigger_decode_request_for_attempt(attempt)
+                if tokenized_decode is None:
+                    raise RuntimeError("Trigger Completion batch requires a tokenized vLLM request")
+                decode_requests.append(tokenized_decode)
+            # A Completion batch is one outer request but contains independent prompts.
+            # One admission must produce one independent sample, so select its first
+            # prompt deterministically and leave every other body untouched.
+            sampled_index = 0
+            if await self._claim_precision_sample_tokenized(
+                attempt.decode_resource,
+                [decode_requests[sampled_index]],
+                sampling_state,
+            ):
+                sampling_state["tokenized_sample_index"] = sampled_index
+                sampling_state["info"]["cached_prompt_token_ids"] = list(
+                    tokenized_requests[sampled_index].prompt_token_ids
+                )
+            async with self._client_for(attempt.decode_resource) as d_client:
+                for index, tokenized_decode in enumerate(decode_requests):
+                    self._reset_trigger_batch_item(attempt)
+                    self.req_info._trigger_batch_index = index
+                    attempt.mark_dispatched(PDRole.ROLE_D.value)
+                    response = await self.forward_request(
+                        tokenized_decode.api,
+                        tokenized_decode.body,
+                        d_client,
+                        self.config.exception_config.infer_timeout,
+                    )
+                    attempt.mark_completed(PDRole.ROLE_D.value)
+                    await self._scheduler.report_cb_event(d_instance_id, "success")
+                    generate_responses.append(response.json())
+        finally:
+            self.req_info._trigger_batch_active = False
+            self.req_info._trigger_batch_index = None
+
+        if self._render_client is None:
+            raise RuntimeError("Derender client is not configured")
+        body = await finish_token_only_response(self._render_client, self.req_info, generate_responses)
+        self.req_info.update_state(ReqState.DECODE_END)
+        sampled_index = sampling_state.get("tokenized_sample_index")
+        if sampled_index is not None:
+            self._collect_logprobs_from_nonstream_body(generate_responses[sampled_index], sampling_state)
+        await self._maybe_submit_sample(attempt, sampling_state)
+        self._strip_logprobs_for_client(body, sampling_state)
+        await self._release_attempt(attempt, wait=False)
+        await self._drain_release_tasks()
+        return body
+
+    async def _run_trigger_nonstream_attempt(self, attempt: AttemptContext) -> dict[str, Any]:
+        self._bind_trigger_attempt(attempt)
+        attempt.transition(AttemptState.ACTIVE)
+        tokenized_requests = self._tokenized_completion_batch()
+        if tokenized_requests:
+            try:
+                return await self._run_trigger_completion_batch(
+                    attempt,
+                    tokenized_requests,
+                    self._init_sampling_state(),
+                )
+            except UpstreamHTTPError as error:
+                if not is_token_only_unsupported(error):
+                    raise
+                self.logger.warning(
+                    "vLLM token-only Trigger Completion batch is unsupported; fallback to native OpenAI request "
+                    "req_id=%s status_code=%s",
+                    self.req_info.req_id,
+                    error.status_code,
+                )
+                self.req_info.tokenized_requests = []
+                self.req_info._trigger_batch_active = False
+                self.req_info._trigger_batch_index = None
+                self._reset_trigger_batch_item(attempt)
+
+        sampling_state = self._init_sampling_state()
+        d_req, d_api = await self._trigger_decode_request_for_attempt(attempt, sampling_state)
+        tokenized_decode = self._tokenized_trigger_decode_request_for_attempt(attempt)
+        await self._claim_decode_precision_sample(attempt, d_req, sampling_state, tokenized_decode=tokenized_decode)
+        async with self._client_for(attempt.decode_resource) as d_client:
+            return await self._await_nonstream_decode(
+                attempt,
+                d_api,
+                d_req,
+                d_client,
+                sampling_state=sampling_state,
+                tokenized_decode=tokenized_decode,
+            )
+
+    async def handle_metaserver_request(self, kv_transfer_params: dict[str, Any]) -> dict[str, Any]:
+        """Forward Decode's layerwise metaserver callback to a scheduled Prefill instance."""
+        t0_metaserver = time.perf_counter()
+        attempt = self.req_info._trigger_attempt
+        if not isinstance(attempt, AttemptContext):
+            raise HTTPException(status_code=404, detail="Trigger attempt not found")
+        async with attempt.trigger_lock:
+            if self.req_info.is_cancelled:
+                raise HTTPException(status_code=409, detail="Request already cancelled")
+            if attempt.state in (AttemptState.STOPPING, AttemptState.STOPPED, AttemptState.DONE):
+                raise HTTPException(status_code=409, detail="Trigger attempt is no longer active")
+            if attempt.decode_resource is None:
+                raise HTTPException(status_code=409, detail="Trigger decode resource is missing")
+            if attempt.prefill_completed:
+                return {}
+            if attempt.prefill_dispatched:
+                raise HTTPException(status_code=409, detail="Prefill dispatch did not complete")
+
+            adapter = self._require_adapter_for_attempt(attempt)
+            if not isinstance(adapter, VllmProtocolAdapter):
+                raise HTTPException(status_code=500, detail="Trigger metaserver requires vLLM")
+
+            current_task = asyncio.current_task()
+            if current_task is None:
+                raise RuntimeError("Metaserver callback must run in an asyncio task")
+            attempt.register_prefill_task(current_task)
+            p_instance_id = None
+            try:
+                if attempt.prefill_resource is None:
+                    attempt.prefill_resource = await self._prepare_attempt_resource(
+                        PDRole.ROLE_P,
+                        attempt.attempt_seq,
+                        required_engine_type=str(attempt.decode_resource.instance.engine_type),
+                    )
+                if self.req_info.is_cancelled or attempt.state in (
+                    AttemptState.STOPPING,
+                    AttemptState.STOPPED,
+                    AttemptState.DONE,
+                ):
+                    raise HTTPException(status_code=409, detail="Trigger attempt is no longer active")
+
+                req, api = self._base_request_for_attempt(PDRole.ROLE_P)
+                context = replace(
+                    self._native_leg_context(attempt, PDRole.ROLE_P, api),
+                    engine_request_id=self.req_info.req_id,
+                )
+                fallback_request = adapter.build_trigger_prefill_request(req, context, kv_transfer_params)
+                tokenized_request = self._tokenized_trigger_prefill_request(attempt, kv_transfer_params)
+                p_instance_id = attempt.prefill_resource.instance.id
+                async with self._client_for(attempt.prefill_resource) as p_client:
+
+                    async def send(request: EngineRequest):
+                        return await self.forward_request(
+                            request.api,
+                            request.body,
+                            p_client,
+                            self.config.exception_config.first_token_timeout,
+                        )
+
+                    def log_fallback(error: UpstreamHTTPError) -> None:
+                        self.logger.warning(
+                            "vLLM token-only Trigger Prefill is unsupported; fallback to native OpenAI Prefill "
+                            "req_id=%s status_code=%s",
+                            self.req_info.req_id,
+                            error.status_code,
+                        )
+
+                    attempt.register_canceller()
+                    attempt.mark_dispatched(PDRole.ROLE_P.value)
+                    response, used_token_only = await run_token_only_or_fallback(
+                        tokenized_request,
+                        fallback_request,
+                        send,
+                        on_unsupported=log_fallback,
+                        allow_fallback=self.req_info._token_obfuscation_service is None,
+                    )
+                    attempt.mark_completed(PDRole.ROLE_P.value)
+                    body = response.json()
+                    self._record_prefill_complete(body)
+                    if used_token_only:
+                        self.logger.info(
+                            "token-only prefill success request_id=%s prompt_length=%d stream=%s",
+                            self.req_info.req_id,
+                            len(self.req_info.token_ids or []),
+                            str(bool(self.req_info.req_data.get("stream", False))).lower(),
+                        )
+                    await self._scheduler.report_cb_event(p_instance_id, "success")
+                    if not self.req_info._trigger_batch_active:
+                        self._submit_prefill_release_background(attempt, WorkloadAction.RELEASE_TOKENS)
+                    elapsed_ms = (time.perf_counter() - t0_metaserver) * 1000
+                    self.logger.info(
+                        "Scheduling latency stage=metaserver_request_total elapsed_ms=%.2f role=ROLE_P req_id=%s",
+                        elapsed_ms,
+                        self.req_info.req_id,
+                    )
+                    return body
+            except asyncio.CancelledError:
+                self.logger.info("Metaserver request was cancelled req_id=%s", self.req_info.req_id)
+                if attempt.state not in (AttemptState.STOPPING, AttemptState.STOPPED, AttemptState.DONE):
+                    await self._stop_attempt(attempt, AttemptStopReason.PEER_FAILED)
+                raise
+            except Exception as e:
+                elapsed_ms = (time.perf_counter() - t0_metaserver) * 1000
+                self.logger.warning(
+                    "Scheduling latency stage=metaserver_request_total elapsed_ms=%.2f error=%s req_id=%s",
+                    elapsed_ms,
+                    e,
+                    self.req_info.req_id,
+                )
+                if p_instance_id is not None and is_cb_reportable_failure(e):
+                    await self._scheduler.report_cb_event(p_instance_id, "failure")
+                if isinstance(e, UpstreamHTTPError):
+                    attempt.mark_completed(PDRole.ROLE_P.value)
+                await self._stop_attempt(attempt, AttemptStopReason.PEER_FAILED)
+                raise
+            finally:
+                if attempt.prefill_task is current_task:
+                    attempt.prefill_task = None
 
     async def _run_bootstrap_nonstream_attempt(self, attempt: AttemptContext) -> dict[str, Any]:
         attempt.transition(AttemptState.ACTIVE)
         p_req, p_api = self._request_for_attempt(attempt, PDRole.ROLE_P)
-        d_req, d_api = self._request_for_attempt(attempt, PDRole.ROLE_D)
         sampling_state = self._init_sampling_state()
+        d_req, d_api = await self._decode_request_for_attempt(attempt, sampling_state)
+        await self._claim_decode_precision_sample(attempt, d_req, sampling_state, tokenized_decode=None)
         async with (
             self._client_for(attempt.prefill_resource) as p_client,
             self._client_for(attempt.decode_resource) as d_client,
@@ -981,18 +1490,59 @@ class UnifiedPDRouter(BaseRouter):
         *,
         sampling_state: dict | None = None,
         prefill_task: asyncio.Task | None = None,
+        tokenized_decode: EngineRequest | None = None,
     ) -> dict[str, Any]:
         d_instance_id = attempt.decode_resource.instance.id
 
-        async def decode_task() -> tuple[Any, Any]:
+        async def decode_task() -> tuple[Any, Any, bool, dict[str, Any] | None]:
+            fallback_request = EngineRequest(api=d_api, body=d_req)
+
+            async def send(request: EngineRequest):
+                return await self.forward_request(
+                    request.api,
+                    request.body,
+                    d_client,
+                    self.config.exception_config.infer_timeout,
+                )
+
+            def log_fallback(error: UpstreamHTTPError) -> None:
+                self.logger.warning(
+                    "vLLM token-only Decode is unsupported; fallback to native OpenAI Decode req_id=%s status_code=%s",
+                    self.req_info.req_id,
+                    error.status_code,
+                )
+
+            generate_body: dict[str, Any] | None = None
             try:
                 attempt.mark_dispatched(PDRole.ROLE_D.value)
-                response = await self.forward_request(
-                    d_api, d_req, d_client, self.config.exception_config.infer_timeout
+                response, used_token_only = await run_token_only_or_fallback(
+                    tokenized_decode,
+                    fallback_request,
+                    send,
+                    on_unsupported=log_fallback,
+                    allow_fallback=self.req_info._token_obfuscation_service is None,
                 )
+                response_body = response.json()
+                if used_token_only:
+                    # The claimed sampling fields only live on the token-only body;
+                    # keep the raw GenerateResponse for logprob collection.
+                    generate_body = response_body
+                    if self._render_client is None:
+                        raise RuntimeError("Derender client is not configured")
+                    response_body = await finish_token_only_response(
+                        self._render_client,
+                        self.req_info,
+                        [response_body],
+                    )
+                elif sampling_state is not None and sampling_state["enabled"] and tokenized_decode is not None:
+                    # The token-only body claimed the sampling window but the engine
+                    # rejected it; the fallback body carries no injected fields, so
+                    # disable sampling instead of collecting nonexistent logprobs.
+                    sampling_state["enabled"] = False
+                    sampling_state["logprobs_metadata"] = None
                 attempt.mark_completed(PDRole.ROLE_D.value)
                 await self._scheduler.report_cb_event(d_instance_id, "success")
-                return response.json(), None
+                return response_body, None, used_token_only, generate_body
             except asyncio.CancelledError:  # pylint: disable=try-except-raise
                 raise
             except Exception as e:
@@ -1000,7 +1550,7 @@ class UnifiedPDRouter(BaseRouter):
                     attempt.mark_completed(PDRole.ROLE_D.value)
                 if is_cb_reportable_failure(e):
                     await self._scheduler.report_cb_event(d_instance_id, "failure")
-                return None, e
+                return None, e, False, None
 
         d_task = attempt.register_decode_task(asyncio.create_task(decode_task()))
         try:
@@ -1016,7 +1566,7 @@ class UnifiedPDRouter(BaseRouter):
                 if d_task in done:
                     break
 
-            response, error = await d_task
+            response, error, used_token_only, generate_body = await d_task
             if error:
                 await attempt.cancel(repr(error))
                 await self._release_attempt(attempt, wait=False)
@@ -1029,9 +1579,20 @@ class UnifiedPDRouter(BaseRouter):
             self._submit_prefill_release_background(attempt, WorkloadAction.RELEASE_TOKENS)
             self.req_info.update_state(ReqState.DECODE_END)
             if sampling_state is not None:
-                response = self._collect_logprobs_from_nonstream_body(response, sampling_state)
+                if used_token_only and generate_body is not None:
+                    # Token-only path: logprobs live on the raw GenerateResponse, which
+                    # was consumed by Derender; collect from it without replacing the
+                    # client-visible derendered body.
+                    self._collect_logprobs_from_nonstream_body(generate_body, sampling_state)
+                else:
+                    self._collect_logprobs_from_nonstream_body(response, sampling_state)
                 await self._maybe_submit_sample(attempt, sampling_state)
                 self._strip_logprobs_for_client(response, sampling_state)
+            if used_token_only:
+                strip_nonstream_response_body_for_client(
+                    response,
+                    client_return_token_ids=self.req_info.client_expects_token_ids,
+                )
             await self._release_attempt(attempt, wait=False)
             await self._drain_release_tasks()
             return response
@@ -1047,8 +1608,38 @@ class UnifiedPDRouter(BaseRouter):
             await self._drain_release_tasks()
             raise
 
+    def _tokenized_handoff_decode_request(
+        self,
+        attempt: AttemptContext,
+        prefill_result: PrefillMetadata,
+        *,
+        allow_streaming: bool = False,
+    ) -> EngineRequest | None:
+        tokenized = self._select_active_token_only_request(allow_streaming=allow_streaming)
+        if tokenized is None:
+            return None
+        adapter = self._require_adapter_for_attempt(attempt)
+        if not isinstance(adapter, VllmProtocolAdapter):
+            return None
+        context = self._native_leg_context(attempt, PDRole.ROLE_D, self.req_info.entry_api)
+        return adapter.build_tokenized_request(
+            tokenized.physical_prompt_token_ids,
+            tokenized.metadata,
+            EngineLegSpec(
+                context=context,
+                phase=EnginePhase.DECODE,
+                generation=GenerationConstraint(stream=allow_streaming),
+                kv_transfer=require_kv_transfer(prefill_result.handoff_ticket, phase=EnginePhase.DECODE),
+            ),
+        )
+
     async def _run_handoff_stream_attempt(self, attempt: AttemptContext) -> AsyncGenerator[str, None]:
         attempt.transition(AttemptState.ACTIVE)
+        completion_requests = self._tokenized_stream_completion_requests(attempt)
+        if completion_requests:
+            async for chunk in self._run_handoff_completion_stream(attempt, completion_requests):
+                yield chunk
+            return
         stream_adapter_state = {}
         sampling_state = self._init_sampling_state()
         async with self._client_for(attempt.prefill_resource) as p_client:
@@ -1061,7 +1652,19 @@ class UnifiedPDRouter(BaseRouter):
             attempt,
         )
         late_decode = await self._ensure_handoff_decode_resource(attempt)
-        d_req, d_api = self._request_for_attempt(attempt, PDRole.ROLE_D, prefill_result=prefill_result)
+        d_req, d_api = await self._decode_request_for_attempt(
+            attempt,
+            sampling_state,
+            prefill_result=prefill_result,
+        )
+        tokenized_decode = self._tokenized_handoff_decode_request(
+            attempt,
+            prefill_result,
+            allow_streaming=True,
+        )
+        if tokenized_decode is not None:
+            d_req, d_api = tokenized_decode.body, tokenized_decode.api
+        await self._claim_decode_precision_sample(attempt, d_req, sampling_state, tokenized_decode=tokenized_decode)
         async with self._client_for(attempt.decode_resource) as d_client:
             if late_decode:
                 # Client is now in the pool; the canceller can bind to it.
@@ -1079,8 +1682,273 @@ class UnifiedPDRouter(BaseRouter):
                 async for chunk in decode_stream:
                     yield chunk
 
+    def _tokenized_stream_completion_requests(self, _attempt: AttemptContext) -> list[TokenizedRequest]:
+        if self.req_info.effective_entry_api().strip("/") != "v1/completions":
+            return []
+        return token_only_requests_for_attempt(
+            self.req_info,
+            self._render_client,
+            allow_streaming=True,
+            retry_plan=self._active_retry_plan,
+        )
+
+    def _tokenized_completion_batch(self) -> list[TokenizedRequest]:
+        requests = select_token_only_requests(self.req_info, self._render_client)
+        return requests if len(requests) > 1 else []
+
+    def _build_handoff_batch_requests(
+        self,
+        attempt: AttemptContext,
+        tokenized_requests: list[TokenizedRequest],
+        *,
+        prefill_results: list[PrefillMetadata] | None = None,
+        stream: bool = False,
+    ) -> list[EngineRequest]:
+        adapter = self._require_adapter_for_attempt(attempt)
+        if not isinstance(adapter, VllmProtocolAdapter):
+            return []
+        role = PDRole.ROLE_P if prefill_results is None else PDRole.ROLE_D
+
+        def leg_factory(index: int) -> EngineLegSpec:
+            context = replace(
+                self._native_leg_context(attempt, role, self.req_info.entry_api),
+                engine_request_id=token_only_request_id(
+                    self.req_info.req_id,
+                    attempt_seq=attempt.attempt_seq,
+                    prompt_index=index,
+                ),
+            )
+            if prefill_results is None:
+                return EngineLegSpec(
+                    context=context,
+                    phase=EnginePhase.PREFILL,
+                    generation=GenerationConstraint(max_tokens=1, min_tokens=1),
+                    kv_transfer=KVTransferDescriptor(
+                        {
+                            "do_remote_decode": True,
+                            "do_remote_prefill": False,
+                        }
+                    ),
+                )
+            ticket = prefill_results[index].handoff_ticket
+            return EngineLegSpec(
+                context=context,
+                phase=EnginePhase.DECODE,
+                generation=GenerationConstraint(stream=stream),
+                kv_transfer=require_kv_transfer(ticket, phase=EnginePhase.DECODE),
+            )
+
+        return build_token_only_batch(adapter, tokenized_requests, leg_factory)
+
+    async def _run_handoff_completion_batch(
+        self,
+        attempt: AttemptContext,
+        tokenized_requests: list[TokenizedRequest],
+        sampling_state: dict,
+    ) -> dict[str, Any]:
+        adapter = self._require_adapter_for_attempt(attempt)
+        prefill_requests = self._build_handoff_batch_requests(attempt, tokenized_requests)
+        p_instance_id = attempt.prefill_resource.instance.id
+        async with self._client_for(attempt.prefill_resource) as p_client:
+
+            async def send_prefill(request: EngineRequest) -> dict[str, Any]:
+                response = await self.forward_request(
+                    request.api,
+                    request.body,
+                    p_client,
+                    self.config.exception_config.first_token_timeout,
+                )
+                return response.json()
+
+            attempt.mark_dispatched(PDRole.ROLE_P.value)
+            prefill_bodies = await gather_generate_responses(prefill_requests, send_prefill)
+            prefill_results = [adapter.parse_prefill_response(body) for body in prefill_bodies]
+            attempt.mark_completed(PDRole.ROLE_P.value)
+            await self._scheduler.report_cb_event(p_instance_id, "success")
+
+        self._submit_release_attempt_resource_background(
+            attempt.prefill_resource,
+            attempt.attempt_seq,
+            WorkloadAction.RELEASE_TOKENS,
+            attempt,
+        )
+        late_decode = await self._ensure_handoff_decode_resource(attempt)
+        decode_requests = self._build_handoff_batch_requests(
+            attempt,
+            tokenized_requests,
+            prefill_results=prefill_results,
+        )
+        # A Completion batch is one outer request but contains independent prompts.
+        # One admission must produce one independent sample, so select its first
+        # prompt deterministically and leave every other body untouched.
+        sampled_index = 0
+        if await self._claim_precision_sample_tokenized(
+            attempt.decode_resource,
+            [decode_requests[sampled_index]],
+            sampling_state,
+        ):
+            sampling_state["tokenized_sample_index"] = sampled_index
+            sampling_state["info"]["cached_prompt_token_ids"] = list(tokenized_requests[sampled_index].prompt_token_ids)
+        d_instance_id = attempt.decode_resource.instance.id
+        async with self._client_for(attempt.decode_resource) as d_client:
+            if late_decode:
+                attempt.register_decode_canceller()
+
+            async def send_decode(request: EngineRequest) -> dict[str, Any]:
+                response = await self.forward_request(
+                    request.api,
+                    request.body,
+                    d_client,
+                    self.config.exception_config.infer_timeout,
+                )
+                return response.json()
+
+            attempt.mark_dispatched(PDRole.ROLE_D.value)
+            generate_responses = await gather_generate_responses(decode_requests, send_decode)
+            attempt.mark_completed(PDRole.ROLE_D.value)
+            await self._scheduler.report_cb_event(d_instance_id, "success")
+
+        if self._render_client is None:
+            raise RuntimeError("Derender client is not configured")
+        body = await finish_token_only_response(self._render_client, self.req_info, generate_responses)
+        self.req_info.update_state(ReqState.DECODE_END)
+        sampled_index = sampling_state.get("tokenized_sample_index")
+        if sampled_index is not None:
+            self._collect_logprobs_from_nonstream_body(generate_responses[sampled_index], sampling_state)
+        await self._maybe_submit_sample(attempt, sampling_state)
+        self._strip_logprobs_for_client(body, sampling_state)
+        await self._release_attempt(attempt, wait=False)
+        await self._drain_release_tasks()
+        return body
+
+    async def _run_handoff_completion_stream(
+        self,
+        attempt: AttemptContext,
+        tokenized_requests: list[TokenizedRequest],
+    ) -> AsyncGenerator[str, None]:
+        adapter = self._require_adapter_for_attempt(attempt)
+        sampling_state = self._init_sampling_state()
+        prefill_requests = self._build_handoff_batch_requests(attempt, tokenized_requests)
+        p_instance_id = attempt.prefill_resource.instance.id
+        async with self._client_for(attempt.prefill_resource) as p_client:
+
+            async def send_prefill(request: EngineRequest) -> dict[str, Any]:
+                response = await self.forward_request(
+                    request.api,
+                    request.body,
+                    p_client,
+                    self.config.exception_config.first_token_timeout,
+                )
+                return response.json()
+
+            attempt.mark_dispatched(PDRole.ROLE_P.value)
+            prefill_bodies = await gather_generate_responses(prefill_requests, send_prefill)
+            prefill_results = [adapter.parse_prefill_response(body) for body in prefill_bodies]
+            if len(prefill_results) == 1 and prefill_results[0].usage is not None:
+                self._capture_prompt_tokens_details({"usage": prefill_results[0].usage})
+            self.req_info.update_state(ReqState.PREFILL_END)
+            if self._stream_commit_controller is not None:
+                self._stream_commit_controller.mark_ready("prefill", attempt.attempt_seq)
+            attempt.mark_completed(PDRole.ROLE_P.value)
+            await self._scheduler.report_cb_event(p_instance_id, "success")
+
+        self._submit_release_attempt_resource_background(
+            attempt.prefill_resource,
+            attempt.attempt_seq,
+            WorkloadAction.RELEASE_TOKENS,
+            attempt,
+        )
+        late_decode = await self._ensure_handoff_decode_resource(attempt)
+        decode_requests = self._build_handoff_batch_requests(
+            attempt,
+            tokenized_requests,
+            prefill_results=prefill_results,
+            stream=True,
+        )
+        sampled_index = 0
+        if await self._claim_precision_sample_tokenized(
+            attempt.decode_resource,
+            [decode_requests[sampled_index]],
+            sampling_state,
+        ):
+            sampling_state["tokenized_sample_index"] = sampled_index
+            sampling_state["info"]["cached_prompt_token_ids"] = list(tokenized_requests[sampled_index].prompt_token_ids)
+        d_instance_id = attempt.decode_resource.instance.id
+        stream_adapter_state: dict[str, Any] = {}
+        if self._render_client is None:
+            raise RuntimeError("Derender client is not configured")
+        async with self._client_for(attempt.decode_resource) as d_client:
+            if late_decode:
+                attempt.register_decode_canceller()
+            ready_callbacks = build_response_ready_callbacks(
+                len(decode_requests),
+                lambda: self._stream_commit_controller.mark_ready("decode", attempt.attempt_seq),
+            )
+            streams = [
+                self.forward_stream_request(
+                    request.api,
+                    request.body,
+                    d_client,
+                    self.config.exception_config.infer_timeout,
+                    on_response_ready=ready_callbacks[index],
+                )
+                for index, request in enumerate(decode_requests)
+            ]
+
+            def before_derender(index: int, chunk: bytes) -> bytes:
+                if index == sampled_index:
+                    return self._collect_logprobs_from_stream_chunk(chunk, sampling_state)
+                return chunk
+
+            attempt.mark_dispatched(PDRole.ROLE_D.value)
+            async for chunk in merge_token_only_streams(
+                self.req_info,
+                self._render_client,
+                streams,
+                tokenized_requests=tokenized_requests,
+                session=self._get_streaming_render_session(),
+                emit_prompt_token_ids=not bool(self.req_info.prompt_token_ids),
+                before_derender=before_derender,
+            ):
+                if self.config.exception_config.reschedule_enabled and len(tokenized_requests) == 1:
+                    chunk = self.rescheduler.process_stream_chunk(
+                        chunk,
+                        stream_adapter_state=stream_adapter_state,
+                    )
+                else:
+                    chunk = self._merge_prompt_tokens_details_into_stream_chunk(chunk)
+                    chunk = strip_stream_chunk_bytes_for_client(
+                        chunk,
+                        client_return_token_ids=self.req_info.client_expects_token_ids,
+                    )
+                yield self._strip_native_internal_fields_from_stream_chunk(chunk, attempt)
+            attempt.mark_completed(PDRole.ROLE_D.value)
+            await self._scheduler.report_cb_event(d_instance_id, "success")
+
+        self.req_info.update_state(ReqState.DECODE_END)
+        await self._maybe_submit_sample(attempt, sampling_state)
+
     async def _run_handoff_nonstream_attempt(self, attempt: AttemptContext) -> dict[str, Any]:
         attempt.transition(AttemptState.ACTIVE)
+        tokenized_requests = self._tokenized_completion_batch()
+        if tokenized_requests:
+            try:
+                return await self._run_handoff_completion_batch(
+                    attempt,
+                    tokenized_requests,
+                    self._init_sampling_state(),
+                )
+            except UpstreamHTTPError as error:
+                if not is_token_only_unsupported(error):
+                    raise
+                self.logger.warning(
+                    "vLLM token-only Completion batch is unsupported; fallback to native OpenAI request "
+                    "req_id=%s status_code=%s",
+                    self.req_info.req_id,
+                    error.status_code,
+                )
+                self.req_info.tokenized_requests = []
+
         sampling_state = self._init_sampling_state()
         async with self._client_for(attempt.prefill_resource) as p_client:
             prefill_result = await self._await_handoff_prefill(attempt, p_client)
@@ -1092,12 +1960,25 @@ class UnifiedPDRouter(BaseRouter):
             attempt,
         )
         late_decode = await self._ensure_handoff_decode_resource(attempt)
-        d_req, d_api = self._request_for_attempt(attempt, PDRole.ROLE_D, prefill_result=prefill_result)
+        d_req, d_api = await self._decode_request_for_attempt(
+            attempt,
+            sampling_state,
+            prefill_result=prefill_result,
+        )
+        tokenized_decode = self._tokenized_handoff_decode_request(attempt, prefill_result)
+        await self._claim_decode_precision_sample(attempt, d_req, sampling_state, tokenized_decode=tokenized_decode)
         async with self._client_for(attempt.decode_resource) as d_client:
             if late_decode:
                 # Client is now in the pool; the canceller can bind to it.
                 attempt.register_decode_canceller()
-            return await self._await_nonstream_decode(attempt, d_api, d_req, d_client, sampling_state=sampling_state)
+            return await self._await_nonstream_decode(
+                attempt,
+                d_api,
+                d_req,
+                d_client,
+                sampling_state=sampling_state,
+                tokenized_decode=tokenized_decode,
+            )
 
     async def _ensure_handoff_decode_resource(self, attempt: AttemptContext) -> bool:
         """Lazily allocate the decode leg for a handoff attempt.
@@ -1181,6 +2062,71 @@ class UnifiedPDRouter(BaseRouter):
             prefill_metadata=prefill_result,
         )
 
+    def _tokenized_handoff_prefill_request(self, attempt: AttemptContext) -> EngineRequest | None:
+        tokenized_request = self._select_active_token_only_request(
+            allow_streaming=True,
+            require_render_client=False,
+        )
+        if tokenized_request is None:
+            return None
+        adapter = self._require_adapter_for_attempt(attempt)
+        if not isinstance(adapter, VllmProtocolAdapter):
+            return None
+        context = self._native_leg_context(attempt, PDRole.ROLE_P, self.req_info.entry_api)
+        return adapter.build_tokenized_request(
+            tokenized_request.physical_prompt_token_ids,
+            tokenized_request.metadata,
+            EngineLegSpec(
+                context=context,
+                phase=EnginePhase.PREFILL,
+                generation=GenerationConstraint(max_tokens=1, min_tokens=1),
+                kv_transfer=KVTransferDescriptor(
+                    {
+                        "do_remote_decode": True,
+                        "do_remote_prefill": False,
+                    }
+                ),
+            ),
+        )
+
+    async def _decode_request_for_attempt(
+        self,
+        attempt: AttemptContext,
+        sampling_state: dict,
+        *,
+        prefill_result: PrefillMetadata | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        req, api = self._base_request_for_attempt(PDRole.ROLE_D)
+        adapter = self._require_adapter_for_attempt(attempt)
+        return self._native_request_for_attempt(
+            attempt,
+            PDRole.ROLE_D,
+            adapter=adapter,
+            req=req,
+            api=api,
+            prefill_metadata=prefill_result,
+        )
+
+    async def _claim_decode_precision_sample(
+        self,
+        attempt: AttemptContext,
+        d_req: dict[str, Any],
+        sampling_state: dict,
+        *,
+        tokenized_decode: EngineRequest | None,
+    ) -> None:
+        """Claim D-instance admission against the decode body actually dispatched.
+
+        Token-only decode bypasses the OpenAI-shaped body, so when a tokenized
+        request exists the claim injects into its body instead of the fallback
+        ``d_req``; otherwise the engine would run without logprobs while the exit
+        path collects them (空采).
+        """
+        if tokenized_decode is not None:
+            await self._claim_precision_sample_tokenized(attempt.decode_resource, [tokenized_decode], sampling_state)
+        else:
+            await self._claim_precision_sample(attempt.decode_resource, d_req, sampling_state)
+
     def _base_request_for_attempt(self, role: PDRole) -> tuple[dict[str, Any], str]:
         api = self.req_info.entry_api
         req = self.req_info.req_data.copy()
@@ -1193,12 +2139,6 @@ class UnifiedPDRouter(BaseRouter):
                     self._active_retry_plan,
                     prefill=role == PDRole.ROLE_P,
                 )
-        if (
-            role == PDRole.ROLE_D
-            and self.config.precision_detection_config.precision_check_enabled
-            and self._sampling_manager is not None
-        ):
-            inject_logprobs(req, self.config.precision_detection_config, req_id=self.req_info.req_id)
         return req, api
 
     def _native_request_for_attempt(
@@ -1248,14 +2188,33 @@ class UnifiedPDRouter(BaseRouter):
         attempt: AttemptContext,
         p_client,
     ) -> PrefillMetadata:
+        tokenized_request = self._tokenized_handoff_prefill_request(attempt)
         p_req, p_api = self._request_for_attempt(attempt, PDRole.ROLE_P)
-        attempt.mark_dispatched(PDRole.ROLE_P.value)
-        try:
-            response = await self.forward_request(
-                p_api,
-                p_req,
+        fallback_request = EngineRequest(api=p_api, body=p_req)
+
+        async def send(request: EngineRequest):
+            return await self.forward_request(
+                request.api,
+                request.body,
                 p_client,
                 self.config.exception_config.first_token_timeout,
+            )
+
+        def log_fallback(error: UpstreamHTTPError) -> None:
+            self.logger.warning(
+                "vLLM token-only Prefill is unsupported; fallback to native OpenAI Prefill req_id=%s status_code=%s",
+                self.req_info.req_id,
+                error.status_code,
+            )
+
+        attempt.mark_dispatched(PDRole.ROLE_P.value)
+        try:
+            response, used_token_only = await run_token_only_or_fallback(
+                tokenized_request,
+                fallback_request,
+                send,
+                on_unsupported=log_fallback,
+                allow_fallback=self.req_info._token_obfuscation_service is None,
             )
         except UpstreamHTTPError:
             attempt.mark_completed(PDRole.ROLE_P.value)
@@ -1274,6 +2233,13 @@ class UnifiedPDRouter(BaseRouter):
             ) from error
         if prefill_metadata.usage is not None:
             self._capture_prompt_tokens_details({"usage": prefill_metadata.usage})
+        if used_token_only:
+            self.logger.info(
+                "token-only prefill success request_id=%s prompt_length=%d stream=%s",
+                self.req_info.req_id,
+                len(self.req_info.token_ids or []),
+                str(bool(self.req_info.req_data.get("stream", False))).lower(),
+            )
         self.req_info.update_state(ReqState.PREFILL_END)
         if self._stream_commit_controller is not None:
             self._stream_commit_controller.mark_ready("prefill", attempt.attempt_seq)
@@ -1281,15 +2247,47 @@ class UnifiedPDRouter(BaseRouter):
 
     def _select_coordination_mode(self, attempt: AttemptContext) -> CoordinationMode:
         adapter = self._require_adapter_for_attempt(attempt)
-        if adapter.coordination_mode == CoordinationMode.BOOTSTRAP and attempt.decode_resource is None:
-            raise RuntimeError(f"{adapter.engine_type} bootstrap requires a decode instance")
-        if attempt.decode_resource is not None:
+        if adapter.coordination_mode == CoordinationMode.BOOTSTRAP:
+            if attempt.decode_resource is None:
+                raise RuntimeError(f"{adapter.engine_type} bootstrap requires a decode instance")
+            if attempt.prefill_resource is not None:
+                decode_engine_type = getattr(attempt.decode_resource.instance, "engine_type", None)
+                if not isinstance(decode_engine_type, str) or decode_engine_type.strip().lower() != adapter.engine_type:
+                    raise RuntimeError(
+                        f"P/D engine types must match: prefill={adapter.engine_type}, decode={decode_engine_type!r}"
+                    )
+            return CoordinationMode.BOOTSTRAP
+        # Prefer cluster detection already done in create_attempt: ALLOCATE_ONLY historically
+        # dropped dispatch_capabilities, which would otherwise fall back to adapter HANDOFF.
+        if self._pd_uses_trigger:
+            return self._require_trigger_decode(attempt)
+        resource = attempt.prefill_resource or attempt.decode_resource
+        caps = list(getattr(resource.instance, "dispatch_capabilities", None) or []) if resource is not None else []
+        if _TRIGGER_CAPABILITY in caps:
+            return self._require_trigger_decode(attempt)
+        if attempt.decode_resource is not None and attempt.prefill_resource is not None:
             decode_engine_type = getattr(attempt.decode_resource.instance, "engine_type", None)
             if not isinstance(decode_engine_type, str) or decode_engine_type.strip().lower() != adapter.engine_type:
                 raise RuntimeError(
                     f"P/D engine types must match: prefill={adapter.engine_type}, decode={decode_engine_type!r}"
                 )
         return adapter.coordination_mode
+
+    def _require_trigger_decode(self, attempt: AttemptContext) -> CoordinationMode:
+        if attempt.decode_resource is None:
+            self.logger.error(
+                "Trigger mode selected without a decode resource req_id=%s attempt=%s",
+                self.req_info.req_id,
+                attempt.attempt_seq,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Trigger P/D requires a decode instance; cluster detection and "
+                    "allocated instance capabilities are inconsistent"
+                ),
+            )
+        return CoordinationMode.TRIGGER
 
     async def _prepare_attempt_resource(
         self,
@@ -1316,15 +2314,35 @@ class UnifiedPDRouter(BaseRouter):
                 raise HTTPException(status_code=503, detail=error_message)
             raise RuntimeError(error_message)
         ins, endpoint, workload = result
-        await self._record_attempt_workload(attempt_seq, role, workload)
-        self.req_info.update_state(ReqState.P_ALLOCATED if role == PDRole.ROLE_P else ReqState.D_ALLOCATED)
-        return ScheduledResource(instance=ins, endpoint=endpoint)
-
-    async def _record_attempt_workload(self, attempt_seq: int, role: PDRole, workload) -> None:
-        if not await self._request_manager.add_req_attempt_workload(self.req_info.req_id, attempt_seq, role, workload):
+        try:
+            recorded = await self._request_manager.add_req_attempt_workload(
+                self.req_info.req_id,
+                attempt_seq,
+                role,
+                workload,
+                instance_id=ins.id,
+                endpoint_id=endpoint.id,
+            )
+        except BaseException as e:
+            self.logger.error(
+                "Workload bookkeeping interrupted after allocation; rolling back "
+                "req_id=%s attempt_seq=%s role=%s instance_id=%s endpoint_id=%s error=%r",
+                self.req_info.req_id,
+                attempt_seq,
+                role,
+                ins.id,
+                endpoint.id,
+                e,
+            )
+            await self._rollback_allocated_workload(ins, endpoint, role, workload)
+            raise
+        if not recorded:
+            await self._rollback_allocated_workload(ins, endpoint, role, workload)
             raise RuntimeError(
                 f"Request {self.req_info.req_id} already allocated for attempt {attempt_seq} role {role}"
             )
+        self.req_info.update_state(ReqState.P_ALLOCATED if role == PDRole.ROLE_P else ReqState.D_ALLOCATED)
+        return ScheduledResource(instance=ins, endpoint=endpoint)
 
     async def _release_attempt(self, attempt: AttemptContext, *, wait: bool = True) -> None:
         if attempt.prefill_resource:
@@ -1343,6 +2361,10 @@ class UnifiedPDRouter(BaseRouter):
                 attempt,
                 wait=wait,
             )
+
+    async def _drain_pending_releases(self) -> None:
+        """Unified PD runs releases as background tasks; settle them before residual reclaim."""
+        await self._drain_release_tasks()
 
     def _submit_prefill_release_background(self, attempt: AttemptContext, action: WorkloadAction) -> None:
         if attempt.prefill_resource is None:
@@ -1459,14 +2481,15 @@ class UnifiedPDRouter(BaseRouter):
                 record.item = item
             ok = await self._send_release_work_item(item)
             if ok:
-                # Scheduler ACKed the release: drop the worker-side ledger record that
-                # compute_and_update intentionally retained for failure recomputation.
+                # Mark released BEFORE finalize: this is the atomic commit point, so a
+                # finalize_release failure below can't reopen the window for a later re-enqueue
+                # to resend (and double-subtract) the same delta.
+                if item.attempt is not None:
+                    self._mark_released(item.attempt, item.role, item.action)
                 try:
                     await self._workload_action_handler.finalize_release(self.req_info.req_id, item.role, attempt_seq)
                 except Exception as exc:
-                    # The scheduler already applied the release; a finalize failure only leaves
-                    # a stale local record (a later re-release is deduped by operation_id).
-                    # Log it but do not turn the ACKed release into a failure/retry.
+                    # Scheduler already applied the release; keep the ACK as success regardless.
                     self.logger.warning(
                         "finalize_release failed after scheduler ACK req_id=%s attempt_seq=%s action=%s: %s",
                         self.req_info.req_id,
@@ -1474,12 +2497,6 @@ class UnifiedPDRouter(BaseRouter):
                         action.value,
                         exc,
                     )
-                else:
-                    # Mark released only after the local record is gone: a finalize failure
-                    # leaves the release unmarked, so a later re-enqueue can recompute the
-                    # delta and finalize again instead of skipping as already-released.
-                    if item.attempt is not None:
-                        self._mark_released(item.attempt, item.role, item.action)
             return ok
         except Exception as exc:
             self._log_release_task_result_error(None, "raised", exc, context=task_context)
@@ -1509,9 +2526,8 @@ class UnifiedPDRouter(BaseRouter):
             req_id=self.req_info.req_id,
             workload_action=action,
             workload_change=workload_change,
-            # Deterministic id keyed on (request, attempt, endpoint, action): stable across the
-            # retries in _send_release_work_item, so a release whose ACK was lost is de-duplicated by
-            # the scheduler instead of applied twice (which would drive the load ledger negative).
+            # Deterministic id for log/trace correlation across retries only -- the CAS release
+            # path does not dedup on it (see _mark_released in _release_attempt_resource_task).
             operation_id=(
                 f"{self.req_info.req_id}:a{attempt_seq}:{resource.instance.id}:{resource.endpoint.id}:{action.value}"
             ),
@@ -1852,8 +2868,7 @@ class UnifiedPDRouter(BaseRouter):
         info.setdefault("cached_prompt_token_ids", self.req_info.token_ids)
         p_id = attempt.prefill_resource.instance.id
         d_id = attempt.decode_resource.instance.id
-        if await self._sampling_manager.confirm_sample((p_id, d_id), time.time()):
-            await self._submit_token_sample(p_id, d_id, info, attempt.decode_resource)
+        await self._submit_token_sample(p_id, d_id, info, attempt.decode_resource)
 
     @staticmethod
     async def _cancel_task_quietly(task: asyncio.Task | None) -> None:

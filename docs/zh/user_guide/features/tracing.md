@@ -12,7 +12,7 @@ MindIE Motor开启Tracing能力需修改env.json配置文件和user_config.json�
 
 ### 配置env.json
 
-以[MindIE Motor快速开始](../quick_start_motor.md)中实例env.json为参考基线，适配打开Tracing能力后的配置文件示例如下：
+以[MindIE Motor快速开始](../quick_start.md)中实例env.json为参考基线，适配打开Tracing能力后的配置文件示例如下：
 
 ```json
 {
@@ -50,7 +50,7 @@ MindIE Motor开启Tracing能力需修改env.json配置文件和user_config.json�
 
 ### 配置user_config.json
 
-以[MindIE Motor快速开始](../quick_start_motor.md)中实例user_config.json为参考基线，适配打开Tracing能力后的配置文件示例如下：
+以[MindIE Motor快速开始](../quick_start.md)中实例user_config.json为参考基线，适配打开Tracing能力后的配置文件示例如下：
 
 ```json
 {
@@ -94,7 +94,7 @@ MindIE Motor开启Tracing能力需修改env.json配置文件和user_config.json�
       "data_parallel_rpc_port": 9000,
       "otlp-traces-endpoint": "http://xx.xx.xx.xx:4318/v1/traces",
       "kv_transfer_config": {
-       "kv_connector": "MooncakeLayerwiseConnector",
+       "kv_connector": "MooncakeConnectorV1",
        "kv_buffer_device": "npu",
        "kv_role": "kv_producer",
        "kv_connector_extra_config": {
@@ -116,7 +116,7 @@ MindIE Motor开启Tracing能力需修改env.json配置文件和user_config.json�
       "data_parallel_rpc_port": 9000,
       "otlp-traces-endpoint": "http://xx.xx.xx.xx:4318/v1/traces",
       "kv_transfer_config": {
-       "kv_connector": "MooncakeLayerwiseConnector",
+       "kv_connector": "MooncakeConnectorV1",
        "kv_buffer_device": "npu",
        "kv_role": "kv_consumer",
        "kv_connector_extra_config": {

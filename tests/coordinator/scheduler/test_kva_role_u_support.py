@@ -10,7 +10,7 @@
 
 """Regression tests for ROLE_U support in KVA register/select flows."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from motor.common.resources.instance import PDRole
 from motor.coordinator.api_client.conductor_api_client import (
@@ -126,6 +126,14 @@ def test_register_post_formats_ipv6_endpoint_and_conductor_address() -> None:
     assert register_payload["replay_endpoint"] == "tcp://[2001:db8::1]:6669"
 
 
+def _mock_enabled_kv_reg():
+    """Return a KV conductor config with registration enabled for unit tests."""
+    mock_reg = Mock()
+    mock_reg.conductor_service = "kv-conductor"
+    mock_reg.store_backend = "YuanRong"
+    return mock_reg
+
+
 def test_register_kv_instance_supports_role_u() -> None:
     instances = [
         _build_instance(PDRole.ROLE_P),
@@ -133,19 +141,18 @@ def test_register_kv_instance_supports_role_u() -> None:
         _build_instance(PDRole.ROLE_D),
     ]
     with (
+        patch.object(ConductorApiClient, "_kv_reg", return_value=_mock_enabled_kv_reg()),
         patch.object(ConductorApiClient, "_register_hbm_dp") as mock_hbm_dp,
-        patch.object(ConductorApiClient, "_register_yuanrong_dp") as mock_yuanrong_dp,
+        patch.object(ConductorApiClient, "_register_yuanrong_node"),
         patch.object(ConductorApiClient, "_register_pool"),
     ):
         ConductorApiClient.register_kv_instance(instances)
 
-    # Depending on backend mode, either _register_hbm_dp or _register_yuanrong_dp
-    # is called for each KVA-eligible instance endpoint.
-    # Signature: _register_*_dp(cls, reg, store_backend, instance, endpoint)
+    # NPU/HBM is registered per KVA-eligible instance endpoint.
+    # Signature: _register_hbm_dp(cls, reg, store_backend, instance, endpoint)
     # call.args excludes cls, so instance is at index 2.
-    registered_method = mock_hbm_dp if mock_hbm_dp.call_count else mock_yuanrong_dp
-    assert registered_method.call_count == 2
-    called_roles = {call.args[2].role for call in registered_method.call_args_list}
+    assert mock_hbm_dp.call_count == 2
+    called_roles = {call.args[2].role for call in mock_hbm_dp.call_args_list}
     assert called_roles == {PDRole.ROLE_P, PDRole.ROLE_U}
 
 
@@ -155,7 +162,10 @@ def test_unregister_kv_instance_supports_role_u() -> None:
         _build_instance(PDRole.ROLE_U),
         _build_instance(PDRole.ROLE_D),
     ]
-    with patch.object(ConductorApiClient, "unregister_post") as mock_unregister_post:
+    with (
+        patch.object(ConductorApiClient, "_kv_reg", return_value=_mock_enabled_kv_reg()),
+        patch.object(ConductorApiClient, "unregister_post") as mock_unregister_post,
+    ):
         ConductorApiClient.unregister_kv_instance(instances)
 
     assert mock_unregister_post.call_count == 2
@@ -222,20 +232,24 @@ def test_kv_cache_affinity_falls_back_to_load_balance_for_role_u() -> None:
 
 
 async def test_select_and_allocate_role_u_unified_forwards_top1() -> None:
-    """Unified affinity forwards every endpoint (with prefill_cost) to the scheduler for a global
-    re-rank, so the worker only needs its own top-1 locally.
-    """
+    """Unified affinity scores locally with top_k=1, then CAS-commits (no ALLOCATE RPC)."""
     client = _build_kv_client()  # default kv_affinity_mode is unified
+    client._workload_reader = Mock()
+    client._workload_reader.native = Mock()
     req_info = Mock()
     req_info.req_id = "req-1"
     req_info.req_data = {}
     req_info.req_len = 0
 
-    with patch.object(
-        client,
-        "_select_endpoint_candidates_with_policy",
-        return_value=([], "kv_cache_affinity"),
-    ) as mock_select:
+    with (
+        patch.object(client, "_refresh_cache_from_workload_reader", new_callable=AsyncMock),
+        patch.object(
+            client,
+            "_select_endpoint_candidates_with_policy",
+            new_callable=AsyncMock,
+            return_value=([], "kv_cache_affinity"),
+        ) as mock_select,
+    ):
         await client.select_and_allocate(PDRole.ROLE_U, req_info)
 
     mock_select.assert_awaited_once()
@@ -243,21 +257,25 @@ async def test_select_and_allocate_role_u_unified_forwards_top1() -> None:
 
 
 async def test_select_and_allocate_role_u_load_gated_uses_affinity_top_k() -> None:
-    """load_gated still proposes a fixed ranked alternate set the scheduler picks among, so it
-    keeps the affinity topK.
-    """
+    """load_gated still proposes a ranked alternate set; Worker CAS uses affinity topK."""
     client = _build_kv_client()
     client._kv_affinity_mode = KV_AFFINITY_MODE_LOAD_GATED
+    client._workload_reader = Mock()
+    client._workload_reader.native = Mock()
     req_info = Mock()
     req_info.req_id = "req-1"
     req_info.req_data = {}
     req_info.req_len = 0
 
-    with patch.object(
-        client,
-        "_select_endpoint_candidates_with_policy",
-        return_value=([], "kv_cache_affinity"),
-    ) as mock_select:
+    with (
+        patch.object(client, "_refresh_cache_from_workload_reader", new_callable=AsyncMock),
+        patch.object(
+            client,
+            "_select_endpoint_candidates_with_policy",
+            new_callable=AsyncMock,
+            return_value=([], "kv_cache_affinity"),
+        ) as mock_select,
+    ):
         await client.select_and_allocate(PDRole.ROLE_U, req_info)
 
     mock_select.assert_awaited_once()

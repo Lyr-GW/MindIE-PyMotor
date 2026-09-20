@@ -16,6 +16,7 @@ import shutil
 import subprocess
 
 import lib.constant as C
+from lib.prepare_utils import kubectl_from_file_args
 from lib.utils import (
     get_coordinator_service_name,
     logger,
@@ -44,6 +45,7 @@ g_user_config_path = None
 g_mf_store_service = "mf_store"
 g_mf_store_enabled = False
 g_engine_type = "vllm"
+_DEPLOYER_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def resolve_nodeports_for_yaml_files(
@@ -341,30 +343,34 @@ def _resolve_accelerator_type_from_nodes(nodes, hardware_type):
 
 
 def get_accelerator_type_from_cluster(hardware_type):
-    """Resolve accelerator-type node label value from cluster nodes via kubectl."""
+    """Resolve accelerator-type node label value from cluster nodes via kubectl.
+
+    Only A2/A3 need this label: both use accelerator=huawei-Ascend910, so
+    accelerator-type is the only thing that keeps the two product forms apart.
+    A5 nodes are selected by accelerator / huawei.com/npu.chip.name only and
+    have no accelerator-type, hence must never reach this function.
+    """
     if hardware_type in _g_accelerator_type_cache:
         return _g_accelerator_type_cache[hardware_type]
 
-    if hardware_type in C.HARDWARE_TYPE_950I_A5:
-        label_selector = f"{C.ACCELERATOR}={C.ACCELERATOR_A5},{C.ACCELERATOR_TYPE}={hardware_type}"
-        nodes = _get_cluster_nodes(label_selector)
-        if not nodes:
-            raise RuntimeError(f"No node in cluster matches {label_selector} for hardware_type={hardware_type}")
-        accelerator_type = hardware_type
-    elif hardware_type in C.HARDWARE_TYPE_A2 or hardware_type in C.HARDWARE_TYPE_A3:
-        nodes = _get_cluster_nodes(f"{C.ACCELERATOR}={C.ACCELERATOR_910}")
-        if not nodes:
-            raise RuntimeError(
-                f"No node in cluster with label {C.ACCELERATOR}={C.ACCELERATOR_910} for hardware_type={hardware_type}"
-            )
-        accelerator_type = _resolve_accelerator_type_from_nodes(nodes, hardware_type)
-    else:
+    if hardware_type in C.HARDWARE_TYPE_A5:
+        raise ValueError(
+            f"hardware_type '{hardware_type}' does not use {C.ACCELERATOR_TYPE}; it is resolved for A2/A3 only"
+        )
+    if hardware_type not in C.HARDWARE_TYPE_A2 and hardware_type not in C.HARDWARE_TYPE_A3:
         known = [
             *sorted(C.HARDWARE_TYPE_A2),
             *sorted(C.HARDWARE_TYPE_A3),
-            *C.HARDWARE_TYPE_950I_A5,
+            *sorted(C.HARDWARE_TYPE_A5),
         ]
         raise ValueError(f"Unknown hardware_type '{hardware_type}'. Supported values: {known}")
+
+    nodes = _get_cluster_nodes(f"{C.ACCELERATOR}={C.ACCELERATOR_910}")
+    if not nodes:
+        raise RuntimeError(
+            f"No node in cluster with label {C.ACCELERATOR}={C.ACCELERATOR_910} for hardware_type={hardware_type}"
+        )
+    accelerator_type = _resolve_accelerator_type_from_nodes(nodes, hardware_type)
 
     logger.info(
         "Resolved %s=%s from cluster for hardware_type=%s",
@@ -536,26 +542,7 @@ def create_motor_config_configmap(job_id, user_config=None, effective_deploy_mod
             "create",
             "configmap",
             C.MOTOR_CONFIG_CONFIGMAP_NAME,
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/boot.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/common.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/hccl_tools.py",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/mooncake/mooncake_config.py",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/controller.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/coordinator.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/engine.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/kv_cache_store.sh",
-            f"--from-file=kv_store_backends.mooncake.mooncake.sh=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/mooncake/mooncake.sh",
-            f"--from-file=kv_store_backends.memcache.memcache.sh=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/memcache.sh",
-            f"--from-file=kv_store_backends.memcache.memcache_meta_service.py=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/memcache_meta_service.py",
-            f"--from-file=kv_store_backends.memcache.mmc-local-inprocess.conf=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/mmc-local-inprocess.conf",
-            f"--from-file=kv_store_backends.memcache.mmc-local-standalone.conf=./{C.STARTUP_ROOT_PATH}/roles/kv_store_backends/memcache/mmc-local-standalone.conf",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/kv_conductor.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/mf_store.sh",
-            f"--from-file=./{C.STARTUP_ROOT_PATH}/roles/all_combine_in_single_container.sh",
-            "--from-file=./probe/probe.sh",
-            "--from-file=./probe/probe.py",
-            "--from-file=./prestop/prestop.sh",
-            "--from-file=./prestop/prestop.py",
+            *kubectl_from_file_args(_DEPLOYER_DIR),
             f"--from-file=user_config.json={config_path}",
             f"--from-file={C.NODEPORT_CONFLICT_COORDINATOR_FILE}={coordinator_conflict}",
             f"--from-file={C.NODEPORT_CONFLICT_CONTROLLER_FILE}={controller_conflict}",
@@ -818,3 +805,40 @@ def scale_engine(deploy_config, baseline_deploy_config):
     out_deploy_yaml_path = C.OUTPUT_ROOT_PATH
     create_motor_config_configmap(job_id)
     elastic_distributed_engine_deploy(deploy_config, baseline_deploy_config, out_deploy_yaml_path)
+
+
+def _merge_kv_into_metadata(metadata, kv_dict, metadata_key):
+    if not isinstance(kv_dict, dict) or not kv_dict or not isinstance(metadata, dict):
+        return
+    target = metadata.setdefault(metadata_key, {})
+    if not isinstance(target, dict):
+        target = {}
+        metadata[metadata_key] = target
+    for key, value in kv_dict.items():
+        if isinstance(key, str) and key.strip():
+            target[key] = value
+
+
+def _merge_annotations_into_metadata(metadata, annotations_dict):
+    _merge_kv_into_metadata(metadata, annotations_dict, C.ANNOTATIONS)
+
+
+def _merge_labels_into_metadata(metadata, labels_dict):
+    _merge_kv_into_metadata(metadata, labels_dict, C.LABELS)
+
+
+def apply_additional_labels_annotations_to_metadata(metadata, role_config):
+    if not isinstance(role_config, dict):
+        return
+    additional_annotations = role_config.get(C.ADDITIONAL_ANNOTATIONS)
+    _merge_annotations_into_metadata(metadata, additional_annotations)
+    additional_labels = role_config.get(C.ADDITIONAL_LABELS)
+    _merge_labels_into_metadata(metadata, additional_labels)
+
+
+def apply_additional_labels_annotations(workload, role_config):
+    if not isinstance(workload, dict):
+        return
+    apply_additional_labels_annotations_to_metadata(workload.get(C.METADATA), role_config)
+    pod_template = workload.get(C.SPEC, {}).get(C.TEMPLATE, {})
+    apply_additional_labels_annotations_to_metadata(pod_template.get(C.METADATA), role_config)

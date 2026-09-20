@@ -24,6 +24,8 @@ from lib.utils import (
     obtain_engine_instance_total,
     obtain_engine_e_instance_total,
     apply_volcano_queue_annotations,
+    get_config_key,
+    resolve_workload_image,
 )
 from lib.generator import k8s_utils
 from lib.generator.k8s_utils import (
@@ -47,6 +49,7 @@ from lib.generator.engine import (
     apply_a5_engine_pod_config,
     apply_a5_dns_config,
     apply_engine_node_selector_overrides,
+    apply_engine_ft_labels,
 )
 from lib.generator.kv_cache_store import (
     normalize_kv_cache_store_config,
@@ -54,6 +57,7 @@ from lib.generator.kv_cache_store import (
 )
 from lib.generator.storage import apply_storage_volumes, apply_dshm_size
 from lib.generator.kv_conductor import normalize_kv_conductor_config
+from lib.generator.render import configure_render_sidecar
 
 
 def get_infer_role(infer_service_set, role_name):
@@ -107,12 +111,13 @@ def _configure_control_role(infer_doc, user_config, role_name, config_key):
     if not containers:
         return None
     container = containers[0]
-    container[C.IMAGE] = deploy_config[C.IMAGE_NAME]
+    container[C.IMAGE] = resolve_workload_image(user_config, cfg)
     job_id = deploy_config[C.CONFIG_JOB_ID]
     uuid_spec = generate_unique_id()
     job_name = f"{job_id}-{role_name}-{uuid_spec}"
     set_container_env(container, build_engine_env_items(role_name, deploy_config, job_name))
     apply_a5_dns_config(pod_spec, deploy_config)
+    k8s_utils.apply_additional_labels_annotations(role, cfg)
     return container
 
 
@@ -143,22 +148,28 @@ def _configure_controller_role(infer_doc, user_config):
 def _configure_coordinator_role(infer_doc, user_config):
     deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     role = get_infer_role(infer_doc, C.COORDINATOR)
-    if role:
-        services = role.get(C.SERVICES, [])
-        for index, service in enumerate(services or []):
-            if not isinstance(service, dict):
-                continue
-            name = (service.get(C.NAME) or "").lower()
-            container_port = _service_container_port(service)
-            if index == 0 or "infer" in name or container_port == 1025:
-                service[C.NAME] = get_coordinator_service_name(deploy_config)
-                apply_coordinator_infer_node_port(service, deploy_config)
-            elif is_observability_service_name(name) or container_port == 1027:
-                apply_coordinator_obs_node_port(service, deploy_config)
+    if not role:
+        return
+
+    services = role.get(C.SERVICES, [])
+    for index, service in enumerate(services or []):
+        if not isinstance(service, dict):
+            continue
+        name = (service.get(C.NAME) or "").lower()
+        container_port = _service_container_port(service)
+        if index == 0 or "infer" in name or container_port == 1025:
+            service[C.NAME] = get_coordinator_service_name(deploy_config)
+            apply_coordinator_infer_node_port(service, deploy_config)
+        elif is_observability_service_name(name) or container_port == 1027:
+            apply_coordinator_obs_node_port(service, deploy_config)
 
     container = _configure_control_role(infer_doc, user_config, C.COORDINATOR, C.MOTOR_COORDINATOR_CONFIG)
     if not container:
         return
+
+    coordinator_pod_spec = role[C.SPEC][C.TEMPLATE][C.SPEC]
+    weight_path = deploy_config.get(C.WEIGHT_MOUNT_PATH, C.DEFAULT_WEIGHT_MOUNT_PATH)
+    set_weight_mount(coordinator_pod_spec, container, weight_path, read_only=True)
 
     coordinator_env = list(k8s_utils.build_kv_store_env_items())
     if k8s_utils.g_kv_conductor_enabled:
@@ -172,28 +183,126 @@ def _configure_coordinator_role(infer_doc, user_config):
     if coordinator_env:
         set_container_env(container, coordinator_env)
 
+    pod_spec = role[C.SPEC][C.TEMPLATE][C.SPEC]
+    configure_render_sidecar(pod_spec, user_config)
 
-def _apply_infer_node_selector_and_sp_block(deploy_config, pod_spec, template, pods_key, npu_key, role_name=None):
+
+def _apply_infer_node_selector_and_sp_block(user_config, pod_spec, template, pods_key, npu_key, role_name=None):
+    deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     hardware_type = deploy_config.get(C.HARDWARE_TYPE, C.HARDWARE_TYPE_800I_A2)
     pod_spec[C.NODE_SELECTOR] = pod_spec.get(C.NODE_SELECTOR, {})
     apply_node_selector_by_hardware(pod_spec, hardware_type)
     if role_name:
         node_type = {C.ROLE_PREFILL: C.NODE_TYPE_P, C.ROLE_DECODE: C.NODE_TYPE_D}.get(role_name)
         if node_type:
-            apply_pd_heterogeneous_node_selector(pod_spec, deploy_config, node_type)
+            apply_pd_heterogeneous_node_selector(pod_spec, user_config, node_type)
 
-    if hardware_type in C.HARDWARE_TYPE_A3 or hardware_type in C.HARDWARE_TYPE_950I_A5:
+    if hardware_type in C.HARDWARE_TYPE_A3 or hardware_type in C.HARDWARE_TYPE_A5:
         # CRD uses StatefulSet; MindCluster sp-block differs from Deployment (see engine.py multi_deployment)
         sp_block_num = int(deploy_config.get(pods_key, 1)) * int(deploy_config.get(npu_key, 1))
         apply_sp_block_annotation(template.setdefault(C.METADATA, {}), sp_block_num, hardware_type)
-    if hardware_type in C.HARDWARE_TYPE_950I_A5:
+    if hardware_type in C.HARDWARE_TYPE_A5:
         apply_a5_workload(template, deploy_config)
 
 
-def _zero_engine_role_replicas(infer_doc, role_name):
+def _zero_engine_role_replicas(infer_doc, user_config, role_name):
     role = get_infer_role(infer_doc, role_name)
     if role:
         role[C.REPLICAS] = 0
+    if user_config:
+        k8s_utils.apply_additional_labels_annotations(role, user_config.get(get_config_key(role_name), {}))
+
+
+_DEFAULT_SCALING_METRICS = {
+    C.ROLE_PREFILL: C.DEFAULT_PREFILL_SCALING_METRIC,
+    C.ROLE_DECODE: C.DEFAULT_DECODE_SCALING_METRIC,
+}
+
+
+def _build_scaling_policy(role_name, policy_cfg, default_max_replicas, namespace="", instance_name=""):
+    """Build the InferServiceSet role scalingPolicy (HPA) block from user config.
+
+    The metric selector carries the deployment scope labels (namespace =
+    job_id, instance name) so multiple Motor deployments in one cluster do
+    not read each other's metrics; ``_set_scaling_policy_scope`` re-syncs
+    both labels at generation time (idempotent with the values set here).
+    """
+    if not isinstance(policy_cfg, dict):
+        raise ValueError(f"scaling_policy for role '{role_name}' must be a dict")
+    metric_name = policy_cfg.get(C.SCALING_METRIC) or _DEFAULT_SCALING_METRICS.get(role_name)
+    if not metric_name:
+        raise ValueError(
+            f"scaling_policy for role '{role_name}' requires '{C.SCALING_METRIC}' (no default metric for this role)"
+        )
+    min_replicas = int(policy_cfg.get(C.SCALING_MIN_REPLICAS, C.DEFAULT_SCALING_MIN_REPLICAS))
+    max_replicas = int(policy_cfg.get(C.SCALING_MAX_REPLICAS, default_max_replicas))
+    if min_replicas < 1 or max_replicas < min_replicas:
+        raise ValueError(
+            f"scaling_policy for role '{role_name}' requires 1 <= min_replicas <= max_replicas, "
+            f"got min_replicas={min_replicas}, max_replicas={max_replicas}"
+        )
+    target = float(policy_cfg.get(C.SCALING_TARGET, C.DEFAULT_SCALING_TARGET))
+    if target <= 0:
+        raise ValueError(f"scaling_policy for role '{role_name}' requires target > 0, got {target}")
+    target_type = policy_cfg.get(C.SCALING_TARGET_TYPE, C.DEFAULT_SCALING_TARGET_TYPE)
+    if target_type not in C.SCALING_TARGET_TYPES:
+        raise ValueError(
+            f"scaling_policy for role '{role_name}' requires target_type in {C.SCALING_TARGET_TYPES}, "
+            f"got {target_type!r}"
+        )
+    target_block = (
+        {"type": "Value", "value": str(target)}
+        if target_type == "Value"
+        else {"type": "AverageValue", "averageValue": str(target)}
+    )
+    metric_selector = {}
+    if namespace or instance_name:
+        metric_selector = {
+            C.SELECTOR: {
+                C.MATCHLABELS: {
+                    "kubernetes_namespace": namespace,
+                    "infer_huawei_com_inferservice_name": instance_name,
+                }
+            }
+        }
+    return {
+        "type": "HPA",
+        C.SPEC: {
+            "minReplicas": min_replicas,
+            "maxReplicas": max_replicas,
+            "metrics": [
+                {
+                    "type": "External",
+                    "external": {
+                        "metric": {C.NAME: metric_name, **metric_selector},
+                        "target": target_block,
+                    },
+                }
+            ],
+        },
+    }
+
+
+def _apply_scaling_policy(role, user_config, role_name, infer_name=""):
+    """Render optional user_config scaling_policy section into the role's scalingPolicy field.
+
+    When scaling_policy is absent or empty, the role is left untouched so the generated
+    yaml stays identical to deployments without this feature.
+    """
+    scaling_policy = (user_config or {}).get(C.SCALING_POLICY)
+    if not scaling_policy:
+        return
+    if not isinstance(scaling_policy, dict):
+        raise ValueError(f"'{C.SCALING_POLICY}' in user config must be a dict")
+    policy_cfg = scaling_policy.get(role_name)
+    if policy_cfg is None:
+        return
+    deploy_config = user_config.get(C.MOTOR_DEPLOY_CONFIG, {})
+    namespace = deploy_config.get(C.CONFIG_JOB_ID, "")
+    instance_name = f"{infer_name}-0" if infer_name else ""
+    role[C.SCALING_POLICY_FIELD] = _build_scaling_policy(
+        role_name, policy_cfg, role.get(C.REPLICAS, 1), namespace, instance_name
+    )
 
 
 def _configure_engine_role(infer_doc, user_config, infer_name, role_name):
@@ -226,13 +335,14 @@ def _configure_engine_role(infer_doc, user_config, infer_name, role_name):
     selector[C.APP] = infer_name
     template = workload_spec.setdefault(C.TEMPLATE, {})
     template.setdefault(C.METADATA, {}).setdefault(C.LABELS, {})[C.APP] = infer_name
+    apply_engine_ft_labels(template, user_config, role_name)
     apply_volcano_queue_annotations(template.setdefault(C.METADATA, {}), deploy_config)
     pod_spec = template.setdefault(C.SPEC, {})
     containers = pod_spec.get(C.CONTAINERS, [])
     if not containers:
         return
     container = containers[0]
-    container[C.IMAGE] = deploy_config[C.IMAGE_NAME]
+    container[C.IMAGE] = resolve_workload_image(user_config, user_config.get(get_config_key(role_name), {}))
     container[C.NAME] = infer_name
     job_id = deploy_config[C.CONFIG_JOB_ID]
     job_name_base = f"{job_id}-{infer_name}"
@@ -247,8 +357,10 @@ def _configure_engine_role(infer_doc, user_config, infer_name, role_name):
     apply_storage_volumes(pod_spec, container, user_config)
     apply_dshm_size(pod_spec, user_config)
     apply_a5_engine_pod_config(pod_spec, container, deploy_config)
-    _apply_infer_node_selector_and_sp_block(deploy_config, pod_spec, template, pods_key, npu_key, role_name)
+    _apply_infer_node_selector_and_sp_block(user_config, pod_spec, template, pods_key, npu_key, role_name)
     apply_engine_node_selector_overrides(pod_spec, deploy_config, prefix)
+    k8s_utils.apply_additional_labels_annotations(role, user_config.get(get_config_key(role_name), {}))
+    _apply_scaling_policy(role, user_config, role_name, infer_name)
 
 
 def _set_role_primary_service_port(role, service_port):
@@ -306,6 +418,9 @@ def _configure_kv_store_role(infer_doc, user_config):
         return
     container = containers[0]
     set_container_env(container, gen_kv_store_env(kv_store_config))
+    logger.info(role)
+    k8s_utils.apply_additional_labels_annotations(role, kv_store_config)
+    logger.info(role)
 
 
 def _configure_kv_conductor_role(infer_doc, user_config):
@@ -319,7 +434,7 @@ def _configure_kv_conductor_role(infer_doc, user_config):
     apply_node_selector_override(pod_spec, deploy_config, C.KV_CONDUCTOR_NODE_SELECTOR)
     containers = pod_spec.get(C.CONTAINERS, [])
     if containers:
-        containers[0][C.IMAGE] = deploy_config[C.IMAGE_NAME]
+        containers[0][C.IMAGE] = resolve_workload_image(user_config, user_config.get(C.KV_CONDUCTOR_CONFIG))
     if not k8s_utils.g_kv_conductor_enabled:
         role[C.REPLICAS] = 0
         workload_spec[C.REPLICAS] = 1
@@ -336,6 +451,33 @@ def _configure_kv_conductor_role(infer_doc, user_config):
         container,
         [{C.NAME: C.ENV_KVS_MASTER_SERVICE, C.VALUE: k8s_utils.g_kv_store_service}],
     )
+    k8s_utils.apply_additional_labels_annotations(role, kv_conductor_config)
+
+
+def _set_scaling_policy_scope(infer_doc: dict, namespace: str) -> None:
+    """Scope opted-in HPA metrics to the generated single InferService instance.
+
+    Infer Operator names the instance expanded from an InferServiceSet as
+    ``{InferServiceSet.name}-{index}``. The deployer renders one set replica,
+    so the generated instance name is ``{name}-0``. Only labels already
+    present in the template are synchronized; missing labels are not injected.
+    """
+    infer_name = infer_doc.get(C.METADATA, {}).get(C.NAME, "mindie-server")
+    instance_name = f"{infer_name}-0"
+    for role in infer_doc.get(C.SPEC, {}).get(C.TEMPLATE, {}).get(C.ROLES, []):
+        policy = role.get("scalingPolicy") or {}
+        if policy.get("type") != "HPA":
+            continue
+        for metric in policy.get(C.SPEC, {}).get("metrics", []):
+            if metric.get("type") != "External":
+                continue
+            metric_conf = (metric.get("external") or {}).get("metric") or {}
+            selector = metric_conf.get(C.SELECTOR) or {}
+            labels = selector.get(C.MATCHLABELS) or {}
+            if "kubernetes_namespace" in labels:
+                labels["kubernetes_namespace"] = namespace
+            if "infer_huawei_com_inferservice_name" in labels:
+                labels["infer_huawei_com_inferservice_name"] = instance_name
 
 
 def generate_yaml_infer_service_set(input_yaml, output_file, user_config):
@@ -350,6 +492,7 @@ def generate_yaml_infer_service_set(input_yaml, output_file, user_config):
     infer_name = infer_doc.get(C.METADATA, {}).get(C.NAME, "mindie-server")
     set_rbac_namespace(extract_rbac_resources(all_docs), namespace)
     infer_doc[C.METADATA][C.NAMESPACE] = namespace
+    _set_scaling_policy_scope(infer_doc, namespace)
     # Must call before engine config so g_mmc_local_service_mode is set
     # when build_engine_env_items() reads it. Second call in _configure_kv_store_role is idempotent.
     if k8s_utils.g_kv_store_enabled:
@@ -359,15 +502,15 @@ def generate_yaml_infer_service_set(input_yaml, output_file, user_config):
     if C.E_INSTANCES_NUM in deploy_config:
         _configure_engine_role(infer_doc, user_config, infer_name, C.ROLE_ENCODE)
     else:
-        _zero_engine_role_replicas(infer_doc, C.ROLE_ENCODE)
+        _zero_engine_role_replicas(infer_doc, user_config, C.ROLE_ENCODE)
     if is_hybrid_deploy(deploy_config):
         _configure_engine_role(infer_doc, user_config, infer_name, C.ROLE_UNION)
-        _zero_engine_role_replicas(infer_doc, C.ROLE_PREFILL)
-        _zero_engine_role_replicas(infer_doc, C.ROLE_DECODE)
+        _zero_engine_role_replicas(infer_doc, user_config, C.ROLE_PREFILL)
+        _zero_engine_role_replicas(infer_doc, user_config, C.ROLE_DECODE)
     else:
         _configure_engine_role(infer_doc, user_config, infer_name, C.ROLE_PREFILL)
         _configure_engine_role(infer_doc, user_config, infer_name, C.ROLE_DECODE)
-        _zero_engine_role_replicas(infer_doc, C.ROLE_UNION)
+        _zero_engine_role_replicas(infer_doc, user_config, C.ROLE_UNION)
     _configure_kv_store_role(infer_doc, user_config)
     _configure_kv_conductor_role(infer_doc, user_config)
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -449,13 +592,14 @@ def init_infer_service_domain_name(infer_service_template_yaml, deploy_config, u
         set_kv_conductor_service(kv_conductor_service)
 
 
-def update_infer_service_replicas_only(infer_service_yaml_path, deploy_config):
+def update_infer_service_replicas_only(infer_service_yaml_path, deploy_config, user_config=None):
     """Update engine role.replicas in infer_service.yaml for scaling (union or prefill/decode)."""
     logger.info("Updating InferServiceSet instance replicas in %s", infer_service_yaml_path)
     all_docs = load_yaml(infer_service_yaml_path, False)
     if not isinstance(all_docs, list):
         all_docs = [all_docs]
     infer_doc = _find_infer_service_set_doc(all_docs)
+    _set_scaling_policy_scope(infer_doc, deploy_config[C.CONFIG_JOB_ID])
 
     e_total = obtain_engine_e_instance_total(deploy_config)
     encode_role = get_infer_role(infer_doc, C.ROLE_ENCODE)
@@ -478,7 +622,7 @@ def update_infer_service_replicas_only(infer_service_yaml_path, deploy_config):
         decode_role = get_infer_role(infer_doc, C.ROLE_DECODE)
         if decode_role:
             decode_role[C.REPLICAS] = d_total
-        _zero_engine_role_replicas(infer_doc, C.ROLE_UNION)
+        _zero_engine_role_replicas(infer_doc, user_config, C.ROLE_UNION)
 
     os.makedirs(os.path.dirname(infer_service_yaml_path), exist_ok=True)
     write_yaml(all_docs, infer_service_yaml_path, False)

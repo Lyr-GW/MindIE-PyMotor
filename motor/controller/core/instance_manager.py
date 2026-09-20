@@ -30,6 +30,10 @@ from motor.config.controller import ControllerConfig
 from motor.controller.api_client.node_manager_api_client import NodeManagerApiClient
 from motor.controller.core import Observer, ObserverEvent
 from motor.controller.core.event_pusher import EventPusher
+from motor.controller.fault_tolerance.dp_scale_down import (
+    committed_dp_ranks,
+    partial_loss_policy,
+)
 from motor.common.logger import get_logger
 from motor.common.logger.rate_limited_logger import RateLimitedLogger
 from motor.common.alarm.instance_exception_alarm import InstanceExceptionAlarm, InstanceExceptionReason
@@ -84,6 +88,10 @@ class InstanceManager(ThreadSafeSingleton):
             self.etcd_config = config.etcd_config
             self.etcd_tls_config = config.etcd_tls_config
             self.instance_manager_check_interval = config.instance_config.instance_manager_check_interval
+            self.enable_fault_tolerance = config.fault_tolerance_config.enable_fault_tolerance
+            self.enable_dp_scale_down = (
+                self.enable_fault_tolerance and config.fault_tolerance_config.enable_dp_scale_down
+            )
 
         # Version control for data persistence
         self._data_version = 0
@@ -127,6 +135,8 @@ class InstanceManager(ThreadSafeSingleton):
         }
 
         self.instances_management_thread = None
+        # instance ids for which the partial-loss shutdown was already dispatched
+        self._partial_loss_shutdown_sent: set[int] = set()
 
         self._initialized = True
         logger.info("InstanceManager initialized.")
@@ -176,6 +186,10 @@ class InstanceManager(ThreadSafeSingleton):
             self.etcd_config = config.etcd_config
             self.etcd_tls_config = config.etcd_tls_config
             self.instance_manager_check_interval = config.instance_config.instance_manager_check_interval
+            self.enable_fault_tolerance = config.fault_tolerance_config.enable_fault_tolerance
+            self.enable_dp_scale_down = (
+                self.enable_fault_tolerance and config.fault_tolerance_config.enable_dp_scale_down
+            )
 
             # Update ETCD client with new configuration
             self.etcd_client = EtcdClient(etcd_config=self.etcd_config, tls_config=self.etcd_tls_config)
@@ -542,7 +556,9 @@ class InstanceManager(ThreadSafeSingleton):
         current: Instance | None = None
         with self.ins_lock:
             for instance in self.instances.values():
-                if instance.job_name == job_name:
+                if instance.job_name != job_name:
+                    continue
+                if current is None or instance.id > current.id:
                     current = instance
         return current
 
@@ -584,7 +600,13 @@ class InstanceManager(ThreadSafeSingleton):
             logger.error("Instance %d not exists, need to re-register.", ins_id)
             raise HTTPException(HEARTBEAT_HANDLER_RE_REGISTER)
 
-        if instance.update_heartbeat(pod_ip, timestamp, heartbeat_msg.status):
+        ignored_endpoint_ids = committed_dp_ranks(ins_id) if self.enable_dp_scale_down else set()
+        if instance.update_heartbeat(
+            pod_ip,
+            timestamp,
+            heartbeat_msg.status,
+            ignored_endpoint_ids=ignored_endpoint_ids,
+        ):
             logger.debug("Heartbeat received successfully  for instance %d from IP %s.", ins_id, pod_ip)
         else:
             # instance.update_heartbeat already logs the specific reason (throttled).
@@ -605,6 +627,15 @@ class InstanceManager(ThreadSafeSingleton):
 
     # State transition callback function
 
+    def _is_effective_heartbeat_complete(self, instance: Instance) -> bool:
+        """Check heartbeat against the active Engine FT topology."""
+        if not self.enable_dp_scale_down:
+            return instance.is_all_endpoints_alive()
+        policy = partial_loss_policy(instance.id)
+        if policy.protect_transaction:
+            return True
+        return instance.is_all_endpoints_alive(ignored_endpoint_ids=set(policy.ignored_dead_ranks))
+
     def _instances_management_loop(self) -> None:
         """Instance management loop"""
         while not self.stop_event.is_set():
@@ -615,7 +646,7 @@ class InstanceManager(ThreadSafeSingleton):
             for instance in cur_instances:
                 if instance.status == InsStatus.DELETED:
                     continue
-                if instance.is_all_endpoints_alive():
+                if self._is_effective_heartbeat_complete(instance):
                     continue
                 # Use _handle_state_transition with heartbeat timeout event to ensure persistence is triggered
                 if not self._handle_state_transition(instance, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT):
@@ -638,6 +669,9 @@ class InstanceManager(ThreadSafeSingleton):
     def _handle_active(self, from_state: InsStatus, condition_event: InsConditionEvent, instance: Instance) -> None:
         if from_state == InsStatus.ACTIVE:
             return
+        # The instance recovered (or a new one with this id was assembled) —
+        # allow the shutdown dispatch again for a future loss episode.
+        self._partial_loss_shutdown_sent.discard(instance.id)
         if condition_event in (InsConditionEvent.INSTANCE_NORMAL, InsConditionEvent.INSTANCE_RESUMED):
             instance.update_instance_status(InsStatus.ACTIVE)
             if condition_event == InsConditionEvent.INSTANCE_RESUMED:
@@ -658,6 +692,10 @@ class InstanceManager(ThreadSafeSingleton):
             return
 
         if condition_event == InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT:
+            policy = partial_loss_policy(instance.id) if self.enable_dp_scale_down else None
+            if policy is not None and policy.protect_transaction:
+                logger.debug("Instance %d partial-loss handling deferred to Engine FT", instance.id)
+                return
             # When heartbeat times out, actively check the instance status to avoid
             # false positives caused by the controller's own service being unavailable,
             # which prevents node_manager from reporting heartbeats.
@@ -669,11 +707,13 @@ class InstanceManager(ThreadSafeSingleton):
             # After failure, node_manager easily reports heartbeats to the wrong pod, leading to
             # heartbeat timeout and instance isolation. Therefore, we need the controller to
             # directly query once using ip+port when heartbeat times out to avoid such situations.]
-            if self._check_node_managers_status(instance):
+            has_abnormal, reachable_nms = self._check_node_managers_status(instance)
+            if has_abnormal:
                 instance.update_instance_status(InsStatus.INACTIVE)
                 self.notify(instance, ObserverEvent.INSTANCE_SEPARATED)
                 self._report_inst_alarm(instance)
                 self._report_coordinator_alarm(instance)
+                self._dispatch_partial_loss_shutdown(instance, reachable_nms)
             else:
                 # If node managers are all normal, do not set to INACTIVE
                 # and we need to refresh the heartbeat to avoid immediate timeout
@@ -688,6 +728,41 @@ class InstanceManager(ThreadSafeSingleton):
                 instance.update_instance_status(InsStatus.PAUSED)
                 self.notify(instance, ObserverEvent.INSTANCE_PAUSED)
                 self._report_inst_alarm(instance)
+
+    def _dispatch_partial_loss_shutdown(self, instance: Instance, reachable_nms: list) -> None:
+        """Tell the surviving NodeManagers to exit after a partial instance loss.
+
+        One NodeManager is gone (heartbeats timed out and the probe confirmed
+        it), so the surviving half must restart together with it — a
+        cross-machine instance cannot run split. ``/node-manager/stop`` is the
+        existing suicide instruction (engines stopped, then the NodeManager
+        exits and k8s restarts the pod). Dispatched once per loss episode; the
+        marker clears when the instance recovers to ACTIVE or is deleted (a
+        re-assembled instance gets a fresh id).
+        """
+        policy = partial_loss_policy(instance.id) if self.enable_dp_scale_down else None
+        if policy is not None and policy.suppress_legacy_shutdown:
+            logger.info("Instance %d survivor shutdown suppressed by Engine FT", instance.id)
+            return
+        if instance.id in self._partial_loss_shutdown_sent:
+            return
+        self._partial_loss_shutdown_sent.add(instance.id)
+        logger.warning(
+            "Instance %d partially lost: dispatching stop to %d surviving node manager(s)",
+            instance.id,
+            len(reachable_nms),
+        )
+        for node_mgr in reachable_nms:
+            try:
+                NodeManagerApiClient.stop(node_mgr)
+                logger.error(
+                    "Stop dispatched to node manager %s:%s (instance %d partially lost)",
+                    node_mgr.pod_ip,
+                    node_mgr.port,
+                    instance.id,
+                )
+            except Exception as e:
+                logger.error("Failed to dispatch stop to node manager %s: %s", node_mgr.pod_ip, e)
 
     def _report_inst_alarm(self, instance: Instance, is_cleared: bool = False) -> None:
         from motor.controller.observability.observability import Observability
@@ -731,14 +806,22 @@ class InstanceManager(ThreadSafeSingleton):
             logger.warning(
                 "No node managers found for instance %s(id:%d), setting to INACTIVE", instance.job_name, instance.id
             )
-            return True
+            return True, []
 
+        # Probe ALL node managers before returning — an early exit on the first
+        # abnormal one would drop the still-reachable survivors from
+        # `reachable_nms` and the partial-loss shutdown would miss them.
+        reachable_nms = []
+        has_abnormal = False
         for node_mgr in node_managers:
             try:
                 response = NodeManagerApiClient.query_status(node_mgr)
                 if isinstance(response, dict) and "status" in response:
                     is_normal = response.get("status", False)
-                    if not is_normal:
+                    if is_normal:
+                        reachable_nms.append(node_mgr)
+                    else:
+                        has_abnormal = True
                         logger.warning(
                             "Node manager %s:%s reports abnormal endpoints for instance %s(id:%d)",
                             node_mgr.pod_ip,
@@ -746,8 +829,8 @@ class InstanceManager(ThreadSafeSingleton):
                             instance.job_name,
                             instance.id,
                         )
-                        return True
                 else:
+                    has_abnormal = True
                     logger.warning(
                         "Invalid response from node manager %s:%s for instance %s(id:%d): %s",
                         node_mgr.pod_ip,
@@ -756,8 +839,8 @@ class InstanceManager(ThreadSafeSingleton):
                         instance.id,
                         response,
                     )
-                    return True
             except Exception as e:
+                has_abnormal = True
                 logger.warning(
                     "Failed to check node manager %s:%s status for instance %s(id:%d): %s",
                     node_mgr.pod_ip,
@@ -766,10 +849,11 @@ class InstanceManager(ThreadSafeSingleton):
                     instance.id,
                     e,
                 )
-                return True
 
+        if has_abnormal:
+            return True, reachable_nms
         logger.info("All node managers report normal status for instance %s(id:%d)", instance.job_name, instance.id)
-        return False
+        return False, reachable_nms
 
     def _handle_deleted(self, from_state: InsStatus, condition_event: InsConditionEvent, instance: Instance) -> None:
         if from_state == InsStatus.DELETED:
@@ -793,21 +877,44 @@ class InstanceManager(ThreadSafeSingleton):
             bool: Whether handle state transition is successful
         """
         from_state = instance.status
+        policy = partial_loss_policy(instance.id) if self.enable_dp_scale_down else None
+        ignored_endpoint_ids = set(policy.ignored_dead_ranks) if policy else set()
+        if policy is not None and policy.protect_transaction:
+            logger.debug(
+                "Instance %d state transition deferred during Engine FT transaction",
+                instance.id,
+            )
+            return True
 
         # Use override event if provided, otherwise detect event based on instance status
         if event_override is not None:
             event = event_override
             to_state = self.transitions.get((from_state, event), None)
-        elif instance.is_all_endpoints_paused():
+        elif instance.is_all_endpoints_paused(ignored_endpoint_ids):
             event = InsConditionEvent.INSTANCE_PAUSED
             to_state = self.transitions.get((from_state, event), None)
-        elif instance.is_all_endpoints_ready():
-            event = InsConditionEvent.INSTANCE_NORMAL
+        elif instance.is_all_endpoints_ready(ignored_endpoint_ids):
+            if not instance.is_all_endpoints_heartbeat_fresh(ignored_endpoint_ids=ignored_endpoint_ids):
+                # Every endpoint reports NORMAL but some endpoint's heartbeat
+                # timed out (its NodeManager is gone and nobody updates its
+                # status field anymore). A lone surviving NodeManager's
+                # heartbeat must not flip the instance ACTIVE — the
+                # management loop owns the timeout flow, so leave the state
+                # untouched this round.
+                logger.debug(
+                    "Instance %d ready by status but has stale heartbeats; skipping state transition",
+                    instance.id,
+                )
+                return True
+            if from_state == InsStatus.PAUSED:
+                event = InsConditionEvent.INSTANCE_RESUMED
+            else:
+                event = InsConditionEvent.INSTANCE_NORMAL
             to_state = self.transitions.get((from_state, event), None)
-        elif instance.is_have_one_endpoint_abnormal():
+        elif instance.is_have_one_endpoint_abnormal(ignored_endpoint_ids):
             event = InsConditionEvent.INSTANCE_ABNORMAL
             to_state = self.transitions.get((from_state, event), None)
-        elif instance.is_any_endpoint_paused():
+        elif instance.is_any_endpoint_paused(ignored_endpoint_ids):
             # Mixed PAUSED + NORMAL/INITIAL (no ABNORMAL): treat as PAUSED event.
             # Prevents INACTIVE → INITIAL when PreStop PAUSED overwrites ABNORMAL in heartbeat.
             event = InsConditionEvent.INSTANCE_PAUSED

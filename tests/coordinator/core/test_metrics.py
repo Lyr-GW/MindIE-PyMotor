@@ -36,6 +36,7 @@ from motor.coordinator.metrics.metric_computer import (
     MotorMetricComputer,
     _MOTOR_COMPUTED_METRICS,
     _get_defs_by_phase,
+    get_inherited_metric_names,
 )
 
 
@@ -104,12 +105,12 @@ class TestMetrics:
         self.config = CoordinatorConfig()
         self.instance_manager = InstanceManager(self.config)
 
-        ep0 = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
-        ep1 = Endpoint(id=1, ip="127.0.0.1", business_port="8001", mgmt_port="8001")
-        ep2 = Endpoint(id=2, ip="127.0.0.1", business_port="8002", mgmt_port="8002")
-        ep3 = Endpoint(id=3, ip="127.0.0.1", business_port="8003", mgmt_port="8003")
-        ep4 = Endpoint(id=4, ip="127.0.0.1", business_port="8004", mgmt_port="8004")
-        ep5 = Endpoint(id=5, ip="127.0.0.1", business_port="8005", mgmt_port="8005")
+        ep0 = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
+        ep1 = Endpoint(id=1, ip="127.0.0.1", business_port="8001")
+        ep2 = Endpoint(id=2, ip="127.0.0.1", business_port="8002")
+        ep3 = Endpoint(id=3, ip="127.0.0.1", business_port="8003")
+        ep4 = Endpoint(id=4, ip="127.0.0.1", business_port="8004")
+        ep5 = Endpoint(id=5, ip="127.0.0.1", business_port="8005")
         self.p_ins = Instance(
             job_name="test-prefill",
             model_name="test-model",
@@ -193,7 +194,7 @@ vllm:num_requests_running{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         metric_gauge.label = ['vllm:num_requests_running{model_name="/job/model/Qwen2.5-0.5B-Instruct"}']
         metric_gauge.value = [1.0]
 
-        return metric_str_gauge.strip(), copy.deepcopy(metric_gauge)
+        return metric_str_gauge.strip() + "\n", copy.deepcopy(metric_gauge)
 
     def load_test_counter_metric(self):
         # metric text
@@ -216,7 +217,7 @@ vllm:request_success_total{engine="0",finished_reason="abort",model_name="/job/m
         ]
         metric_counter.value = [1.0, 2.0, 0.0]
 
-        return metric_str_counter.strip(), copy.deepcopy(metric_counter)
+        return metric_str_counter.strip() + "\n", copy.deepcopy(metric_counter)
 
     def load_test_histogram_metric(self):
         # metric text
@@ -249,7 +250,7 @@ vllm:request_params_n_sum{engine="0",model_name="/job/model/Qwen2.5-0.5B-Instruc
         ]
         metric_histogram.value = [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0]
 
-        return metric_str_histogram.strip(), copy.deepcopy(metric_histogram)
+        return metric_str_histogram.strip() + "\n", copy.deepcopy(metric_histogram)
 
     def load_test_summary_metric(self):
         metric_str_summary = """
@@ -272,7 +273,7 @@ http_request_size_bytes_sum{handler="/v1/chat/completions"} 268.0"""
         ]
         metric_summary.value = [2.0, 312.0, 1.0, 268.0]
 
-        return metric_str_summary.strip(), copy.deepcopy(metric_summary)
+        return metric_str_summary.strip() + "\n", copy.deepcopy(metric_summary)
 
     def check_metric_value_equel(self, a: list[float], b: list[float]) -> bool:
         if not isinstance(a, list) or not isinstance(b, list):
@@ -518,7 +519,8 @@ c_metric{engine="0"} -1.0"""
         assert role_key in metric_collector._inactive_instance_metrics_aggregate
         inactive_metrics = metric_collector._inactive_instance_metrics_aggregate[role_key]
         assert self.check_metric_value_equel(inactive_metrics[0].value, [0.0] * len(metric_gauge.value))
-        assert self.check_metric_value_equel(inactive_metrics[1].value, metric_counter.value)
+        # request_success_total is restart-compensated, so the history must not keep it as well
+        assert self.check_metric_value_equel(inactive_metrics[1].value, [0.0] * len(metric_counter.value))
         assert self.check_metric_value_equel(inactive_metrics[2].value, metric_histogram.value)
         assert self.check_metric_value_equel(inactive_metrics[3].value, metric_summary.value)
 
@@ -827,7 +829,7 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
         metric_str_counter, metric_counter = self.load_test_counter_metric()
         metric_str_histogram, metric_histogram = self.load_test_histogram_metric()
         metric_str_summary, metric_summary = self.load_test_summary_metric()
-        metric_str_mix = "\n".join([metric_str_gauge, metric_str_counter, metric_str_histogram, metric_str_summary])
+        metric_str_mix = "".join([metric_str_gauge, metric_str_counter, metric_str_histogram, metric_str_summary])
         metric_mix = [metric_gauge, metric_counter, metric_histogram, metric_summary]
 
         # check function
@@ -881,7 +883,6 @@ http_request_duration_seconds_created{handler="/v1/chat/completions",method="POS
             id=7,
             ip="2001:db8::7",
             business_port="8007",
-            mgmt_port="9007",
         )
         instance = Instance(
             job_name="native-metrics",
@@ -1184,6 +1185,28 @@ def test_fetch_memcache_metrics_brackets_ipv6_service():
 
 
 @patch("threading.Thread.start", MagicMock())
+def test_fetch_mooncake_metrics_auto_port_default_50090():
+    """Mooncake backend without explicit metrics_port must fall back to 50090.
+
+    Regression guard: previously the auto-fallback pointed mooncake at the store
+    business port (50088), where no /metrics endpoint exists.
+    """
+    config = CoordinatorConfig()
+    config.prometheus_metrics_config.enable_kv_store_metrics = True
+    config.prometheus_metrics_config.kv_store_backend = "mooncake"
+    config.prometheus_metrics_config.kv_store_service = "kv-store-svc"
+    collector = MetricsCollector(config)
+
+    response = MagicMock()
+    response.status_code = 200
+    response.text = ""
+    with patch("motor.coordinator.metrics.metrics_collector.requests.get", return_value=response) as mock_get:
+        collector._fetch_kv_store_metrics()
+
+    mock_get.assert_called_once_with("http://kv-store-svc:50090/metrics", timeout=15)
+
+
+@patch("threading.Thread.start", MagicMock())
 def test_get_metrics_full_with_kv_store_append():
     _cleanup_singletons()
     config = CoordinatorConfig()
@@ -1270,12 +1293,16 @@ def test_get_metrics_role_all():
 
     collector._last_collects = {
         0: {"role": "prefill", "endpoints": {0: {"metrics": [metric], "pod_ip": "10.0.0.1"}}},
+        1: {"role": "decode", "endpoints": {0: {"metrics": [metric], "pod_ip": "10.0.0.2"}}},
     }
     collector._collects_version = 1
 
     result = collector.get_metrics(metrics_type="role")
     assert isinstance(result, str)
     assert "prefill" in result
+    assert "decode" in result
+    assert result.endswith("\n")
+    assert "\n#" in result
     _cleanup_singletons()
 
 
@@ -1695,7 +1722,7 @@ def test_counter_rate_first_collection_creates_state():
     _effective, tps = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=raw,
         ins_id=1,
         now=now,
@@ -1719,7 +1746,7 @@ def test_counter_rate_steady_state():
     _effective, tps1 = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=1000.0,
         ins_id=1,
         now=t0,
@@ -1729,7 +1756,7 @@ def test_counter_rate_steady_state():
     _effective, tps2 = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=1500.0,
         ins_id=1,
         now=t0 + dt,
@@ -1746,7 +1773,7 @@ def test_counter_rate_restart_by_instance_id():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=10000.0,
         ins_id=1,
         now=t0,
@@ -1754,7 +1781,7 @@ def test_counter_rate_restart_by_instance_id():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=11000.0,
         ins_id=1,
         now=t0 + dt,
@@ -1764,7 +1791,7 @@ def test_counter_rate_restart_by_instance_id():
     _effective, tps_restart = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=50.0,
         ins_id=12,
         now=t0 + dt * 2,
@@ -1779,7 +1806,7 @@ def test_counter_rate_restart_by_instance_id():
     _effective, tps_post = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=500.0,
         ins_id=12,
         now=t0 + dt * 3,
@@ -1796,7 +1823,7 @@ def test_counter_rate_restart_by_counter_drop():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=10000.0,
         ins_id=1,
         now=t0,
@@ -1805,7 +1832,7 @@ def test_counter_rate_restart_by_counter_drop():
     _effective, tps = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=500.0,
         ins_id=1,
         now=t0 + dt,
@@ -1823,7 +1850,7 @@ def test_counter_rate_multiple_dp_ranks_independent():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=1000.0,
         ins_id=1,
         now=t0,
@@ -1831,7 +1858,7 @@ def test_counter_rate_multiple_dp_ranks_independent():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=1,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=2000.0,
         ins_id=1,
         now=t0,
@@ -1851,7 +1878,7 @@ def test_counter_rate_both_prompt_and_generation():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:prompt_tokens_total",
+        series="vllm:prompt_tokens_total",
         raw_counter=5000.0,
         ins_id=1,
         now=t0,
@@ -1859,7 +1886,7 @@ def test_counter_rate_both_prompt_and_generation():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=3000.0,
         ins_id=1,
         now=t0,
@@ -1878,7 +1905,7 @@ def test_counter_rate_negative_clamped_to_zero():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=1000.0,
         ins_id=1,
         now=t0,
@@ -1886,7 +1913,7 @@ def test_counter_rate_negative_clamped_to_zero():
     _effective, tps = computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=950.0,
         ins_id=1,
         now=t0 + dt,
@@ -2036,7 +2063,7 @@ def test_effective_counter_inherited_after_restart():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=10000.0,
         ins_id=5,
         now=t0,
@@ -2047,7 +2074,7 @@ def test_effective_counter_inherited_after_restart():
     computer._compute_effective_and_rate(
         job_name="job-1",
         dp_rank=0,
-        src_name="vllm:generation_tokens_total",
+        series="vllm:generation_tokens_total",
         raw_counter=50.0,
         ins_id=12,
         now=t0 + dt,
@@ -2119,6 +2146,44 @@ def test_raw_counter_corrected_after_restart():
     assert collects3[12]["endpoints"][0]["metrics"][0].value[0] == pytest.approx(11050.0)
 
 
+def test_plain_counter_survives_restart_per_label():
+    """request_success_total keeps each label's total across an instance restart."""
+    computer = MotorMetricComputer()
+
+    def _collects(ins_id, values):
+        metric = Metric(
+            name="vllm:request_success_total",
+            help="test",
+            type=MetricType.COUNTER,
+            label=[
+                'vllm:request_success_total{finished_reason="length"}',
+                'vllm:request_success_total{finished_reason="stop"}',
+            ],
+            value=list(values),
+        )
+        return {
+            ins_id: {
+                "role": "decode",
+                "job_name": "decode-0",
+                "endpoints": {0: {"metrics": [metric], "pod_ip": "10.0.0.1"}},
+            },
+        }
+
+    first = _collects(5, [1000.0, 0.0])
+    computer.compute_pre_aggregation(first)
+    assert first[5]["endpoints"][0]["metrics"][0].value == [1000.0, 0.0]
+
+    # Restart: new instance_id, engine counters start over.
+    after = _collects(12, [5.0, 0.0])
+    computer.compute_pre_aggregation(after)
+    # "length" resumes from 1000; "stop" never fired and must stay 0.
+    assert after[12]["endpoints"][0]["metrics"][0].value == [pytest.approx(1005.0), 0.0]
+
+
+def test_inherited_names_cover_plain_counters():
+    assert "vllm:request_success_total" in get_inherited_metric_names()
+
+
 def test_computed_registry_contains_tps_metrics():
     """TPS metrics are present in the built-in registry."""
     names = {d.name for d in _MOTOR_COMPUTED_METRICS}
@@ -2137,12 +2202,12 @@ def test_computed_registry_pre_aggregation_defs():
 
 
 def test_computed_registry_post_aggregation_defs():
-    """Post-aggregation phase contains worker_count definitions."""
+    """Post-aggregation phase contains worker_count / pd_ratio definitions."""
     defs = _get_defs_by_phase("post_aggregation")
     assert len(defs) >= 4
     for d in defs:
         assert d.phase == "post_aggregation"
-        assert d.compute_type == "worker_count"
+        assert d.compute_type in {"worker_count", "pd_ratio"}
 
 
 # ---------------------------------------------------------------------------
@@ -2221,4 +2286,28 @@ def test_dp_view_includes_tps_with_labels():
     assert "motor:generation_tokens_per_second" in result
     assert 'dp_rank="0"' in result
     assert 'role="decode"' in result
+    _cleanup_singletons()
+
+
+@patch("threading.Thread.start", MagicMock())
+def test_collect_metrics_survives_planner_exception():
+    """CapacityPlanner failure is contained: collection loop lives, last output kept."""
+    _cleanup_singletons()
+    config = CoordinatorConfig()
+    collector = MetricsCollector(config)
+
+    # Seed a known-good planner output, then make update_planner blow up.
+    collector._motor_computer._planner_output = {"prefill_replicas_required": 3.0}
+    collector._get_available_instances = MagicMock(return_value=({}, {}))
+    collector._fetch_instance_metrics = MagicMock(return_value={})
+    collector._parse_metrics = MagicMock(return_value=True)
+    collector._motor_computer.update_planner = MagicMock(side_effect=RuntimeError("planner boom"))
+
+    with patch("motor.coordinator.metrics.metrics_collector.logger") as mock_logger:
+        collects = collector._collect_metrics()
+        mock_logger.error.assert_called_once()
+
+    # The collection cycle completes normally and the cached output survives.
+    assert collects == {}
+    assert collector._motor_computer._planner_output == {"prefill_replicas_required": 3.0}
     _cleanup_singletons()

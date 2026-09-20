@@ -11,11 +11,10 @@ import logging
 import argparse
 import os
 import sys
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from lib.utils import read_json, get_json_by_path, resolve_model_name, update_shell_safely
+from lib.docker_utils import get_json_by_path, read_json, resolve_model_name, update_shell_safely
 
 
 MOTOR_COMMON_ENV = "motor_common_env"
@@ -39,6 +38,7 @@ def set_env_docker(configmap_path):
     engine_shell_path = os.path.join(configmap_path, "engine.sh")
     kv_cache_store_shell_path = os.path.join(configmap_path, "kv_cache_store.sh")
     kv_conductor_shell_path = os.path.join(configmap_path, "kv_conductor.sh")
+    mf_store_shell_path = os.path.join(configmap_path, "mf_store.sh")
 
     deploy_mode = get_json_by_path(user_config, "motor_deploy_config.deploy_mode")
 
@@ -64,7 +64,7 @@ def set_env_docker(configmap_path):
 
     service_id = (
         f"{get_json_by_path(user_config, 'motor_deploy_config.job_id')}_"
-        f"{datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d%H%M%S')}"
+        f"{datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d%H%M%S')}"
     )
     env_config[MOTOR_COMMON_ENV][SERVICE_ID] = service_id
     logger.info(f"Set {SERVICE_ID} environment variable to: {service_id}")
@@ -74,6 +74,8 @@ def set_env_docker(configmap_path):
     union_env_key = "motor_engine_union_env"
     if union_env_key not in env_config:
         env_config[union_env_key] = dict(env_config.get("motor_engine_prefill_env", {}))
+
+    update_shell_safely(mf_store_shell_path, env_config, "motor_mf_store_env", "set_mf_store_env")
 
     if deploy_mode == "single_container":
         update_shell_safely(single_container_shell_path, env_config, "motor_controller_env", "set_controller_env")
@@ -93,6 +95,9 @@ def set_env_docker(configmap_path):
         update_shell_safely(engine_shell_path, env_config, union_env_key, "set_union_env")
         update_shell_safely(kv_cache_store_shell_path, env_config, "motor_kv_cache_store_env", "set_kv_store_env")
         update_shell_safely(kv_conductor_shell_path, env_config, "motor_kv_conductor_env", "set_kv_conductor_env")
+        combined_shell_path = os.path.join(configmap_path, "coordinator_controller.sh")
+        update_shell_safely(combined_shell_path, env_config, "motor_controller_env", "set_controller_env")
+        update_shell_safely(combined_shell_path, env_config, "motor_coordinator_env", "set_coordinator_env")
 
 
 def parse_arguments():

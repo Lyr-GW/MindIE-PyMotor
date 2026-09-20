@@ -15,6 +15,7 @@ This module defines fault level/fault_type/category enumerations, data models
 fault tolerance management subsystem.
 """
 
+import re
 import threading
 import time
 from enum import Enum
@@ -34,6 +35,20 @@ class SpecialFaultCode(int, Enum):
     NODE_REBOOT = 0x0000001
     ENGINE_DEAD = 0x1000001
     ENGINE_UNHEALTHY = 0x1000002
+    # Device-plugin CardNetworkUnhealthy / linkdown (ConfigMap).
+    # A2: PD-disagg isolation trigger; A3/A5: false-positive noise.
+    CARD_NETWORK_LINKDOWN = 0x81078603
+
+
+# A2 PD-disagg isolation codes. Membership means ALL of: keep PreSeparateNPU at L6,
+# attribute by occupied NPU, and Decode uses NmSuicide (not ScaleP2D).
+# Do not add a code that only needs "keep L6".
+# Keep independent of LINKDOWN_FAULT_CODES below (it may grow with real codes).
+A2_PD_ISOLATION_FAULT_CODES: frozenset[int] = frozenset({int(SpecialFaultCode.CARD_NETWORK_LINKDOWN)})
+
+# Linkdown codes dropped as noise on non-A2 hardware (A3/A5 false positives).
+# Independent of A2_PD_ISOLATION_FAULT_CODES above.
+LINKDOWN_FAULT_CODES: frozenset[int] = frozenset({int(SpecialFaultCode.CARD_NETWORK_LINKDOWN)})
 
 
 class NodeStatus(str, Enum):
@@ -99,6 +114,7 @@ class FaultInfo(BaseModel):
     exception_message: str | None = Field(default=None, description="Exception message (software only)")
     engine_id: int | None = Field(default=None, description="Engine ID (software only)")
     engine_status: int | None = Field(default=None, description="EngineStatusType value (software only)")
+    instance_id: int | None = Field(default=None, description="Owning instance ID (software only)")
     timestamp: str | None = Field(default=None, description="Fault timestamp")
     additional_info: dict | None = Field(default=None, description="Additional fault info (software only)")
 
@@ -109,6 +125,7 @@ class FaultInfo(BaseModel):
         engine_id: int,
         engine_status: int,
         additional_info: dict | None = None,
+        instance_id: int | None = None,
     ) -> "FaultInfo":
         """Create a software FaultInfo from an exception."""
         fault_level = cls._map_engine_status_to_fault_level(engine_status)
@@ -122,6 +139,7 @@ class FaultInfo(BaseModel):
             exception_message=str(exception),
             engine_id=engine_id,
             engine_status=int(engine_status),
+            instance_id=instance_id,
             timestamp=time.strftime("%H:%M:%S", local_time),
             additional_info=additional_info or {},
         )
@@ -143,6 +161,22 @@ class FaultInfo(BaseModel):
         elif engine_status == 2:
             return int(SpecialFaultCode.ENGINE_UNHEALTHY)
         return 0x0
+
+
+def hardware_fault_storage_key(fault: FaultInfo) -> str:
+    """Return a device-scoped key so equal fault codes on different NPUs do not collide."""
+    return "%x:%s" % (int(fault.fault_code), fault.npu_name or "node")
+
+
+def hardware_fault_identity(node_name: str, fault: FaultInfo) -> str:
+    """Return the cluster-unique identity of one hardware fault observation."""
+    return "%s:%s" % (node_name, hardware_fault_storage_key(fault))
+
+
+def software_fault_storage_key(fault: FaultInfo) -> str:
+    """Return a per-instance DP key so a newer status replaces the prior one."""
+    engine_id = fault.engine_id if fault.engine_id is not None else "unknown"
+    return "%s:%s" % (fault.instance_id, engine_id) if fault.instance_id is not None else str(engine_id)
 
 
 def map_fault_type(fault_type_str: str) -> HardwareFaultType:
@@ -212,6 +246,108 @@ def map_fault_level(fault_level_str: str) -> FaultLevel:
     return fault_level_mapping.get(fault_level_str, FaultLevel.HEALTHY)
 
 
+def is_800i_a2(hardware_type: str) -> bool:
+    """True for Atlas 800I A2, accepting both 800I_A2 and 800I-A2 spellings."""
+    normalized = (hardware_type or "").strip().replace("_", "-").upper()
+    return normalized == "800I-A2"
+
+
+def is_a2_linkdown_pre_separate(fault_info: FaultInfo, hardware_type: str) -> bool:
+    """A2 CardNetworkUnhealthy that maps to PreSeparateNPU (must stay L6 for PD)."""
+    if not is_800i_a2(hardware_type):
+        return False
+    if fault_info.origin_fault_level != OriginFaultLevel.PRE_SEPARATE_NPU:
+        return False
+    return int(fault_info.fault_code) in A2_PD_ISOLATION_FAULT_CODES
+
+
+def is_non_a2_linkdown_noise(fault_info: FaultInfo, hardware_type: str) -> bool:
+    """Whether a linkdown (0x81078603) is noise to ignore on this hardware.
+
+    Ignored on non-A2 hardware; A2 and empty/unknown keep legacy storage.
+    """
+    hw = (hardware_type or "").strip()
+    if not hw or is_800i_a2(hw):
+        return False
+    return int(fault_info.fault_code) in LINKDOWN_FAULT_CODES
+
+
+def instance_requires_a2_linkdown_l6(instance: Any) -> bool:
+    """Whether this instance should keep A2 linkdown at L6 (P, D, or multi-pod union)."""
+    if instance is None:
+        return False
+    role = getattr(instance, "role", None)
+    role_val = getattr(role, "value", role)
+    if role_val in ("prefill", "decode"):
+        return True
+    if role_val == "union":
+        if hasattr(instance, "get_node_managers_num"):
+            return instance.get_node_managers_num() > 1
+        node_managers = instance.get_node_managers() if hasattr(instance, "get_node_managers") else []
+        return len(node_managers) > 1
+    return False
+
+
+def parse_npu_chip_ids(npu_name: str) -> set[int]:
+    """Parse chip ids from ConfigMap npu_name values.
+
+    Accepts ``Ascend910-6``, ``npu-4``, ``npu0``, and comma-joined lists such as
+    ``Ascend910-0, Ascend910-1``. Tokens that cannot be parsed are skipped.
+    """
+    if not npu_name:
+        return set()
+    chip_ids: set[int] = set()
+    for token in npu_name.replace(";", ",").split(","):
+        token = token.strip()
+        if not token or token.startswith("..."):
+            continue
+        match = re.fullmatch(r"(?:Ascend\d+|npu)-?(\d+)", token, re.IGNORECASE)
+        if match is None:
+            continue
+        chip_ids.add(int(match.group(1)))
+    return chip_ids
+
+
+def collect_instance_chip_ids(instance: Any) -> set[int]:
+    """Physical device ids this instance registered on its endpoints."""
+    if instance is None or not hasattr(instance, "get_all_endpoints"):
+        return set()
+    raw_eps = instance.get_all_endpoints()
+    if not isinstance(raw_eps, (list, tuple)):
+        return set()
+    chip_ids: set[int] = set()
+    for endpoint in raw_eps:
+        for device in getattr(endpoint, "device_infos", None) or []:
+            raw_id = getattr(device, "device_id", None)
+            if raw_id is None:
+                continue
+            try:
+                chip_ids.add(int(str(raw_id).strip()))
+            except (TypeError, ValueError):
+                continue
+    return chip_ids
+
+
+def a2_linkdown_targets_instance(fault_info: FaultInfo, instance: Any, hardware_type: str) -> bool:
+    """Whether an A2 linkdown fault should isolate this instance.
+
+    Ownership is the intersection of ConfigMap ``npu_name`` chip ids and the
+    instance endpoint ``device_id`` list. Unknown ``npu_name`` still fails open
+    so isolation is not skipped. An instance with no ``device_id`` list fails
+    closed so a colocated INITIAL instance is not isolated as the owner.
+    Non-A2-linkdown faults always return True (caller decides separately).
+    """
+    if not is_a2_linkdown_pre_separate(fault_info, hardware_type):
+        return True
+    chip_ids = parse_npu_chip_ids(fault_info.npu_name)
+    if not chip_ids:
+        return True
+    owned = collect_instance_chip_ids(instance)
+    if not owned:
+        return False
+    return bool(chip_ids & owned)
+
+
 class NodeMetadata(BaseModel):
     """
     Each node metadata represents a physical node in the cluster.
@@ -227,18 +363,48 @@ class NodeMetadata(BaseModel):
     node_name: str = Field(..., description="Kubernetes node name")
     instance_ids: set[int] = Field(default_factory=set, description="Instance IDs running on this node")
     instance_pod_ips: dict[int, str] = Field(
-        default_factory=dict, description="Per-instance pod IP mapping (instance_id -> pod_ip)"
+        default_factory=dict,
+        description="Per-instance pod IP mapping (instance_id -> pod_ip)",
     )
     instance_job_names: dict[int, str] = Field(
-        default_factory=dict, description="Per-instance job name mapping (instance_id -> job_name)"
+        default_factory=dict,
+        description="Per-instance job name mapping (instance_id -> job_name)",
     )
     node_status: NodeStatus = Field(default=NodeStatus.READY, description="Node status")
-    hardware_fault_infos: dict[int, FaultInfo] = Field(
-        default_factory=dict, description="Hardware fault information dictionary keyed by fault_code"
+    hardware_fault_infos: dict[int | str, FaultInfo] = Field(
+        default_factory=dict,
+        description="Hardware faults keyed by fault_code and device identity",
     )
-    software_fault_infos: dict[int, FaultInfo] = Field(
-        default_factory=dict, description="Software fault information dictionary keyed by fault_code"
+    software_fault_infos: dict[int | str, FaultInfo] = Field(
+        default_factory=dict,
+        description="Software faults keyed by fault_code and engine identity",
     )
+
+
+def pre_separate_fault_affects_instance(
+    fault_info: FaultInfo,
+    node: "NodeMetadata",
+    instance: Any,
+    hardware_type: str,
+) -> bool:
+    """Whether a node-level hardware fault should raise this instance's fault level.
+
+    A2 CardNetworkUnhealthy is attributed per occupied NPU so a Prefill linkdown
+    on a shared node does not isolate a colocated Decode instance.
+    """
+    if fault_info.origin_fault_level != OriginFaultLevel.PRE_SEPARATE_NPU:
+        return True
+    if (
+        fault_info.fault_level == FaultLevel.L6
+        and is_a2_linkdown_pre_separate(fault_info, hardware_type)
+        and not instance_requires_a2_linkdown_l6(instance)
+    ):
+        return False
+    if not a2_linkdown_targets_instance(fault_info, instance, hardware_type):
+        return False
+    if fault_info.fault_level != FaultLevel.L6:
+        return True
+    return len(node.instance_ids) > 0
 
 
 class InstanceMetadata(BaseModel):
@@ -258,13 +424,59 @@ class InstanceMetadata(BaseModel):
     fault_level: FaultLevel = Field(default=FaultLevel.HEALTHY, description="Current instance fault level")
     fault_code: int = Field(default=0x0, description="Fault code that trigger the current strategy")
     strategy_fault_level: FaultLevel = Field(
-        default=FaultLevel.HEALTHY, description="Fault level of the currently running strategy"
+        default=FaultLevel.HEALTHY,
+        description="Fault level of the currently running strategy",
     )
+    #: Set when the last strategy finished without restoring health; the
+    #: strategy center then escalates to the fallback strategy
+    #: (EngineRelaunchStrategy) instead of re-running the same strategy.
+    prev_strategy_failed: bool = Field(default=False, description="Last strategy failed to recover")
+    prev_strategy_name: str = Field(default="", description="Last completed recovery strategy")
+    prev_strategy_fallback: str = Field(default="", description="Original fallback after scale-down failure")
+    handled_hardware_faults: set[str] = Field(
+        default_factory=set,
+        description="Hardware fault identities already committed by DP scale-down",
+    )
+    fault_collection_started_at: float | None = Field(
+        default=None,
+        description="Wall-clock time when the current software FT status round started",
+    )
+    hardware_fault_observed_at: float | None = Field(
+        default=None,
+        description="Wall-clock time when actionable hardware evidence opened the recovery session",
+    )
+    software_dead_observed_at: dict[int, float] = Field(
+        default_factory=dict,
+        exclude=True,
+        description="First wall-clock DEAD observation time for each DP rank",
+    )
+    software_unhealthy_observed_at: dict[int, float] = Field(
+        default_factory=dict,
+        exclude=True,
+        description="First wall-clock UNHEALTHY observation time for each DP rank",
+    )
+    recovery_ready: bool = Field(
+        default=True,
+        description="Whether the instance completed readiness baseline collection",
+    )
+    ignored_pre_ready_hardware_faults: set[str] = Field(
+        default_factory=set,
+        description="Hardware fault identities already present before the instance became ready",
+    )
+    recovery_plan_source: str = Field(default="", description="Evidence source frozen for current recovery round")
+    recovery_plan_strategy: str = Field(default="", description="Primary strategy frozen for current recovery round")
+    recovery_plan_fallback: str = Field(default="", description="Fallback frozen for current recovery round")
 
     # Non-serializable fields (excluded from serialization)
     lock: Any = Field(default=None, exclude=True)
     # StrategyBase instance, using Any to avoid requiring arbitrary_types_allowed
     strategy: Any = Field(default=None, exclude=True)
+    strategy_future: Any = Field(default=None, exclude=True)
+    strategy_preempted: bool = Field(
+        default=False,
+        exclude=True,
+        description="Current strategy is stopping before a higher-level strategy starts",
+    )
 
     @model_validator(mode="after")
     def init_lock(self):
@@ -275,4 +487,12 @@ class InstanceMetadata(BaseModel):
 
     def model_dump(self, **kwargs) -> dict:
         """Override model_dump to exclude non-serializable fields"""
-        return super().model_dump(exclude={"lock", "strategy"}, **kwargs)
+        return super().model_dump(
+            exclude={
+                "lock",
+                "strategy",
+                "strategy_future",
+                "strategy_preempted",
+            },
+            **kwargs,
+        )

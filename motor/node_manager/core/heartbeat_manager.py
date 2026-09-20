@@ -20,8 +20,7 @@ from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.utils.snapshot_utils import is_restored_from_host_side_snapshot, RETRY_LOG_FREQUENCY
 from motor.config.node_manager import NodeManagerConfig
 from motor.node_manager.api_client.controller_api_client import ControllerApiClient
-from motor.node_manager.core.engine_manager import EngineManager
-from motor.node_manager.core.daemon import Daemon
+from motor.node_manager.core.register_manager import RegisterManager
 from motor.node_manager.core.services.native_engine.models import RuntimeState
 
 
@@ -48,21 +47,18 @@ class HeartbeatManager(ThreadSafeSingleton):
         self._role = "prefill"
         self._instance_id = -1
         self._endpoints: list[Endpoint] = []
+        self._retired_endpoint_ids: set[int] = set()
         self._heartbeat_report_thread = threading.Thread(
             target=self._report_heartbeat_loop,
             daemon=True,
             name="heartbeat_report",
         )
-        self._engine_status_thread = threading.Thread(
-            target=self._refresh_endpoints_status_loop,
-            daemon=True,
-            name="endpoint_status_fetch",
-        )
+        # The status thread is created in start() — it needs the Daemon's
+        # engine-ready event injected at that point.
+        self._engine_status_thread: threading.Thread | None = None
         self._thread_started = False
-        self._consecutive_abnormal_count = 0
-        self._abnormal_count_lock = threading.Lock()
-        self._should_suicide = False
-        self._suicide_lock = threading.Lock()
+        self._engine_status_thread_start_time = None
+        self._is_within_grace_period = True
         # for snapshot
         self._register_after_restore_retry_count = 0
         self._checkpoint_done_inspect_retry_count = 0
@@ -74,8 +70,22 @@ class HeartbeatManager(ThreadSafeSingleton):
         self._initialized = True
         logger.info("HeartBeatManager module start.")
 
-    def start(self):
+    def start(self, engine_ready_event: threading.Event | None = None) -> None:
+        """Start the heartbeat and engine-status threads.
+
+        ``engine_ready_event`` (the Daemon's engine-ready handoff) gates the
+        status polling: the status thread waits for it before probing the
+        engines, so the HeartbeatManager has no engine-readiness logic of its
+        own. None (snapshot-restore path, no engines pulled) starts probing
+        immediately.
+        """
         if self._thread_started is False:
+            self._engine_status_thread = threading.Thread(
+                target=self._refresh_endpoints_status_loop,
+                args=(engine_ready_event,),
+                daemon=True,
+                name="endpoint_status_fetch",
+            )
             self._heartbeat_report_thread.start()
             self._engine_status_thread.start()
             self._thread_started = True
@@ -95,31 +105,125 @@ class HeartbeatManager(ThreadSafeSingleton):
             self._role = node_manager_info.role
             self._instance_id = node_manager_info.instance_id
             self._endpoints.clear()
+            self._retired_endpoint_ids.clear()
             for item in node_manager_info.endpoints:
                 self._endpoints.append(item)
             self._endpoints_generation += 1
-        # Reset abnormal count when endpoints are updated
-        with self._abnormal_count_lock:
-            self._consecutive_abnormal_count = 0
-        # Reset suicide flag when endpoints are updated
-        with self._suicide_lock:
-            self._should_suicide = False
+        self._is_within_grace_period = True
+        if self._thread_started:
+            self._engine_status_thread_start_time = time.time()
 
-    def should_suicide(self) -> bool:
+    def has_abnormal_endpoints(self) -> bool:
+        """True when any managed endpoint is ABNORMAL.
+
+        State fact for the Daemon's suicide arbitration — the heartbeat
+        module only maintains endpoint state; the Daemon decides whether to
+        kill the pod.
         """
-        Check if suicide flag is set.
-        Returns True if 5 consecutive abnormal heartbeats have been reported.
+        with self._endpoint_lock:
+            return any(
+                item.id not in self._retired_endpoint_ids and item.status == EndpointStatus.ABNORMAL
+                for item in self._endpoints
+            )
+
+    def normal_endpoint_ids(self) -> list[int]:
+        """Ids of the endpoints currently NORMAL.
+
+        State fact for the Daemon's suicide arbitration: an endpoint that was
+        never NORMAL is still cold-starting (model loading) — its ABNORMAL
+        observations must not be reported as engine death.
         """
-        with self._suicide_lock:
-            return self._should_suicide
+        with self._endpoint_lock:
+            return [
+                item.id
+                for item in self._endpoints
+                if item.id not in self._retired_endpoint_ids and item.status == EndpointStatus.NORMAL
+            ]
+
+    def abnormal_endpoint_ids(self) -> list[int]:
+        """Ids of the endpoints currently ABNORMAL.
+
+        ABNORMAL covers both native-engine process death and business-level
+        failure (engine alive but its internal executor died — vLLM EngineCore
+        crash) — either way the engine is unusable and must be relaunched.
+        """
+        with self._endpoint_lock:
+            return [
+                item.id
+                for item in self._endpoints
+                if item.id not in self._retired_endpoint_ids and item.status == EndpointStatus.ABNORMAL
+            ]
+
+    def retire_endpoints(self, endpoint_ids: list[int]) -> None:
+        """Exclude committed scale-down ranks from heartbeat and suicide facts."""
+        with self._endpoint_lock:
+            self._validate_retire_endpoints_locked(endpoint_ids)
+            self._retired_endpoint_ids.update(endpoint_ids)
+            self._endpoints_generation += 1
+        logger.info("Retired local DP ranks after scale-down commit: %s", sorted(endpoint_ids))
+
+    def validate_retire_endpoints(self, endpoint_ids: list[int]) -> None:
+        """Validate a retirement set without changing heartbeat state."""
+        with self._endpoint_lock:
+            self._validate_retire_endpoints_locked(endpoint_ids)
+
+    def _validate_retire_endpoints_locked(self, endpoint_ids: list[int]) -> None:
+        managed_ids = {item.id for item in self._endpoints}
+        missing = set(endpoint_ids) - managed_ids
+        if missing:
+            raise ValueError("cannot retire unmanaged endpoint ids: %s" % sorted(missing))
+
+    def endpoints_generation(self) -> int:
+        """Incremented on every endpoint update (Daemon resets its suicide
+        count when this changes).
+        """
+        with self._endpoint_lock:
+            return self._endpoints_generation
+
+    def get_endpoints(self, include_headless: bool = False) -> list[Endpoint]:
+        """Return a stable snapshot of all endpoints owned by this NodeManager."""
+        with self._endpoint_lock:
+            return [e for e in self._endpoints if include_headless or not e.headless]
+
+    def get_active_endpoints(self, include_headless: bool = False) -> list[Endpoint]:
+        """Return endpoints that have not been committed as retired."""
+        with self._endpoint_lock:
+            return [
+                endpoint
+                for endpoint in self._endpoints
+                if endpoint.id not in self._retired_endpoint_ids and (include_headless or not endpoint.headless)
+            ]
+
+    def is_within_grace_period(self) -> bool:
+        """True during the 120s cold-start window after endpoints were set."""
+        with self._endpoint_lock:
+            return self._is_within_grace_period
 
     def stop(self) -> None:
         self.stop_event.set()
         if self._heartbeat_report_thread.is_alive():
             self._heartbeat_report_thread.join(timeout=2.0)
-        if self._engine_status_thread.is_alive():
+        if self._engine_status_thread is not None and self._engine_status_thread.is_alive():
             self._engine_status_thread.join(timeout=2.0)
         logger.info("HeartBeatManager stopped.")
+
+    def check_all_endpoints_recovering(self) -> bool:
+        """True when no managed endpoint is ABNORMAL.
+
+        Relaxed readiness for the engine-relaunch flow: an engine that was
+        just relaunched reports INITIAL while loading its model — the relaunch
+        succeeded as soon as every endpoint is past ABNORMAL (engine process
+        alive); model readiness is tracked separately by NORMAL.
+        """
+        with self._endpoint_lock:
+            if not self._endpoints:
+                return False
+            for endpoint in self._endpoints:
+                if endpoint.id in self._retired_endpoint_ids:
+                    continue
+                if endpoint.status == EndpointStatus.ABNORMAL:
+                    return False
+        return True
 
     def check_all_endpoints_normal(self) -> bool:
         """
@@ -133,12 +237,14 @@ class HeartbeatManager(ThreadSafeSingleton):
                 logger.debug("[snapshot] No endpoints were pulled up yet")
                 return False
             for endpoint in self._endpoints:
+                if endpoint.id in self._retired_endpoint_ids:
+                    continue
                 if endpoint.status != EndpointStatus.NORMAL:
                     logger.warning(
                         "Endpoint %d at %s:%s is in status %s",
                         endpoint.id,
                         endpoint.ip,
-                        endpoint.mgmt_port,
+                        endpoint.business_port,
                         endpoint.status,
                     )
                     return False
@@ -160,8 +266,16 @@ class HeartbeatManager(ThreadSafeSingleton):
 
     def get_engine_metrics_targets(self) -> list[str]:
         """Return native metrics URLs for routable local endpoints."""
+        # Lazy import: the Daemon imports this module at top level; this
+        # runtime lookup keeps the module graph acyclic.
+        from motor.node_manager.core.daemon import Daemon  # pylint: disable=cyclic-import
+
         with self._endpoint_lock:
-            endpoints = [endpoint for endpoint in self._endpoints if not endpoint.headless]
+            endpoints = [
+                endpoint
+                for endpoint in self._endpoints
+                if endpoint.id not in self._retired_endpoint_ids and not endpoint.headless
+            ]
         daemon = Daemon()
         return [target for endpoint in endpoints if (target := daemon.get_engine_metrics_target(endpoint)) is not None]
 
@@ -185,7 +299,17 @@ class HeartbeatManager(ThreadSafeSingleton):
         with self._started_after_restore_lock:
             self._is_started_after_restore = is_started
 
-    def _refresh_endpoints_status_loop(self) -> None:
+    def _refresh_endpoints_status_loop(self, engine_ready_event: threading.Event | None = None) -> None:
+        # Wait for the Daemon's engine-ready handoff (native /health on
+        # business_port) before probing — readiness is the Daemon/native
+        # engine service's concern, not this module's. The event is always set
+        # eventually (also when the engines died), so this never blocks forever.
+        if engine_ready_event is not None:
+            while not self.stop_event.is_set():
+                if engine_ready_event.wait(timeout=1.0):
+                    break
+            if self.stop_event.is_set():
+                return
         while not self.stop_event.is_set():
             self._refresh_native_engine_status()
             self.stop_event.wait(1)
@@ -194,16 +318,21 @@ class HeartbeatManager(ThreadSafeSingleton):
         with self._endpoint_lock:
             endpoints_snapshot = list(self._endpoints)
             generation_at_start = self._endpoints_generation
+            instance_id_at_start = self._instance_id
 
         if not endpoints_snapshot:
             return
+
+        # Lazy import: the Daemon imports this module at top level; this
+        # runtime lookup keeps the module graph acyclic.
+        from motor.node_manager.core.daemon import Daemon  # pylint: disable=cyclic-import
 
         updated_endpoints = []
         daemon = Daemon()
         for item in endpoints_snapshot:
             original_status = item.status
             try:
-                runtime_state = daemon.get_engine_runtime_state(item)
+                runtime_state = daemon.get_engine_runtime_state(item, instance_id_at_start)
             except Exception as e:
                 logger.error(
                     "Failed to probe native engine at %s: %s",
@@ -223,13 +352,15 @@ class HeartbeatManager(ThreadSafeSingleton):
                 # If restored from host side snapshot and not started after restore(pod_ip do not refresh yet), keep original status
                 logger.info(
                     "[snapshot] Node manager is restored from host side snapshot and not started after restore, "
-                    "keeping stale status: %s",
+                    "keeping stale status: %s, old endpoint ip=%s, new endpoint ip=%s",
                     original_status,
+                    item.ip,
+                    self._config.api_config.pod_ip,
                 )
                 item.status = original_status
             elif runtime_state in (RuntimeState.STARTING, RuntimeState.STOPPING):
                 # Loading is not a failure. Keep INITIAL (or the last reported
-                # status) until the native readiness endpoint succeeds.
+                # status) until the native readiness probe succeeds.
                 logger.debug(
                     "Native engine %s is %s, keeping status %s",
                     format_address(item.ip, item.business_port),
@@ -257,25 +388,30 @@ class HeartbeatManager(ThreadSafeSingleton):
             if generation_at_start != self._endpoints_generation:
                 return
             self._endpoints = updated_endpoints
+            # Once an endpoint has proved READY, subsequent ABNORMAL states
+            # are runtime failures rather than cold-start noise.  Ending the
+            # global grace period lets the Daemon report those failures; its
+            # per-endpoint NORMAL history still protects endpoints that have
+            # not completed startup yet.
+            if any(item.status == EndpointStatus.NORMAL for item in updated_endpoints):
+                self._is_within_grace_period = False
 
     def _report_heartbeat_loop(self) -> None:
         while not self.stop_event.is_set():
-            has_abnormal = False
             is_normal = True
             try:
                 with self._endpoint_lock:
-                    # Check actual endpoint status, not the reported status.
-                    has_abnormal = any(item.status == EndpointStatus.ABNORMAL for item in self._endpoints)
-                    is_normal = all(item.status == EndpointStatus.NORMAL for item in self._endpoints)
+                    active_endpoints = [item for item in self._endpoints if item.id not in self._retired_endpoint_ids]
+                    is_normal = all(item.status == EndpointStatus.NORMAL for item in active_endpoints)
 
-                    endpoint_status_list = {item.id: item.status for item in self._endpoints}
+                    endpoint_status_list = {item.id: item.status for item in active_endpoints}
 
                 # If container snapshot enabled
                 # During cold start, when suspend done, node manager should not report heartbeat to controller until engine checkpoint is done
                 if (
                     is_normal
                     and not is_restored_from_host_side_snapshot()
-                    and not EngineManager().is_engine_checkpoint_done()
+                    and not RegisterManager().is_engine_checkpoint_done()
                 ):
                     if self._checkpoint_done_inspect_retry_count % RETRY_LOG_FREQUENCY == 0:
                         logger.info(
@@ -317,28 +453,15 @@ class HeartbeatManager(ThreadSafeSingleton):
                             window_sec=60,
                         )
 
-            # Update consecutive abnormal count after successful heartbeat report
-            with self._abnormal_count_lock:
-                if has_abnormal:
-                    self._consecutive_abnormal_count += 1
-                    logger.warning("Consecutive abnormal heartbeat count: %d/5", self._consecutive_abnormal_count)
-                    # Set suicide flag if reached 5 consecutive abnormal heartbeats
-                    if self._consecutive_abnormal_count >= 5:
-                        logger.error(
-                            "Reached 5 consecutive abnormal heartbeats, setting suicide flag for main to handle..."
-                        )
-                        with self._suicide_lock:
-                            self._should_suicide = True
-                else:
-                    self._consecutive_abnormal_count = 0
-
+            # Suicide arbitration moved to the Daemon's process monitor:
+            # this module only reports the endpoint-state facts.
             with self.config_lock:
                 time.sleep(self.heartbeat_interval_seconds)
 
     def _register_after_restore(self) -> None:
         # refresh config: job_name from snapshot metadata and new pod ip
         try:
-            EngineManager().register_prepare_after_restore()
+            RegisterManager().register_prepare_after_restore()
         except Exception as e:
             if self._register_after_restore_retry_count % RETRY_LOG_FREQUENCY == 0:
                 logger.error("[snapshot] Failed to register prepare after restore: %s", e)
@@ -348,11 +471,11 @@ class HeartbeatManager(ThreadSafeSingleton):
         # Register for post-snapshot brandnew job name
         # Do not consider retry
         # If current register failed, next register will be triggered by next heartbeat report exception
-        ret = EngineManager().post_register_msg()
+        ret = RegisterManager().post_register_msg()
         self._is_registered_after_restore = ret is True
 
     def _reregister(self) -> None:
-        ret = EngineManager().post_reregister_msg()
+        ret = RegisterManager().post_reregister_msg()
         if ret is False:
             logger.error("reregister failed")
         else:

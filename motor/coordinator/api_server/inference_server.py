@@ -10,7 +10,9 @@
 
 """
 Inference plane: Worker subprocess only; provides /v1/completions, /v1/chat/completions,
-/v1/messages, /v1/messages/count_tokens, /v1/models, etc.
+/v1/responses, /v1/messages, /v1/messages/count_tokens, /v1/models, etc.
+Dedicated per-worker metaserver (POST /v1/metaserver) is served on worker_metaserver_port
+when inference_workers_config.worker_metaserver_base_port > 0.
 """
 
 import asyncio
@@ -20,6 +22,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from pydantic import TypeAdapter, ValidationError
 
 from motor.common.resources.instance import PDRole
 from motor.common.logger import get_logger
@@ -37,11 +40,23 @@ from motor.common.http.http_client import HTTPClientPool
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.models.request import RequestType
 from motor.coordinator.domain.request_manager import RequestManager
-from motor.coordinator.router.dispatch import handle_request
+from motor.coordinator.domain.scheduling import InstanceReadiness, has_decode_colocation_candidate
+from motor.coordinator.router.dispatch import handle_metaserver_request, handle_request
+from motor.coordinator.render.image_obfuscation_service import ImageObfuscationService, resolve_image_obfuscation_config
+from motor.coordinator.render.tokenization_service import TokenizationService
+from motor.coordinator.render.token_obfuscation_service import (
+    TokenObfuscationService,
+    resolve_token_obfuscation_config,
+)
+from motor.coordinator.render.vllm_render_client import VLLMRenderClient
+from motor.coordinator.scheduler.policy.kv_cache_affinity import TokenizerManager
 from motor.coordinator.tracer.tracing import TracerManager
-from motor.coordinator.domain.agent_hint import parse_manage_request
+from motor.coordinator.domain.agent_hint import agent_hint_implies_manage_request
 
 logger = get_logger(__name__)
+
+_OPENAI_INT_ADAPTER = TypeAdapter(int)
+_OPENAI_BOOL_ADAPTER = TypeAdapter(bool)
 
 
 def get_request_manager(request: Request) -> RequestManager:
@@ -49,38 +64,22 @@ def get_request_manager(request: Request) -> RequestManager:
     return request.app.state.request_manager
 
 
-def _has_session_target_edit(body_json: dict[str, Any]) -> bool:
-    """Return True if any edit in agent_hint.context_management.edits targets 'session'.
+def _validate_positive_int_field(body_json: dict[str, Any], field_name: str) -> None:
+    """Validate an optional positive integer field.
 
-    An edit is considered 'session-targeted' when its `target` field is either
-    explicitly 'session' or absent (the V1.1 default in agent_hint.py is
-    'session' — see _EDIT_TARGET_DEFAULT). Malformed substructures are treated
-    as 'no session edit' so the original validation still triggers.
+    If the field is present but not a positive integer, remove it from the
+    request body and log a warning with the body content before removal.
     """
-    agent_hint = body_json.get("agent_hint")
-    if not isinstance(agent_hint, dict):
-        return False
-    context_management = agent_hint.get("context_management")
-    if not isinstance(context_management, dict):
-        return False
-    edits = context_management.get("edits")
-    if not isinstance(edits, list):
-        return False
-    for edit in edits:
-        if isinstance(edit, dict) and edit.get("target", "session") == "session":
-            return True
-    return False
-
-
-def _is_manage_request(body_json: dict[str, Any]) -> bool:
-    """Return True if agent_hint.context_management.manage_request is True."""
-    agent_hint = body_json.get("agent_hint")
-    if not isinstance(agent_hint, dict):
-        return False
-    context_management = agent_hint.get("context_management")
-    if not isinstance(context_management, dict):
-        return False
-    return parse_manage_request(context_management.get("manage_request"))
+    value = body_json.get(field_name)
+    if value is None:
+        return
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        logger.warning(
+            "Invalid %s=%r in request body, removing it.",
+            field_name,
+            value,
+        )
+        body_json.pop(field_name, None)
 
 
 def _validate_anthropic_request(body_json: dict[str, Any], *, require_max_tokens: bool = True) -> None:
@@ -110,35 +109,14 @@ def _validate_anthropic_request(body_json: dict[str, Any], *, require_max_tokens
             )
 
 
-def _validate_openai_request(body_json: dict[str, Any], request_type: RequestType) -> None:
-    """Validate OpenAI-style request body. Raises HTTPException on invalid."""
-    if OpenAIField.MODEL not in body_json:
+def _validate_message_array(messages: list[Any], field_name: str) -> None:
+    """Validate a Chat Completions message array. Raises HTTPException on invalid."""
+    if len(messages) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Missing required field: {OpenAIField.MODEL}",
+            detail=f"Invalid {field_name} field: must be a non-empty array",
         )
-    if request_type != RequestType.OPENAI:
-        return
-    if OpenAIField.PROMPT not in body_json and OpenAIField.MESSAGES not in body_json:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Missing required field: {OpenAIField.PROMPT} or {OpenAIField.MESSAGES}",
-        )
-    if OpenAIField.MESSAGES not in body_json:
-        return
-    if not isinstance(body_json[OpenAIField.MESSAGES], list):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid {OpenAIField.MESSAGES} field: must be a non-empty array",
-        )
-    if len(body_json[OpenAIField.MESSAGES]) == 0 and not (
-        _is_manage_request(body_json) and _has_session_target_edit(body_json)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid {OpenAIField.MESSAGES} field: must be a non-empty array",
-        )
-    for i, message in enumerate(body_json[OpenAIField.MESSAGES]):
+    for i, message in enumerate(messages):
         if not isinstance(message, dict):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -149,15 +127,160 @@ def _validate_openai_request(body_json: dict[str, Any], request_type: RequestTyp
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(f"Invalid message at index {i}: missing {OpenAIField.ROLE} or {OpenAIField.CONTENT}"),
             )
-        if message[OpenAIField.ROLE] not in ["system", "user", "assistant", "tool"]:
+        if message[OpenAIField.ROLE] not in ["system", "developer", "user", "assistant", "tool"]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     f"Invalid {OpenAIField.ROLE} "
                     f"'{message[OpenAIField.ROLE]}' at index {i}: must be system, "
-                    "user, or assistant"
+                    "developer, user, assistant, or tool"
                 ),
             )
+
+
+def _validate_responses_input_items(input_items: list[Any]) -> None:
+    """Validate Responses message items while deferring other typed items to the engine."""
+    if not input_items:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid input field: must be a non-empty array",
+        )
+    for i, item in enumerate(input_items):
+        if not isinstance(item, dict):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid input item at index {i}: must be an object",
+            )
+
+        item_type = item.get("type")
+        if item_type is None and OpenAIField.ROLE not in item and OpenAIField.CONTENT not in item:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid input item at index {i}: missing type or message fields",
+            )
+        if item_type is not None and (not isinstance(item_type, str) or not item_type):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid input item type at index {i}: must be a non-empty string",
+            )
+        if item_type not in (None, "message"):
+            continue
+
+        if OpenAIField.ROLE not in item or OpenAIField.CONTENT not in item:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(f"Invalid Responses message at index {i}: missing {OpenAIField.ROLE} or {OpenAIField.CONTENT}"),
+            )
+        if item[OpenAIField.ROLE] not in ["system", "developer", "user", "assistant"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid {OpenAIField.ROLE} '{item[OpenAIField.ROLE]}' at index {i}: "
+                    "must be system, developer, user, or assistant"
+                ),
+            )
+
+
+def _validate_openai_request(body_json: dict[str, Any], request_type: RequestType) -> None:
+    """Validate OpenAI-style request body. Raises HTTPException on invalid."""
+    if OpenAIField.MODEL not in body_json:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing required field: {OpenAIField.MODEL}",
+        )
+    _validate_positive_int_field(body_json, OpenAIField.MAX_TOKENS)
+    _validate_positive_int_field(body_json, OpenAIField.MAX_COMPLETION_TOKENS)
+    for field_name, adapter in (
+        (OpenAIField.STREAM, _OPENAI_BOOL_ADAPTER),
+        (OpenAIField.MIN_TOKENS, _OPENAI_INT_ADAPTER),
+    ):
+        if field_name not in body_json or (field_name == OpenAIField.STREAM and body_json[field_name] is None):
+            continue
+        try:
+            adapter.validate_python(body_json[field_name])
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid {field_name} field.",
+            ) from exc
+
+    min_tokens = (
+        0
+        if OpenAIField.MIN_TOKENS not in body_json
+        else _OPENAI_INT_ADAPTER.validate_python(body_json[OpenAIField.MIN_TOKENS])
+    )
+
+    # Deliberately inspect the raw stream value, matching the engine protocol's
+    # mode="before" validator. String "false" is truthy here and later coerced
+    # to False, so Prefill and Decode consistently accept it.
+    if body_json.get(OpenAIField.STREAM_OPTIONS) and not body_json.get(OpenAIField.STREAM):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Stream options can only be defined when `stream=True`.",
+        )
+    max_field = (
+        OpenAIField.MAX_COMPLETION_TOKENS
+        if OpenAIField.MESSAGES in body_json and OpenAIField.MAX_COMPLETION_TOKENS in body_json
+        else OpenAIField.MAX_TOKENS
+    )
+    max_tokens = body_json.get(max_field)
+    if min_tokens < 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{OpenAIField.MIN_TOKENS} must be greater than or equal to 0.",
+        )
+    if max_tokens is not None and min_tokens > max_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{OpenAIField.MIN_TOKENS} must be less than or equal to {max_field}.",
+        )
+    if request_type != RequestType.OPENAI:
+        return
+    if OpenAIField.PROMPT not in body_json and OpenAIField.MESSAGES not in body_json:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing required field: {OpenAIField.PROMPT} or {OpenAIField.MESSAGES}",
+        )
+    if OpenAIField.MESSAGES in body_json:
+        if not isinstance(body_json[OpenAIField.MESSAGES], list):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid {OpenAIField.MESSAGES} field: must be an array",
+            )
+        # Allow empty messages for manage requests (context_management or session_control)
+        if len(body_json[OpenAIField.MESSAGES]) == 0 and agent_hint_implies_manage_request(body_json.get("agent_hint")):
+            pass
+        else:
+            _validate_message_array(body_json[OpenAIField.MESSAGES], OpenAIField.MESSAGES)
+
+
+def _validate_responses_request(body_json: dict[str, Any]) -> None:
+    """Validate the required fields of a Responses create request."""
+    model = body_json.get(OpenAIField.MODEL)
+    if not isinstance(model, str) or not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Missing or invalid required field: {OpenAIField.MODEL}",
+        )
+    if "input" not in body_json:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required field: input",
+        )
+    input_value = body_json["input"]
+    if isinstance(input_value, str):
+        if not input_value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid input field: must not be empty",
+            )
+        return
+    if not isinstance(input_value, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid input field: must be a string or array",
+        )
+    _validate_responses_input_items(input_value)
 
 
 class InferenceServer(BaseCoordinatorServer):
@@ -190,6 +313,21 @@ class InferenceServer(BaseCoordinatorServer):
     def app(self) -> FastAPI:
         """Inference FastAPI app, run by process_worker with uvicorn."""
         return self._inference_app
+
+    def create_metaserver_app(self) -> FastAPI:
+        """Dedicated per-worker app for Decode layerwise callbacks. No API key / TLS."""
+        app = FastAPI(title="Inference Worker Metaserver")
+
+        @app.post("/v1/metaserver")
+        async def metaserver(request: Request):
+            return await handle_metaserver_request(
+                request,
+                self.coordinator_config,
+                scheduler=self._get_scheduler_client(),
+                request_manager=self._request_manager,
+            )
+
+        return app
 
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI):
@@ -231,7 +369,7 @@ class InferenceServer(BaseCoordinatorServer):
                 logger.info(
                     "Precision check (token sampling): interval=%.1fs logprobs_count=%d "
                     "threshold=%d probe_attempts=%d probe_timeout=%.1fs "
-                    "exit_gate=scheduler_zmq streak=scheduler_zmq probe=internal_router",
+                    "entry_admission=scheduler_zmq streak=scheduler_zmq probe=internal_router",
                     sampling_cfg.interval_seconds,
                     sampling_cfg.logprobs_count,
                     sampling_cfg.precision_issue_threshold,
@@ -241,7 +379,45 @@ class InferenceServer(BaseCoordinatorServer):
                 app.state.sampling_manager = sampling_manager
         else:
             app.state.sampling_manager = None
+        render_client = None
+        app.state.tokenization_service = None
+        app.state.token_obfuscation_service = None
+        app.state.image_obfuscation_service = None
         try:
+            obfuscation_config = self.coordinator_config.token_obfuscation_config
+            render_config = self.coordinator_config.render_config
+            if render_config.enable:
+                if obfuscation_config.enable:
+                    token_config, vocab_source = resolve_token_obfuscation_config(
+                        obfuscation_config,
+                        self.coordinator_config.engine_model_paths,
+                    )
+                    app.state.token_obfuscation_service = TokenObfuscationService(token_config)
+                    logger.info("Token data obfuscation is enabled vocab_size_source=%s", vocab_source)
+                image_obfuscation_service = None
+                if obfuscation_config.image_config.enable:
+                    image_config, geometry_source = resolve_image_obfuscation_config(
+                        obfuscation_config.image_config,
+                        self.coordinator_config.engine_model_paths,
+                    )
+                    image_obfuscation_service = ImageObfuscationService(
+                        image_config,
+                        obfuscation_config.seed_content,
+                    )
+                    logger.info(
+                        "Vision data obfuscation is enabled for Render image items geometry_source=%s",
+                        geometry_source,
+                    )
+                app.state.image_obfuscation_service = image_obfuscation_service
+                render_client = VLLMRenderClient(render_config)
+                app.state.tokenization_service = TokenizationService(
+                    render_config,
+                    render_client=render_client,
+                    local_tokenizer=TokenizerManager(self.coordinator_config),
+                    context_budget_mode=self.coordinator_config.context_budget_mode,
+                    obfuscation_service=app.state.token_obfuscation_service,
+                    image_obfuscation_service=image_obfuscation_service,
+                )
             yield
         except asyncio.CancelledError:
             logger.info("Inference server startup was cancelled")
@@ -250,6 +426,11 @@ class InferenceServer(BaseCoordinatorServer):
             raise
         finally:
             logger.info("Inference server is shutting down...")
+            sampling_manager = getattr(app.state, "sampling_manager", None)
+            if sampling_manager is not None:
+                await sampling_manager.shutdown()
+            if render_client is not None:
+                await render_client.aclose()
             try:
                 TracerManager().shutdown()
             except Exception as e:
@@ -346,6 +527,7 @@ class InferenceServer(BaseCoordinatorServer):
     def _make_on_instance_refreshed(self):
         """Create on_instance_refreshed callback: cleanup and warmup HTTP pool on instance change."""
         tls_config = self.coordinator_config.infer_tls_config
+        keepalive_expiry = self.coordinator_config.timeout_config.engine_client_keepalive_expiry
         pool = HTTPClientPool()
 
         async def _callback(active_endpoints: list[tuple[str, str]]) -> None:
@@ -361,6 +543,7 @@ class InferenceServer(BaseCoordinatorServer):
                 results = await pool.warmup_clients(
                     endpoints=active_endpoints,
                     tls_config=tls_config,
+                    keepalive_expiry=keepalive_expiry,
                 )
                 new_count = sum(1 for v in results.values() if v)
                 if new_count > 0:
@@ -398,12 +581,15 @@ class InferenceServer(BaseCoordinatorServer):
 
     async def _is_available(self) -> bool:
         """Whether instances are available (Worker reads SchedulerClient cache).
-        PD mode: available if has P or P+D.
+        PD mode: decode-only is available when hybrid fallback is enabled.
         """
         client = self._scheduler_connection.get_client()
         if client is None:
             return False
         readiness = await client.has_required_instances()
+        if readiness == InstanceReadiness.ONLY_DECODE:
+            fallback_enabled = self.coordinator_config.scheduler_config.enable_pd_separation_fallback_to_hybrid
+            return fallback_enabled and await has_decode_colocation_candidate(client)
         return readiness.is_run()
 
     def _register_routes(self) -> None:
@@ -424,6 +610,15 @@ class InferenceServer(BaseCoordinatorServer):
         ):
             self.verify_api_key(request)
             return await self._handle_openai_request(request, RequestType.OPENAI, request_manager)
+
+        @self._inference_app.post("/v1/responses")
+        @self.timeout_handler()
+        async def openai_responses(
+            request: Request,
+            request_manager: RequestManager = Depends(get_request_manager),
+        ):
+            self.verify_api_key(request)
+            return await self._handle_responses_request(request, request_manager)
 
         @self._inference_app.post("/v1/messages")
         @self.timeout_handler()
@@ -542,6 +737,41 @@ class InferenceServer(BaseCoordinatorServer):
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(e),
             ) from e
+
+    async def _handle_responses_request(
+        self,
+        request: Request,
+        request_manager: RequestManager,
+    ):
+        """Validate and transparently route a native Responses create request."""
+        try:
+            body_json = json.loads((await request.body()).decode("utf-8"))
+            _validate_responses_request(body_json)
+            if not await self._is_available():
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Service is not available",
+                )
+            return await handle_request(
+                request,
+                self.coordinator_config,
+                scheduler=self._get_scheduler_client(),
+                request_manager=request_manager,
+                request_json=body_json,
+            )
+        except HTTPException:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid JSON format",
+            ) from error
+        except Exception as error:
+            logger.error("Failed to process Responses request: %s", error, exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(error),
+            ) from error
 
     def _initialize_config(self, coordinator_config: CoordinatorConfig | None) -> None:
         if coordinator_config is None:

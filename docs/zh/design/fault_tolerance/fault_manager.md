@@ -4,6 +4,9 @@
 
 FaultManager 是 MindIE Motor Controller 中负责故障容错管理的核心组件。它通过观察者模式监听实例生命周期事件，统一管理硬件故障（ConfigMap 上报）和软件故障（引擎异常），协调 ResourceMonitor 进行故障检测，并与 InstanceManager 配合进行实例隔离和恢复。
 
+> **能力边界：** Engine Server 已删除。NodeManager 直接轮询原生引擎的
+> `/fault_tolerance/status` HTTP 接口；该接口必须由目标引擎版本明确提供。
+
 ## 架构总览
 
 ### 模块拆分
@@ -39,25 +42,37 @@ class FaultManager(_PersistenceMixin, _ResourceManagerMixin, ThreadSafeSingleton
 Controller 侧:
   FaultManager (核心)
   ├── 硬件故障: ResourceMonitor → ConfigMap → _handle_fault_info_update()
-  ├── 软件故障: NodeManager/FaultReporter → HTTP API → report_software_fault()
+  ├── 软件故障: NodeManager/EngineFtManager → HTTP API → report_software_fault()
   ├── 故障评估: _refresh_instance_fault_level() → 综合硬件+软件故障等级
   ├── 策略中心: _ft_strategy_center() → 按 fault_level 生成/管理恢复策略
   ├── 节点交换: _swap_node_ownership() → 跨 job 实例间节点所有权交换
   └── 数据持久化: ETCD Client
 
+跨组件通用基线:
+  ├── NodeManager: 进程状态、原生 /health、Pod 级恢复
+  └── Coordinator: 请求异常、熔断、实例隔离与恢复探测
+
 NodeManager 侧:
-  FaultReporter (EngineManager 聚合)
+  EngineFtManager (Daemon 持有)
   ├── HTTP 轮询 → GET {endpoint.business_port}/fault_tolerance/status (vLLM FT API)
   ├── 状态去重 → 仅上报 dead/unhealthy 变更
   ├── 连续 max_poll_failures 次轮询失败 → 按 dead 上报
+  ├── 引擎重拉期间由 Daemon 暂停/恢复（重拉后清空轮询状态重起启动宽限）
   └── HTTP POST → Controller /controller/report_software_fault
 ```
 
-## 故障上报链路 (端到端)
+### 故障能力分层
+
+| 层级 | 来源 | 目标态要求 |
+|---|---|---|
+| 通用基线 | 原生进程状态、`/health`、请求 transport/5xx/协议异常、Coordinator 熔断、ConfigMap、Node Watch | 所有原生引擎部署必须保留 |
+| 引擎扩展 | vLLM `/fault_tolerance/status` | 启用 EngineFtManager 时，目标引擎必须提供该 HTTP 接口 |
+
+## 原生引擎故障上报链路（端到端）
 
 ```text
 vllm EngineCore 异常 → 引擎状态变为 unhealthy/dead
-  → (HTTP) FaultReporter 轮询 GET /fault_tolerance/status (每 poll_interval_sec)
+  → (HTTP) EngineFtManager 轮询 GET /fault_tolerance/status (每 poll_interval_sec)
     → 解析 engines[] 状态 → 去重后 (仅上报状态变更)
       → _send_fault_to_controller() 注入 pod_ip
         → ControllerApiClient.report_software_fault()
@@ -363,9 +378,11 @@ L2 策略按 fault_code 分发:
 - PreSeparateNPU 动态降级到 L2（有活跃业务）→ 走 L2 正常分发
 - 其它 → None
 
-L4/L5/L6 → 根据实例角色 (decode) → ScaleP2DStrategy
+L4/L5 → decode → ScaleP2DStrategy
 
-> **注意**: PreSeparateNPU 在无活跃业务时，故障在 Step 2（故障评估流程）被排除，不会到达 L6 的策略分发 —— 因此不会触发 ScaleP2D。
+L6 → A2 隔离码集合的 Prefill / Decode / 多 Pod union → NmSuicideStrategy；其它 Decode L6 → ScaleP2DStrategy
+
+> **注意**: 非 A2 的 PreSeparateNPU 在仍有活跃业务时会被动态降到 L2。A2 隔离码集合（`A2_PD_ISOLATION_FAULT_CODES`，当前仅 `0x81078603`）保持 L6，按实例占用的 NPU 归属隔离（无 `device_id` 的实例 fail-closed，不隔离），再走 NmSuicide。单 Pod union 仍降 L2。非隔离码 / 非 A2 的 Prefill L6 策略层仍为空操作。
 
 ### 策略与故障解耦
 
@@ -425,6 +442,6 @@ L4/L5/L6 → 根据实例角色 (decode) → ScaleP2DStrategy
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `enable_fault_tolerance` | bool | 显式启用故障上报线程；引擎 user config 检测到 FT 时自动启用。默认: `false` |
-| `poll_interval_sec` | float | 轮询引擎 FT 状态接口的间隔 (秒)。默认: `5.0` |
+| `poll_interval_sec` | float | 轮询引擎 FT 状态接口的间隔 (秒)。默认: `1.0` |
 | `poll_timeout_sec` | float | 单次轮询的 HTTP 超时 (秒)。默认: `5.0` |
 | `max_poll_failures` | int | 连续轮询失败阈值，达到后按 `dead` 上报。默认: `3` |

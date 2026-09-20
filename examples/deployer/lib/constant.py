@@ -28,17 +28,12 @@ D_POD_NPU_NUM = "d_pod_npu_num"
 ASCEND_910_NPU_NUM = "huawei.com/Ascend910"
 ASCEND_950_NPU_NUM = "huawei.com/npu"
 RING_CONTROLLER_ATLAS_LABEL = "ring-controller.atlas"
-INFERSERVICE_ID_LABEL = "inferserviceid"
+FAULT_SCHEDULING_LABEL = "fault-scheduling"
+FAULT_SCHEDULING_EXTERNAL_FORCE_POD_FAILED = "external-force-pod-failed"
+POD_RESCHEDULING_LABEL = "pod-rescheduling"
+POD_RESCHEDULING_ON = "on"
 HUAWEI_SCHEDULE_POLICY_ANNOTATION = "huawei.com/schedule_policy"
-A5_SCHEDULE_POLICY_BY_ACCELERATOR_TYPE = {
-    "350-Atlas-8": "chip1-node8",
-    "350-Atlas-16": "chip1-node16",
-    "350-Atlas-4p-8": "chip4-node8",
-    "350-Atlas-4p-16": "chip4-node16",
-    "850-Atlas-8p-8": "chip8-node8",
-    "850-SuperPod-Atlas-8": "chip8-node8-sp",
-    "950-SuperPod-Atlas-8": "chip8-node8-ra64-sp",
-}
+A5_SCHEDULE_POLICY = "chip8-node8"
 A5_HOST_PATH_VOLUMES = [
     {"name": "host-lib64", "path": "/usr/lib64"},
     {"name": "hixlep", "path": "/etc/hixlep"},
@@ -88,8 +83,6 @@ KV_CACHE_STORE_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/kv_cache_stor
 MF_STORE_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/mf_store.sh")
 SINGLE_CONTAINER_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/all_combine_in_single_container.sh")
 MOTOR_COMMON_ENV = "motor_common_env"
-ASCEND_GLOBAL_LOG_LEVEL = "ASCEND_GLOBAL_LOG_LEVEL"
-ASCEND_GLOBAL_LOG_LEVEL_ERROR = "3"
 WEIGHT_MOUNT = "weight-mount"
 KV_CACHE_STORE_CONFIG = "kv_cache_store_config"
 TARGET_JOB_ID = "target_job_id"
@@ -109,10 +102,12 @@ DEFAULT_MMC_METRICS_PORT = 50090
 KV_CONDUCTOR_CONFIG = "kv_conductor_config"
 KV_CONDUCTOR_PORT = "http_server_port"
 KV_CONDUCTOR_SHELL_PATH = os.path.join(STARTUP_ROOT_PATH, "roles/kv_conductor.sh")
+MF_STORE_CONFIG = "mf_store_config"
 DEFAULT_MF_STORE_PORT = 50089
 STANDBY_CONFIG = "standby_config"
 MOTOR_CONTROLLER_CONFIG = "motor_controller_config"
 MOTOR_COORDINATOR_CONFIG = "motor_coordinator_config"
+RENDER_CONFIG = "render_config"
 MOTOR_NODEMANAGER_CONFIG = "motor_nodemanger_config"
 ENABLE_MASTER_STANDBY = "enable_master_standby"
 INSTANCE_NUM_ZERO = 0
@@ -128,6 +123,8 @@ SERVER_BASE_NAME_MAP = {
     ENGINE_TYPE_SGLANG: ENGINE_TYPE_SGLANG,
 }
 LOG_PATH = "plog-path"
+CACHE_PATH = "cache-path"
+DEFAULT_CACHE_MOUNT_PATH = "/root/.cache"
 DEPLOY_YAML_ROOT_PATH = "./yaml_template"
 OUTPUT_ROOT_PATH = "./output_yamls"
 SELECTOR = "selector"
@@ -150,29 +147,17 @@ HARDWARE_TYPE_800T_A3 = "800T_A3"
 # Group by chip generation — both 800I and 800T variants share the same accelerator labels
 HARDWARE_TYPE_A2 = {HARDWARE_TYPE_800I_A2, HARDWARE_TYPE_800T_A2}
 HARDWARE_TYPE_A3 = {HARDWARE_TYPE_800I_A3, HARDWARE_TYPE_800T_A3}
-HARDWARE_TYPE_950I_A5 = [
-    "350-Atlas-8",
-    "350-Atlas-16",
-    "350-Atlas-4p-8",
-    "350-Atlas-4p-16",
-    "850-Atlas-8p-8",
-    "850-SuperPod-Atlas-8",
-    "950-SuperPod-Atlas-8",
-]
+HARDWARE_TYPE_ASCEND950 = "Ascend950"
+HARDWARE_TYPE_A5 = {HARDWARE_TYPE_ASCEND950}
 ACCELERATOR_A5 = "huawei-npu"
 ACCELERATOR_910 = "huawei-Ascend910"
 ACCELERATOR_TYPE = "accelerator-type"
 ACCELERATOR = "accelerator"
 ACCELERATOR_TYPE_910B = "module-910b-8"
 ACCELERATOR_TYPE_A3 = "module-a3-16"
-
-ENABLE_PD_HETEROGENEOUS = "enable_pd_heterogeneous"
-PD_HETEROGENEOUS_LABEL_KEY = "pd_heterogeneous_label_key"
-PD_HETEROGENEOUS_PREFILL_LABEL_VALUE = "pd_heterogeneous_prefill_label_value"
-PD_HETEROGENEOUS_DECODE_LABEL_VALUE = "pd_heterogeneous_decode_label_value"
-DEFAULT_PD_HETEROGENEOUS_LABEL_KEY = "card_type"
-DEFAULT_PD_HETEROGENEOUS_PREFILL_VALUE = "Ascend950PR"
-DEFAULT_PD_HETEROGENEOUS_DECODE_VALUE = "Ascend950DT"
+NPU_CHIP_NAME_LABEL = "huawei.com/npu.chip.name"
+# User config field (one per engine section) that selects the chip name for PD heterogeneous scheduling.
+NPU_CHIP_NAME_KEY = "npu_chip_name"
 
 CONTAINERS = "containers"
 IMAGE = "image"
@@ -191,12 +176,29 @@ NODE_TYPE_U = "u"
 ROLE_SINGLE_CONTAINER = "SINGLE_CONTAINER"
 REQUESTS = "requests"
 LIMITS = "limits"
+SCALING_POLICY = 'scaling_policy'
+SCALING_POLICY_FIELD = 'scalingPolicy'
+SCALING_MIN_REPLICAS = 'min_replicas'
+SCALING_MAX_REPLICAS = 'max_replicas'
+SCALING_METRIC = 'metric'
+SCALING_TARGET = 'target'
+SCALING_TARGET_TYPE = 'target_type'
+DEFAULT_SCALING_MIN_REPLICAS = 1
+DEFAULT_SCALING_TARGET = 0.8
+# The capacity-planning utilization metrics are already normalized by the
+# current replica count, so HPA must compare them with type "Value" —
+# "AverageValue" would divide by the pod count a second time.
+DEFAULT_SCALING_TARGET_TYPE = 'Value'
+SCALING_TARGET_TYPES = ('Value', 'AverageValue')
+DEFAULT_PREFILL_SCALING_METRIC = 'motor_prefill_utilization'
+DEFAULT_DECODE_SCALING_METRIC = 'motor_decode_utilization'
 PREFILL_NODE_SELECTOR = "prefill_node_selector"
 DECODE_NODE_SELECTOR = "decode_node_selector"
 CONTROLLER_NODE_SELECTOR = "controller_node_selector"
 COORDINATOR_NODE_SELECTOR = "coordinator_node_selector"
 KV_POOL_NODE_SELECTOR = "kv_pool_node_selector"
 KV_CONDUCTOR_NODE_SELECTOR = "kv_conductor_node_selector"
+MF_STORE_NODE_SELECTOR = "mf_store_node_selector"
 
 ENV_ROLE = "ROLE"
 ENV_JOB_NAME = "JOB_NAME"
@@ -239,12 +241,10 @@ MOTOR_ENGINE_PREFILL_CONFIG = "motor_engine_prefill_config"
 MOTOR_ENGINE_DECODE_CONFIG = "motor_engine_decode_config"
 MOTOR_ENGINE_ENCODE_CONFIG = "motor_engine_encode_config"
 MOTOR_ENGINE_UNION_CONFIG = "motor_engine_union_config"
-MOTOR_ENGINE_PREFILL_ENV = "motor_engine_prefill_env"
-MOTOR_ENGINE_DECODE_ENV = "motor_engine_decode_env"
-MOTOR_ENGINE_ENCODE_ENV = "motor_engine_encode_env"
-MOTOR_ENGINE_UNION_ENV = "motor_engine_union_env"
-HEALTH_CHECK_CONFIG = "health_check_config"
-ENABLE_VIRTUAL_INFERENCE = "enable_virtual_inference"
+FAULT_TOLERANCE_CONFIG = "fault_tolerance_config"
+ENABLE_FAULT_TOLERANCE = "enable_fault_tolerance"
+ENABLE_FAULT_TOLERANCE_KEBAB = "enable-fault-tolerance"
+ENABLE_DP_SCALE_DOWN = "enable_dp_scale_down"
 ENGINE_CONFIG = "engine_config"
 KV_TRANSFER_CONFIG = "kv_transfer_config"
 KV_CONNECTOR = "kv_connector"
@@ -302,6 +302,8 @@ DEFAULT_STORAGE_ACCESS_MODE = "ReadWriteMany"
 ROLES = "roles"
 SERVICES = "services"
 KIND_KEY = "kind"
+ADDITIONAL_ANNOTATIONS = "additional_annotations"
+ADDITIONAL_LABELS = "additional_labels"
 
 # ---------------------------------------------------------------------------
 # TUI ANSI style constants
@@ -383,3 +385,157 @@ CONTROLLER_OBSERVABILITY_NODE_PORT = "controller_observability_node_port"
 NODEPORT_CONFLICT_COORDINATOR_FILE = "nodeport_conflict_coordinator.txt"
 NODEPORT_CONFLICT_CONTROLLER_FILE = "nodeport_conflict_controller.txt"
 VOLCANO_QUEUE_ANNOTATION = "scheduling.volcano.sh/queue-name"
+
+# Docker-only create templates (examples/deployer/docker_deploy.py --create / one-click).
+# Edit these literals to change host devices and binds. Do not add --rm.
+# Host binds /root/ascend/log, /root/.cache, /var/coredump, /data match K8s hostPath
+# (plog-path / cache-path / coredump / data). docker_deploy.py mkdir -p these before create.
+# Engine / single-container templates use --shm-size=4g to match K8s dshm emptyDir sizeLimit 4Gi.
+# CTRL / KVS YAML has no dshm volume, so those templates omit --shm-size.
+# motor_deploy_config.dshm_size overrides an existing --shm-size line only (does not insert one).
+ENTER_DOCKER_RUN_A2 = """docker run -it --name "$NAME" -u root \\
+  --net=host \\
+  --shm-size=4g \\
+  -e ASCEND_RUNTIME_OPTIONS=NODRV \\
+  -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
+  -e NAME="$NAME" \\
+  -e WEIGHT="$WEIGHT" \\
+  --device /dev/davinci0 \\
+  --device /dev/davinci1 \\
+  --device /dev/davinci2 \\
+  --device /dev/davinci3 \\
+  --device /dev/davinci4 \\
+  --device /dev/davinci5 \\
+  --device /dev/davinci6 \\
+  --device /dev/davinci7 \\
+  --device /dev/davinci_manager \\
+  --device /dev/devmm_svm \\
+  --device /dev/hisi_hdc \\
+  -v /usr/local/dcmi:/usr/local/dcmi \\
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \\
+  -v /usr/local/sbin:/usr/local/sbin \\
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \\
+  -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \\
+  -v /etc/ascend_install.info:/etc/ascend_install.info \\
+  -v /etc/hccn.conf:/etc/hccn.conf \\
+  -v /root/ascend/log:/root/ascend/log \\
+  -v /root/.cache:/root/.cache \\
+  -v /var/coredump:/var/coredump \\
+  -v /data:/data \\
+  -v "$EXAMPLES:$EXAMPLES" \\
+  -v "$WEIGHT:$WEIGHT:ro" \\
+  "$IMAGE" bash
+"""
+
+ENTER_DOCKER_RUN_A3 = """docker run -it --name "$NAME" -u root \\
+  --net=host \\
+  --shm-size=4g \\
+  -e ASCEND_RUNTIME_OPTIONS=NODRV \\
+  -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
+  -e NAME="$NAME" \\
+  -e WEIGHT="$WEIGHT" \\
+  --device /dev/davinci0 \\
+  --device /dev/davinci1 \\
+  --device /dev/davinci2 \\
+  --device /dev/davinci3 \\
+  --device /dev/davinci4 \\
+  --device /dev/davinci5 \\
+  --device /dev/davinci6 \\
+  --device /dev/davinci7 \\
+  --device /dev/davinci8 \\
+  --device /dev/davinci9 \\
+  --device /dev/davinci10 \\
+  --device /dev/davinci11 \\
+  --device /dev/davinci12 \\
+  --device /dev/davinci13 \\
+  --device /dev/davinci14 \\
+  --device /dev/davinci15 \\
+  --device /dev/davinci_manager \\
+  --device /dev/devmm_svm \\
+  --device /dev/hisi_hdc \\
+  -v /usr/local/dcmi:/usr/local/dcmi \\
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \\
+  -v /usr/local/sbin:/usr/local/sbin \\
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \\
+  -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \\
+  -v /etc/ascend_install.info:/etc/ascend_install.info \\
+  -v /etc/hccn.conf:/etc/hccn.conf \\
+  -v /root/ascend/log:/root/ascend/log \\
+  -v /root/.cache:/root/.cache \\
+  -v /var/coredump:/var/coredump \\
+  -v /data:/data \\
+  -v "$EXAMPLES:$EXAMPLES" \\
+  -v "$WEIGHT:$WEIGHT:ro" \\
+  "$IMAGE" bash
+"""
+
+ENTER_DOCKER_RUN_A5 = """docker run -it --name "$NAME" -u root \\
+  --net=host \\
+  --shm-size=4g \\
+  -e ASCEND_RUNTIME_OPTIONS=NODRV \\
+  -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
+  -e NAME="$NAME" \\
+  -e WEIGHT="$WEIGHT" \\
+  --device /dev/davinci0 \\
+  --device /dev/davinci1 \\
+  --device /dev/davinci2 \\
+  --device /dev/davinci3 \\
+  --device /dev/davinci4 \\
+  --device /dev/davinci5 \\
+  --device /dev/davinci6 \\
+  --device /dev/davinci7 \\
+  --device /dev/davinci_manager \\
+  --device /dev/hisi_hdc \\
+  --device /dev/ummu \\
+  --device /dev/uburma \\
+  -v /usr/local/dcmi:/usr/local/dcmi \\
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \\
+  -v /usr/local/sbin:/usr/local/sbin \\
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \\
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \\
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \\
+  -v /etc/hccn.conf:/etc/hccn.conf \\
+  -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \\
+  -v /usr/lib64:/usr/lib64 \\
+  -v /etc/hixlep:/etc/hixlep \\
+  -v /lib/route.conf:/lib/route.conf \\
+  -v /usr/bin/urma_admin:/usr/bin/urma_admin \\
+  -v /root/ascend/log:/root/ascend/log \\
+  -v /root/.cache:/root/.cache \\
+  -v /var/coredump:/var/coredump \\
+  -v /data:/data \\
+  -v "$EXAMPLES:$EXAMPLES" \\
+  -v "$WEIGHT:$WEIGHT:ro" \\
+  "$IMAGE" bash
+"""
+
+ENTER_DOCKER_RUN_CTRL = """docker run -it --name "$NAME" -u root \\
+  --net=host \\
+  -e NAME="$NAME" \\
+  -e WEIGHT="$WEIGHT" \\
+  -v /root/ascend/log:/root/ascend/log \\
+  -v /root/.cache:/root/.cache \\
+  -v /var/coredump:/var/coredump \\
+  -v /data:/data \\
+  -v "$EXAMPLES:$EXAMPLES" \\
+  -v "$WEIGHT:$WEIGHT:ro" \\
+  "$IMAGE" bash
+"""
+
+ENTER_DOCKER_RUN_KVS = """docker run -it --name "$NAME" -u root \\
+  --net=host \\
+  -e NAME="$NAME" \\
+  -e WEIGHT="$WEIGHT" \\
+  -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \\
+  -v /driver:/driver \\
+  -v /var/log:/var/log \\
+  -v /root/ascend/log:/root/ascend/log \\
+  -v /root/.cache:/root/.cache \\
+  -v /var/coredump:/var/coredump \\
+  -v /data:/data \\
+  -v "$EXAMPLES:$EXAMPLES" \\
+  -v "$WEIGHT:$WEIGHT:ro" \\
+  "$IMAGE" bash
+"""
+
+ENTER_DOCKER_RUN_IMAGE_BASH = '"$IMAGE" bash'

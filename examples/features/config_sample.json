@@ -100,7 +100,19 @@
       "k8s_cert_path": "",
       "enable_scale_p2d": true,
       "enable_token_reinference": true,
-      "scale_p2d_d_instance_reinit_wait_timeout": 60
+      "scale_p2d_d_instance_reinit_wait_timeout": 60,
+      "enable_dp_scale_down": false,
+      "enable_dp_scale_up": false,
+      "dp_scale_down_config": {
+        "request_timeout_sec": 11.0,
+        "poll_interval_sec": 1.0,
+        "execution_deadline_sec": 30.0
+      },
+      "enable_engine_relaunch": true,
+      "engine_relaunch_complete_timeout_sec": 600,
+      "engine_relaunch_poll_interval_sec": 5.0,
+      "engine_relaunch_dispatch_retries": 3,
+      "engine_relaunch_nm_unreachable_threshold": 3
     },
     "observability_config": {
       "observability_enable": false,
@@ -131,6 +143,7 @@
     "precision_auto_recovery_enabled": false
   },
   "motor_coordinator_config": {
+    "context_budget_mode": "off",
     "logging_config": {
       "log_level": "INFO",
       "log_max_line_length": 8192,
@@ -165,6 +178,12 @@
       "connect_timeout": 5.0,
       "upstream_error_body_max_bytes": 65536
     },
+    "circuit_config": {
+      "enable": true,
+      "failure_threshold": 3,
+      "base_timeout_s": 30.0,
+      "max_timeout_s": 300.0
+    },
     "scheduler_config": {
       "scheduler_type": "load_balance",
       "endpoint_instance_score_weight": 0.05,
@@ -176,18 +195,47 @@
         "load_gate_topn": 0,
         "w_npu": 1.0,
         "w_cpu": 1.0,
-        "w_disk": 0.0
+        "w_disk": 0.0,
+        "hit_rate_threshold": 0.0
+      }
+    },
+    "render_config": {
+      "enable": false,
+      "endpoint": {
+        "host": "127.0.0.1",
+        "port": 8100
+      },
+      "timeout_ms": 5000,
+      "renderer_num_workers": 4,
+      "image_name": ""
+    },
+    "token_obfuscation_config": {
+      "enable": false,
+      "model_path": "",
+      "vocab_size": 0,
+      "token_white_list": [],
+      "seed_content": "",
+      "image_config": {
+        "enable": false,
+        "model_path": "",
+        "patch_size": 0,
+        "merge_size": 0,
+        "longest_edge": 0,
+        "shortest_edge": 0,
+        "temporal_patch_size": 0
       }
     },
     "inference_workers_config": {
-      "num_workers": 4
+      "num_workers": 4,
+      "worker_metaserver_base_port": 12000
     },
     "timeout_config": {
       "request_timeout": 30,
       "connection_timeout": 10,
       "read_timeout": 15,
       "write_timeout": 15,
-      "keep_alive_timeout": 60
+      "keep_alive_timeout": 60,
+      "engine_client_keepalive_expiry": 3.0
     },
     "api_key_config": {
       "enable_api_key": false,
@@ -204,7 +252,8 @@
         "/liveness",
         "/redoc",
         "/instances/refresh",
-        "/metrics"
+        "/metrics",
+        "/v1/metaserver"
       ],
       "encryption_algorithm": "PBKDF2_SHA256"
     },
@@ -222,7 +271,8 @@
         "/redoc",
         "/openapi.json",
         "/favicon.ico",
-        "/startup"
+        "/startup",
+        "/v1/metaserver"
       ],
       "error_message": "too many requests, please try again later",
       "error_status_code": 429,
@@ -230,8 +280,8 @@
     },
     "standby_config": {
       "enable_master_standby": false,
-      "master_standby_check_interval": 5,
-      "master_lock_ttl": 15,
+      "master_standby_check_interval": 2,
+      "master_lock_ttl": 8,
       "master_lock_retry_interval": 5,
       "master_lock_max_failures": 3,
       "master_lock_key": "/coordinator/master_lock"
@@ -302,7 +352,6 @@
     "endpoint_config": {
       "endpoint_num": 0,
       "base_port": 10000,
-      "mgmt_ports": [],
       "service_ports": []
     },
     "basic_config": {
@@ -328,6 +377,11 @@
     "snapshot_config": {
       "enable_snapshot": false,
       "snapshot_metadata_path": ""
+    },
+    "vllm_startup_acceleration_config": {
+      "enable_startup_plan": false,
+      "enable_graph_reuse": false,
+      "cache_root": ""
     },
     "logging_config": {
       "log_level": "INFO",
@@ -358,9 +412,12 @@
     },
     "fault_tolerance_config": {
       "enable_fault_tolerance": false,
-      "poll_interval_sec": 5.0,
+      "poll_interval_sec": 1.0,
       "poll_timeout_sec": 5.0,
-      "max_poll_failures": 3
+      "max_poll_failures": 3,
+      "enable_engine_relaunch": true,
+      "engine_restart_wait_timeout_sec": 180.0,
+      "engine_restart_freeze_sec": 720.0
     },
     "port_allocator_config": {
       "enable": true,

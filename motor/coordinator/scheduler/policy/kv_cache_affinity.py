@@ -9,15 +9,21 @@
 import json
 import os
 import threading
+import time
 from pathlib import Path
 
 from motor.common.resources.instance import Instance, PDRole
+from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.common.resources.endpoint import Endpoint
 from motor.coordinator.domain import InstanceProvider
 from motor.coordinator.domain.block_offset_translator import attach_block_offsets
-from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy, WorkloadLedgerMixin
+from motor.coordinator.domain.responses_input import responses_scheduling_messages
+from motor.coordinator.scheduler.policy.base import BaseSchedulingPolicy
 from motor.config.coordinator import (
+    AIGW_D_MAX_SEQLEN,
+    AIGW_P_MAX_SEQLEN,
     CoordinatorConfig,
+    CONTEXT_BUDGET_ON,
     KV_AFFINITY_MODE_LOAD_GATED,
     KV_AFFINITY_MODE_UNIFIED,
 )
@@ -29,21 +35,78 @@ from motor.coordinator.api_client.conductor_api_client import (
     TENANT_ID,
     conductor_instance_id,
 )
-from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.coordinator.scheduler.policy.utils import (
     preprocess_input,
     preprocess_messages_for_dsv4,
     preprocess_messages_for_standard,
 )
 
+__all__ = ["KvCacheAffinityPolicy", "TokenizerManager", "adapt_context_budget"]
 
 logger = get_logger(__name__)
 
 # Endpoints kept by the load-gated mode when kv_affinity.load_gate_topn is left unset (0).
 _DEFAULT_LOAD_GATE_TOPN = 2
+_TOKENIZER_LOAD_RETRY_SECONDS = 30.0
 
 
-class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
+def adapt_context_budget(
+    req_info: RequestInfo,
+    config: CoordinatorConfig,
+) -> None:
+    """Clamp the active output-token limit before routing, independent of scheduler type."""
+    if config.context_budget_mode != CONTEXT_BUDGET_ON:
+        return
+
+    req_data = req_info.req_data
+    parameters = (
+        (OpenAIField.MAX_COMPLETION_TOKENS, OpenAIField.MAX_TOKENS)
+        if OpenAIField.MESSAGES in req_data
+        else (OpenAIField.MAX_TOKENS,)
+    )
+    for parameter in parameters:
+        requested_tokens = req_data.get(parameter)
+        if isinstance(requested_tokens, int) and not isinstance(requested_tokens, bool) and requested_tokens > 0:
+            break
+    else:
+        return
+
+    aigw_model = config.get_aigw_models() or {}
+    context_limits = [
+        value
+        for value in (
+            aigw_model.get(AIGW_P_MAX_SEQLEN),
+            aigw_model.get(AIGW_D_MAX_SEQLEN),
+        )
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    ]
+    if not context_limits:
+        return
+
+    token_ids = KvCacheAffinityPolicy._ensure_token_ids(req_info)
+    if not token_ids:
+        return
+
+    max_model_len = min(context_limits)
+    available_tokens = max_model_len - len(token_ids)
+    if available_tokens < 1:
+        return
+
+    effective_tokens = min(requested_tokens, available_tokens)
+    req_data[parameter] = effective_tokens
+    if effective_tokens < requested_tokens:
+        logger.info(
+            "Context budget clamped req_id=%s parameter=%s requested=%d effective=%d prompt_tokens=%d max_model_len=%d",
+            req_info.req_id,
+            parameter,
+            requested_tokens,
+            effective_tokens,
+            len(token_ids),
+            max_model_len,
+        )
+
+
+class KvCacheAffinityPolicy(BaseSchedulingPolicy):
     """
     KvCache Affinity Scheduler Policy implementation.
     Selects instances and endpoints in a kvcache-affinity fashion.
@@ -66,16 +129,20 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         w_npu: float = 1.0,
         w_cpu: float = 1.0,
         w_disk: float = 0.0,
+        hit_rate_threshold: float = 0.0,
         top_k: int = 1,
     ) -> list[tuple[Instance, Endpoint, float]] | None:
         """
         Rank prefill (instance, endpoint) candidates by KV-cache prefix affinity, best first.
 
         Returns up to ``top_k`` ``(instance, endpoint, score)`` tuples ordered best-first (lower
-        score = better), or ``None`` to let the caller fall back. The worker proposes this ranked
-        set to the scheduler; the scheduler may re-pick among them by its authoritative (fresh)
-        workload ledger -- so spreading a burst across the top candidates is the scheduler's job,
-        not a client-local in-flight overlay.
+        score = better), or ``None`` / ``[]`` to let the caller fall back. ``None`` means the
+        conductor result is unusable; ``[]`` means affinity declined the request (hit rate at or
+        below ``hit_rate_threshold``) and the caller should use load_balance without treating it
+        as a conductor failure. The worker proposes this ranked set to the scheduler; the
+        scheduler may re-pick among them by its authoritative (fresh) workload ledger -- so
+        spreading a burst across the top candidates is the scheduler's job, not a client-local
+        in-flight overlay.
 
         Two modes, chosen explicitly by ``mode``:
 
@@ -107,8 +174,13 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         :param w_npu: weight for exclusive NPU matched blocks (default 1.0).
         :param w_cpu: weight for exclusive CPU matched blocks (default 1.0).
         :param w_disk: weight for exclusive Disk matched blocks (default 0.0).
+        :param hit_rate_threshold: require ``max(matched_tokens) / prompt_tokens`` strictly
+            greater than this value before keeping affinity routing. ``0`` (default) disables
+            the gate. Values in ``(0, 1]`` fall back to load_balance when the best prefix hit
+            rate is at or below the threshold.
         :param top_k: maximum number of ranked candidates to return (>=1).
-        :returns: best-first ``[(instance, endpoint, score), ...]`` or ``None`` to fall back.
+        :returns: best-first ``[(instance, endpoint, score), ...]``, ``[]`` to fall back to
+            load_balance after a low hit rate, or ``None`` when the conductor result is missing.
         """
         encoded_ids = KvCacheAffinityPolicy._ensure_token_ids(req_info)
 
@@ -144,6 +216,7 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
                 w_cpu=w_cpu,
                 w_disk=w_disk,
                 block_size=block_size,
+                hit_rate_threshold=hit_rate_threshold,
             )
 
         # "unified" (default); unknown modes fall through here too.
@@ -160,6 +233,7 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
             w_cpu=w_cpu,
             w_disk=w_disk,
             block_size=block_size,
+            hit_rate_threshold=hit_rate_threshold,
         )
 
     @staticmethod
@@ -174,6 +248,7 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         w_npu: float = 1.0,
         w_cpu: float = 1.0,
         w_disk: float = 0.0,
+        hit_rate_threshold: float = 0.0,
     ) -> tuple[Instance, Endpoint] | None:
         """
         Single-result convenience wrapper over :meth:`select_endpoint_candidates_from_list`.
@@ -192,6 +267,7 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
             w_npu=w_npu,
             w_cpu=w_cpu,
             w_disk=w_disk,
+            hit_rate_threshold=hit_rate_threshold,
             top_k=1,
         )
         if not ranked:
@@ -204,37 +280,60 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         """
         Tokenize the prompt once and cache it on ``req_info.token_ids`` for reuse.
 
-        The same token ids feed (a) the conductor prefix query, (b) ``isl`` for the prefill cost,
-        and (c) ``calculate_demand_workload`` so the committed prefill load is in real tokens
-        rather than the byte-length heuristic. Returns the cached list when already present so a
-        request is tokenized at most once.
+        The same token ids feed context budgeting, the conductor prefix query, prefill cost,
+        and workload accounting. Returns the cached list when already present so a request is
+        tokenized at most once.
         """
         cached = getattr(req_info, "token_ids", None)
+        engine_cached = getattr(req_info, "engine_token_ids", None)
+        if isinstance(engine_cached, list):
+            return engine_cached
         if isinstance(cached, list):
             return cached
         encoded_ids: list[int] = []
         messages = req_info.req_data.get(OpenAIField.MESSAGES, None)
         tools = req_info.req_data.get(OpenAIField.TOOLS, None)
-        if messages is not None:
-            tokenizer_manager = TokenizerManager()
-            encoded_ids = tokenizer_manager.apply_chat_template(messages, tools, req_data=req_info.req_data)
-            attach_block_offsets(req_info, messages, tools, tokenizer=tokenizer_manager.tokenizer)
-        else:
-            prompt = req_info.req_data.get(OpenAIField.PROMPT, None)
-            if prompt is not None:
-                encoded_ids = TokenizerManager().encode(prompt)
+        is_responses_request = req_info.effective_entry_api() == "v1/responses"
+        if messages is None and is_responses_request:
+            messages = responses_scheduling_messages(req_info.req_data)
+        try:
+            if messages is not None:
+                tokenizer_manager = TokenizerManager()
+                encoded_ids = tokenizer_manager.apply_chat_template(messages, tools, req_data=req_info.req_data)
+                if not is_responses_request:
+                    attach_block_offsets(req_info, messages, tools, tokenizer=tokenizer_manager.tokenizer)
+            else:
+                prompt = req_info.req_data.get(OpenAIField.PROMPT, None)
+                if isinstance(prompt, str):
+                    encoded_ids = TokenizerManager().encode(prompt)
+                elif (
+                    isinstance(prompt, list)
+                    and prompt
+                    and all(isinstance(token_id, int) and not isinstance(token_id, bool) for token_id in prompt)
+                ):
+                    encoded_ids = prompt.copy()
+                elif prompt is not None:
+                    logger.info(
+                        "kv_cache_affinity: unsupported prompt type %s; falling back to load_balance",
+                        type(prompt).__name__,
+                    )
+        except Exception as e:
+            logger.warning("kv_cache_affinity tokenization failed; falling back to load_balance: %s", e)
+            encoded_ids = []
+        if not isinstance(encoded_ids, list) or any(
+            not isinstance(token_id, int) or isinstance(token_id, bool) for token_id in encoded_ids
+        ):
+            logger.warning("kv_cache_affinity tokenizer returned invalid token ids; falling back to load_balance")
+            encoded_ids = []
         try:
             req_info.token_ids = encoded_ids
         except Exception as e:  # pragma: no cover - req_info may be immutable in some callers
             logger.debug("Could not cache token_ids on req_info: %s", e)
-        # Visibility for the validated invariant: tools, when present, MUST inflate
-        # the encoded token sequence. Operators can grep this line to verify
-        # function-call requests are being tokenised correctly.
         logger.debug(
             "kv_affinity tokenize ok: msgs=%d tools=%d encoded_ids=%d",
-            len(messages or []),
-            len(tools or []),
-            len(encoded_ids or []),
+            len(messages) if isinstance(messages, list) else 0,
+            len(tools) if isinstance(tools, list) else 0,
+            len(encoded_ids),
         )
         return encoded_ids
 
@@ -280,6 +379,25 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         return int(matched_raw or 0)
 
     @staticmethod
+    def _tier_hit_tokens(
+        matched_raw: object,
+        block_size: int,
+    ) -> tuple[int, int, int] | None:
+        """Return exclusive HBM (NPU), CPU, and Disk matched token counts from conductor blocks."""
+        if not isinstance(matched_raw, dict) or block_size <= 0:
+            return None
+        npu = matched_raw.get("npu_blocks")
+        cpu = matched_raw.get("cpu_blocks")
+        disk = matched_raw.get("disk_blocks")
+        if npu is None and cpu is None and disk is None:
+            return None
+        return (
+            int(npu or 0) * block_size,
+            int(cpu or 0) * block_size,
+            int(disk or 0) * block_size,
+        )
+
+    @staticmethod
     def _collect_load_candidates(
         instances: list[Instance],
         tenant: dict,
@@ -289,23 +407,32 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         w_cpu: float = 1.0,
         w_disk: float = 0.0,
         block_size: int = 0,
-    ) -> tuple[list[tuple[float, int, float, Instance, Endpoint]], bool]:
+    ) -> tuple[list[tuple[float, int, float, Instance, Endpoint, tuple[int, int, int] | None]], bool]:
         """
         Build the per-endpoint scoring tuples shared by the load-aware selection modes.
 
-        Each candidate is ``(load_cost, matched_tokens, prefill_cost, instance, endpoint)`` where
-        ``load_cost`` is the SHM-reported live workload and ``matched_tokens`` is the
-        tier-weighted affinity match capped at the prompt. Returns
-        ``(candidates, any_instance)``; ``any_instance`` distinguishes "conductor reported nothing
-        for our instances" (fall back) from "reported, but no endpoints".
+        Each candidate is ``(load_cost, matched_tokens, prefill_cost, instance, endpoint,
+        tier_hit_tokens)`` where ``load_cost`` is the SHM-reported live workload,
+        ``matched_tokens`` is the tier-weighted affinity match capped at the prompt, and
+        ``tier_hit_tokens`` is ``(hbm, cpu, disk)`` exclusive hit token counts when the conductor
+        reports per-medium blocks. Returns ``(candidates, any_instance)``; ``any_instance`` is
+        True when the conductor tenant map contains at least one of *our* instances (fall back
+        to load_balance when False). Instances absent from a partial tenant map are scored as
+        zero-match rather than skipped, so they can still win on load when other instances
+        already have KV indexes.
         """
-        candidates: list[tuple[float, int, float, Instance, Endpoint]] = []
+        candidates: list[tuple[float, int, float, Instance, Endpoint, tuple[int, int, int] | None]] = []
         any_instance = False
         for instance in instances:
-            instance_data = tenant.get(conductor_instance_id(instance), None)
+            # The conductor tenant map is index-driven: instances with no cached KV blocks
+            # are absent. Treat absence as "zero match" instead of skipping, otherwise an
+            # instance can never be picked (no blocks -> not in map -> never scored ->
+            # never gets blocks), locking all traffic onto the already-indexed instances.
+            instance_data = tenant.get(conductor_instance_id(instance))
             if instance_data is None:
-                continue
-            any_instance = True
+                instance_data = {"DP": {}}
+            else:
+                any_instance = True
             dp_map = instance_data.get("DP", {})
             # get_all_endpoints() is the canonical accessor: it flattens the per-DP map and
             # already excludes headless endpoints / respects enable_multi_endpoints.
@@ -317,17 +444,50 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
                 matched_tokens = min(matched, isl) if isl > 0 else 0
                 prefill_cost = max(0.0, isl - overlap_credit * matched_tokens)
                 load_cost = ep.workload.calculate_workload_score(PDRole.ROLE_P)
-                candidates.append((load_cost, matched_tokens, prefill_cost, instance, ep))
+                tier_hit = KvCacheAffinityPolicy._tier_hit_tokens(matched_raw, block_size)
+                candidates.append((load_cost, matched_tokens, prefill_cost, instance, ep, tier_hit))
         return candidates, any_instance
+
+    @staticmethod
+    def _hit_rate_below_threshold(
+        raw: list[tuple[float, int, float, Instance, Endpoint, tuple[int, int, int] | None]],
+        isl: int,
+        hit_rate_threshold: float,
+    ) -> bool:
+        """True when affinity should yield to load_balance because prefix hit rate is too low.
+
+        ``hit_rate_threshold <= 0`` disables the gate. Otherwise the best endpoint's
+        tier-weighted ``matched_tokens / prompt_tokens`` must be strictly greater than
+        the threshold; equal or lower values fall back.
+        """
+        if hit_rate_threshold <= 0.0:
+            return False
+        if isl <= 0 or not raw:
+            logger.debug(
+                "kv_cache_affinity: empty prompt or candidates; hit_rate_threshold=%.4f, falling back to load_balance",
+                hit_rate_threshold,
+            )
+            return True
+        max_matched = max(matched_tokens for (_load, matched_tokens, _prefill, _inst, _ep, _tier) in raw)
+        hit_rate = max_matched / float(isl)
+        if hit_rate > hit_rate_threshold:
+            return False
+        logger.debug(
+            "kv_cache_affinity: max hit_rate=%.4f <= threshold=%.4f; falling back to load_balance",
+            hit_rate,
+            hit_rate_threshold,
+        )
+        return True
 
     @staticmethod
     def _stash_affinity_debug(
         req_info: RequestInfo | None,
-        raw: list[tuple[float, int, float, Instance, Endpoint]],
+        raw: list[tuple[float, int, float, Instance, Endpoint, tuple[int, int, int] | None]],
         with_prefill: bool = False,
     ) -> None:
         """
-        Cache per-endpoint ``(matched_tokens, load_cost, prefill_cost)`` on ``req_info``.
+        Cache per-endpoint ``(matched_tokens, load_cost, prefill_cost, tier_hit_tokens)`` on
+        ``req_info``.
 
         Two consumers:
         * the worker's final allocation log, which reports the KV-affinity prefix hit and load of
@@ -346,8 +506,13 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
             return
         try:
             req_info.kv_affinity_debug = {
-                (instance.id, ep.id): (matched_tokens, load_cost, prefill_cost if with_prefill else None)
-                for (load_cost, matched_tokens, prefill_cost, instance, ep) in raw
+                (instance.id, ep.id): (
+                    matched_tokens,
+                    load_cost,
+                    prefill_cost if with_prefill else None,
+                    tier_hit,
+                )
+                for (load_cost, matched_tokens, prefill_cost, instance, ep, tier_hit) in raw
             }
         except Exception as e:  # pragma: no cover - req_info may be immutable in some callers
             logger.debug("Could not cache kv_affinity_debug on req_info: %s", e)
@@ -366,6 +531,7 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         w_cpu: float = 1.0,
         w_disk: float = 0.0,
         block_size: int = 0,
+        hit_rate_threshold: float = 0.0,
     ) -> list[tuple[Instance, Endpoint, float]] | None:
         """
         Unified cost: score every reported endpoint by affinity-discounted prefill
@@ -390,23 +556,36 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         if not raw:
             logger.warning("kv_cache_affinity(load-aware): no endpoint selected")
             return None
+        if KvCacheAffinityPolicy._hit_rate_below_threshold(raw, isl, hit_rate_threshold):
+            return []
 
         # Each candidate: (score, instance, endpoint, matched_tokens); lower score is better.
         candidates = [
             (prefill_load_scale * prefill_cost + load_weight * load_cost, instance, ep, matched_tokens)
-            for (load_cost, matched_tokens, prefill_cost, instance, ep) in raw
+            for (load_cost, matched_tokens, prefill_cost, instance, ep, _tier_hit) in raw
         ]
         ranked = sorted(candidates, key=lambda c: c[0])[: max(1, top_k)]
         top_score, top_inst, top_ep, top_matched = ranked[0]
+        top_tier = next(
+            (
+                tier
+                for (_load, matched, _prefill, instance, ep, tier) in raw
+                if instance.id == top_inst.id and ep.id == top_ep.id
+            ),
+            None,
+        )
         # DEBUG, not INFO: this is only the worker's *proposal*. The request's real destination is
         # decided by the scheduler's authoritative re-pick and logged once at INFO ("scheduled ...")
         # in AsyncSchedulerClient.select_and_allocate. Emitting this at INFO misleads load analysis.
         logger.debug(
-            "select_endpoint(load-aware): role=%s %s-%s matched:%s score:%.2f (top%d of %d)",
+            "select_endpoint(load-aware): role=%s %s-%s matched:%s hbm:%s cpu:%s disk:%s score:%.2f (top%d of %d)",
             top_inst.role,
             top_inst.id,
             top_ep.id,
             top_matched,
+            top_tier[0] if top_tier else None,
+            top_tier[1] if top_tier else None,
+            top_tier[2] if top_tier else None,
             top_score,
             len(ranked),
             len(candidates),
@@ -427,6 +606,7 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         w_cpu: float = 1.0,
         w_disk: float = 0.0,
         block_size: int = 0,
+        hit_rate_threshold: float = 0.0,
     ) -> list[tuple[Instance, Endpoint, float]] | None:
         """
         Two-stage "load first, affinity second" ranking: keep only the ``load_gate_topn``
@@ -452,6 +632,8 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         if not raw:
             logger.warning("kv_cache_affinity(load-gated): no endpoint selected")
             return None
+        if KvCacheAffinityPolicy._hit_rate_below_threshold(raw, isl, hit_rate_threshold):
+            return []
 
         # Candidate is (load_cost, matched_tokens, prefill_cost, instance, endpoint).
         # Stage 1: keep the N least-loaded endpoints.
@@ -459,22 +641,26 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
         gated = sorted(raw, key=lambda c: c[0])[:topn]
         # Stage 2: rank the least-loaded by longest cached prefix; tie -> lighter load.
         ranked = sorted(gated, key=lambda c: (-c[1], c[0]))[: max(1, top_k)]
-        top_load, top_matched, _prefill, top_inst, top_ep = ranked[0]
+        top_load, top_matched, _prefill, top_inst, top_ep, top_tier = ranked[0]
         # DEBUG, not INFO: worker proposal only; see _select_with_load / "scheduled ..." for the
         # authoritative destination the scheduler committed.
         logger.debug(
-            "select_endpoint(load-gated): role=%s %s-%s matched:%s load:%.2f (top%d of %d gated, %d total)",
+            "select_endpoint(load-gated): role=%s %s-%s matched:%s hbm:%s cpu:%s disk:%s load:%.2f "
+            "(top%d of %d gated, %d total)",
             top_inst.role,
             top_inst.id,
             top_ep.id,
             top_matched,
+            top_tier[0] if top_tier else None,
+            top_tier[1] if top_tier else None,
+            top_tier[2] if top_tier else None,
             top_load,
             len(ranked),
             topn,
             len(raw),
         )
         KvCacheAffinityPolicy._stash_affinity_debug(req_info, raw)
-        return [(inst, ep, load_cost) for (load_cost, _m, _p, inst, ep) in ranked]
+        return [(inst, ep, load_cost) for (load_cost, _m, _p, inst, ep, _tier) in ranked]
 
     def _select_instance(self, _: PDRole = None) -> Instance | None:
         """
@@ -505,220 +691,205 @@ class KvCacheAffinityPolicy(WorkloadLedgerMixin, BaseSchedulingPolicy):
 
 
 class TokenizerManager(ThreadSafeSingleton):
-    """
-    Tracer Manager class, Singleton class
-    """
+    """Tokenizer shared directly by KV affinity and context-budget routing."""
 
     def __init__(self, config: CoordinatorConfig | None = None):
-        """TracerManager init"""
-        # If the instance manager is already initialized, return.
-        if hasattr(self, '_initialized'):
+        if hasattr(self, "_initialized"):
             return
         self._initialized = True
         self.config_lock = threading.RLock()
-
         if config is None:
             config = CoordinatorConfig()
 
         self.endpoint = config.tracer_config.endpoint
-
         self.tokenizer = None
         self._is_dsv4 = False
-
-        kv_config = config.scheduler_config.kv_conductor_config
-        if kv_config.conductor_service == "":
-            logger.info("conductor_service is empty. disable TokenizerManager!")
+        self._next_load_attempt_at = 0.0
+        scheduler_config = getattr(config, "scheduler_config", None)
+        kv_config = getattr(scheduler_config, "kv_conductor_config", None) if scheduler_config else None
+        if kv_config is None:
+            kv_config = getattr(config, "prefill_kv_event_config", None)
+        scheduler_type = getattr(scheduler_config, "scheduler_type", None) if scheduler_config else None
+        scheduler_value = getattr(scheduler_type, "value", scheduler_type)
+        render_enabled = bool(getattr(getattr(config, "render_config", None), "enable", False))
+        eager_load = bool(
+            (kv_config and getattr(kv_config, "conductor_service", ""))
+            or scheduler_value == "kv_cache_affinity"
+            or (config.context_budget_mode == CONTEXT_BUDGET_ON and not render_enabled)
+        )
+        needs_tokenizer = eager_load or render_enabled
+        if not needs_tokenizer:
+            logger.info("KV affinity, context budget, and Render are disabled. disable TokenizerManager!")
             return
 
-        model_path = kv_config.model_path
-        if model_path:
-            os.environ['TORCH_DEVICE_BACKEND_AUTOLOAD'] = '0'
-            engine_type = str(getattr(kv_config, "engine_type", "vllm") or "vllm").strip().lower()
-            is_vllm_engine = engine_type == "vllm"
-
-            if is_vllm_engine and self._is_deepseek_v4_model(model_path):
-                from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer  # pylint: disable=no-name-in-module
-
-                self.tokenizer = DeepseekV4Tokenizer.from_pretrained(model_path, trust_remote_code=True)
-                self._is_dsv4 = True
-            else:
-                from transformers import AutoTokenizer
-
-                self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-
+        os.environ["TORCH_DEVICE_BACKEND_AUTOLOAD"] = "0"
+        self.model_path = getattr(kv_config, "model_path", "") if kv_config else ""
+        self.engine_type = str(getattr(kv_config, "engine_type", "vllm") or "vllm").strip().lower()
+        self.openai_standard = os.environ.get("OPENAI_STANDARD", "STANDARD")
+        if eager_load:
+            self.get_tokenizer()
         logger.info(
-            "TokenizerManager init.(model_path:%s, is_dsv4:%s)",
-            model_path,
+            "TokenizerManager init.(model_path:%s, is_dsv4:%s, lazy_load:%s)",
+            self.model_path,
             self._is_dsv4,
+            not eager_load,
         )
 
-        self.openai_standard = os.environ.get("OPENAI_STANDARD", "STANDARD")
+    def get_tokenizer(self):
+        """Load the local tokenizer lazily and retry transient failures after a cooldown."""
+        if self.tokenizer is not None:
+            return self.tokenizer
+        if time.monotonic() < self._next_load_attempt_at:
+            return None
+        with self.config_lock:
+            if self.tokenizer is not None:
+                return self.tokenizer
+            if time.monotonic() < self._next_load_attempt_at:
+                return None
+            if not getattr(self, "model_path", ""):
+                return None
+            try:
+                if self.engine_type == "vllm" and self._is_deepseek_v4_model(self.model_path):
+                    from vllm.tokenizers.deepseek_v4 import DeepseekV4Tokenizer  # pylint: disable=import-error,no-name-in-module
 
-    def apply_chat_template(
-        self,
-        messages: list,
-        tools: list | None = None,
-        req_data: dict | None = None,
-    ) -> list[int]:
-        """Render messages (and optional tools) into token ids for KV-cache affinity.
+                    self.tokenizer = DeepseekV4Tokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+                    self._is_dsv4 = True
+                else:
+                    from transformers import AutoTokenizer
 
-        The output token sequence is the *same* one vLLM/SGLang sees during
-        actual inference, so conductor's ``longest_matched`` truly reflects the
-        cluster's KV-cache distribution. ``tools`` MUST be forwarded on every
-        path - dropping it silently was the bug fixed in this revision.
-        """
-        if self.tokenizer is None:
+                    self.tokenizer = AutoTokenizer.from_pretrained(self.model_path, trust_remote_code=True)
+            except Exception as exc:
+                self._next_load_attempt_at = time.monotonic() + _TOKENIZER_LOAD_RETRY_SECONDS
+                logger.warning(
+                    "Tokenizer load failed; retrying in %.0fs: %s",
+                    _TOKENIZER_LOAD_RETRY_SECONDS,
+                    exc,
+                )
+                return None
+            self._next_load_attempt_at = 0.0
+            return self.tokenizer
+
+    def apply_chat_template(self, messages: list, tools: list | None = None, req_data: dict | None = None) -> list[int]:
+        if self.get_tokenizer() is None:
             return []
-
         try:
             if self._is_dsv4:
                 return self._apply_chat_template_dsv4(messages, tools, req_data)
             if self.openai_standard != "STANDARD":
-                return self._apply_chat_template_with_preprocess(messages, tools)
-            return self._apply_chat_template_standard(messages, tools)
-        except Exception as e:
+                return self._apply_chat_template_with_preprocess(messages, tools, req_data)
+            return self._apply_chat_template_standard(messages, tools, req_data)
+        except Exception as exc:
             if self._is_dsv4:
-                logger.error(
-                    "kv_affinity dsv4 tokenize failed on primary path; "
-                    "no separate fallback available, returning [] so scheduler "
-                    "falls back to LoadBalance. "
-                    "msgs=%d tools=%d err=%s",
-                    len(messages or []),
-                    len(tools or []),
-                    e,
-                )
+                logger.error("kv_affinity dsv4 tokenize failed; returning []: %s", exc)
                 return []
-            logger.warning(
-                "kv_affinity primary tokenize path failed: %s; trying tools-aware fallback (msgs=%d, tools=%d)",
-                e,
-                len(messages or []),
-                len(tools or []),
-            )
-            return self._safe_fallback_encode(messages, tools)
+            logger.warning("kv_affinity primary tokenize path failed: %s; trying fallback", exc)
+            return self._safe_fallback_encode(messages, tools, req_data)
 
     def encode(self, prompt: str) -> list[int]:
-        """
-        When the inference API /v1/completions is called,
-        this method is used for encoding.
-        """
-        if self.tokenizer is None:
-            return []
-        result = self.tokenizer.encode(prompt)
-        return result
+        tokenizer = self.get_tokenizer()
+        return [] if tokenizer is None else tokenizer.encode(prompt)
 
     @staticmethod
     def _read_model_config_dict(model_path: str) -> dict | None:
-        """Read ``config.json`` locally without invoking ``AutoConfig``."""
         try:
-            config_file = Path(model_path) / "config.json"
-            if not config_file.is_file():
-                return None
-            with open(config_file, encoding="utf-8") as f:
-                data = json.load(f)
+            with open(Path(model_path) / "config.json", encoding="utf-8") as file:
+                data = json.load(file)
             return data if isinstance(data, dict) else None
-        except Exception as e:  # pragma: no cover - best-effort read
-            logger.debug("Could not read config.json from %s: %s", model_path, e)
+        except (OSError, ValueError) as exc:
+            logger.debug("Could not read config.json from %s: %s", model_path, exc)
             return None
 
     @staticmethod
     def _is_deepseek_v4_model(model_path: str) -> bool:
-        """Detect DeepSeek V4 from ``config.json`` without ``AutoConfig``.
-
-        Transformers may not register ``deepseek_v4`` yet; vLLM loads the
-        tokenizer via ``PreTrainedTokenizerFast`` plus custom ``encode_messages``.
-        """
         config_dict = TokenizerManager._read_model_config_dict(model_path)
         if not config_dict:
             return False
-        if config_dict.get("model_type") == "deepseek_v4":
-            return True
-        architectures = config_dict.get("architectures") or []
-        return "DeepseekV4ForCausalLM" in architectures
+        return config_dict.get("model_type") == "deepseek_v4" or "DeepseekV4ForCausalLM" in (
+            config_dict.get("architectures") or []
+        )
 
     @staticmethod
     def _build_dsv4_chat_template_kwargs(req_data: dict | None) -> dict:
-        """Mirror vLLM ChatCompletionRequest.build_chat_params for DeepSeek V4."""
         kwargs: dict = {"tokenize": True, "drop_thinking": True}
         if not req_data:
             return kwargs
-
         reasoning_effort = req_data.get("reasoning_effort")
         if reasoning_effort is not None:
             kwargs["reasoning_effort"] = reasoning_effort
-
         chat_template_kwargs = req_data.get("chat_template_kwargs") or {}
         if isinstance(chat_template_kwargs, dict):
             kwargs.update(chat_template_kwargs)
-
         if reasoning_effort is not None and "enable_thinking" not in kwargs:
             kwargs["enable_thinking"] = reasoning_effort != "none"
-
         return kwargs
 
-    def _apply_chat_template_dsv4(
-        self,
-        messages: list,
-        tools: list | None = None,
-        req_data: dict | None = None,
-    ) -> list[int]:
-        """DeepSeek V4 path: use vLLM's custom encode_messages-based template."""
+    @staticmethod
+    def _build_standard_chat_template_kwargs(req_data: dict | None, *, tokenize: bool) -> dict:
+        kwargs: dict = {"add_generation_prompt": True, "tokenize": tokenize}
+        if tokenize:
+            kwargs["return_dict"] = False
+        if not req_data:
+            return kwargs
+        if isinstance(req_data.get("add_generation_prompt"), bool):
+            kwargs["add_generation_prompt"] = req_data["add_generation_prompt"]
+        if req_data.get("continue_final_message"):
+            kwargs["continue_final_message"] = True
+            kwargs["add_generation_prompt"] = False
+        if req_data.get("documents") is not None:
+            kwargs["documents"] = req_data["documents"]
+        template_kwargs = req_data.get("chat_template_kwargs") or {}
+        if isinstance(template_kwargs, dict):
+            reserved = {
+                "tokenize",
+                "return_dict",
+                "conversation",
+                "tools",
+                "add_generation_prompt",
+                "continue_final_message",
+            }
+            kwargs.update({key: value for key, value in template_kwargs.items() if key not in reserved})
+        reasoning_effort = req_data.get("reasoning_effort")
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
+            kwargs.setdefault("enable_thinking", reasoning_effort != "none")
+        thinking = req_data.get("thinking")
+        if isinstance(thinking, dict) and "enable_thinking" not in kwargs:
+            if thinking.get("type") == "enabled":
+                kwargs["enable_thinking"] = True
+            elif thinking.get("type") == "disabled":
+                kwargs["enable_thinking"] = False
+        return kwargs
+
+    def _apply_chat_template_dsv4(self, messages: list, tools: list | None, req_data: dict | None) -> list[int]:
         messages, tools = preprocess_messages_for_dsv4(messages, tools)
-        kwargs = self._build_dsv4_chat_template_kwargs(req_data)
-        result = self.tokenizer.apply_chat_template(messages, tools=tools, **kwargs)
-        if isinstance(result, list):
-            return result
-        return self.tokenizer.encode(result, add_special_tokens=False)
+        result = self.tokenizer.apply_chat_template(
+            messages, tools=tools, **self._build_dsv4_chat_template_kwargs(req_data)
+        )
+        return result if isinstance(result, list) else self.tokenizer.encode(result, add_special_tokens=False)
 
-    def _apply_chat_template_standard(self, messages: list, tools: list | None = None) -> list[int]:
-        """Standard OpenAI-compatible model path.
-
-        Calls the model tokenizer's jinja chat-template directly with ``tools``,
-        ``add_generation_prompt=True`` and ``tokenize=True`` so the resulting
-        token ids are byte-equivalent to what vLLM/SGLang prefill receives.
-        """
-        messages = preprocess_messages_for_standard(messages)
+    def _apply_chat_template_standard(self, messages: list, tools: list | None, req_data: dict | None) -> list[int]:
         return self.tokenizer.apply_chat_template(
-            conversation=messages,
+            conversation=preprocess_messages_for_standard(messages),
             tools=tools,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=False,
+            **self._build_standard_chat_template_kwargs(req_data, tokenize=True),
         )
 
-    def _apply_chat_template_with_preprocess(self, messages: list, tools: list | None = None) -> list[int]:
-        """Non-standard model path: normalise messages/tools then encode the
-        rendered prompt string. Kept for models whose chat-template cannot be
-        directly invoked with ``tokenize=True`` (e.g. require argument coercion
-        or reordering done by ``preprocess_input``).
-        """
-        messages_copy, tools_copy = preprocess_input(messages, tools)
-        messages_copy = preprocess_messages_for_standard(messages_copy)
-
+    def _apply_chat_template_with_preprocess(
+        self, messages: list, tools: list | None, req_data: dict | None
+    ) -> list[int]:
+        messages, tools = preprocess_input(messages, tools)
         prompt = self.tokenizer.apply_chat_template(
-            conversation=messages_copy,
-            tools=tools_copy,
-            tokenize=False,
+            conversation=messages,
+            tools=tools,
+            **self._build_standard_chat_template_kwargs(req_data, tokenize=False),
         )
         return self.tokenizer.encode(prompt)
 
-    def _safe_fallback_encode(self, messages: list, tools: list | None = None) -> list[int]:
-        """Last-resort tokenize that NEVER drops ``tools``.
-
-        Tries the tools-aware standard call once more; if that also fails,
-        returns ``[]`` so the affinity candidate path can fall back to load balance.
-        Returning a partially-correct token list (e.g. messages without tools)
-        would silently mislead conductor's longest_matched and is far worse
-        than failing closed.
-        """
+    def _safe_fallback_encode(self, messages: list, tools: list | None, req_data: dict | None) -> list[int]:
         try:
-            return self._apply_chat_template_standard(messages, tools)
-        except Exception as e:
-            logger.error(
-                "kv_affinity tokenize failed on both primary and fallback paths; "
-                "returning [] so scheduler falls back to LoadBalance. "
-                "msgs=%d tools=%d err=%s",
-                len(messages or []),
-                len(tools or []),
-                e,
-            )
+            if self.openai_standard == "STANDARD":
+                return self._apply_chat_template_with_preprocess(messages, tools, req_data)
+            return self._apply_chat_template_standard(messages, tools, req_data)
+        except Exception as exc:
+            logger.error("kv_affinity tokenize failed on both primary and fallback paths; returning []: %s", exc)
             return []

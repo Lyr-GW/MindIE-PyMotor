@@ -326,7 +326,6 @@ spec:
             schedulerName: volcano
             nodeSelector:
               accelerator: huawei-Ascend910
-              accelerator-type: module-910b-8
             terminationGracePeriodSeconds: 30
             automountServiceAccountToken: false
             securityContext:
@@ -377,16 +376,17 @@ spec:
                 mountPath: /var/coredump
               - name: mnt
                 mountPath: /mnt
-              - name: hccn-tool
-                mountPath: /usr/local/Ascend/driver/tools/hccn_tool
-              - name: driver-version
-                mountPath: /usr/local/Ascend/driver/version.info
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
+              - name: ascend-driver
+                mountPath: /usr/local/Ascend/driver
+                readOnly: true
               - name: weight-mount
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -409,22 +409,22 @@ spec:
             - name: mnt
               hostPath:
                 path: /mnt
-            - name: hccn-tool
-              hostPath:
-                path: /usr/local/Ascend/driver/tools/hccn_tool
-            - name: driver-version
-              hostPath:
-                path: /usr/local/Ascend/driver/version.info
-                type: File
             - name: hccn-conf
               hostPath:
                 path: /etc/hccn.conf
+            - name: ascend-driver
+              hostPath:
+                path: /usr/local/Ascend/driver
             - name: weight-mount
               hostPath:
                 path: /mnt/weight
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: prefill
@@ -452,7 +452,6 @@ spec:
             schedulerName: volcano
             nodeSelector:
               accelerator: huawei-Ascend910
-              accelerator-type: module-910b-8
             terminationGracePeriodSeconds: 30
             automountServiceAccountToken: false
             securityContext:
@@ -503,16 +502,17 @@ spec:
                 mountPath: /var/coredump
               - name: mnt
                 mountPath: /mnt
-              - name: hccn-tool
-                mountPath: /usr/local/Ascend/driver/tools/hccn_tool
-              - name: driver-version
-                mountPath: /usr/local/Ascend/driver/version.info
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
+              - name: ascend-driver
+                mountPath: /usr/local/Ascend/driver
+                readOnly: true
               - name: weight-mount
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -535,22 +535,22 @@ spec:
             - name: mnt
               hostPath:
                 path: /mnt
-            - name: hccn-tool
-              hostPath:
-                path: /usr/local/Ascend/driver/tools/hccn_tool
-            - name: driver-version
-              hostPath:
-                path: /usr/local/Ascend/driver/version.info
-                type: File
             - name: hccn-conf
               hostPath:
                 path: /etc/hccn.conf
+            - name: ascend-driver
+              hostPath:
+                path: /usr/local/Ascend/driver
             - name: weight-mount
               hostPath:
                 path: /mnt/weight
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: decode
@@ -578,7 +578,6 @@ spec:
             schedulerName: volcano
             nodeSelector:
               accelerator: huawei-Ascend910
-              accelerator-type: module-910b-8
             terminationGracePeriodSeconds: 30
             automountServiceAccountToken: false
             securityContext:
@@ -629,16 +628,17 @@ spec:
                 mountPath: /var/coredump
               - name: mnt
                 mountPath: /mnt
-              - name: hccn-tool
-                mountPath: /usr/local/Ascend/driver/tools/hccn_tool
-              - name: driver-version
-                mountPath: /usr/local/Ascend/driver/version.info
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
+              - name: ascend-driver
+                mountPath: /usr/local/Ascend/driver
+                readOnly: true
               - name: weight-mount
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -661,22 +661,22 @@ spec:
             - name: mnt
               hostPath:
                 path: /mnt
-            - name: hccn-tool
-              hostPath:
-                path: /usr/local/Ascend/driver/tools/hccn_tool
-            - name: driver-version
-              hostPath:
-                path: /usr/local/Ascend/driver/version.info
-                type: File
             - name: hccn-conf
               hostPath:
                 path: /etc/hccn.conf
+            - name: ascend-driver
+              hostPath:
+                path: /usr/local/Ascend/driver
             - name: weight-mount
               hostPath:
                 path: /mnt/weight
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: union
@@ -704,7 +704,6 @@ spec:
             schedulerName: volcano
             nodeSelector:
               accelerator: huawei-Ascend910
-              accelerator-type: module-910b-8
             terminationGracePeriodSeconds: 30
             automountServiceAccountToken: false
             securityContext:
@@ -755,16 +754,17 @@ spec:
                 mountPath: /var/coredump
               - name: mnt
                 mountPath: /mnt
-              - name: hccn-tool
-                mountPath: /usr/local/Ascend/driver/tools/hccn_tool
-              - name: driver-version
-                mountPath: /usr/local/Ascend/driver/version.info
               - name: hccn-conf
                 mountPath: /etc/hccn.conf
+              - name: ascend-driver
+                mountPath: /usr/local/Ascend/driver
+                readOnly: true
               - name: weight-mount
                 mountPath: /mnt/weight
               - name: plog-path
                 mountPath: /root/ascend/log
+              - name: cache-path
+                mountPath: /root/.cache
             volumes:
             - name: data
               hostPath:
@@ -787,22 +787,22 @@ spec:
             - name: mnt
               hostPath:
                 path: /mnt
-            - name: hccn-tool
-              hostPath:
-                path: /usr/local/Ascend/driver/tools/hccn_tool
-            - name: driver-version
-              hostPath:
-                path: /usr/local/Ascend/driver/version.info
-                type: File
             - name: hccn-conf
               hostPath:
                 path: /etc/hccn.conf
+            - name: ascend-driver
+              hostPath:
+                path: /usr/local/Ascend/driver
             - name: weight-mount
               hostPath:
                 path: /mnt/weight
             - name: plog-path
               hostPath:
                 path: /root/ascend/log
+                type: DirectoryOrCreate
+            - name: cache-path
+              hostPath:
+                path: /root/.cache
                 type: DirectoryOrCreate
 
     - name: kv-store
@@ -823,6 +823,10 @@ spec:
             port: 50090
             protocol: TCP
             targetPort: 50090
+          - name: kv-events
+            port: 5557
+            protocol: TCP
+            targetPort: 5557
           selector:
             app: mindie-motor-kv-store
           sessionAffinity: None
@@ -830,6 +834,7 @@ spec:
       workload:
         apiVersion: apps/v1
         kind: Deployment
+      metadata: {}
       spec:
         replicas: 1
         selector:
@@ -926,6 +931,7 @@ spec:
       workload:
         apiVersion: apps/v1
         kind: Deployment
+      metadata: {}
       spec:
         replicas: 1
         selector:

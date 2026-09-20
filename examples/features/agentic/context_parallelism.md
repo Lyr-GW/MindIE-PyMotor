@@ -64,9 +64,9 @@
 
 支持 `data_parallel_size > 1` 与跨节点 PCP 组合使用。例如 DP=4、PCP=2、每节点 16 卡时，总共需要 4 × 2 = 8 个节点。Controller 会等待全部 8 个节点到齐后统一组装并下发启动命令。
 
-### 从节点 SimInference 处理
+### 从节点健康状态
 
-跨节点 PCP 的从节点不启动 API 服务器（headless 模式），MgmtEndpoint 的 `/status` 健康检查通过 AI Cube 利用率监控实现，虚拟推理请求自动禁用。
+跨节点 PCP 的从节点不启动 API 服务器（headless 模式），NodeManager 根据原生引擎进程状态维护从节点生命周期；只有主节点暴露业务端口并参与健康探测和请求调度。
 
 ### 调度模式（Coordinator 侧）
 
@@ -85,7 +85,8 @@
 | `MooncakeConnectorV1` | `cpcd_separate` | ✅ 推荐 | 非 layerwise connector 配合 CPCD 调度模式，block 切分与 CP 场景兼容 |
 | `MooncakeLayerwiseConnector` | `pd_separate` | ❌ 不推荐 | Layerwise 按层拆分 KV 传输，与 CP 场景存在兼容性问题 |
 
-> **注意**：若使用 `MooncakeConnectorV1` 时配为 `pd_separate`，会走 `SeparateCDPRouter` 路由，其 KV transfer 的 block 切分逻辑与 CP 场景不兼容，导致两类断言失败：
+> [!NOTE] 说明
+> 若使用 `MooncakeConnectorV1` 时配为 `pd_separate`，会走 `SeparateCDPRouter` 路由，其 KV transfer 的 block 切分逻辑与 CP 场景不兼容，导致两类断言失败：
 >
 > - Prefill 侧：`assert len(selected_p_cp_groups) == len(selected_d_cp_groups)` — CP group 数量不匹配
 > - Decode 侧：`assert num_external_tokens == 0` — `remote_block_ids` 为空但 `num_external_tokens > 0`，非 layerwise connector 的 block 分配与 CDP 调度不一致
@@ -94,4 +95,4 @@
 
 CLI 参数与 `engine_config` 键名的完整映射关系详见：
 
-👉 **[CLI 参数与 engine_config 映射指南](CLI 参数完整定义与校验见 `motor/config/endpoint.py` 中 `EndpointConfig.parse_cli_args`)**
+CLI 参数与 `engine_config` 的映射由 `motor/node_manager/core/services/native_engine/backends/vllm/config.py` 中的 `VLLMConfig` 维护。

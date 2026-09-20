@@ -16,15 +16,21 @@ are provided by FaultManager.__init__, not redeclared here.
 from motor.common.logger import get_logger
 from motor.common.resources import InsStatus, ReadOnlyInstance
 from motor.controller.fault_tolerance.fault_types import (
+    LINKDOWN_FAULT_CODES,
     FaultCategory,
     FaultInfo,
     FaultLevel,
     HardwareFaultType,
+    hardware_fault_identity,
+    hardware_fault_storage_key,
     InstanceMetadata,
     NodeMetadata,
     NodeStatus,
     OriginFaultLevel,
     SpecialFaultCode,
+    instance_requires_a2_linkdown_l6,
+    is_a2_linkdown_pre_separate,
+    is_non_a2_linkdown_noise,
 )
 from motor.controller.fault_tolerance.k8s.resource_monitor import ResourceMonitor
 
@@ -178,7 +184,7 @@ class _ResourceManagerMixin:
         InstanceMetadata is created, and per-node ResourceMonitors are started.
         """
         logger.debug("Adding new instance %d (%s) to fault manager", instance.id, instance.job_name)
-        ins_metadata = InstanceMetadata(instance_id=instance.id)
+        ins_metadata = InstanceMetadata(instance_id=instance.id, recovery_ready=False)
         self.instances[instance.id] = ins_metadata
 
         new_job_name = instance.job_name
@@ -392,12 +398,52 @@ class _ResourceManagerMixin:
                 return True
         return False
 
+    def _hardware_type(self) -> str:
+        return getattr(self.config, "hardware_type", "") or ""
+
+    def _node_requires_a2_linkdown_l6(self, node_metadata: NodeMetadata) -> bool:
+        """True when any instance on this node is P, D, or a multi-pod union."""
+        from motor.controller.core.instance_manager import InstanceManager
+
+        for iid in list(node_metadata.instance_ids):
+            inst = InstanceManager().get_instance(iid)
+            if instance_requires_a2_linkdown_l6(inst):
+                return True
+        return False
+
+    def _keep_a2_linkdown_at_l6(self, fault_info: FaultInfo, node_metadata: NodeMetadata) -> bool:
+        return is_a2_linkdown_pre_separate(fault_info, self._hardware_type()) and self._node_requires_a2_linkdown_l6(
+            node_metadata
+        )
+
+    def _is_ignored_linkdown_fault(self, fault_info: FaultInfo) -> bool:
+        """Whether a linkdown fault must never be stored on the current hardware."""
+        return is_non_a2_linkdown_noise(fault_info, self._hardware_type())
+
+    def _warn_once(self, key: str) -> bool:
+        """Rate-limit an advisory warning to once per key per FaultManager lifetime.
+
+        The two linkdown advisories below would otherwise repeat on every
+        ConfigMap refresh while the fault persists.
+        """
+        store = getattr(self, "_ft_once_warns", None)
+        if store is None:
+            store = set()
+            self._ft_once_warns = store
+        if key in store:
+            return False
+        store.add(key)
+        return True
+
     def _handle_fault_info_update(self, fault_infos: list[FaultInfo], node_name: str) -> None:
         """Handle a hardware fault information update pushed by a ResourceMonitor.
 
         Replaces the node's hardware_fault_infos with the incoming fault list.
         Preserves any existing node_reboot fault (managed separately by the node
         status handler), since ConfigMap data does not include reboot faults.
+
+        Non-A2 linkdowns (0x81078603) are dropped: storing them at L2 would
+        suppress the ENGINE_DEAD fault code and block engine relaunch.
 
         For PreSeparateNPU faults, dynamically adjusts the fault level based on
         whether the node still hosts INITIAL/ACTIVE instances (L2 if yes, L6 if no).
@@ -412,6 +458,39 @@ class _ResourceManagerMixin:
         if node_metadata is None:
             logger.warning("Node with node_name %s not found, cannot process fault info update", node_name)
             return
+
+        # Non-A2 linkdowns are noise: drop before the L2/L6 level logic below.
+        # Advisory is warning-level (not info) so a REAL linkdown (cable/module
+        # failure) on non-A2 hardware stays visible to operators, and
+        # rate-limited to once per node since the fault persists across refreshes.
+        hw = self._hardware_type()
+        ignored = [info for info in fault_infos if self._is_ignored_linkdown_fault(info)]
+        if ignored:
+            if self._warn_once(f"linkdown-drop:{node_name}"):
+                logger.warning(
+                    "Ignored %d linkdown fault(s) code 0x%x on node %s (hardware %r is not A2) — "
+                    "not stored; linkdown no longer suppresses ENGINE_DEAD on this hardware",
+                    len(ignored),
+                    int(ignored[0].fault_code),
+                    node_name,
+                    hw,
+                )
+            fault_infos = [info for info in fault_infos if not self._is_ignored_linkdown_fault(info)]
+        elif not hw:
+            # hardware_type unset: the linkdown keeps the legacy store path, where
+            # the original ENGINE_DEAD suppression still applies. Warn once so an
+            # A3/A5 deployment missing hardware_type is discoverable from logs.
+            legacy = [info for info in fault_infos if int(info.fault_code) in LINKDOWN_FAULT_CODES]
+            if legacy and self._warn_once(f"linkdown-legacy:{node_name}"):
+                logger.warning(
+                    "Stored %d linkdown fault(s) code 0x%x on node %s: hardware_type is unset, kept "
+                    "legacy behavior (stored linkdown at L2 may suppress ENGINE_DEAD). Set "
+                    "motor_deploy_config.hardware_type (e.g. 800I_A3/800I_A5) to drop linkdown as "
+                    "non-A2 noise",
+                    len(legacy),
+                    int(legacy[0].fault_code),
+                    node_name,
+                )
 
         # Group faults by fault_code, collecting all affected NPU names
         grouped: dict[int, list[FaultInfo]] = {}
@@ -460,16 +539,26 @@ class _ResourceManagerMixin:
 
         with self.lock:
             node_reboot_fault = node_metadata.hardware_fault_infos.get(node_reboot_key)
-
             node_metadata.hardware_fault_infos.clear()
-            for code, infos in grouped.items():
-                info = max(infos, key=lambda i: i.fault_level.value)
+            for raw_info in fault_infos:
+                code = int(raw_info.fault_code)
+                info = raw_info.model_copy()
                 info.fault_category = FaultCategory.HARDWARE
 
                 # Dynamically adjust PreSeparateNPU fault level based on
                 # whether any INITIAL/ACTIVE instance still runs on this node.
+                # A2 CardNetworkUnhealthy (linkdown) must stay L6 for P/D and
+                # multi-pod union — in-place L2 would never recover PD-disagg.
                 if info.origin_fault_level == OriginFaultLevel.PRE_SEPARATE_NPU:
-                    if node_has_active:
+                    if self._keep_a2_linkdown_at_l6(info, node_metadata):
+                        info.fault_level = FaultLevel.L6
+                        logger.info(
+                            "PreSeparateNPU fault 0x%x kept at L6: A2 linkdown on node %s "
+                            "(P/D or multi-pod union requires isolation)",
+                            code,
+                            node_name,
+                        )
+                    elif node_has_active:
                         info.fault_level = FaultLevel.L2
                         logger.info(
                             "PreSeparateNPU fault 0x%x downgraded to L2: node %s still has active instances",
@@ -483,27 +572,21 @@ class _ResourceManagerMixin:
                             code,
                             node_name,
                         )
-
-                # Preserve NPU info in stored entry: note count when multiple NPUs
-                # share the same fault code so downstream consumers can see the scope.
-                npu_names = [i.npu_name for i in infos if i.npu_name]
-                if len(npu_names) > 1:
-                    if len(npu_names) <= 4:
-                        info.npu_name = ", ".join(npu_names)
-                    else:
-                        info.npu_name = f"{', '.join(npu_names[:3])}, ... ({len(npu_names)} total)"
-                node_metadata.hardware_fault_infos[code] = info
+                storage_key = hardware_fault_storage_key(info)
+                existing = node_metadata.hardware_fault_infos.get(storage_key)
+                if existing is None or info.fault_level >= existing.fault_level:
+                    node_metadata.hardware_fault_infos[storage_key] = info
 
             if node_reboot_fault:
                 node_metadata.hardware_fault_infos[node_reboot_key] = node_reboot_fault
+            stored_fault_count = len(node_metadata.hardware_fault_infos) - int(node_reboot_fault is not None)
 
         logger.info(
             "Updated node %s with %d hardware fault infos (preserved node_reboot: %s)",
             node_name,
-            len(grouped),
+            stored_fault_count,
             node_reboot_fault is not None,
         )
-
         # Refresh fault levels for ALL LIVE instances on this node (skip stale/removed ones)
         affected_ids = [iid for iid in node_metadata.instance_ids if iid in self.instances]
         stale_count = len(node_metadata.instance_ids) - len(affected_ids)
@@ -514,6 +597,16 @@ class _ResourceManagerMixin:
                 node_name,
             )
         for instance_id in affected_ids:
+            # Only actionable ConfigMap evidence opens the 5-second FT
+            # correlation window. Observation-only L1/L2 events keep their
+            # legacy fault-level semantics and cannot trigger engine recovery.
+            actionable_keys = {
+                hardware_fault_identity(node_name, fault)
+                for fault in node_metadata.hardware_fault_infos.values()
+                if fault.fault_level >= FaultLevel.L4
+            }
+            if actionable_keys:
+                self._record_hardware_fault_event(instance_id, actionable_keys)
             self._refresh_instance_fault_level(instance_id)
 
         # Wake the strategy center — hardware fault data changed

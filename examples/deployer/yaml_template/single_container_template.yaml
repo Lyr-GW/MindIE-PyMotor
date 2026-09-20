@@ -23,7 +23,6 @@ spec:
       schedulerName: volcano
       nodeSelector:
         accelerator: huawei-Ascend910
-        accelerator-type: module-910b-8
       terminationGracePeriodSeconds: 10
       automountServiceAccountToken: false
       securityContext:
@@ -109,6 +108,8 @@ spec:
             mountPath: /mnt/weight
           - name: plog-path
             mountPath: /root/ascend/log
+          - name: cache-path
+            mountPath: /root/.cache
       volumes:
       - name: data
         hostPath:
@@ -143,6 +144,10 @@ spec:
       - name: plog-path
         hostPath:
           path: /root/ascend/log
+          type: DirectoryOrCreate
+      - name: cache-path
+        hostPath:
+          path: /root/.cache
           type: DirectoryOrCreate
 ---
 apiVersion: v1

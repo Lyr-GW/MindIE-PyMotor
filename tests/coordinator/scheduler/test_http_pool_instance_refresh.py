@@ -24,7 +24,6 @@ from motor.coordinator.scheduler.runtime.scheduler_client import (
     AsyncSchedulerClient,
     SchedulerClientConfig,
 )
-from motor.coordinator.scheduler.runtime.zmq_protocol import SchedulerResponseType
 
 
 def _make_instance(instance_id: int, role: PDRole, endpoints: list[tuple[str, str, EndpointStatus]]) -> Instance:
@@ -41,7 +40,6 @@ def _make_instance(instance_id: int, role: PDRole, endpoints: list[tuple[str, st
             id=instance_id * 10 + i,
             ip=ip,
             business_port=port,
-            mgmt_port=f"9{port}",
             status=status,
             workload=Workload(),
         )
@@ -234,23 +232,9 @@ async def test_on_instance_refreshed_callback_invoked_on_version_change():
         await client._cache.replace_all(PDRole.ROLE_P, [inst])
         return {1: inst}
 
-    alloc_response = MagicMock()
-    alloc_response.response_type = SchedulerResponseType.SUCCESS
-    alloc_response.data = {
-        "instance": {"id": 1, "job_name": "j", "model_name": "m", "role": "prefill"},
-        "endpoint": {"id": 11, "ip": "10.0.0.1", "business_port": "8001", "mgmt_port": "9001", "status": "normal"},
-    }
-
     with patch.object(client, "get_available_instances", side_effect=mock_get_available_instances):
-        with patch.object(client, "_transport") as mock_transport:
-            mock_transport.connected = True
-            mock_transport.send_request = AsyncMock(return_value=alloc_response)
-            req_info = RequestInfo(req_id="", req_data={"test": "data"}, req_len=100, api="/test/api")
-            result = await client.select_and_allocate(PDRole.ROLE_P, req_info)
+        await client._refresh_cache_from_workload_reader(PDRole.ROLE_P)
 
-    assert result is not None
-    ins, ep, workload = result
-    assert ins is not None and ep is not None
     assert len(callback_called) == 1
     assert callback_endpoints[0] == [("10.0.0.1", "8001")]
 
@@ -270,11 +254,7 @@ async def test_on_instance_refreshed_not_called_when_no_callback():
     client._last_instance_version = 1
 
     with patch.object(client, "get_available_instances", side_effect=AsyncMock(return_value={})):
-        with patch.object(client, "_transport") as mock_transport:
-            mock_transport.connected = True
-            mock_transport.send_request = AsyncMock(return_value=None)
-            req_info = RequestInfo(req_id="", req_data={"test": "data"}, req_len=100, api="/test/api")
-            await client.select_and_allocate(PDRole.ROLE_P, req_info)
+        await client._refresh_cache_from_workload_reader(PDRole.ROLE_P)
 
     assert client._on_instance_refreshed is None
 
@@ -295,6 +275,7 @@ async def test_inference_server_callback_cleanup_and_warmup():
 
     with patch("motor.coordinator.api_server.inference_server.HTTPClientPool", return_value=mock_pool):
         config = CoordinatorConfig()
+        config.timeout_config.engine_client_keepalive_expiry = 2.5
         request_manager = MagicMock(spec=RequestManager)
         server = InferenceServer(config=config, request_manager=request_manager)
 
@@ -303,4 +284,8 @@ async def test_inference_server_callback_cleanup_and_warmup():
 
     mock_pool.get_pool_keys_for_endpoints.assert_called_once()
     mock_pool.cleanup_unused_clients.assert_awaited_once()
-    mock_pool.warmup_clients.assert_awaited_once()
+    mock_pool.warmup_clients.assert_awaited_once_with(
+        endpoints=[("10.0.0.1", "8001")],
+        tls_config=config.infer_tls_config,
+        keepalive_expiry=2.5,
+    )

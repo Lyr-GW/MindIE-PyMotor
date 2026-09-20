@@ -10,8 +10,7 @@ MindIE Motor 提供多层级的可靠性保障机制，覆盖硬件故障感知�
 | 自动重拉起注册 | Pod 重启后 NodeManager 自动重新注册，Controller 组装实例并拉起引擎 | `InstanceAssembler` + `InstanceManager` |
 | 缩P保D（Scale P2D） | Decode 实例故障时，释放 Prefill 节点以恢复 Decode | `ScaleP2DStrategy` |
 | token级重推 | L2 级别网络故障检测与token级重推恢复 | `TokenReinferenceStrategy` |
-
----
+| A2 linkdown 整实例自杀 | Atlas 800I_A2 上 `0x81078603` 保持 L6，对 Prefill / Decode / 多 Pod union 下发 `/node-manager/stop` | `NmSuicideStrategy` |
 
 ## 实例故障隔离
 
@@ -59,8 +58,6 @@ FaultManager._refresh_instance_fault_level()
         └── HEALTHY     →  重置为健康状态 + recover
 ```
 
----
-
 ## 自动重拉起注册
 
 当 Pod 因故障被 K8s 重启后，NodeManager 需要重新向 Controller 注册并重新组装实例、拉起推理引擎。该过程由 `InstanceAssembler` 和 `InstanceManager` 协同 K8s 完成，无需人工干预。
@@ -71,7 +68,7 @@ FaultManager._refresh_instance_fault_level()
 Pod 因故障被 K8s 重启
         │
         ▼
-NodeManager 启动，EngineManager._register() 发送 RegisterMsg 到 Controller
+NodeManager 启动，RegisterManager._register() 发送 RegisterMsg 到 Controller
         │
         ▼
 Controller InstanceAssembler.register()
@@ -96,7 +93,7 @@ InstanceAssembler._start_command_sender 发送 StartCmdMsg
         ▼
 NodeManager 接收 StartCmdMsg
   - parse_start_cmd(): 校验参数，存储 instance_id 和 endpoints
-  - Daemon.pull_engine(): 启动 engine_server 推理进程
+  - Daemon.pull_engine(): 启动原生推理引擎进程
   - HeartbeatManager.start(): 开始心跳上报
         │
         ▼
@@ -106,7 +103,7 @@ InstanceManager 收到心跳 → 状态机: INITIAL → ACTIVE
 
 ### 关键组件交互
 
-**NodeManager 侧（[engine_manager.py](https://gitcode.com/Ascend/MindIE-Motor/blob/master/motor/node_manager/core/engine_manager.py)）**：
+**NodeManager 侧（[register_manager.py](https://gitcode.com/Ascend/MindIE-Motor/blob/master/motor/node_manager/core/register_manager.py)）**：
 
 - `_register()`：NodeManager 启动后自动向 Controller 发送 `RegisterMsg`（含 job_name、role、pod_ip、parallel_config、device_num、ranktable 等），失败后指数退避持续重试直至成功。
 - `parse_start_cmd()`：接收 Controller 的 `StartCmdMsg`，校验参数后存储 `instance_id` 和 `endpoints`，并将 ranktable 写入本地文件供引擎使用。
@@ -124,8 +121,6 @@ InstanceManager 收到心跳 → 状态机: INITIAL → ACTIVE
 ### 与故障隔离的关系
 
 自动重拉起注册是故障恢复链路的关键闭环：`FaultManager` 负责故障检测与隔离决策，而 Pod 重启后实例的重新组装和引擎拉起则由 `InstanceAssembler` + `InstanceManager` 完成。两者通过 `forced_separated_instances` 集合衔接——只有 `FaultManager` 调用 `recover_instance()` 解除隔离后，实例状态机才允许从 `INACTIVE` 恢复为 `ACTIVE`。
-
----
 
 ## 缩P保D（Scale P2D）
 
@@ -184,8 +179,6 @@ scale_p2d()：选择一个 P 实例，释放其占用的节点资源
 # L6 → 委托 L4
 ```
 
----
-
 ## token级重推
 
 ### 背景
@@ -239,8 +232,6 @@ FaultManager 感知故障清除 → 实例恢复 HEALTHY
 - **故障检测来源**：同时支持 `DeviceInfoCfg`（卡间网络故障 `CardNetworkUnhealthy`）和 `SwitchInfoCfg`（交换机故障）两条检测路径。
 - **策略代码**：[token_reinference.py](https://gitcode.com/Ascend/MindIE-Motor/blob/master/motor/controller/fault_tolerance/strategy/token_reinference.py)
 
----
-
 ## 组件交互全景
 
 ```text
@@ -255,8 +246,8 @@ FaultManager 感知故障清除 → 实例恢复 HEALTHY
 │  ┌──────────────┐    ┌──────────────────┐    ┌──────────────────┐  │
 │  │ FaultManager │    │ InstanceAssembler│    │ InstanceManager  │  │
 │  │              │    │                  │    │                  │  │
-│  │ 故障检测      │    │ 实例组装          │    │ 生命周期管理       │  │
-│  │ 隔离/恢复     │    │ 下发StartCmd      │    │ 心跳/状态机       │  │
+│  │ 故障检测      │    │ 实例组装          │    │ 生命周期管理      │  │
+│  │ 隔离/恢复     │    │ 下发StartCmd      │    │ 心跳/状态机      │  │
 │  │ 策略调度      │    │                  │    │ forced_separated │  │
 │  └──────┬───────┘    └────────┬─────────┘    └────────┬─────────┘  │
 │         │                     │                       │            │
@@ -265,8 +256,9 @@ FaultManager 感知故障清除 → 实例恢复 HEALTHY
 │                                                                    │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │ 策略中心                                                      │  │
-│  │  L2 + 白名单故障码  →  TokenReinferenceStrategy                 │  │
-│  │  L4/L5/L6 + decode  →  ScaleP2DStrategy                      │  │
+│  │  L2 + 白名单故障码  →  TokenReinferenceStrategy               │  │
+│  │  L6 A2 Prefill/Decode/多Pod union 隔离码 → NmSuicideStrategy │  │
+│  │  L4/L5/L6 + decode（非 linkdown）→  ScaleP2DStrategy          │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 └────────────────────────────────────────────────────────────────────┘
          │                                       │
@@ -274,15 +266,13 @@ FaultManager 感知故障清除 → 实例恢复 HEALTHY
          ▼                                       ▼
 ┌────────────────────────────────────────────────────────────────────┐
 │ NodeManager                                                        │
-│  ┌──────────────┐    ┌──────────────────┐    ┌──────────────────┐  │
-│  │ EngineManager│    │ HeartbeatManager │    │     Daemon       │  │
-│  │ 注册/重注册    │    │ 心跳上报          │    │ 拉起引擎进程       │  │
-│  │ 解析StartCmd  │    │ 检测Controller重启│    │                  │  │
-│  └──────────────┘    └──────────────────┘    └──────────────────┘  │
+│  ┌────────────────┐    ┌──────────────────┐    ┌─────────────────┐ │
+│  │ RegisterManager│    │ HeartbeatManager │    │     Daemon      │ │
+│  │ 注册/重注册     │    │ 心跳上报          │    │ 拉起引擎进程     │ │
+│  │ 解析StartCmd    │   │ 检测Controller重启│    │                 │ │
+│  └────────────────┘    └──────────────────┘    └─────────────────┘ │
 └────────────────────────────────────────────────────────────────────┘
 ```
-
----
 
 ## 相关文档
 

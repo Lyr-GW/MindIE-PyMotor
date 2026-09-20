@@ -32,10 +32,13 @@ bash build.sh
 
 `build.sh` 会自动检测 kv-conductor 二进制：
 
-- `target/release/kv-conductor` 已存在 → 直接复制到 `bin/`，打包进 wheel
-- 不存在但有 `cargo` → 自动编译
-- 设置了 `KV_CONDUCTOR_PREBUILT=/path/to/binary` → 使用指定的预构建二进制
-- 都没有 → 跳过，wheel 不含 kv-conductor（其他功能不受影响）
+- `KV_CONDUCTOR_PREBUILT=/path/to/binary` → 使用指定的预构建二进制
+- `bin/kv-conductor` 已存在且 Rust 源码未改（镜像预编译产物 / 上次编译指纹）且未设 `SKIP_KV_CONDUCTOR_BUILD=0` → 跳过 cargo，直接打包
+- 已有 `bin/` 但改过 `src/*.rs` / `Cargo.toml` 等 → 自动 `cargo build --release`
+- `SKIP_KV_CONDUCTOR_BUILD=1` → 跳过 cargo（无 bin 则省略该 crate）
+- 缺二进制、有 `cargo` 且能探测到 libzmq（`pkg-config --exists libzmq` 或 `zmq.h`）→ `cargo build --release` 并复制到 `bin/`
+- 有 `cargo` 但缺 libzmq → **WARNING 后自动跳过**（不因此让整个 `build.sh` 失败）
+- 都没有 → 跳过，wheel 不含 kv-conductor（其他功能不受影响；`libmindie_workload_shm.so` 仍必需）
 
 产物：`dist/motor-*.whl`
 
@@ -92,14 +95,18 @@ Coordinator 调度器（`kv_affinity_w_*`）在计分时应用。
 
 ### HBM（NPU）— 统一模型
 
-引擎 Worker 通过 ZMQ PUB 或 HTTP 将 KV 事件**直接推送给** conductor。
+引擎 Worker 通过 ZMQ PUB 或 HTTP 将 KV 事件发给 conductor。
+ZMQ 模式下事件端点由引擎 Worker 绑定，conductor 作为 SUB **主动 connect 到引擎**
+（连接方向 conductor → 引擎，事件数据流引擎 → conductor）；HTTP 模式下引擎 Worker
+将 KV 事件 POST 到 conductor 的 `/events` 接口。
 所有后端（Mooncake / Memcache / YuanRong）的 HBM 事件链路一致：
 
 ```text
 Engine Worker                        KV Conductor
 (vLLM/SGLang)
       │                                │
-      │  ZMQ PUB / HTTP POST           │
+      │  ZMQ PUB（引擎绑定，conductor   │
+      │  SUB 主动 connect）/ HTTP POST │
       │  {type: "stored",              │
       │   token_ids, block_hashes,     │
       │   parent_hash, medium: "npu"}  │
@@ -152,8 +159,8 @@ Engine Worker           Pool Master               KV Conductor
 
 - **索引结构**：`LowerTierIndexer`，按 `(parent_seq_hash, tokens_hash)` 记录 continuation edge
 - **匹配语义**：
-  - CPU：从 HBM 断点续查；root 链（首块副本）无条件走——更长副本不会被上游较短命中掩盖
-  - Disk：从 `max(HBM, CPU)` 断点续查（CPU 更长时优先接 CPU）；root 链同 CPU 层无条件走
+  - CPU：从 HBM 断点续查（仅同一 `(instance_id, dp_rank)`）；root 链（首块副本）无条件走——更长副本不会被上游较短命中掩盖
+  - Disk：从 `max(HBM, CPU)` 断点续查（同样按 `(instance_id, dp_rank)` 对齐；CPU 更长时优先接 CPU）；root 链同 CPU 层无条件走
 - **连续匹配**：走到第一个缺失边即停；同一 worker 多条候选链（root + 断点）取绝对终点最远者
 - **content 保留**：pool 确认后始终保留 `(tokens_hash, parent_hash)`（无需配置），跨 tier 移除存活，CPU 已驱逐后、保留窗口（300s TTL）内仍可解析 Disk store；窗口关闭自动清除，内存有界（条目为 tier 数据拷贝 + 短暂迁移残留）。未确认的 offload **无 TTL、无硬容量上限**，随未确认块增长，仅在匹配成功或引擎驱逐时清除
 
@@ -163,7 +170,7 @@ Engine Worker           Pool Master               KV Conductor
 |------|----------|-------------|
 | Mooncake | 中心化 master，一个 ZMQ PUB | IP 匹配 → 节点上所有 DP |
 | Memcache | 中心化 master，一个 ZMQ PUB | 同 Mooncake |
-| YuanRong | 每节点多端口 ZMQ PUB | Port 匹配 → 精确 DP |
+| YuanRong | 每节点 CPU/Disk PUB + 每 DP NPU | NPU：精确 DP；CPU/Disk：IP 匹配 → 节点上所有 DP |
 
 ### 查询
 
@@ -254,13 +261,14 @@ Coordinator 通过 `ConductorApiClient` 与 conductor 通信。`user_config.json
   },
   "kv_conductor_config": {
     "block_size": 128,
-    "npu_endpoint": "tcp://*:50090",
+    "npu_endpoint": "tcp://*:5557",
     "http_server_port": 13333
   }
 }
 ```
 
-`npu_endpoint` 模式中的 `*` 会被替换为 endpoint IP，端口会加上 `dp_rank`。
+`npu_endpoint` 必须与引擎 `--kv-events-config` 的 `endpoint` 一致（`tcp://*:5557` 为 vLLM 常用值）；
+模式中的 `*` 会被替换为 endpoint IP，端口会加上 `dp_rank`，conductor 主动 connect 到各引擎节点绑定的事件端口。
 注册时写入 conductor 的 `medium_endpoints` key 为 `"npu"`。
 
 详见 [KV Cache 亲和性调度文档](../../docs/zh/user_guide/features/kvcache_affinity.md)。

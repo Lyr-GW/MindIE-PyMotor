@@ -44,6 +44,7 @@ from motor.coordinator.router.precision_sample.sample_builder import (
     _log_sample_submission,
 )
 from motor.coordinator.router.precision_sample import response as sampling_resp
+from motor.coordinator.router.precision_sample.request import inject_logprobs
 from motor.coordinator.router.adapters.stream import (
     parse_stream_chunk_json,
     encode_stream_chunk_bytes,
@@ -88,7 +89,7 @@ def check_cancel_error(error: asyncio.CancelledError) -> (str, bool):
     reason = "Exception"
     if error.args:
         reason = error.args[0]
-        if reason in {cancel_error.CLIENT_DISCONNECT, cancel_error.DISPATCH_ABORT}:
+        if reason in {cancel_error.CLIENT_DISCONNECT, cancel_error.DISPATCH_ABORT, cancel_error.INFER_TIMEOUT}:
             return reason, False
         elif reason.startswith(cancel_error.SCOPE_ABORT):
             return cancel_error.SCOPE_ABORT, False
@@ -139,6 +140,38 @@ class BaseRouter(ABC):
             else WorkloadActionHandler(self._request_manager)
         )
         self._sampling_manager = sampling_manager
+        self._forward_resource: ScheduledResource | None = None
+        self._sched_to_p_logged = False
+
+    def _stream_overall_timeout(self) -> float:
+        """Remaining infer_timeout budget for the streaming response, counted from request arrival.
+
+        Streaming responses are served by uvicorn after the handler returns, so the
+        ``timeout_handler`` decorator cannot bound them; the budget is passed to
+        CommitAwareStreamingResponse and enforced as an overall wall-clock deadline.
+        """
+        infer_timeout = self.config.exception_config.infer_timeout
+        elapsed = time.time() - self.req_info.status.get(ReqState.ARRIVE, time.time())
+        return max(infer_timeout - elapsed, 0.0)
+
+    def _log_sched_to_p_if_needed(self) -> None:
+        """Full-INFO T_sched→P end mark, immediately before the first HTTP POST to P/U."""
+        resource = self._forward_resource
+        if self._sched_to_p_logged or resource is None or resource.instance is None:
+            return
+        role = resource.instance.role
+        if role not in (PDRole.ROLE_P, PDRole.ROLE_U):
+            return
+        self._sched_to_p_logged = True
+        now = time.time()
+        arrive = self.req_info.status.get(ReqState.ARRIVE, now)
+        self.logger.info(
+            "Scheduling metric stage=dispatch_to_p req_id=%s unix_ts=%.6f elapsed_ms=%.2f role=%s",
+            self.req_info.req_id,
+            now,
+            (now - arrive) * 1000.0,
+            getattr(role, "value", role),
+        )
 
     @staticmethod
     def build_error_response(e: Exception) -> ErrorResponse:
@@ -195,6 +228,9 @@ class BaseRouter(ABC):
             trace_obj.trace_headers = TracerManager().inject_trace_context()
             trace_obj.set_trace_attribute("requestId", self.req_info.req_id)
             trace_obj.set_trace_attribute("stream", is_stream)
+            route_degradation = getattr(trace_obj, "route_degradation", "")
+            if route_degradation:
+                trace_obj.set_trace_attribute("routing.degradation", route_degradation)
             if trace_obj.error_message:
                 trace_obj.set_trace_error_message(trace_obj.error_message)
             yield span
@@ -213,8 +249,78 @@ class BaseRouter(ABC):
         try:
             yield
         finally:
-            await self._request_manager.del_req_info(self.req_info.req_id)
+            with CancelScope(shield=True):
+                await self._reclaim_residual_workloads()
+                await self._request_manager.del_req_info(self.req_info.req_id)
             self._log_request_details()
+
+    async def _drain_pending_releases(self) -> None:
+        """Hook: routers that run background release tasks drain them before residual reclaim."""
+        return
+
+    async def _reclaim_residual_workloads(self) -> None:
+        """Release scheduler-ledger entries whose local records survived the whole request.
+
+        Must run after all in-flight releases settle (see _drain_pending_releases), because a
+        record is only removed by finalize_release after the ledger ACKed the release; popping
+        a record while its release RPC is still in flight would double-subtract the ledger.
+        """
+        try:
+            await self._drain_pending_releases()
+        except Exception as e:
+            self.logger.error(
+                "Draining pending releases failed; skip residual workload reclaim to avoid "
+                "double release req_id=%s error=%r",
+                self.req_info.req_id,
+                e,
+            )
+            return
+        residuals = await self._request_manager.pop_residual_workloads(self.req_info.req_id)
+        for key, workload, owner in residuals:
+            if owner is None:
+                self.logger.error(
+                    "Orphan workload record has no owner; cannot reclaim ledger tokens "
+                    "req_id=%s key=%s active_tokens=%s",
+                    self.req_info.req_id,
+                    key,
+                    workload.active_tokens,
+                )
+                continue
+            instance_id, endpoint_id = owner
+            self.logger.error(
+                "Reclaiming orphan workload allocation req_id=%s key=%s instance_id=%s endpoint_id=%s active_tokens=%s",
+                self.req_info.req_id,
+                key,
+                instance_id,
+                endpoint_id,
+                workload.active_tokens,
+            )
+            params = UpdateWorkloadParams(
+                instance_id=instance_id,
+                endpoint_id=endpoint_id,
+                role=key[-1],
+                req_id=self.req_info.req_id,
+                workload_action=WorkloadAction.RELEASE_TOKENS,
+                workload_change=Workload(active_tokens=-workload.active_tokens),
+            )
+            try:
+                ok = await self._scheduler.update_workload(params)
+            except Exception as e:
+                self.logger.error(
+                    "Reclaim release RPC raised req_id=%s instance_id=%s endpoint_id=%s error=%r",
+                    self.req_info.req_id,
+                    instance_id,
+                    endpoint_id,
+                    e,
+                )
+                continue
+            if not ok:
+                self.logger.error(
+                    "Reclaim release rejected by scheduler req_id=%s instance_id=%s endpoint_id=%s",
+                    self.req_info.req_id,
+                    instance_id,
+                    endpoint_id,
+                )
 
     @contextlib.asynccontextmanager
     async def _manage_client_context(self, resource: ScheduledResource):
@@ -222,7 +328,10 @@ class BaseRouter(ABC):
         t0_client = time.perf_counter()
         client_pool = HTTPClientPool()
         client = await client_pool.get_client(
-            ip=endpoint.ip, port=endpoint.business_port, tls_config=self.config.infer_tls_config
+            ip=endpoint.ip,
+            port=endpoint.business_port,
+            tls_config=self.config.infer_tls_config,
+            keepalive_expiry=self.config.timeout_config.engine_client_keepalive_expiry,
         )
         elapsed_client_ms = (time.perf_counter() - t0_client) * 1000
         self.logger.debug(
@@ -231,7 +340,12 @@ class BaseRouter(ABC):
             endpoint.ip,
             endpoint.business_port,
         )
-        yield client
+        previous = self._forward_resource
+        self._forward_resource = resource
+        try:
+            yield client
+        finally:
+            self._forward_resource = previous
 
     @contextlib.asynccontextmanager
     async def _manage_resource_context(self, role: PDRole, release_func):
@@ -262,13 +376,19 @@ class BaseRouter(ABC):
                         self.req_info.state,
                     )
 
-    async def prepare_resource(self, role: PDRole) -> ScheduledResource:
+    async def prepare_resource(
+        self,
+        role: PDRole,
+        *,
+        target_instance_id: int | None = None,
+        required_engine_type: str | None = None,
+        required_dispatch_capability: str | None = None,
+    ) -> ScheduledResource:
         """Select instance + allocate workload (one RPC), record in RequestManager, retry on failure."""
         self.req_info.update_state(_scheduling_state_for_role(role))
 
-        target_instance_id = None
         constraint = self.req_info.scheduling_constraint
-        if constraint is not None:
+        if target_instance_id is None and constraint is not None:
             target_instance_id = constraint.target_for_role(role)
 
         last_exception = None
@@ -276,11 +396,12 @@ class BaseRouter(ABC):
         for attempt in range(self.config.exception_config.max_retry):
             try:
                 t0_select = time.perf_counter()
-                result = await self._scheduler.select_and_allocate(
-                    role,
-                    self.req_info,
-                    target_instance_id=target_instance_id,
-                )
+                scheduler_kwargs = {"target_instance_id": target_instance_id}
+                if required_engine_type is not None:
+                    scheduler_kwargs["required_engine_type"] = required_engine_type
+                if required_dispatch_capability is not None:
+                    scheduler_kwargs["required_dispatch_capability"] = required_dispatch_capability
+                result = await self._scheduler.select_and_allocate(role, self.req_info, **scheduler_kwargs)
                 elapsed_select_ms = (time.perf_counter() - t0_select) * 1000
                 if _should_log_scheduling_sample(self.req_info.req_id):
                     self.logger.info(
@@ -300,13 +421,31 @@ class BaseRouter(ABC):
                     msg = f"Invalid scheduler result: {result}"
                     raise ValueError(msg)
 
-                if not await self._request_manager.add_req_workload(self.req_info.req_id, role, allocate_workload):
-                    await self._rollback_allocated_workload(
-                        ins,
-                        endpoint,
+                try:
+                    recorded = await self._request_manager.add_req_workload(
+                        self.req_info.req_id,
                         role,
                         allocate_workload,
+                        instance_id=ins.id,
+                        endpoint_id=endpoint.id,
                     )
+                except BaseException as e:
+                    # The ledger commit inside select_and_allocate already succeeded; if local
+                    # bookkeeping is interrupted (incl. CancelledError, which is not an
+                    # Exception subclass), roll the commit back before propagating.
+                    self.logger.error(
+                        "Workload bookkeeping interrupted after allocation; rolling back "
+                        "req_id=%s role=%s instance_id=%s endpoint_id=%s error=%r",
+                        self.req_info.req_id,
+                        role,
+                        ins.id,
+                        endpoint.id,
+                        e,
+                    )
+                    await self._rollback_allocated_workload(ins, endpoint, role, allocate_workload)
+                    raise
+                if not recorded:
+                    await self._rollback_allocated_workload(ins, endpoint, role, allocate_workload)
                     msg = f"Request {self.req_info.req_id} already allocated for role {role}"
                     raise RuntimeError(msg)
 
@@ -432,6 +571,7 @@ class BaseRouter(ABC):
 
         self.first_chunk_sent = False
         trace_obj.add_trace_event(f"Begin to stream: {client.base_url}/{api}, {client.timeout}", is_meta=self.is_meta)
+        self._log_sched_to_p_if_needed()
         t0_forward = time.perf_counter()
         async with client.stream(
             "POST",
@@ -524,6 +664,7 @@ class BaseRouter(ABC):
         )
 
         trace_obj.add_trace_event(f"Begin to post: {client.base_url}/{api}, {client.timeout}", is_meta=self.is_meta)
+        self._log_sched_to_p_if_needed()
         t0_forward = time.perf_counter()
         url = f"/{api}"
         async with self._open_nonstream_response(
@@ -743,24 +884,21 @@ class BaseRouter(ABC):
             workload_action=action,
             workload_change=workload_change,
         )
-        # Release RPC must finish even if the request/stream task is cancelled (e.g. client disconnect).
+        # Shield covers finalize_release too: it is the only gate against re-sending this release,
+        # so it must not be interrupted by the same cancellation that shields update_workload.
         with CancelScope(shield=True):
             ok = await self._scheduler.update_workload(params)
-        if ok and action == WorkloadAction.RELEASE_TOKENS:
-            # Scheduler ACKed the release: drop the worker-side ledger record retained for
-            # failure recomputation (see WorkloadActionHandler.compute_and_update).
-            try:
-                await self._workload_action_handler.finalize_release(self.req_info.req_id, role)
-            except Exception as exc:
-                # The scheduler already applied the release; a finalize failure only leaves a
-                # stale local record (a later re-release is deduped by operation_id). Log it
-                # but do not turn the ACKed release into a failure.
-                self.logger.warning(
-                    "finalize_release failed after scheduler ACK req_id=%s action=%s: %s",
-                    self.req_info.req_id,
-                    action.value,
-                    exc,
-                )
+            if ok and action == WorkloadAction.RELEASE_TOKENS:
+                try:
+                    await self._workload_action_handler.finalize_release(self.req_info.req_id, role)
+                except Exception as exc:
+                    # Scheduler already applied the release; keep the ACK as success regardless.
+                    self.logger.warning(
+                        "finalize_release failed after scheduler ACK req_id=%s action=%s: %s",
+                        self.req_info.req_id,
+                        action.value,
+                        exc,
+                    )
         return ok
 
     async def _submit_token_sample(
@@ -789,17 +927,108 @@ class BaseRouter(ABC):
                 request_structure=request_structure,
             )
             _log_sample_submission(sample)
-            await self._sampling_manager.submit_sample(sample)
+            self._sampling_manager.enqueue_sample(sample)
         except Exception as e:
             self.logger.warning("_submit_token_sample failed: %s", e)
 
     def _init_sampling_state(self) -> dict:
         return {
-            "enabled": self.config.precision_detection_config.precision_check_enabled,
-            "client_logprobs": bool(self.req_info.req_data.get("logprobs")),
+            "enabled": False,
             "lp_count": self.config.precision_detection_config.logprobs_count,
+            "logprobs_metadata": None,
             "info": {},
         }
+
+    async def _claim_precision_sample(
+        self,
+        decode_resource: ScheduledResource | None,
+        request_data: dict,
+        sampling_state: dict,
+    ) -> bool:
+        """Claim D-instance admission and inject fields only for the selected request."""
+        if (
+            decode_resource is None
+            or decode_resource.instance is None
+            or self._sampling_manager is None
+            or not self.config.precision_detection_config.precision_check_enabled
+        ):
+            return False
+        d_instance_id = decode_resource.instance.id
+        if not await self._sampling_manager.claim_sample(d_instance_id, time.time()):
+            return False
+        metadata = inject_logprobs(
+            request_data,
+            self.config.precision_detection_config,
+            req_id=self.req_info.req_id,
+        )
+        sampling_state["enabled"] = True
+        sampling_state["lp_count"] = metadata.effective_count
+        sampling_state["logprobs_metadata"] = metadata
+        return True
+
+    async def _claim_precision_sample_tokenized(
+        self,
+        decode_resource: ScheduledResource | None,
+        tokenized_requests: list,
+        sampling_state: dict,
+    ) -> bool:
+        """Claim D-instance admission and inject fields into token-only engine bodies.
+
+        Token-only requests bypass the OpenAI-shaped ``request_data`` body, so the
+        injected fields must land on each selected ``EngineRequest.body`` (and its
+        ``sampling_params``). Preserve an explicit client width from Render's
+        metadata: sampling may expand a request, never narrow it.
+        """
+        if (
+            not tokenized_requests
+            or decode_resource is None
+            or decode_resource.instance is None
+            or self._sampling_manager is None
+            or not self.config.precision_detection_config.precision_check_enabled
+        ):
+            return False
+        d_instance_id = decode_resource.instance.id
+        if not await self._sampling_manager.claim_sample(d_instance_id, time.time()):
+            return False
+        sampling_width = self.config.precision_detection_config.logprobs_count
+        for engine_request in tokenized_requests:
+            body = engine_request.body
+            sampling_params = body.get("sampling_params")
+            client_width = self._tokenized_logprobs_width(body, sampling_params)
+            effective_width = max(client_width, sampling_width)
+            body["logprobs"] = effective_width
+            if isinstance(sampling_params, dict):
+                sampling_params["logprobs"] = effective_width
+            body["return_token_ids"] = True
+            body["return_tokens_as_token_ids"] = True
+        sampling_state["enabled"] = True
+        sampling_state["lp_count"] = max(
+            self._tokenized_logprobs_width(request.body, request.body.get("sampling_params"))
+            for request in tokenized_requests
+        )
+        # The derendered client-visible body keeps the client's original logprobs
+        # contract; Motor-requested logprobs never surface, so no width projection
+        # is needed for the token-only path.
+        sampling_state["logprobs_metadata"] = None
+        logger.debug(
+            "PrecisionSample: claimed token-only d_instance_id=%s req_id=%s logprobs=%d prompts=%d",
+            d_instance_id,
+            self.req_info.req_id,
+            sampling_state["lp_count"],
+            len(tokenized_requests),
+        )
+        return True
+
+    @staticmethod
+    def _tokenized_logprobs_width(body: dict, sampling_params: object) -> int:
+        """Return the explicit positive client width retained by a token-only body."""
+        candidates = [body.get("logprobs")]
+        if isinstance(sampling_params, dict):
+            candidates.append(sampling_params.get("logprobs"))
+        return max(
+            (value for value in candidates if isinstance(value, int) and not isinstance(value, bool) and value > 0),
+            default=0,
+        )
 
     def _collect_logprobs_from_stream_chunk(self, chunk: bytes, sampling_state: dict) -> bytes:
         if not sampling_state["enabled"] or not chunk:
@@ -816,13 +1045,11 @@ class BaseRouter(ABC):
             logprobs_count=sampling_state["lp_count"],
         )
         has_logprobs_field = any(isinstance(ch, dict) and "logprobs" in ch for ch in chunk_json.get("choices") or [])
-        sampling_resp.strip_logprobs_for_client(
+        changed = sampling_resp.project_logprobs_for_client(
             chunk_json,
-            client_requested_logprobs=sampling_state["client_logprobs"],
+            metadata=sampling_state["logprobs_metadata"],
         )
-        if not sampling_state["client_logprobs"] and not has_logprobs_field:
-            return chunk
-        if sampling_state["client_logprobs"]:
+        if not has_logprobs_field or not changed:
             return chunk
         return encode_stream_chunk_bytes(chunk, chunk_json)
 
@@ -837,9 +1064,9 @@ class BaseRouter(ABC):
     def _strip_logprobs_for_client(self, body: dict, sampling_state: dict) -> None:
         if not sampling_state["enabled"]:
             return
-        sampling_resp.strip_logprobs_for_client(
+        sampling_resp.project_logprobs_for_client(
             body,
-            client_requested_logprobs=sampling_state["client_logprobs"],
+            metadata=sampling_state["logprobs_metadata"],
         )
 
     def _log_request_details(self):

@@ -20,28 +20,44 @@ import uvicorn
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import PlainTextResponse
 
-from motor.common.resources import RegisterMsg, ReregisterMsg, HeartbeatMsg, TerminateInstanceMsg
+from motor.common.resources import (
+    RegisterMsg,
+    ReregisterMsg,
+    HeartbeatMsg,
+    TerminateInstanceMsg,
+)
 from motor.common.standby.standby_manager import StandbyManager, StandbyRole
 from motor.common.http.cert_util import CertUtil
 from motor.common.logger import get_logger, ApiAccessFilter
-from motor.common.http.http_response import format_success_response, raise_internal_error
+from motor.common.http.http_response import (
+    format_success_response,
+    raise_internal_error,
+)
 from motor.common.utils.net import format_address
 from motor.common.alarm.alarm import Alarm
 from motor.common.alarm.deserialize import deserialize_incoming_record
+from motor.common.alarm.master_to_slave_event import MASTER_TO_SLAVE_EVENT_CONFIGS, MasterToSlaveComponent
 from motor.config.controller import ControllerConfig
 from motor.controller.observability.observability import Observability
 from motor.controller.core.instance_assembler import InstanceAssembler
 from motor.controller.core.instance_manager import InstanceManager
 from motor.controller.fault_tolerance.fault_manager import FaultManager
+from motor.controller.fault_tolerance.dp_scale_down import FtPhase, get_ft_runtime_store
 from motor.controller.fault_tolerance.fault_types import FaultInfo
 from motor.controller.core.recovery_service import (
     complete_precision_pd_group_recovery,
     is_precision_raise_alarm,
     terminate_instance_for_recovery,
 )
-from motor.controller.observability.inventory.inventory_collector import InventoryCollector
+from motor.controller.observability.inventory.inventory_collector import (
+    InventoryCollector,
+)
 
 logger = get_logger(__name__)
+
+# Reported by a Coordinator the moment it takes over as master. Its Scheduler pool is
+# empty at that point, so this is the earliest reliable trigger to push instances.
+_COORDINATOR_FAILOVER_ALARM_ID = MASTER_TO_SLAVE_EVENT_CONFIGS[MasterToSlaveComponent.COORDINATOR].alarm_id
 
 
 def observability_enabled_required(func: Callable):
@@ -82,6 +98,7 @@ class ControllerAPI:
         # Observability API configuration
         self.enable_observability_api = config.observability_config.observability_enable
         self.enable_fault_tolerance = config.fault_tolerance_config.enable_fault_tolerance
+        self.enable_dp_scale_down = config.fault_tolerance_config.enable_dp_scale_down
         self.observability_api_host = host if host is not None else config.api_config.controller_api_host
         self.observability_api_port = config.api_config.observability_api_port
         self.observability_tls_config = config.observability_tls_config
@@ -102,7 +119,9 @@ class ControllerAPI:
 
         # Observability API startup logic merging
         self.observability_api_server_thread = threading.Thread(
-            target=self._run_observability_api_server, daemon=True, name="ObservabilityAPIServer"
+            target=self._run_observability_api_server,
+            daemon=True,
+            name="ObservabilityAPIServer",
         )
         self.observability_api_server_thread.start()
         logger.info(
@@ -154,6 +173,7 @@ class ControllerAPI:
             # Observability API and fault tolerance configuration update
             self.enable_observability_api = config.observability_config.observability_enable
             self.enable_fault_tolerance = config.fault_tolerance_config.enable_fault_tolerance
+            self.enable_dp_scale_down = config.fault_tolerance_config.enable_dp_scale_down
             self.precision_auto_recovery_enabled = config.precision_auto_recovery_enabled
 
             logger.info("ControllerAPI configuration updated (runtime changes may require restart)")
@@ -239,7 +259,11 @@ class ControllerAPI:
         app.add_api_route("/controller/heartbeat", self._heartbeat, methods=post_methods)
         app.add_api_route("/controller/register", self._register, methods=post_methods)
         app.add_api_route("/controller/reregister", self._reregister, methods=post_methods)
-        app.add_api_route("/controller/terminate_instance", self._terminate_instance, methods=post_methods)
+        app.add_api_route(
+            "/controller/terminate_instance",
+            self._terminate_instance,
+            methods=post_methods,
+        )
         app.add_api_route("/controller/check_instance", self._check_instance, methods=post_methods)
 
         app.add_api_route("/startup", self._startup, methods=get_methods)
@@ -248,9 +272,37 @@ class ControllerAPI:
 
         app.add_api_route("/observability/add_alarm", self._add_alarm, methods=post_methods)
 
-        app.add_api_route("/controller/report_software_fault", self._report_software_fault, methods=post_methods)
+        app.add_api_route(
+            "/controller/report_software_fault",
+            self._report_software_fault,
+            methods=post_methods,
+        )
+        app.add_api_route(
+            "/controller/fault_tolerance/status",
+            self._get_fault_tolerance_status,
+            methods=get_methods,
+        )
 
         return app
+
+    async def _get_fault_tolerance_status(self, request: Request) -> dict:
+        """Return all DP scale-down runtimes or one selected instance."""
+        raw_instance_id = request.query_params.get("instance_id")
+        if not self.enable_fault_tolerance or not self.enable_dp_scale_down:
+            return format_success_response(data={"phase": FtPhase.DISABLED.value, "instances": []})
+
+        store = get_ft_runtime_store()
+        if raw_instance_id is None:
+            return format_success_response(data={"instances": store.list()})
+        try:
+            instance_id = int(raw_instance_id)
+        except (TypeError, ValueError) as e:
+            raise HTTPException(status_code=400, detail="instance_id must be an integer") from e
+
+        runtime = store.get(instance_id)
+        if runtime is None:
+            raise HTTPException(status_code=404, detail="fault-tolerance runtime not found")
+        return format_success_response(data=runtime)
 
     async def _heartbeat(self, request: Request):
         body = await request.json()
@@ -298,9 +350,15 @@ class ControllerAPI:
                     raise RuntimeError("Failed to create SSL context")
 
                 server_config.ssl = context
-                logger.info("Starting Controller API server on https://%s", format_address(self.host, self.port))
+                logger.info(
+                    "Starting Controller API server on https://%s",
+                    format_address(self.host, self.port),
+                )
             else:
-                logger.info("Starting Controller API server on http://%s", format_address(self.host, self.port))
+                logger.info(
+                    "Starting Controller API server on http://%s",
+                    format_address(self.host, self.port),
+                )
 
             self.server = uvicorn.Server(server_config)
             self.loop = asyncio.new_event_loop()
@@ -372,11 +430,17 @@ class ControllerAPI:
         msg = "message"
         reason = "reason"
         if status.get("overall_healthy") is False:
-            raise HTTPException(status_code=503, detail={msg: "Controller is not ready", reason: "Overall not healthy"})
+            raise HTTPException(
+                status_code=503,
+                detail={msg: "Controller is not ready", reason: "Overall not healthy"},
+            )
 
         if status.get("deploy_mode") == "master_standby":
             if status.get("role") != StandbyRole.MASTER.value:
-                raise HTTPException(status_code=503, detail={msg: "Controller is not ready", reason: "Not master"})
+                raise HTTPException(
+                    status_code=503,
+                    detail={msg: "Controller is not ready", reason: "Not master"},
+                )
         return {msg: "Controller is ready"}
 
     def _get_controller_status(self) -> dict:
@@ -434,7 +498,11 @@ class ControllerAPI:
         # Even standby controllers should be considered alive
         if status.get("overall_healthy") is False:
             raise HTTPException(
-                status_code=503, detail={"message": "Controller is not alive", "reason": "Overall not healthy"}
+                status_code=503,
+                detail={
+                    "message": "Controller is not alive",
+                    "reason": "Overall not healthy",
+                },
             )
         else:
             return {"message": "Controller is alive"}
@@ -443,6 +511,10 @@ class ControllerAPI:
         body = await request.json()
         try:
             record = deserialize_incoming_record(body)
+            if record.alarm_id == _COORDINATOR_FAILOVER_ALARM_ID:
+                client = getattr(request, "client", None)
+                peer = getattr(client, "host", None) if client is not None else None
+                self._push_instances_to_new_coordinator_master(peer)
             if isinstance(record, Alarm) and is_precision_raise_alarm(record):
                 with self.config_lock:
                     allow = self.precision_auto_recovery_enabled
@@ -487,6 +559,18 @@ class ControllerAPI:
             logger.error("Failed to add alarms: %s", e)
             raise_internal_error(f"Internal server error: {str(e)}")
 
+    def _push_instances_to_new_coordinator_master(self, master_host: str | None = None) -> None:
+        """Reload the promoted Coordinator's instance pool as soon as it reports the switch."""
+        event_pusher = (self.modules or {}).get("EventPusher")
+        if event_pusher is None:
+            logger.warning("Coordinator master switch reported but EventPusher is unavailable.")
+            return
+        try:
+            event_pusher.notify_coordinator_failover(master_host)
+        except Exception as e:
+            # Never fail the alarm report: heartbeat detection still covers this case.
+            logger.error("Failed to push instances after Coordinator master switch: %s", e)
+
     async def _report_software_fault(self, request: Request) -> dict:
         """Receive software fault reports from NodeManagers at node granularity.
 
@@ -496,6 +580,7 @@ class ControllerAPI:
             "exception_message": "engine crashed",
             "engine_id": 1,
             "engine_status": 1,
+            "instance_id": 2,
             "pod_ip": "192.168.1.1",
             "additional_info": {}
         }
@@ -510,6 +595,7 @@ class ControllerAPI:
             engine_status = body.get("engine_status")
             pod_ip = body.get("pod_ip", "")
             additional_info = body.get("additional_info")
+            instance_id = body.get("instance_id")
 
             if engine_id is None or engine_status is None:
                 return raise_internal_error("Missing required fields: engine_id, engine_status")
@@ -522,9 +608,14 @@ class ControllerAPI:
                 engine_id=int(engine_id),
                 engine_status=int(engine_status),
                 additional_info=additional_info,
+                instance_id=int(instance_id) if instance_id is not None else None,
             )
 
-            FaultManager().report_software_fault(fault_info, pod_ip=pod_ip)
+            FaultManager().report_software_fault(
+                fault_info,
+                pod_ip=pod_ip,
+                instance_id=int(instance_id) if instance_id is not None else None,
+            )
             return format_success_response(message="Software fault reported successfully")
         except HTTPException:
             raise

@@ -11,16 +11,22 @@
 import json
 import os
 import sys
-import pytest
 import tempfile
 from dataclasses import MISSING, fields
-from unittest.mock import patch, mock_open, MagicMock
+from unittest.mock import MagicMock, mock_open, patch
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from motor.config.node_manager import NodeManagerConfig, SingleContainerNodemanagerConfig
+from motor.config.node_manager import (
+    NodeManagerConfig,
+    NodeManagerFaultToleranceConfig,
+    SingleContainerNodemanagerConfig,
+    VLLMStartupAccelerationConfig,
+)
 from motor.common.resources.dispatch import DispatchPlan
-from motor.common.resources.instance import ParallelConfig, PDRole
+from motor.common.resources.instance import FtCapabilitySnapshot, ParallelConfig, PDRole
 
 
 @pytest.fixture(name="nm_config_data")
@@ -55,6 +61,10 @@ def create_config_mock(config_dict):
 def clear_node_manager_config():
     """Clear any cached state (no longer needed for non-singleton)"""
     pass
+
+
+def test_engine_ft_manager_default_poll_interval_is_one_second():
+    assert NodeManagerFaultToleranceConfig().poll_interval_sec == 1.0
 
 
 def create_config_object():
@@ -162,7 +172,7 @@ def test_logging_config_defaults(nm_config_data):
     assert config.logging_config.log_level == "INFO"
     assert config.logging_config.log_max_line_length == 8192
     assert config.logging_config.host_log_dir is not None
-    # Default format aligned with vLLM field order; engine_server uses single module bucket
+    # Default format aligned with vLLM field order; native engines use the NodeManager module bucket.
     assert config.logging_config.log_format == (
         '(%(processName)s pid=%(process)d) %(levelname)s %(asctime)s [%(name)s][%(fileinfo)s:%(lineno)d] %(message)s'
     )
@@ -277,9 +287,7 @@ def test_generate_endpoint_ports(nm_config_data):
     NodeManagerConfig._generate_endpoint_ports(config)
 
     assert config.endpoint_config.endpoint_num == 2
-    assert len(config.endpoint_config.mgmt_ports) == 2
     assert len(config.endpoint_config.service_ports) == 2
-    assert config.endpoint_config.mgmt_ports == ["10001", "10003"]
     assert config.endpoint_config.service_ports == ["10000", "10002"]
 
 
@@ -434,6 +442,7 @@ def test_to_dict():
 
     assert config_dict["basic_config"]["model_name"] == "test_model"
     assert "dispatch_capabilities" not in config_dict["basic_config"]
+    assert config_dict["basic_config"]["ft_capability"] == (FtCapabilitySnapshot().model_dump())
 
     assert "config_path" not in config_dict
 
@@ -525,7 +534,6 @@ def test_generate_endpoint_ports_with_cp_prefill():
     # prefill with cp=2 needs cp*tp*pp = 4 devices/endpoint => 8 devices gives 2 endpoints
     assert config.endpoint_config.endpoint_num == 2
     assert len(config.endpoint_config.service_ports) == 2
-    assert len(config.endpoint_config.mgmt_ports) == 2
 
 
 @patch.dict('os.environ', {'ROLE': 'both'})
@@ -548,6 +556,13 @@ def test_from_json_loads_union_config_for_hybrid():
                 "parallel_config": {"dp_size": 2, "tp_size": 2, "pp_size": 1},
             },
             "engine_config": {"max_model_len": 2048},
+            "motor_nodemanger_config": {
+                "vllm_startup_acceleration_config": {
+                    "enable_startup_plan": True,
+                    "enable_graph_reuse": True,
+                    "cache_root": "/mnt/vllm-cache/union",
+                }
+            },
         },
     }
 
@@ -569,13 +584,93 @@ def test_from_json_loads_union_config_for_hybrid():
     assert config.basic_config.parallel_config.pp_size == 1
     assert config.basic_config.device_num == 4
     assert config.endpoint_config.endpoint_num == 2
+    assert config.vllm_startup_acceleration_config == VLLMStartupAccelerationConfig(True, True, "/mnt/vllm-cache/union")
 
 
-def test_native_runtime_rejects_snapshot_configuration():
+def test_native_vllm_runtime_accepts_snapshot_configuration():
     config = NodeManagerConfig()
     config.snapshot_config.enable_snapshot = True
+    config.basic_config.engine_type = "vllm"
 
-    with pytest.raises(ValueError, match="Native engine runtime does not support snapshot yet"):
+    config.validate_config()
+
+
+def test_native_non_vllm_runtime_rejects_snapshot_configuration():
+    config = NodeManagerConfig()
+    config.basic_config.engine_type = "sglang"
+    config.snapshot_config.enable_snapshot = True
+
+    with pytest.raises(ValueError, match="Native Snapshot currently supports only the vllm engine type"):
+        config.validate_config()
+
+
+@patch.dict("os.environ", {"ROLE": "prefill"})
+def test_from_json_loads_vllm_startup_acceleration_on_a2(tmp_path):
+    """Startup acceleration is configured by role and is not gated by NodeManager hardware checks."""
+    user_config = {
+        "motor_deploy_config": {
+            "hardware_type": "800I-A2",
+            "p_instances_num": 1,
+            "single_p_instance_pod_num": 1,
+            "p_pod_npu_num": 1,
+        },
+        "motor_engine_prefill_config": {
+            "engine_type": "vllm",
+            "engine_config": {
+                "model": "/mnt/weight/test",
+                "data_parallel_size": 1,
+                "tensor_parallel_size": 1,
+            },
+            "motor_nodemanger_config": {
+                "vllm_startup_acceleration_config": {
+                    "enable_startup_plan": True,
+                    "enable_graph_reuse": True,
+                    "cache_root": "/mnt/vllm-cache",
+                }
+            },
+        },
+    }
+
+    config_path = tmp_path / "user_config.json"
+    config_path.write_text(json.dumps(user_config), encoding="utf-8")
+
+    config = NodeManagerConfig.from_json(str(config_path))
+    startup_config = config.vllm_startup_acceleration_config
+    assert startup_config.enable_startup_plan is True
+    assert startup_config.enable_graph_reuse is True
+    assert startup_config.cache_root == "/mnt/vllm-cache"
+
+
+def test_vllm_startup_acceleration_defaults_allow_enabling_without_cache_root():
+    startup_config = VLLMStartupAccelerationConfig()
+    assert (startup_config.enable_startup_plan, startup_config.enable_graph_reuse, startup_config.cache_root) == (
+        False,
+        False,
+        "",
+    )
+    startup_config.enable_startup_plan = startup_config.enable_graph_reuse = True
+    config = NodeManagerConfig()
+    config.basic_config.engine_type = "vllm"
+    config.vllm_startup_acceleration_config = startup_config
+    config.validate_config()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "engine_type", "expected_error"),
+    [
+        ("enable_startup_plan", "true", "vllm", "enable_startup_plan must be a boolean"),
+        ("enable_graph_reuse", "true", "vllm", "enable_graph_reuse must be a boolean"),
+        ("cache_root", "relative/cache", "vllm", "cache_root must be an absolute path"),
+        ("enable_startup_plan", True, "sglang", "supports only the vllm engine type"),
+        ("cache_root", 123, "vllm", "cache_root must be a string"),
+    ],
+)
+def test_vllm_startup_acceleration_validation(field, value, engine_type, expected_error):
+    config = NodeManagerConfig()
+    config.basic_config.engine_type = engine_type
+    setattr(config.vllm_startup_acceleration_config, field, value)
+
+    with pytest.raises(ValueError, match=expected_error):
         config.validate_config()
 
 
@@ -635,7 +730,7 @@ def test_vllm_handoff_connector_infers_handoff_capability():
         }
     )
 
-    assert capabilities == [DispatchPlan.PREFILL_HANDOFF_DECODE.value]
+    assert capabilities == [DispatchPlan.PREFILL_HANDOFF_DECODE.value, DispatchPlan.DECODE_COLOCATION.value]
 
 
 def test_vllm_hybrid_connector_infers_handoff_capability():
@@ -650,7 +745,7 @@ def test_vllm_hybrid_connector_infers_handoff_capability():
         }
     )
 
-    assert capabilities == [DispatchPlan.PREFILL_HANDOFF_DECODE.value]
+    assert capabilities == [DispatchPlan.PREFILL_HANDOFF_DECODE.value, DispatchPlan.DECODE_COLOCATION.value]
 
 
 def test_vllm_nixl_connector_infers_handoff_capability():
@@ -665,7 +760,7 @@ def test_vllm_nixl_connector_infers_handoff_capability():
         }
     )
 
-    assert capabilities == [DispatchPlan.PREFILL_HANDOFF_DECODE.value]
+    assert capabilities == [DispatchPlan.PREFILL_HANDOFF_DECODE.value, DispatchPlan.DECODE_COLOCATION.value]
 
 
 def test_vllm_multi_connector_infers_transport_connector_capability():
@@ -686,12 +781,17 @@ def test_vllm_multi_connector_infers_transport_connector_capability():
         }
 
     assert NodeManagerConfig._infer_dispatch_capabilities(_multi_connector("MooncakeHybridConnector")) == [
-        DispatchPlan.PREFILL_HANDOFF_DECODE.value
+        DispatchPlan.PREFILL_HANDOFF_DECODE.value,
+        DispatchPlan.DECODE_COLOCATION.value,
     ]
     assert NodeManagerConfig._infer_dispatch_capabilities(_multi_connector("NixlConnector")) == [
-        DispatchPlan.PREFILL_HANDOFF_DECODE.value
+        DispatchPlan.PREFILL_HANDOFF_DECODE.value,
+        DispatchPlan.DECODE_COLOCATION.value,
     ]
-    assert NodeManagerConfig._infer_dispatch_capabilities(_multi_connector("MooncakeLayerwiseConnector")) == []
+    assert NodeManagerConfig._infer_dispatch_capabilities(_multi_connector("MooncakeLayerwiseConnector")) == [
+        DispatchPlan.CONCURRENT_ENGINE_SYNC.value,
+        DispatchPlan.DECODE_COLOCATION.value,
+    ]
 
 
 def test_vllm_multi_connector_ignores_non_transport_connector_profiles():
@@ -711,7 +811,10 @@ def test_vllm_multi_connector_ignores_non_transport_connector_profiles():
         },
     }
 
-    assert NodeManagerConfig._infer_dispatch_capabilities(engine_config) == []
+    assert NodeManagerConfig._infer_dispatch_capabilities(engine_config) == [
+        DispatchPlan.CONCURRENT_ENGINE_SYNC.value,
+        DispatchPlan.DECODE_COLOCATION.value,
+    ]
 
 
 def test_vllm_multi_connector_requires_transport_and_store_connectors():
@@ -751,8 +854,35 @@ def test_user_dispatch_capabilities_cannot_override_connector_semantics():
     NodeManagerConfig._discard_user_dispatch_capabilities(user_config)
     config_data = NodeManagerConfig._load_node_manager_config_data(user_config)
 
-    assert config_data["basic_config"]["dispatch_capabilities"] == [DispatchPlan.PREFILL_HANDOFF_DECODE.value]
+    assert config_data["basic_config"]["dispatch_capabilities"] == [
+        DispatchPlan.PREFILL_HANDOFF_DECODE.value,
+        DispatchPlan.DECODE_COLOCATION.value,
+    ]
     assert "dispatch_capabilities" not in user_config["motor_engine_prefill_config"]
+
+
+@pytest.mark.parametrize(
+    "controller_ft,expected",
+    [
+        ({"enable_fault_tolerance": True, "enable_dp_scale_down": True}, True),
+        ({"enable_fault_tolerance": True, "enable_dp_scale_down": False}, False),
+        ({"enable_fault_tolerance": False, "enable_dp_scale_down": True}, False),
+    ],
+)
+@patch.dict("os.environ", {"ROLE": "prefill"})
+def test_dp_scale_down_proxy_gate_is_derived_from_controller(controller_ft, expected):
+    user_config = {
+        "motor_deploy_config": {"hardware_type": "800I-A3"},
+        "motor_controller_config": {"fault_tolerance_config": controller_ft},
+        "motor_engine_prefill_config": {
+            "engine_type": "vllm",
+            "engine_config": {},
+        },
+    }
+
+    config_data = NodeManagerConfig._load_node_manager_config_data(user_config)
+
+    assert config_data["fault_tolerance_config"]["enable_dp_scale_down_proxy"] is expected
 
 
 @patch.dict("os.environ", {"ROLE": "prefill"})
@@ -777,7 +907,7 @@ def test_user_dispatch_capabilities_cannot_enable_unknown_connector():
     assert config_data["basic_config"]["dispatch_capabilities"] == []
 
 
-def test_vllm_layerwise_connector_does_not_advertise_unsupported_native_capability():
+def test_vllm_layerwise_connector_advertises_concurrent_capability():
     capabilities = NodeManagerConfig._infer_dispatch_capabilities(
         {
             "engine_type": "vllm",
@@ -789,7 +919,7 @@ def test_vllm_layerwise_connector_does_not_advertise_unsupported_native_capabili
         }
     )
 
-    assert capabilities == []
+    assert capabilities == [DispatchPlan.CONCURRENT_ENGINE_SYNC.value, DispatchPlan.DECODE_COLOCATION.value]
 
 
 def test_sglang_infers_concurrent_capability():
@@ -801,6 +931,69 @@ def test_sglang_infers_concurrent_capability():
     )
 
     assert capabilities == [DispatchPlan.CONCURRENT_ENGINE_SYNC.value]
+
+
+@pytest.mark.parametrize(
+    "native,expected_auto_recovery",
+    [
+        (
+            {
+                "enable_fault_tolerance": True,
+                "data_parallel_external_lb": True,
+                "enable_eplb": True,
+                "eplb_config": {"num_redundant_experts": 2},
+                "additional_config": {"enable_fused_mc2": 1},
+                "fault_tolerance_config": {},
+            },
+            False,
+        ),
+        (
+            {
+                "enable-fault-tolerance": True,
+                "data-parallel-external-lb": True,
+                "enable-eplb": True,
+                "eplb-config": '{"num-redundant-experts": 2}',
+                "additional-config": '{"enable-fused-mc2": 1}',
+                "fault-tolerance-config": '{"auto-recovery": true}',
+            },
+            True,
+        ),
+    ],
+)
+def test_vllm_ft_capability_is_inferred_from_official_engine_config(
+    native,
+    expected_auto_recovery,
+):
+    capability = NodeManagerConfig._infer_ft_capability(
+        {
+            "engine_type": "vllm",
+            "engine_config": native,
+        }
+    )
+
+    assert capability == FtCapabilitySnapshot(
+        enabled=True,
+        scale_down_supported=True,
+        external_lb=True,
+        auto_recovery=expected_auto_recovery,
+        fused_mc2_enabled=True,
+        eplb_enabled=True,
+        num_redundant_experts=2,
+    )
+
+
+def test_non_vllm_does_not_advertise_scale_down_support():
+    capability = NodeManagerConfig._infer_ft_capability(
+        {
+            "engine_type": "sglang",
+            "engine_config": {
+                "enable_fault_tolerance": True,
+                "data_parallel_external_lb": True,
+            },
+        }
+    )
+
+    assert capability.scale_down_supported is False
 
 
 # ===== Cross-Node PCP Tests =====
@@ -912,7 +1105,6 @@ def test_cross_node_pcp_generate_endpoint_ports():
     # endpoint_num = min(dp=1, 16//16) = 1
     assert config.endpoint_config.endpoint_num == 1
     assert len(config.endpoint_config.service_ports) == 1
-    assert len(config.endpoint_config.mgmt_ports) == 1
 
 
 # --- single_container port path with UCM as MultiConnector store -------------------------
@@ -1121,3 +1313,83 @@ def test_cross_node_pp_not_divisible_raises():
             NodeManagerConfig.from_json(temp_path)
     finally:
         os.unlink(temp_path)
+
+
+def test_config_engine_restart_freeze_defaults():
+    """The engine-restart suicide freeze knobs default to sane values."""
+    config = NodeManagerConfig()
+    ft = config.fault_tolerance_config
+    assert ft.engine_restart_wait_timeout_sec == 180.0
+    assert ft.engine_restart_freeze_sec == 720.0
+
+
+@pytest.mark.parametrize(
+    "attr,value,expected",
+    [
+        ("engine_restart_wait_timeout_sec", 30, "engine_restart_wait_timeout_sec must be in range 60-3600"),
+        ("engine_restart_freeze_sec", 60, "engine_restart_freeze_sec must be in range 120-7200"),
+    ],
+)
+def test_config_engine_restart_validation(attr, value, expected):
+    with pytest.raises(ValueError, match=expected):
+        config = NodeManagerConfig()
+        setattr(config.fault_tolerance_config, attr, value)
+        config.validate_config()
+
+
+# ===================================================================
+# kv_cache_store_config — Mooncake standalone store mode
+# ===================================================================
+
+
+def _parse_kv(raw_kv: dict):
+    config = NodeManagerConfig()
+    NodeManagerConfig._parse_kv_cache_store_config(config, {"kv_cache_store_config": raw_kv})
+    return config.kv_cache_store_config
+
+
+def test_kv_config_mooncake_standalone_fields():
+    kcfg = _parse_kv(
+        {
+            "backend": "mooncake",
+            "store_mode": "standalone",
+            "global_segment_size": "600GB",
+            "local_buffer_size": "2GB",
+            "store_http_port": 9090,
+            "metadata_server": "etcd://10.0.0.1:2379",
+            "protocol": "tcp",
+            "device_name": "mlx5_0",
+        }
+    )
+    assert kcfg.enable is True
+    assert kcfg.store_mode == "standalone"
+    assert kcfg.global_segment_size == "600GB"
+    assert kcfg.local_buffer_size == "2GB"
+    assert kcfg.store_http_port == 9090
+    assert kcfg.metadata_server == "etcd://10.0.0.1:2379"
+    assert kcfg.protocol == "tcp"
+    assert kcfg.device_name == "mlx5_0"
+
+
+def test_kv_config_mooncake_defaults():
+    """Omitted mooncake fields fall back to embedded mode and Ascend defaults."""
+    kcfg = _parse_kv({"backend": "mooncake"})
+    assert kcfg.store_mode == ""
+    assert kcfg.global_segment_size == ""
+    assert kcfg.local_buffer_size == ""
+    assert kcfg.store_http_port == 0
+    assert kcfg.metadata_server == "P2PHANDSHAKE"
+    assert kcfg.protocol == "ascend"
+    assert kcfg.device_name == ""
+
+
+def test_kv_config_mooncake_invalid_store_mode_falls_back():
+    kcfg = _parse_kv({"backend": "mooncake", "store_mode": "bogus"})
+    assert kcfg.store_mode == "embedded"
+
+
+def test_kv_config_memcache_ignores_mooncake_fields():
+    """Mooncake-only fields are not parsed for the memcache backend."""
+    kcfg = _parse_kv({"backend": "memcache", "store_mode": "standalone", "global_segment_size": "1GB"})
+    assert kcfg.store_mode == ""
+    assert kcfg.global_segment_size == ""

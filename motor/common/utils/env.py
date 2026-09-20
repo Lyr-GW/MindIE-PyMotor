@@ -99,10 +99,6 @@ class _Environment:
     # --- Daemon behaviour ---
 
     @property
-    def motor_restart_engine(self):
-        return os.getenv("MOTOR_RESTART_ENGINE", "0") == "1"
-
-    @property
     def motor_restart_local_service(self):
         return os.getenv("MOTOR_RESTART_LOCAL_SERVICE", "1") == "1"
 
@@ -111,6 +107,12 @@ class _Environment:
     @property
     def mmc_local_config_path(self):
         return os.getenv("MMC_LOCAL_CONFIG_PATH", "")
+
+    # --- Mooncake store ---
+
+    @property
+    def mooncake_config_path(self):
+        return os.getenv("MOONCAKE_CONFIG_PATH", "")
 
     @property
     def mmc_local_service_mode(self):

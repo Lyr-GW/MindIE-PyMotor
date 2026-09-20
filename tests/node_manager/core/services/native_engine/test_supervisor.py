@@ -13,6 +13,7 @@ import signal
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from http import HTTPStatus
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -170,6 +171,42 @@ def test_successful_native_probe_marks_ready(mock_popen, mock_client):
 
 @patch("motor.node_manager.core.services.native_engine.supervisor.SafeHTTPSClient")
 @patch("motor.node_manager.core.services.native_engine.supervisor.subprocess.Popen")
+def test_snapshot_pending_probe_reports_running(mock_popen, mock_client):
+    process = MagicMock(pid=12345)
+    process.poll.return_value = None
+    mock_popen.return_value = process
+    response = mock_client.return_value.__enter__.return_value.do_get.return_value
+    response.status_code = HTTPStatus.ACCEPTED
+    supervisor = ProcessSupervisor()
+    probe = ProbeSpec(
+        path="/snapshot/health",
+        timeout_seconds=5,
+        startup_timeout_seconds=1800,
+    )
+    supervisor.start(3, _command(), probe)
+
+    state = supervisor.state(3, "10.0.0.1", 8000)
+
+    assert state == RuntimeState.RUNNING
+
+
+@patch("motor.node_manager.core.services.native_engine.supervisor.SafeHTTPSClient")
+@patch("motor.node_manager.core.services.native_engine.supervisor.subprocess.Popen")
+def test_completed_snapshot_probe_marks_ready(mock_popen, mock_client):
+    process = MagicMock(pid=12345)
+    process.poll.return_value = None
+    mock_popen.return_value = process
+    response = mock_client.return_value.__enter__.return_value.do_get.return_value
+    response.status_code = HTTPStatus.OK
+    supervisor = ProcessSupervisor()
+    probe = ProbeSpec(path="/snapshot/health", timeout_seconds=5, startup_timeout_seconds=1800)
+    supervisor.start(3, _command(), probe)
+
+    assert supervisor.state(3, "10.0.0.1", 8000) == RuntimeState.READY
+
+
+@patch("motor.node_manager.core.services.native_engine.supervisor.SafeHTTPSClient")
+@patch("motor.node_manager.core.services.native_engine.supervisor.subprocess.Popen")
 def test_native_probe_retries_timeout_within_attempt_limit(mock_popen, mock_client):
     process = MagicMock(pid=12345)
     process.poll.return_value = None
@@ -245,7 +282,7 @@ def test_dead_process_is_stopped_without_http_probe(mock_popen):
 
     assert supervisor.state(3, "10.0.0.1", 8000) == RuntimeState.STOPPED
     with patch.object(supervisor, "_kill_group") as kill_group:
-        assert supervisor.dead_pids() == [12345]
+        assert supervisor.dead_pids() == [(12345, 3)]
     kill_group.assert_called_once()
     assert supervisor.dead_pids() == []
     assert supervisor.pid_list() == []

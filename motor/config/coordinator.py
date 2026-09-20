@@ -13,6 +13,7 @@ import json
 import re
 import ipaddress
 import tempfile
+from pathlib import Path
 from typing import Optional, Any
 from enum import Enum
 from dataclasses import dataclass, field, asdict, is_dataclass
@@ -26,6 +27,7 @@ from motor.config.standby import StandbyConfig
 from motor.config.tls_config import TLSConfig
 from motor.config.config_utils import (
     ConfigKey,
+    MOTOR_ENGINE_UNION_CONFIG,
     apply_config_path_metadata,
     apply_standby_persistence_rule,
     finalize_json_config_load,
@@ -33,6 +35,7 @@ from motor.config.config_utils import (
     log_json_config_load_error,
     reload_dataclass_config_from_json,
     resolve_config_json_path,
+    resolve_engine_model_paths,
     save_instance_config_to_json,
     _update_tls_config,
     _update_instances_num,
@@ -62,12 +65,74 @@ SLO_TPOT = "slo_tpot"
 
 logger = get_logger(__name__)
 
+MGMT_API_KEY_HEADER = "X-Motor-Management-Key"
+
+
+def _require_engine_config(engine_section: dict[str, Any], *, source: str) -> dict[str, Any]:
+    if ENGINE_CONFIG not in engine_section:
+        raise KeyError(
+            f"'{ENGINE_CONFIG}' not found in {source} config. Available keys: {sorted(engine_section.keys())}"
+        )
+    return normalize_keys(engine_section[ENGINE_CONFIG])
+
+
+def _require_max_model_len(engine_cfg: dict[str, Any], *, source: str) -> Any:
+    if MAX_MODEL_LEN not in engine_cfg:
+        raise KeyError(
+            f"'{MAX_MODEL_LEN}' not found in {source} engine_config. Available keys: {sorted(engine_cfg.keys())}"
+        )
+    return engine_cfg[MAX_MODEL_LEN]
+
+
+def _apply_aigw_common_fields(aigw: dict[str, Any], *, model_id: str) -> None:
+    aigw.setdefault(AIGW_ID, model_id)
+    aigw.setdefault(AIGW_OBJECT, AIGW_OBJECT_MODEL)
+    aigw.setdefault(AIGW_OWNED_BY, AIGW_OWNED_BY_MOTOR)
+    aigw.setdefault(SLO_TTFT, 1000)
+    aigw.setdefault(SLO_TPOT, 50)
+
+
+def _build_aigw_model_metadata(cfg: dict[str, Any], user_config_data: dict[str, Any]) -> None:
+    """Fill ``cfg['aigw']`` from engine sections when possible.
+
+    Preference: complete PD (prefill+decode) over PD-hybrid union. Only missing
+    ``aigw`` keys are filled; explicit user values in ``motor_coordinator_config.aigw``
+    are preserved.
+    """
+    prefill = user_config_data.get(ConfigKey.MOTOR_ENGINE_PREFILL.value)
+    decode = user_config_data.get(ConfigKey.MOTOR_ENGINE_DECODE.value)
+    union = user_config_data.get(MOTOR_ENGINE_UNION_CONFIG)
+
+    if prefill and decode:
+        prefill_engine = _require_engine_config(prefill, source="prefill")
+        decode_engine = _require_engine_config(decode, source="decode")
+        if AIGW not in cfg:
+            cfg[AIGW] = {}
+        prefill_resolver = ConfigResolver(prefill)
+        _apply_aigw_common_fields(cfg[AIGW], model_id=prefill_resolver.get_model_name(""))
+        cfg[AIGW].setdefault(AIGW_P_MAX_SEQLEN, _require_max_model_len(prefill_engine, source="prefill"))
+        cfg[AIGW].setdefault(AIGW_D_MAX_SEQLEN, _require_max_model_len(decode_engine, source="decode"))
+        return
+
+    if isinstance(union, dict) and union:
+        union_engine = _require_engine_config(union, source="union")
+        if AIGW not in cfg:
+            cfg[AIGW] = {}
+        union_resolver = ConfigResolver(union)
+        _apply_aigw_common_fields(cfg[AIGW], model_id=union_resolver.get_model_name(""))
+        max_model_len = _require_max_model_len(union_engine, source="union")
+        # Hybrid has one engine; expose the same limit on both P/D fields for API parity.
+        cfg[AIGW].setdefault(AIGW_P_MAX_SEQLEN, max_model_len)
+        cfg[AIGW].setdefault(AIGW_D_MAX_SEQLEN, max_model_len)
+
+
 # Role shm and heartbeat (Coordinator Daemon liveness).
 # Not configurable; use these constants so Daemon and Mgmt stay in sync.
 ROLE_SHM_NAME = "coordinator_standby_role"
 ROLE_SHM_SIZE = 9  # 1 byte role (byte0) + 8 bytes heartbeat (bytes 1-8, little-endian uint64)
 ROLE_SHM_MASTER = 1  # byte0 value when this node is master
 ROLE_SHM_STANDBY = 0  # byte0 value when standby or unknown
+ROLE_SHM_ISOLATED = 2  # lock renew failed; must leave the inference Service now
 ROLE_HEARTBEAT_INTERVAL_SEC = 2.0
 ROLE_HEARTBEAT_STALE_SEC = 5.0
 
@@ -84,6 +149,7 @@ def _default_skip_paths() -> set[str]:
         "/redoc",
         "/openapi.json",
         "/favicon.ico",
+        "/v1/metaserver",
     }
 
 
@@ -97,6 +163,7 @@ def default_rate_limit_skip_paths() -> list[str]:
         "/openapi.json",
         "/favicon.ico",
         "/startup",
+        "/v1/metaserver",
     ]
 
 
@@ -148,6 +215,14 @@ KV_AFFINITY_MODE_UNIFIED = "unified"
 KV_AFFINITY_MODE_LOAD_GATED = "load_gated"
 KV_AFFINITY_MODES = (KV_AFFINITY_MODE_UNIFIED, KV_AFFINITY_MODE_LOAD_GATED)
 
+CONTEXT_BUDGET_MODE = "context_budget_mode"
+CONTEXT_BUDGET_OFF = "off"
+CONTEXT_BUDGET_ON = "on"
+CONTEXT_BUDGET_MODES = (
+    CONTEXT_BUDGET_OFF,
+    CONTEXT_BUDGET_ON,
+)
+
 # Legacy flat scheduler_config keys → nested kv_affinity field names.
 _LEGACY_KV_AFFINITY_FLAT_KEYS = {
     "kv_affinity_mode": "mode",
@@ -193,11 +268,14 @@ class KvConductorConfig:
 
     - Mooncake / Memcache: register the pool once (``pool_endpoint``) +
       per-DP HBM via ``npu_endpoint``.
-    - YuanRong: per-DP multi-port via ``npu/cpu/disk_endpoint`` patterns.
+    - YuanRong: per-DP NPU via ``npu_endpoint`` (port + ``dp_rank``);
+      CPU/Disk once per node via ``cpu_endpoint`` / ``disk_endpoint``
+      (base port, no ``dp_rank`` offset).
 
-    Endpoint patterns use ``*`` as IP placeholder and add ``dp_rank``
-    to the port, e.g. ``"tcp://*:15557"`` resolves to
-    ``tcp://<endpoint_ip>:<15557 + dp_rank>``.
+    Endpoint patterns use ``*`` as IP placeholder. NPU (and Mooncake/Memcache
+    HBM) add ``dp_rank`` to the port, e.g. ``"tcp://*:15557"`` resolves to
+    ``tcp://<endpoint_ip>:<15557 + dp_rank>``. YuanRong CPU/Disk use the
+    base port on the node IP (no ``dp_rank`` offset).
 
     This config replaces the legacy ``prefill_kv_event_config`` —
     connection info (``conductor_service``, ``http_server_port``) and
@@ -227,7 +305,12 @@ class KvConductorConfig:
 
     block_size: int = 128
     """KV block size in tokens — determines token→hash granularity.
-    Must match the engine's ``--block-size``.  Default 128."""
+
+    Must match the main-attention KV event ``block_size``, not necessarily
+    the engine ``--block-size`` / scheduler LCM. In hybrid-KV models (e.g.
+    DeepSeek-V4 MLA = 128 while ``--block-size`` may be 32), register the
+    MLA event grain or events are dropped as ``block_size_mismatch``.
+    Default 128."""
 
     engine_type: str = "vLLM"
     """Inference engine type, sent to conductor on registration."""
@@ -291,6 +374,10 @@ class KvAffinityConfig:
     w_npu: float = 1.0
     w_cpu: float = 1.0
     w_disk: float = 0.0
+    # Minimum prefix hit rate required to keep affinity routing. 0 disables the gate
+    # (always score by affinity). Values in (0, 1] require
+    # max(matched_tokens) / prompt_tokens > threshold; otherwise fall back to load_balance.
+    hit_rate_threshold: float = 0.0
 
 
 @dataclass
@@ -300,10 +387,46 @@ class SchedulerConfig:
     # Weight of the instance average workload in endpoint-first load balancing.
     # 0 means pure global endpoint minimum; small values preserve instance pressure awareness.
     endpoint_instance_score_weight: float = 0.05
+    # Window (seconds) for worker-0 per-DP telemetry: one log line per DP
+    # with request count and SHM active_tokens (dp_stats). Independent of
+    # kv_affinity hit telemetry. 0 disables emission.
+    dp_stats_window: int = 60
     # kv_cache_affinity tunables (affinity + load + per-medium weights).
     kv_affinity: KvAffinityConfig = field(default_factory=KvAffinityConfig)
     # KV event registration config for kv-conductor.
     kv_conductor_config: KvConductorConfig = field(default_factory=KvConductorConfig)
+
+
+@dataclass
+class CapacityPlanningConfig:
+    """HPA capacity planning (demand-driven autoscaling) tunables.
+
+    Field names map one-to-one onto the CapacityPlanner's PlannerConfig,
+    plus the PD-ratio suggestion smoothing/clamping parameters.
+    """
+
+    # Target per-instance utilization the replica derivation aims for.
+    target_utilization: float = 0.8
+    # Target KV cache utilization for the decode KV constraint.
+    kv_target_utilization: float = 0.9
+    # EMA coefficient for demand / capacity / wait-time smoothing.
+    # Samples are already 3s-window aggregate means, so heavy smoothing is
+    # unnecessary: 0.85 converges within 3 collection cycles; transient spikes
+    # are absorbed by the downstream HPA stabilization window.
+    ema_alpha: float = 0.85
+    # Slow decay applied to the decode capacity peak per interval.
+    capacity_decay: float = 0.005
+    # Capacity priors (tokens/s per instance). 0 means "no prior": the
+    # estimate is uncalibrated until the first valid online sample.
+    prefill_tps_capacity_prior: float = 0.0
+    decode_tps_capacity_prior: float = 0.0
+    # Sliding-window length (in planning cycles) for the decode capacity decay
+    # floor: the estimate never decays below max(prior, window sample peak).
+    capacity_window_cycles: int = 200
+    # --- PD ratio suggestion tunables ---
+    pd_ratio_smooth_alpha: float = 0.3  # EMA coefficient; lower = smoother
+    pd_ratio_min: float = 0.05  # clamp bounds for motor:pd_ratio_suggested
+    pd_ratio_max: float = 20.0
 
 
 @dataclass
@@ -317,6 +440,8 @@ class PrometheusMetricsConfig:
     kv_store_backend: str = ""  # e.g. "memcache", "mooncake"
     kv_store_service: str = ""  # default falls back to $KVS_MASTER_SERVICE
     kv_store_metrics_port: int = 0  # 0 → auto: 50088 (mooncake) / 50090 (default)
+    # --- HPA capacity planning (planner + PD ratio suggestion) ---
+    capacity_planning: CapacityPlanningConfig = field(default_factory=CapacityPlanningConfig)
 
 
 @dataclass
@@ -357,14 +482,14 @@ class ExceptionConfig:
 class PrecisionDetectionConfig:
     """Precision detection configuration for online token/logprob sampling per PD instance group.
 
-    For each PD instance group (keyed by D instance ID or P+D instance ID pair),
-    at most one full request's token_ids and logprobs are sampled within
-    interval_seconds for precision detection reporting.
+    For each Decode instance, at most one request injects token_ids and
+    logprobs within interval_seconds. Detection results remain attributed to
+    the final P+D instance group.
     When precision_check_enabled=False, no sampling or request modification
     occurs — zero performance overhead.
     """
 
-    interval_seconds: float = 30.0  # Sampling interval per PD instance group (seconds)
+    interval_seconds: float = 30.0  # Minimum injection interval per Decode instance (seconds)
     logprobs_count: int = 1  # Number of top_logprobs (chat) / logprobs (completion) injected during sampling
     # Also determines the detection types enabled for msprobe:
     # 1 → repetition; >=3 → +garbled; >=5 → +rare characters (requires multiple keys)
@@ -378,12 +503,28 @@ class PrecisionDetectionConfig:
 
 
 @dataclass
+class CircuitConfig:
+    """Coordinator instance circuit-breaker (self-fusing) configuration.
+
+    Applied when the circuit breaker manager is constructed at Coordinator
+    startup; changing these requires a Coordinator restart.
+    Defaults reproduce the historical built-in behavior exactly.
+    """
+
+    enable: bool = True  # Master switch; False disarms counting/tripping entirely
+    failure_threshold: int = 3  # Consecutive failures before the circuit trips
+    base_timeout_s: float = 30.0  # First trip duration (seconds); doubled per re-trip
+    max_timeout_s: float = 300.0  # Cap on trip duration (seconds) = 5 min
+
+
+@dataclass
 class TimeoutConfig:
     request_timeout: int = 30
     connection_timeout: int = 10
     read_timeout: int = 15
     write_timeout: int = 15
     keep_alive_timeout: int = 60
+    engine_client_keepalive_expiry: float = 3.0
 
 
 @dataclass
@@ -411,8 +552,30 @@ class APIKeyConfig:
 
 
 @dataclass
+class MgmtAPIKeyConfig:
+    """Shared-secret authentication for privileged management APIs."""
+
+    enable_api_key: bool = False
+    api_key_file: str = ""
+
+    def load_api_key(self) -> str:
+        """Read the management API key without exposing it in JSON configuration."""
+        try:
+            api_key = Path(self.api_key_file).read_text(encoding=FILE_ENCODING).strip()
+        except OSError as e:
+            raise ValueError(f"Failed to read management API key file '{self.api_key_file}': {e}") from e
+        if not api_key:
+            raise ValueError("Management API key file cannot be empty")
+        if "\n" in api_key or "\r" in api_key:
+            raise ValueError("Management API key file must contain exactly one line")
+        return api_key
+
+
+@dataclass
 class InferenceWorkersConfig:
     num_workers: int = 4  # Number of inference API worker processes; >1 = multiprocess
+    # Base port for per-worker metaserver; 0=disabled. Worker i listens on base+i.
+    worker_metaserver_base_port: int = 12000
 
 
 @dataclass
@@ -511,6 +674,8 @@ class PrefillKvEventConfig:
     conductor_service: str = field(default_factory=lambda: Env.conductor_service or "")
     http_server_port: int = 13333
     block_size: int = 128
+    """Must match main-attention KV event ``block_size`` (hybrid KV ≠
+    engine ``--block-size``; e.g. DeepSeek-V4 MLA = 128). Default 128."""
     endpoint: str = ""
     replay_endpoint: str = ""
     engine_type: str = "vLLM"
@@ -519,8 +684,81 @@ class PrefillKvEventConfig:
 
 
 @dataclass
+class RenderEndpointConfig:
+    """vLLM Render sidecar endpoint."""
+
+    host: str = "127.0.0.1"
+    port: int = 8100
+
+
+@dataclass
+class RenderConfig:
+    """Coordinator frontend tokenization through a vLLM Render sidecar."""
+
+    enable: bool = False
+    endpoint: RenderEndpointConfig = field(default_factory=RenderEndpointConfig)
+    timeout_ms: int = 5000
+    renderer_num_workers: int = 4
+    image_name: str = ""
+
+
+IMAGE_OBFUSCATION_GEOMETRY_FIELDS = (
+    "patch_size",
+    "merge_size",
+    "temporal_patch_size",
+    "longest_edge",
+    "shortest_edge",
+)
+
+
+@dataclass
+class ImageObfuscationConfig:
+    """Vision data permutation matching the data-obfuscated multimodal weights.
+
+    Geometry mirrors the model's image processor, so every field may be left at ``0``: an unset
+    field is read from the served model directory (``preprocessor_config.json``) at startup, and an
+    explicitly configured value always wins. ``model_path`` optionally pins that directory when it
+    cannot be taken from the engine sections (e.g. standalone deployment). See the data-obfuscation
+    feature guide.
+    """
+
+    enable: bool = False
+    model_path: str = ""
+    patch_size: int = 0
+    merge_size: int = 0
+    longest_edge: int = 0
+    shortest_edge: int = 0
+    temporal_patch_size: int = 0
+
+
+@dataclass
+class TokenObfuscationConfig:
+    """Data-obfuscation settings matching the data-obfuscated weights.
+
+    ``vocab_size`` / ``token_white_list`` / ``seed_content`` drive prompt token permutation; the
+    nested ``image_config`` shares the same data seed for multimodal (vision tensor) permutation.
+    All of them are model-specific (they must match the offline weight obfuscation) and the code
+    ships no built-in default: unset values are ``0`` / ``[]`` / ``""``. ``vocab_size`` is read from
+    the served model directory when unset; ``token_white_list`` and ``seed_content`` always have to
+    be configured. ``model_path`` optionally pins that directory when it cannot be taken from the
+    engine sections. See the data-obfuscation feature guide.
+    """
+
+    enable: bool = False
+    model_path: str = ""
+    vocab_size: int = 0
+    token_white_list: list[int] = field(default_factory=list)
+    seed_content: str = ""
+    image_config: ImageObfuscationConfig = field(default_factory=ImageObfuscationConfig)
+
+
+@dataclass
 class CoordinatorConfig:
     """Coordinator configuration class with validation, reload and error handling support"""
+
+    # Tokenize the prompt once and clamp the client output budget before routing.
+    # Applies uniformly to every scheduler type.
+    context_budget_mode: str = CONTEXT_BUDGET_OFF
 
     logging_config: LoggingConfig = field(default_factory=LoggingConfig)
     prometheus_metrics_config: PrometheusMetricsConfig = field(default_factory=PrometheusMetricsConfig)
@@ -532,6 +770,7 @@ class CoordinatorConfig:
     etcd_tls_config: TLSConfig = field(default_factory=TLSConfig)
     timeout_config: TimeoutConfig = field(default_factory=TimeoutConfig)
     api_key_config: APIKeyConfig = field(default_factory=APIKeyConfig)
+    mgmt_api_key_config: MgmtAPIKeyConfig = field(default_factory=MgmtAPIKeyConfig)
     rate_limit_config: RateLimitConfig = field(default_factory=RateLimitConfig)
     standby_config: StandbyConfig = field(default_factory=StandbyConfig)
 
@@ -540,15 +779,20 @@ class CoordinatorConfig:
     api_config: ApiConfig = field(default_factory=ApiConfig)
     deploy_config: DeployConfig = field(default_factory=DeployConfig)
     tracer_config: TracerConfig = field(default_factory=TracerConfig)
+    render_config: RenderConfig = field(default_factory=RenderConfig)
+    token_obfuscation_config: TokenObfuscationConfig = field(default_factory=TokenObfuscationConfig)
     prefill_kv_event_config: PrefillKvEventConfig = field(default_factory=PrefillKvEventConfig)
     precision_detection_config: PrecisionDetectionConfig = field(default_factory=PrecisionDetectionConfig)
+    circuit_config: CircuitConfig = field(default_factory=CircuitConfig)
     port_allocator_config: PortAllocatorConfig = field(default_factory=PortAllocatorConfig)
 
     # internal fields
     config_path: str | None = field(default=None, init=False)
     last_modified: float | None = field(default=None, init=False)
+    engine_model_paths: list[str] = field(default_factory=list, init=False)
     _errors: list[str] = field(default_factory=list, init=False)
     worker_index: int | None = field(default=None, repr=False)
+    worker_metaserver_port: int | None = field(default=None, repr=False)
 
     def __post_init__(self):
         """Validate configuration after initialization"""
@@ -582,6 +826,9 @@ class CoordinatorConfig:
                         _redirect_prefill_kv_event_config(cfg, raw)
                         _update_prefill_kv_event_config(cfg, raw)
                         _merge_kv_store_metrics_config(cfg, raw)
+                        # Data obfuscation reads model-side parameters (image geometry) from the
+                        # served weights directory when the user leaves them unconfigured.
+                        cfg["engine_model_paths"] = resolve_engine_model_paths(raw)
         except (json.JSONDecodeError, Exception) as e:
             log_json_config_load_error(json_path, e)
 
@@ -610,7 +857,7 @@ class CoordinatorConfig:
                         setattr(obj, key, enum_value)
 
             scheduler_handlers = {
-                'scheduler_type': lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType),
+                "scheduler_type": lambda obj, key, value: set_enum_field(obj, key, value, SchedulerType),
             }
 
             exception_config_data = cfg.get("exception_config", {})
@@ -644,33 +891,7 @@ class CoordinatorConfig:
             # whether the user wrote an "aigw" key in motor_coordinator_config.
             if user_config_data:
                 try:
-                    prefill = user_config_data.get(ConfigKey.MOTOR_ENGINE_PREFILL.value)
-                    decode = user_config_data.get(ConfigKey.MOTOR_ENGINE_DECODE.value)
-                    if prefill and decode:
-                        if AIGW not in cfg:
-                            cfg[AIGW] = {}
-                        prefill_resolver = ConfigResolver(prefill)
-                        cfg[AIGW][AIGW_ID] = prefill_resolver.get_model_name("")
-                        cfg[AIGW][AIGW_OBJECT] = AIGW_OBJECT_MODEL
-                        cfg[AIGW][AIGW_OWNED_BY] = AIGW_OWNED_BY_MOTOR
-                        prefill_engine = normalize_keys(prefill[ENGINE_CONFIG])
-                        decode_engine = normalize_keys(decode[ENGINE_CONFIG])
-
-                        if MAX_MODEL_LEN not in prefill_engine:
-                            raise KeyError(
-                                f"'{MAX_MODEL_LEN}' not found in prefill engine_config. "
-                                f"Available keys: {sorted(prefill_engine.keys())}"
-                            )
-                        if MAX_MODEL_LEN not in decode_engine:
-                            raise KeyError(
-                                f"'{MAX_MODEL_LEN}' not found in decode engine_config. "
-                                f"Available keys: {sorted(decode_engine.keys())}"
-                            )
-
-                        cfg[AIGW][AIGW_P_MAX_SEQLEN] = prefill_engine[MAX_MODEL_LEN]
-                        cfg[AIGW][AIGW_D_MAX_SEQLEN] = decode_engine[MAX_MODEL_LEN]
-                        cfg[AIGW].setdefault(SLO_TTFT, 1000)
-                        cfg[AIGW].setdefault(SLO_TPOT, 50)
+                    _build_aigw_model_metadata(cfg, user_config_data)
                 except Exception as e:
                     logger.warning("Failed to build aigw model metadata: %s", e)
 
@@ -683,6 +904,7 @@ class CoordinatorConfig:
                 ("inference_workers_config", config.inference_workers_config, None),
                 ("timeout_config", config.timeout_config, None),
                 ("api_key_config", config.api_key_config, None),
+                ("mgmt_api_key_config", config.mgmt_api_key_config, None),
                 ("rate_limit_config", config.rate_limit_config, None),
                 ("standby_config", config.standby_config, None),
                 ("etcd_config", config.etcd_config, None),
@@ -692,8 +914,11 @@ class CoordinatorConfig:
                 ("api_config", config.api_config, None),
                 ("deploy_config", config.deploy_config, None),
                 ("tracer_config", config.tracer_config, None),
+                ("render_config", config.render_config, None),
+                ("token_obfuscation_config", config.token_obfuscation_config, None),
                 ("prefill_kv_event_config", config.prefill_kv_event_config, None),
                 ("precision_detection_config", config.precision_detection_config, None),
+                ("circuit_config", config.circuit_config, None),
                 ("port_allocator_config", config.port_allocator_config, None),
             ]
 
@@ -704,6 +929,9 @@ class CoordinatorConfig:
                 if section_name in cfg:
                     update_config_from_dict(config_obj, cfg[section_name], special_handlers)
 
+            if CONTEXT_BUDGET_MODE in cfg:
+                config.context_budget_mode = cfg[CONTEXT_BUDGET_MODE]
+
             if "precision_detection_config" not in cfg and "token_sampling_config" in cfg:
                 logger.warning(
                     "token_sampling_config is deprecated; use precision_detection_config for precision detection."
@@ -712,6 +940,8 @@ class CoordinatorConfig:
 
             if "aigw" in cfg:
                 config.aigw_model = dict(cfg["aigw"])
+
+            config.engine_model_paths = list(cfg.get("engine_model_paths", []))
 
             apply_config_path_metadata(config, config_path)
 
@@ -732,6 +962,24 @@ class CoordinatorConfig:
             logger.error("Failed to create configuration instance: %s", e)
             raise
 
+    def _obfuscation_model_path_issue(self, explicit_model_path: str) -> str:
+        """Describe why model-side obfuscation params cannot be auto-resolved ('' when they can).
+
+        Model-side parameters (``vocab_size``, vision geometry) are read from the served weights
+        directory. An explicitly configured ``model_path`` always works; otherwise the directory
+        declared by the engine sections is used, and it must be unambiguous.
+        """
+        if isinstance(explicit_model_path, str) and explicit_model_path.strip():
+            return ""
+        if not self.engine_model_paths:
+            return "no model directory is configured (set model_path, or ensure engine_config.model is set)"
+        if len(self.engine_model_paths) > 1:
+            return (
+                "model_path is required because multiple model directories are served: "
+                f"{', '.join(self.engine_model_paths)}"
+            )
+        return ""
+
     def validate_config(self) -> None:
         """Validate the validity of configuration values"""
         self._errors = []
@@ -749,6 +997,10 @@ class CoordinatorConfig:
         self._validate_positive_number(self.timeout_config.read_timeout, "read_timeout")
         self._validate_positive_number(self.timeout_config.write_timeout, "write_timeout")
         self._validate_positive_number(self.timeout_config.keep_alive_timeout, "keep_alive_timeout")
+        self._validate_positive_number(
+            self.timeout_config.engine_client_keepalive_expiry,
+            "engine_client_keepalive_expiry",
+        )
 
         # Validate exception configuration
         self._validate_positive_number(self.exception_config.max_retry, "max_retry", allow_zero=True)
@@ -782,6 +1034,91 @@ class CoordinatorConfig:
             self.inference_workers_config.num_workers,
             "num_workers",
         )
+        self._validate_worker_metaserver_ports()
+
+        self._validate_ip_or_hostname(self.render_config.endpoint.host, "render_config.endpoint.host")
+        self._validate_port_range(self.render_config.endpoint.port, "render_config.endpoint.port")
+        self._validate_positive_number(self.render_config.timeout_ms, "render_config.timeout_ms")
+        if not isinstance(self.render_config.renderer_num_workers, int) or isinstance(
+            self.render_config.renderer_num_workers, bool
+        ):
+            self._errors.append("render_config.renderer_num_workers must be an integer")
+        elif self.render_config.renderer_num_workers <= 0:
+            self._errors.append("render_config.renderer_num_workers must be greater than 0")
+        if not isinstance(self.render_config.image_name, str):
+            self._errors.append("render_config.image_name must be a string")
+        elif self.render_config.image_name and not self.render_config.image_name.strip():
+            self._errors.append("render_config.image_name cannot contain only whitespace")
+
+        obfuscation = self.token_obfuscation_config
+        if not isinstance(obfuscation.enable, bool):
+            self._errors.append("token_obfuscation_config.enable must be a bool")
+        if obfuscation.enable and not self.render_config.enable:
+            self._errors.append("token_obfuscation_config requires render_config.enable=true")
+        if not isinstance(obfuscation.vocab_size, int) or isinstance(obfuscation.vocab_size, bool):
+            self._errors.append("token_obfuscation_config.vocab_size must be an integer")
+        elif obfuscation.vocab_size < 0:
+            self._errors.append("token_obfuscation_config.vocab_size must not be negative")
+        elif obfuscation.enable and obfuscation.vocab_size == 0:
+            # Unset vocab_size is read from the served model directory (config.json).
+            reason = self._obfuscation_model_path_issue(obfuscation.model_path)
+            if reason:
+                self._errors.append(
+                    "token_obfuscation_config.vocab_size must be explicitly configured or resolvable from the "
+                    f"served model directory: {reason}"
+                )
+        white_list = obfuscation.token_white_list
+        if not isinstance(white_list, list) or any(
+            not isinstance(token_id, int) or isinstance(token_id, bool) or token_id < 0 for token_id in white_list
+        ):
+            self._errors.append("token_obfuscation_config.token_white_list must contain non-negative integer token ids")
+        elif obfuscation.enable and not white_list:
+            self._errors.append(
+                "token_obfuscation_config.token_white_list must be explicitly configured when obfuscation is enabled"
+            )
+        elif obfuscation.vocab_size > 0 and any(token_id >= obfuscation.vocab_size for token_id in white_list):
+            self._errors.append(
+                "token_obfuscation_config.token_white_list must contain integer token ids within vocab_size"
+            )
+        if not isinstance(obfuscation.seed_content, str):
+            self._errors.append("token_obfuscation_config.seed_content must be a string")
+        elif (obfuscation.enable or obfuscation.image_config.enable) and not obfuscation.seed_content:
+            self._errors.append(
+                "token_obfuscation_config.seed_content must be explicitly configured when obfuscation is enabled"
+            )
+
+        image = obfuscation.image_config
+        if not isinstance(image.enable, bool):
+            self._errors.append("token_obfuscation_config.image_config.enable must be a bool")
+        if image.enable and not self.render_config.enable:
+            self._errors.append("token_obfuscation_config.image_config requires render_config.enable=true")
+        unset_geometry = []
+        for field_name in IMAGE_OBFUSCATION_GEOMETRY_FIELDS:
+            value = getattr(image, field_name)
+            field_path = f"token_obfuscation_config.image_config.{field_name}"
+            if not isinstance(value, int) or isinstance(value, bool):
+                self._errors.append(f"{field_path} must be an integer")
+            elif value < 0:
+                self._errors.append(f"{field_path} must not be negative")
+            elif value == 0:
+                unset_geometry.append(field_name)
+        if image.enable and unset_geometry:
+            # Unset fields are read from the served weights directory; without one they must be given.
+            reason = self._obfuscation_model_path_issue(image.model_path)
+            if reason:
+                self._errors.append(
+                    "token_obfuscation_config.image_config requires explicit geometry "
+                    f"({', '.join(unset_geometry)}) or a readable served model directory: {reason}"
+                )
+        if (
+            image.enable
+            and image.longest_edge > 0
+            and image.shortest_edge > 0
+            and image.longest_edge < image.shortest_edge
+        ):
+            self._errors.append(
+                "token_obfuscation_config.image_config.longest_edge must be greater than or equal to shortest_edge"
+            )
 
         # Validate scheduler score configuration
         self._validate_positive_number(
@@ -825,8 +1162,43 @@ class CoordinatorConfig:
             "kv_affinity.w_disk",
             allow_zero=True,
         )
+        self._validate_positive_number(
+            affinity.hit_rate_threshold,
+            "kv_affinity.hit_rate_threshold",
+            allow_zero=True,
+        )
+        if (
+            isinstance(affinity.hit_rate_threshold, (int, float))
+            and not isinstance(affinity.hit_rate_threshold, bool)
+            and affinity.hit_rate_threshold > 1.0
+        ):
+            self._errors.append(f"kv_affinity.hit_rate_threshold must be in [0, 1], got {affinity.hit_rate_threshold}")
+        self._validate_positive_number(
+            self.scheduler_config.dp_stats_window,
+            "scheduler_config.dp_stats_window",
+            allow_zero=True,
+        )
         if affinity.mode not in KV_AFFINITY_MODES:
             self._errors.append(f"kv_affinity.mode must be one of {KV_AFFINITY_MODES}, got {affinity.mode!r}")
+        if self.context_budget_mode not in CONTEXT_BUDGET_MODES:
+            self._errors.append(
+                f"context_budget_mode must be one of {CONTEXT_BUDGET_MODES}, got {self.context_budget_mode!r}"
+            )
+        if self.context_budget_mode == CONTEXT_BUDGET_ON:
+            model_path = self.scheduler_config.kv_conductor_config.model_path or getattr(
+                self.prefill_kv_event_config, "model_path", ""
+            )
+            if not model_path:
+                self._errors.append("kv_conductor_config.model_path is required when context_budget_mode='on'")
+            aigw_model = self.get_aigw_models() or {}
+            context_limits = (
+                aigw_model.get(AIGW_P_MAX_SEQLEN),
+                aigw_model.get(AIGW_D_MAX_SEQLEN),
+            )
+            if not any(
+                isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in context_limits
+            ):
+                self._errors.append("aigw.p_max_seqlen or aigw.d_max_seqlen is required when context_budget_mode='on'")
 
         # Validate kv-conductor query wire encoding
         valid_query_encodings = ["msgpack", "json"]
@@ -863,6 +1235,7 @@ class CoordinatorConfig:
 
         # Validate Prometheus metrics configuration
         self._validate_positive_number(self.prometheus_metrics_config.reuse_time, "reuse_time")
+        self._validate_capacity_planning()
 
         # Validate standby configuration
         self._validate_positive_number(
@@ -907,6 +1280,13 @@ class CoordinatorConfig:
             self.precision_detection_config.probe_timeout_seconds, "precision_detection_config.probe_timeout_seconds"
         )
 
+        # Validate circuit_config (self circuit breaker)
+        self._validate_positive_number(self.circuit_config.failure_threshold, "circuit_config.failure_threshold")
+        self._validate_positive_number(self.circuit_config.base_timeout_s, "circuit_config.base_timeout_s")
+        self._validate_positive_number(self.circuit_config.max_timeout_s, "circuit_config.max_timeout_s")
+        if self.circuit_config.base_timeout_s > self.circuit_config.max_timeout_s:
+            self._errors.append("circuit_config.base_timeout_s must be <= circuit_config.max_timeout_s")
+
         # Note: TLS certificate file validation is handled by the TLS configuration's check_files flag
         # and is performed during TLS handshake, not during configuration validation
 
@@ -918,6 +1298,9 @@ class CoordinatorConfig:
                 self._errors.append("header_name cannot be empty when api_key authentication is enabled")
             if not self.api_key_config.key_prefix:
                 self._errors.append("key_prefix cannot be empty when api_key authentication is enabled")
+
+        if self.mgmt_api_key_config.enable_api_key and not self.mgmt_api_key_config.api_key_file:
+            self._errors.append("api_key_file cannot be empty when management api_key authentication is enabled")
 
         if self._errors:
             error_msg = "Configuration validation failed:\n" + "\n".join(f"  - {error}" for error in self._errors)
@@ -933,7 +1316,7 @@ class CoordinatorConfig:
         return reload_dataclass_config_from_json(
             self,
             self.from_json,
-            skip=frozenset({"worker_index"}),
+            skip=frozenset({"worker_index", "worker_metaserver_port"}),
             skip_private=True,
         )
 
@@ -946,12 +1329,14 @@ class CoordinatorConfig:
         # Remove internal fields that shouldn't be in the output
         config_dict.pop("config_path", None)
         config_dict.pop("last_modified", None)
+        # Derived from the engine sections on load; never part of the public configuration surface
+        config_dict.pop("engine_model_paths", None)
 
         # Convert enums to their string values for JSON serialization
-        if 'scheduler_config' in config_dict:
-            scheduler_config = config_dict['scheduler_config']
-            if 'scheduler_type' in scheduler_config and isinstance(scheduler_config['scheduler_type'], SchedulerType):
-                scheduler_config['scheduler_type'] = scheduler_config['scheduler_type'].value
+        if "scheduler_config" in config_dict:
+            scheduler_config = config_dict["scheduler_config"]
+            if "scheduler_type" in scheduler_config and isinstance(scheduler_config["scheduler_type"], SchedulerType):
+                scheduler_config["scheduler_type"] = scheduler_config["scheduler_type"].value
         # Convert sets to lists for JSON serialization
         if "api_key_config" in config_dict:
             api_key_config = config_dict["api_key_config"]
@@ -1021,16 +1406,22 @@ class CoordinatorConfig:
             f"    ├─ KV Affinity Load Gate TopN: {self.scheduler_config.kv_affinity.load_gate_topn}\n"
             f"    ├─ KV Affinity W NPU:          {self.scheduler_config.kv_affinity.w_npu}\n"
             f"    ├─ KV Affinity W CPU:          {self.scheduler_config.kv_affinity.w_cpu}\n"
-            f"    └─ KV Affinity W Disk:         {self.scheduler_config.kv_affinity.w_disk}\n"
+            f"    ├─ KV Affinity W Disk:         {self.scheduler_config.kv_affinity.w_disk}\n"
+            f"    ├─ KV Affinity Hit Rate:       {self.scheduler_config.kv_affinity.hit_rate_threshold}\n"
+            f"    ├─ DP Stats Window:            {self.scheduler_config.dp_stats_window}s\n"
+            f"    └─ Context Budget Mode:        {self.context_budget_mode}\n"
             "\n"
             "  Multiprocess (Inference Workers):\n"
-            f"    └─ Num Workers: {self.inference_workers_config.num_workers}\n"
+            f"    ├─ Num Workers: {self.inference_workers_config.num_workers}\n"
+            f"    └─ Worker Metaserver Base: "
+            f"{self.inference_workers_config.worker_metaserver_base_port or 'disabled'}\n"
             "\n"
             "  Security:\n"
             f"    ├─ Infer TLS:           {'Enabled' if self.infer_tls_config.enable_tls else 'Disabled'}\n"
             f"    ├─ Management TLS:      {'Enabled' if self.mgmt_tls_config.enable_tls else 'Disabled'}\n"
             f"    ├─ Etcd TLS:            {'Enabled' if self.etcd_tls_config.enable_tls else 'Disabled'}\n"
             f"    ├─ API Key Auth:        {'Enabled' if self.api_key_config.enable_api_key else 'Disabled'}\n"
+            f"    ├─ Mgmt API Key Auth:   {'Enabled' if self.mgmt_api_key_config.enable_api_key else 'Disabled'}\n"
             f"    └─ Rate Limiting:       {'Enabled' if self.rate_limit_config.enable_rate_limit else 'Disabled'}\n"
             "\n"
             "  High Availability:\n"
@@ -1051,10 +1442,59 @@ class CoordinatorConfig:
 
     def _validate_positive_number(self, value: float | int, field_name: str, allow_zero: bool = False) -> None:
         """Validate that a number is positive (optionally allow zero)"""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            self._errors.append(f"{field_name} must be a number, got {type(value).__name__}")
+            return
         if allow_zero and value < 0:
             self._errors.append(f"{field_name} cannot be negative")
         elif not allow_zero and value <= 0:
             self._errors.append(f"{field_name} must be greater than 0")
+
+    def _validate_capacity_planning(self) -> None:
+        """Validate capacity_planning ranges at load time.
+
+        Mirrors CapacityPlanner's PlannerConfig.__post_init__ checks so an
+        invalid value fails fast at config load instead of surfacing as a
+        per-collection-cycle planner error.
+        """
+        prefix = "prometheus_metrics_config.capacity_planning"
+        cp = self.prometheus_metrics_config.capacity_planning
+
+        def fraction(field_name: str, value: float) -> None:
+            if not 0.0 < value <= 1.0:
+                self._errors.append(f"{prefix}.{field_name} must be in (0, 1], got {value}")
+
+        fraction("target_utilization", cp.target_utilization)
+        fraction("kv_target_utilization", cp.kv_target_utilization)
+        fraction("ema_alpha", cp.ema_alpha)
+        fraction("pd_ratio_smooth_alpha", cp.pd_ratio_smooth_alpha)
+        if not 0.0 <= cp.capacity_decay < 1.0:
+            self._errors.append(f"{prefix}.capacity_decay must be in [0, 1), got {cp.capacity_decay}")
+        self._validate_positive_number(
+            cp.prefill_tps_capacity_prior, f"{prefix}.prefill_tps_capacity_prior", allow_zero=True
+        )
+        self._validate_positive_number(
+            cp.decode_tps_capacity_prior, f"{prefix}.decode_tps_capacity_prior", allow_zero=True
+        )
+        if cp.capacity_window_cycles < 1:
+            self._errors.append(f"{prefix}.capacity_window_cycles must be >= 1, got {cp.capacity_window_cycles}")
+        if not 0.0 < cp.pd_ratio_min <= cp.pd_ratio_max:
+            self._errors.append(
+                f"{prefix} requires 0 < pd_ratio_min <= pd_ratio_max, "
+                f"got pd_ratio_min={cp.pd_ratio_min}, pd_ratio_max={cp.pd_ratio_max}"
+            )
+
+    def _validate_worker_metaserver_ports(self) -> None:
+        """Allow 0 (disabled); otherwise each worker port must fit in 1-65535."""
+        base_port = self.inference_workers_config.worker_metaserver_base_port
+        if base_port == 0:
+            return
+        if not isinstance(base_port, int) or isinstance(base_port, bool) or base_port < 1:
+            self._errors.append("worker_metaserver_base_port must be 0 or a TCP port in 1-65535")
+            return
+        last_port = base_port + self.inference_workers_config.num_workers - 1
+        if last_port > 65535:
+            self._errors.append("worker_metaserver_base_port + num_workers - 1 must be in range 1-65535")
 
     def _validate_port_range(self, port: int, field_name: str) -> None:
         """Validate that a port number is in valid range (1-65535)"""

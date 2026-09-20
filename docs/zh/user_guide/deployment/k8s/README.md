@@ -9,21 +9,17 @@ MindIE Motor支持两种业务拓扑结构（**影响功能**）和 三种服务
 | 业务拓扑 | PD 分离、PD 混部 | 决定 Prefill / Decode 是否拆分部署，**影响推理性能** |
 | 服务部署方式 | `infer_service_set`、`multi_deployment`、`single_container` | 仅影响服务资源如何创建，部署方式**对服务功能无影响，本文仅介绍工作原理，一般情况下无需关注该字段**。未显示配置时使用`infer_service_set`，。
 
----
-
 ## 业务拓扑
 
 业务拓扑决定服务功能与运行形态，需按场景选择。
 
 ### PD 分离
 
-Prefill 与 Decode 分属不同实例，适用于需要独立规划 P/D 资源、追求更高吞吐的场景。详细步骤见 [PD 分离服务部署](./pd_disaggregation_deployment.md)。
+Prefill 与 Decode 分属不同实例，适用于需要独立规划 P/D 资源、追求更高吞吐的场景。详细步骤见 [PD 分离服务部署](./pd_disaggregation_deployment.md)。若底层引擎为 SGLang，见 [SGLang PD 分离服务部署](./pd_disaggregation_sglang.md)。
 
 ### PD 混部
 
 Prefill 与 Decode 由同一类实例（union）承载，适用于快速验证与中小规模部署。详细步骤见 [PD 混部服务部署](./pd_aggregation_deployment.md)。
-
----
 
 ## 部署方式
 

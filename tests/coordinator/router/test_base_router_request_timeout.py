@@ -3,13 +3,16 @@
 
 """Tests for BaseRouter._build_request_timeout (bounded TCP connect phase)."""
 
-from unittest.mock import MagicMock
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from motor.config.coordinator import CoordinatorConfig
 from motor.coordinator.domain import (
     ScheduledResource,  # noqa: F401 -- domain must import first (models.request <-> domain cycle)
 )
-from motor.coordinator.models.request import RequestInfo
+from motor.coordinator.models.request import RequestInfo, ReqState
 from motor.coordinator.router.strategies.base import BaseRouter
 
 
@@ -54,3 +57,64 @@ class TestBuildRequestTimeout:
 
         assert timeout.connect == 30.0
         assert timeout.read == 30.0
+
+
+@pytest.mark.asyncio
+async def test_manage_client_context_passes_configured_keepalive_expiry():
+    config = CoordinatorConfig()
+    config.timeout_config.engine_client_keepalive_expiry = 2.5
+    router = _make_router(config)
+    resource = MagicMock()
+    resource.endpoint.ip = "127.0.0.1"
+    resource.endpoint.business_port = "8000"
+    client = MagicMock()
+    pool = MagicMock()
+    pool.get_client = AsyncMock(return_value=client)
+
+    with patch("motor.coordinator.router.strategies.base.HTTPClientPool", return_value=pool):
+        async with router._manage_client_context(resource) as actual:
+            assert actual is client
+
+    pool.get_client.assert_awaited_once_with(
+        ip="127.0.0.1",
+        port="8000",
+        tls_config=config.infer_tls_config,
+        keepalive_expiry=2.5,
+    )
+
+
+class TestStreamOverallTimeout:
+    """_stream_overall_timeout: remaining infer_timeout budget for streaming responses."""
+
+    def test_full_budget_when_just_arrived(self):
+        config = CoordinatorConfig()
+        config.exception_config.infer_timeout = 3600
+        router = _make_router(config)
+
+        budget = router._stream_overall_timeout()
+
+        assert 3599 < budget <= 3600
+
+    def test_elapsed_time_deducted_from_budget(self):
+        config = CoordinatorConfig()
+        config.exception_config.infer_timeout = 100
+        router = _make_router(config)
+        router.req_info.status[ReqState.ARRIVE] = time.time() - 40
+
+        assert router._stream_overall_timeout() == pytest.approx(60, abs=1)
+
+    def test_budget_floors_at_zero_after_deadline(self):
+        config = CoordinatorConfig()
+        config.exception_config.infer_timeout = 100
+        router = _make_router(config)
+        router.req_info.status[ReqState.ARRIVE] = time.time() - 200
+
+        assert router._stream_overall_timeout() == 0.0
+
+    def test_missing_arrive_time_uses_now(self):
+        config = CoordinatorConfig()
+        config.exception_config.infer_timeout = 100
+        router = _make_router(config)
+        router.req_info.status.pop(ReqState.ARRIVE, None)
+
+        assert router._stream_overall_timeout() == pytest.approx(100, abs=1)

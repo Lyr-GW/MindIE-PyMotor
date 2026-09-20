@@ -28,6 +28,7 @@ from motor.common.resources import EventType
 from motor.common.utils.singleton import ThreadSafeSingleton
 from motor.config.controller import ControllerConfig
 from motor.controller.core.event_pusher import EventPusher
+from motor.controller.fault_tolerance.dp_scale_down import FtPhase, FtRuntime, get_ft_runtime_store
 
 
 # Helper functions
@@ -40,7 +41,6 @@ def create_test_instance(instance_id: int, job_name: str, pod_ips: list[str], ro
                 id=0,
                 ip=pod_ip,
                 business_port=f"80{0}{i}",
-                mgmt_port=f"80{1}{i}",
                 status=EndpointStatus.NORMAL,
                 hb_timestamp=time.time(),
             )
@@ -49,13 +49,12 @@ def create_test_instance(instance_id: int, job_name: str, pod_ips: list[str], ro
     return Instance(id=instance_id, job_name=job_name, model_name="test_model", role=role, endpoints=endpoints)
 
 
-def _create_endpoint(endpoint_id: int, ip: str, business_port: str = "9090", mgmt_port: str = "8080") -> Endpoint:
+def _create_endpoint(endpoint_id: int, ip: str, business_port: str = "9090") -> Endpoint:
     """Helper function to create an Endpoint with default values"""
     return Endpoint(
         id=endpoint_id,
         ip=ip,
         business_port=business_port,
-        mgmt_port=mgmt_port,
         status=EndpointStatus.INITIAL,
         device_infos=[],
         hb_timestamp=time.time(),
@@ -93,20 +92,20 @@ def test_config():
     d_parallel_config = ParallelConfig(dp_size=dp * 4, tp_size=tp // 2)
 
     return {
-        'dp': dp,
-        'tp': tp,
-        'p_role': p_role,
-        'd_role': d_role,
-        'pod_ips': pod_ips,
-        'p_parallel_config': p_parallel_config,
-        'd_parallel_config': d_parallel_config,
+        "dp": dp,
+        "tp": tp,
+        "p_role": p_role,
+        "d_role": d_role,
+        "pod_ips": pod_ips,
+        "p_parallel_config": p_parallel_config,
+        "d_parallel_config": d_parallel_config,
     }
 
 
 @pytest.fixture(autouse=True)
 def mock_etcd_client():
     """Mock EtcdClient to avoid real ETCD operations in tests"""
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.persist_data.return_value = True
         mock_client.restore_data.return_value = None
@@ -118,7 +117,7 @@ def mock_etcd_client():
 def setup_test_environment():
     """Setup and teardown for each test"""
     # Clear singleton instance before each test
-    if hasattr(ThreadSafeSingleton, '_instances') and InstanceManager in ThreadSafeSingleton._instances:
+    if hasattr(ThreadSafeSingleton, "_instances") and InstanceManager in ThreadSafeSingleton._instances:
         try:
             ThreadSafeSingleton._instances[InstanceManager].stop()
         except Exception:
@@ -132,15 +131,15 @@ def instance_manager(test_config):
     instance_manager = create_instance_manager_with_config()
 
     # Extract pod_ips for cleaner code
-    pod_ips = test_config['pod_ips']
+    pod_ips = test_config["pod_ips"]
     # p0
     instance_manager.add_instance(
         Instance(
             job_name="prefill-0",
             model_name="test_model",
             id=0,
-            role=test_config['p_role'],
-            parallel_config=test_config['p_parallel_config'],
+            role=test_config["p_role"],
+            parallel_config=test_config["p_parallel_config"],
             node_mgrs=[
                 NodeManagerInfo(pod_ip=pod_ips[0], host_ip=pod_ips[0], port="8080"),
                 NodeManagerInfo(pod_ip=pod_ips[1], host_ip=pod_ips[1], port="8080"),
@@ -157,8 +156,8 @@ def instance_manager(test_config):
             job_name="prefill-1",
             model_name="test_model",
             id=1,
-            role=test_config['p_role'],
-            parallel_config=test_config['p_parallel_config'],
+            role=test_config["p_role"],
+            parallel_config=test_config["p_parallel_config"],
             node_mgrs=[
                 NodeManagerInfo(pod_ip=pod_ips[2], host_ip=pod_ips[2], port="8080"),
                 NodeManagerInfo(pod_ip=pod_ips[3], host_ip=pod_ips[3], port="8080"),
@@ -174,8 +173,8 @@ def instance_manager(test_config):
         job_name="decode-0",
         model_name="test_model",
         id=2,
-        role=test_config['d_role'],
-        parallel_config=test_config['d_parallel_config'],
+        role=test_config["d_role"],
+        parallel_config=test_config["d_parallel_config"],
         node_mgrs=[
             NodeManagerInfo(pod_ip=pod_ips[4], host_ip=pod_ips[4], port="8080"),
             NodeManagerInfo(pod_ip=pod_ips[5], host_ip=pod_ips[5], port="8080"),
@@ -190,9 +189,7 @@ def instance_manager(test_config):
         port_temp = 8080
         endpoints[pod_ip] = {}
         for i in range(0, 8):
-            endpoints[pod_ip][i] = _create_endpoint(
-                endpoint_id=i, ip=pod_ip, business_port=str(port_temp), mgmt_port=str(port_temp + 1000)
-            )
+            endpoints[pod_ip][i] = _create_endpoint(endpoint_id=i, ip=pod_ip, business_port=str(port_temp))
             port_temp += 1
 
         d_instance.add_endpoints(pod_ip, endpoints[pod_ip])
@@ -207,7 +204,7 @@ def test_singleton_initialization():
     # First instance
     manager1 = InstanceManager()
     assert manager1 is not None
-    assert hasattr(manager1, '_initialized')
+    assert hasattr(manager1, "_initialized")
 
     # Second instance should return the same object
     manager2 = InstanceManager()
@@ -224,7 +221,7 @@ def test_initialization_with_config():
     assert manager.instance_manager_check_interval == config.instance_config.instance_manager_check_interval
 
 
-@patch('motor.controller.core.instance_manager.time.sleep')
+@patch("motor.controller.core.instance_manager.time.sleep")
 def test_start_stop_manager(mock_sleep):
     """Test starting and stopping the instance manager"""
     manager = create_instance_manager_with_config()
@@ -254,7 +251,7 @@ def test_persist_data_success():
 
 def test_persist_data_failure():
     """Test data persistence failure"""
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.persist_data.side_effect = Exception("ETCD error")
         mock_etcd_class.return_value = mock_client
@@ -285,7 +282,7 @@ def test_restore_data_success():
 
     mock_persistent_states = {"state": persistent_state}
 
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.restore_data.return_value = mock_persistent_states
         mock_etcd_class.return_value = mock_client
@@ -303,7 +300,7 @@ def test_restore_data_success():
 
 def test_restore_data_no_data():
     """Test restoration when no data exists"""
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.restore_data.return_value = None
         mock_etcd_class.return_value = mock_client
@@ -336,7 +333,7 @@ def test_restore_data_invalid_checksum():
         )
     }
 
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.restore_data.return_value = mock_persistent_states
         mock_etcd_class.return_value = mock_client
@@ -365,8 +362,8 @@ def test_add_instance(instance_manager, test_config):
             job_name="testAllocInsGroup2",
             model_name="test_model",
             id=100,
-            role=test_config['p_role'],
-            parallel_config=ParallelConfig(dp_size=test_config['dp'], tp_size=test_config['tp'] // 2),
+            role=test_config["p_role"],
+            parallel_config=ParallelConfig(dp_size=test_config["dp"], tp_size=test_config["tp"] // 2),
         )
     )
     assert instance_manager.get_instance_num() == cur_instance_num + 1
@@ -377,8 +374,8 @@ def test_add_instance(instance_manager, test_config):
             job_name="testAllocInsGroup2",
             model_name="test_model",
             id=100,
-            role=test_config['p_role'],
-            parallel_config=ParallelConfig(dp_size=test_config['dp'], tp_size=test_config['tp'] // 2),
+            role=test_config["p_role"],
+            parallel_config=ParallelConfig(dp_size=test_config["dp"], tp_size=test_config["tp"] // 2),
         )
     )
     assert instance_manager.get_instance_num() == cur_instance_num + 1  # Should not increase
@@ -496,7 +493,7 @@ def test_get_instance_by_job_name_returns_newest_when_stale_entries_exist(instan
 
 def test_handle_heartbeat_success(instance_manager, test_config):
     """Test successful heartbeat handling"""
-    pod_ips = test_config['pod_ips']
+    pod_ips = test_config["pod_ips"]
 
     # Test normal heartbeat transition
     heartbeat_msg = get_mock_heartbeat_msg("prefill-0", 0, pod_ips[0])
@@ -507,6 +504,90 @@ def test_handle_heartbeat_success(instance_manager, test_config):
     # Verify instance status changed to INITIAL
     instance = instance_manager.get_instance(0)
     assert instance.status == InsStatus.INITIAL
+
+
+@pytest.mark.parametrize(
+    "scale_down,committed,status,accepted",
+    [
+        (False, [1], {0: EndpointStatus.NORMAL}, False),
+        (True, [], {0: EndpointStatus.NORMAL}, False),
+        (True, [1], {}, False),
+        (True, [1], {0: EndpointStatus.NORMAL}, True),
+        (True, [0, 1], {}, True),
+    ],
+)
+def test_heartbeat_subset_requires_committed_scale_down_rank(instance_manager, scale_down, committed, status, accepted):
+    store = get_ft_runtime_store()
+    store.clear()
+    instance = Instance(id=301, job_name="dp-heartbeat", model_name="model", role="decode")
+    pod_ip = "192.0.2.30"
+    instance.add_endpoints(
+        pod_ip,
+        {rank: Endpoint(id=rank, ip=pod_ip, business_port=str(8000 + rank)) for rank in range(2)},
+    )
+    instance_manager.add_instance(instance)
+    instance_manager.enable_dp_scale_down = scale_down
+    store.put(FtRuntime(instance_id=instance.id, phase=FtPhase.SCALED_DOWN_RUNNING, dead_committed=committed))
+    heartbeat = HeartbeatMsg(job_name=instance.job_name, ins_id=instance.id, ip=pod_ip, status=status)
+
+    try:
+        if accepted:
+            assert instance_manager.handle_heartbeat(heartbeat)[0] is True
+        else:
+            with pytest.raises(HTTPException):
+                instance_manager.handle_heartbeat(heartbeat)
+    finally:
+        store.clear()
+
+
+def test_heartbeat_matches_global_endpoint_id_when_pod_keys_restart_at_zero(instance_manager):
+    instance = Instance(id=302, job_name='cross-pod-heartbeat', model_name='model', role='decode')
+    first_pod_ip = '192.0.2.30'
+    second_pod_ip = '192.0.2.31'
+    instance.add_endpoints(first_pod_ip, {0: Endpoint(id=0, ip=first_pod_ip, business_port='8000')})
+    instance.add_endpoints(second_pod_ip, {0: Endpoint(id=1, ip=second_pod_ip, business_port='8000')})
+    instance_manager.add_instance(instance)
+    instance_manager.enable_dp_scale_down = False
+    heartbeat = HeartbeatMsg(
+        job_name=instance.job_name,
+        ins_id=instance.id,
+        ip=second_pod_ip,
+        status={1: EndpointStatus.NORMAL},
+    )
+
+    assert instance_manager.handle_heartbeat(heartbeat) == (True, 200)
+
+
+def test_scaled_down_state_transition_ignores_committed_abnormal_rank():
+    manager = create_instance_manager_with_config()
+    manager.enable_dp_scale_down = True
+    now = time.time()
+    instance = Instance(
+        id=302,
+        job_name="scaled-down-health",
+        model_name="model",
+        role="decode",
+        endpoints={
+            "192.0.2.30": {
+                0: Endpoint(
+                    id=0, ip="192.0.2.30", business_port="8000", status=EndpointStatus.ABNORMAL, hb_timestamp=0
+                ),
+                1: Endpoint(
+                    id=1, ip="192.0.2.30", business_port="8001", status=EndpointStatus.NORMAL, hb_timestamp=now
+                ),
+            }
+        },
+    )
+    instance.update_instance_status(InsStatus.ACTIVE)
+    store = get_ft_runtime_store()
+    store.clear()
+    store.put(FtRuntime(instance_id=instance.id, phase=FtPhase.SCALED_DOWN_RUNNING, dead_committed=[0]))
+
+    try:
+        assert manager._handle_state_transition(instance) is True
+        assert instance.status == InsStatus.ACTIVE
+    finally:
+        store.clear()
 
 
 def test_handle_heartbeat_invalid_message(instance_manager):
@@ -535,7 +616,7 @@ def test_handle_heartbeat_nonexistent_instance():
 
 def test_state_transitions(instance_manager, test_config):
     """Test various state transitions"""
-    pod_ips = test_config['pod_ips']
+    pod_ips = test_config["pod_ips"]
     instance = instance_manager.get_instance(0)
 
     # INITIAL -> ACTIVE
@@ -659,7 +740,7 @@ def test_separate_instance(instance_manager):
     instance.update_instance_status(InsStatus.ACTIVE)
 
     # Test separating active instance - should trigger persistence
-    with patch.object(instance_manager, 'persist_data', return_value=True) as mock_persist:
+    with patch.object(instance_manager, "persist_data", return_value=True) as mock_persist:
         instance_manager.separate_instance(instance.id)
         assert instance.status == InsStatus.INACTIVE
         assert instance.id in instance_manager.forced_separated_instances
@@ -667,7 +748,7 @@ def test_separate_instance(instance_manager):
         mock_persist.assert_called_once()
 
     # Test separating already inactive instance (should not notify again or trigger persistence)
-    with patch.object(instance_manager, 'persist_data', return_value=True) as mock_persist:
+    with patch.object(instance_manager, "persist_data", return_value=True) as mock_persist:
         original_status = instance.status
         instance_manager.separate_instance(instance.id)
         assert instance.status == original_status  # Should remain INACTIVE
@@ -906,7 +987,7 @@ def test_instances_management_loop_timeout():
 
 def test_persistence_on_state_change():
     """Test automatic persistence on state changes"""
-    with patch.object(InstanceManager, 'persist_data') as mock_persist:
+    with patch.object(InstanceManager, "persist_data") as mock_persist:
         manager = create_instance_manager_with_config(enable_etcd=True)
         instance = create_test_instance(106, "test_persist", ["192.168.1.7"])
         manager.add_instance(instance)
@@ -948,7 +1029,7 @@ def test_prevent_forced_separation_reactivation():
 
 def test_update_config():
     """Test update_config method updates configuration and recreates ETCD client"""
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_etcd_class.return_value = mock_client
 
@@ -960,6 +1041,8 @@ def test_update_config():
         new_config.etcd_config.etcd_port = 2380
         new_config.etcd_config.etcd_timeout = 30.0
         new_config.etcd_config.enable_etcd_persistence = True
+        new_config.fault_tolerance_config.enable_fault_tolerance = True
+        new_config.fault_tolerance_config.enable_dp_scale_down = True
 
         # Clear the mock call history to track new calls
         mock_etcd_class.reset_mock()
@@ -972,11 +1055,16 @@ def test_update_config():
         assert manager.etcd_config.etcd_host == "new-etcd-host"
         assert manager.etcd_config.etcd_port == 2380
         assert manager.etcd_config.etcd_timeout == 30.0
+        assert manager.enable_dp_scale_down is True
 
         # Verify ETCD client constructor was called with new config
         mock_etcd_class.assert_called_once_with(
             etcd_config=new_config.etcd_config, tls_config=new_config.etcd_tls_config
         )
+
+        new_config.fault_tolerance_config.enable_fault_tolerance = False
+        manager.update_config(new_config)
+        assert manager.enable_dp_scale_down is False
 
 
 # ===== Persistence and Recovery Tests =====
@@ -991,8 +1079,8 @@ def test_persist_and_restore_instance_data_success():
     manager.add_instance(instance)
 
     # Mock successful ETCD operations
-    with patch.object(manager.etcd_client, 'persist_data', return_value=True) as mock_persist:
-        with patch.object(manager.etcd_client, 'restore_data') as mock_restore:
+    with patch.object(manager.etcd_client, "persist_data", return_value=True) as mock_persist:
+        with patch.object(manager.etcd_client, "restore_data") as mock_restore:
             # Persist data
             persist_result = manager.persist_data()
             assert persist_result
@@ -1011,7 +1099,7 @@ def test_persist_and_restore_instance_data_success():
             mock_restore.return_value = mock_persistent_states
 
             # Create new manager instance for restore test
-            with patch('motor.controller.core.instance_manager.EtcdClient'):
+            with patch("motor.controller.core.instance_manager.EtcdClient"):
                 new_manager = create_instance_manager_with_config(enable_etcd=True)
 
                 # Restore data
@@ -1033,7 +1121,7 @@ def test_persist_data_with_checksum_validation():
     instance = create_test_instance(202, "test_checksum", ["192.168.1.2"])
     manager.add_instance(instance)
 
-    with patch.object(manager.etcd_client, 'persist_data', return_value=True) as mock_persist:
+    with patch.object(manager.etcd_client, "persist_data", return_value=True) as mock_persist:
         # Persist data
         result = manager.persist_data()
         assert result
@@ -1080,7 +1168,7 @@ def test_restore_data_with_invalid_checksum():
         )
     }
 
-    with patch.object(manager.etcd_client, 'restore_data', return_value=mock_persistent_states):
+    with patch.object(manager.etcd_client, "restore_data", return_value=mock_persistent_states):
         result = manager.restore_data()
 
         # Should fail because checksum validation fails
@@ -1097,7 +1185,7 @@ def test_persistence_disabled_in_config():
     manager.add_instance(instance)
 
     # Try to persist manually - should still work but not be called from state transitions
-    with patch.object(manager.etcd_client, 'persist_data', return_value=True):
+    with patch.object(manager.etcd_client, "persist_data", return_value=True):
         result = manager.persist_data()
         assert result  # persist_data always calls etcd_client.persist_data regardless of flag
 
@@ -1106,7 +1194,7 @@ def test_persist_empty_instances():
     """Test persisting when no instances exist"""
     manager = create_instance_manager_with_config(enable_etcd=True)
 
-    with patch.object(manager.etcd_client, 'persist_data', return_value=True) as mock_persist:
+    with patch.object(manager.etcd_client, "persist_data", return_value=True) as mock_persist:
         result = manager.persist_data()
         assert result
 
@@ -1124,7 +1212,7 @@ def test_restore_no_instance_data_available():
     """Test restore when no instance data is available in ETCD"""
     manager = create_instance_manager_with_config(enable_etcd=True)
 
-    with patch.object(manager.etcd_client, 'restore_data', return_value=None):
+    with patch.object(manager.etcd_client, "restore_data", return_value=None):
         result = manager.restore_data()
 
         # Should succeed with empty state
@@ -1186,7 +1274,7 @@ def test_restore_data_with_type_conversion():
 
     mock_persistent_states = {"state": persistent_state}
 
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.restore_data.return_value = mock_persistent_states
         mock_etcd_class.return_value = mock_client
@@ -1230,7 +1318,7 @@ def test_restore_data_with_invalid_enum_value():
 
     mock_persistent_states = {"state": persistent_state}
 
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.restore_data.return_value = mock_persistent_states
         mock_etcd_class.return_value = mock_client
@@ -1271,7 +1359,7 @@ def test_restore_data_with_malformed_numeric_data():
 
     mock_persistent_states = {"state": persistent_state}
 
-    with patch('motor.controller.core.instance_manager.EtcdClient') as mock_etcd_class:
+    with patch("motor.controller.core.instance_manager.EtcdClient") as mock_etcd_class:
         mock_client = MagicMock()
         mock_client.restore_data.return_value = mock_persistent_states
         mock_etcd_class.return_value = mock_client
@@ -1284,3 +1372,213 @@ def test_restore_data_with_malformed_numeric_data():
 
         # Instance should not be created due to validation error
         assert len(manager.instances) == 0
+
+
+def test_stale_heartbeat_blocks_reactivation(instance_manager):
+    """All endpoints NORMAL by status, but one endpoint's heartbeat timed out:
+    the surviving NM's heartbeat must NOT flip the instance ACTIVE.
+    """
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(301, "test_stale", ["192.168.1.1", "192.168.1.2"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.INACTIVE)
+
+    for ep in instance.endpoints["192.168.1.1"].values():
+        ep.status = EndpointStatus.NORMAL
+        ep.hb_timestamp = time.time() - 60  # NM 1 is gone
+    for ep in instance.endpoints["192.168.1.2"].values():
+        ep.status = EndpointStatus.NORMAL
+        ep.hb_timestamp = time.time()  # NM 2 alive
+
+    result = manager._handle_state_transition(instance)
+
+    assert result is True
+    assert instance.status == InsStatus.INACTIVE, (
+        f"Expected INACTIVE but got {instance.status} — stale heartbeats must block ACTIVE"
+    )
+
+
+def test_fresh_heartbeats_still_activate(instance_manager):
+    """With all heartbeats fresh, the NORMAL transition works as before."""
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(302, "test_fresh", ["192.168.1.1", "192.168.1.2"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.INACTIVE)
+
+    for ep in instance.endpoints["192.168.1.1"].values():
+        ep.status = EndpointStatus.NORMAL
+        ep.hb_timestamp = time.time()
+    for ep in instance.endpoints["192.168.1.2"].values():
+        ep.status = EndpointStatus.NORMAL
+        ep.hb_timestamp = time.time()
+
+    result = manager._handle_state_transition(instance)
+
+    assert result is True
+    assert instance.status == InsStatus.ACTIVE
+
+
+def test_check_node_managers_status_probes_all_before_returning(instance_manager):
+    """An abnormal NM earlier in the list must not drop the later reachable survivors."""
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(305, "test_probe_all", ["192.168.1.1", "192.168.1.2"])
+    manager.add_instance(instance)
+
+    nm_abnormal = MagicMock(pod_ip="192.168.1.1", port="8080")
+    nm_normal = MagicMock(pod_ip="192.168.1.2", port="8080")
+    with (
+        patch.object(Instance, "get_node_managers", return_value=[nm_abnormal, nm_normal]),
+        patch("motor.controller.core.instance_manager.NodeManagerApiClient") as mock_client_cls,
+    ):
+        mock_client_cls.query_status.side_effect = [{"status": False}, {"status": True}]
+
+        has_abnormal, reachable = manager._check_node_managers_status(instance)
+
+    assert has_abnormal is True
+    # the survivor behind the abnormal NM is still discovered
+    assert reachable == [nm_normal]
+
+
+def test_partial_loss_dispatches_stop_with_dedup(instance_manager):
+    """Partial loss dispatches stop to the reachable NM once per episode; the
+    dedup marker clears when the instance recovers to ACTIVE.
+    """
+    manager = create_instance_manager_with_config()
+    instance = create_test_instance(303, "test_loss", ["192.168.1.1", "192.168.1.2"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.ACTIVE)
+
+    reachable = [MagicMock(pod_ip="192.168.1.2", port="8080")]
+    with (
+        patch.object(manager, "_check_node_managers_status", return_value=(True, reachable)),
+        patch("motor.controller.core.instance_manager.NodeManagerApiClient") as mock_client_cls,
+    ):
+        mock_client_cls.stop.return_value = True
+
+        manager._handle_inactive(InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
+        assert mock_client_cls.stop.call_count == 1
+        mock_client_cls.stop.assert_called_once_with(reachable[0])
+
+        # second episode round in the same episode: deduped
+        manager._handle_inactive(InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
+        assert mock_client_cls.stop.call_count == 1
+
+        # instance recovers (INACTIVE -> ACTIVE via _handle_active)
+        manager._handle_active(InsStatus.INACTIVE, InsConditionEvent.INSTANCE_NORMAL, instance)
+
+        # a new loss episode dispatches again
+        manager._handle_inactive(InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
+        assert mock_client_cls.stop.call_count == 2
+
+
+def test_partial_loss_is_deferred_during_scale_down_transaction():
+    manager = create_instance_manager_with_config()
+    manager.enable_fault_tolerance = True
+    manager.enable_dp_scale_down = True
+    instance = create_test_instance(306, "test_ft_transaction", ["192.168.1.1", "192.168.1.2"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.ACTIVE)
+    store = get_ft_runtime_store()
+    store.clear()
+    store.transition(instance.id, phase=FtPhase.SCALING_DOWN)
+
+    try:
+        with (
+            patch.object(manager, "_check_node_managers_status") as check_status,
+            patch("motor.controller.core.instance_manager.NodeManagerApiClient") as mock_client_cls,
+        ):
+            manager._handle_inactive(InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
+
+        assert instance.status == InsStatus.ACTIVE
+        check_status.assert_not_called()
+        mock_client_cls.stop.assert_not_called()
+    finally:
+        store.clear()
+
+
+def test_abnormal_heartbeat_is_deferred_while_collecting_engine_ft_status():
+    manager = create_instance_manager_with_config()
+    manager.enable_fault_tolerance = True
+    manager.enable_dp_scale_down = True
+    instance = create_test_instance(308, "test_ft_collection", ["192.168.1.1"])
+    manager.add_instance(instance)
+    instance.update_instance_status(InsStatus.ACTIVE)
+    next(iter(instance.get_all_endpoints())).status = EndpointStatus.ABNORMAL
+    store = get_ft_runtime_store()
+    store.clear()
+    store.transition(instance.id, phase=FtPhase.WAITING_ENGINE_FAULT)
+
+    try:
+        assert manager._handle_state_transition(instance) is True
+        assert instance.status == InsStatus.ACTIVE
+    finally:
+        store.clear()
+
+
+def test_scaled_down_heartbeat_ignores_only_committed_ranks():
+    manager = create_instance_manager_with_config()
+    manager.enable_fault_tolerance = True
+    manager.enable_dp_scale_down = True
+    now = time.time()
+    instance = Instance(
+        id=307,
+        job_name="test_effective_topology",
+        model_name="test_model",
+        role="decode",
+        endpoints={
+            "192.168.1.1": {
+                0: Endpoint(id=0, ip="192.168.1.1", business_port="8000", hb_timestamp=now),
+            },
+            "192.168.1.2": {
+                1: Endpoint(id=1, ip="192.168.1.2", business_port="8001", hb_timestamp=0),
+            },
+        },
+    )
+    instance.update_instance_status(InsStatus.ACTIVE)
+    store = get_ft_runtime_store()
+    store.clear()
+    store.transition(instance.id, phase=FtPhase.SCALED_DOWN_RUNNING, dead_committed=[1])
+
+    try:
+        assert manager._is_effective_heartbeat_complete(instance) is True
+        instance.endpoints["192.168.1.1"][0].hb_timestamp = 0
+        assert manager._is_effective_heartbeat_complete(instance) is False
+    finally:
+        store.clear()
+
+
+def test_scaled_down_instance_does_not_use_legacy_survivor_shutdown():
+    manager = create_instance_manager_with_config()
+    manager.enable_fault_tolerance = True
+    manager.enable_dp_scale_down = True
+    instance = create_test_instance(308, "test_ft_survivor", ["192.168.1.1", "192.168.1.2"])
+    reachable = [MagicMock(pod_ip="192.168.1.2", port="8080")]
+    store = get_ft_runtime_store()
+    store.clear()
+    store.transition(instance.id, phase=FtPhase.SCALED_DOWN_RUNNING, dead_committed=[1])
+
+    try:
+        with patch("motor.controller.core.instance_manager.NodeManagerApiClient") as mock_client_cls:
+            manager._dispatch_partial_loss_shutdown(instance, reachable)
+        mock_client_cls.stop.assert_not_called()
+    finally:
+        store.clear()
+
+
+def test_disabled_dp_scale_down_bypasses_all_partial_loss_runtime_hooks():
+    manager = create_instance_manager_with_config()
+    manager.enable_fault_tolerance = True
+    manager.enable_dp_scale_down = False
+    instance = create_test_instance(309, "test_baseline", ["192.168.1.1"])
+    reachable = [MagicMock(pod_ip="192.168.1.1", port="8080")]
+
+    with (
+        patch("motor.controller.core.instance_manager.partial_loss_policy") as policy,
+        patch.object(manager, "_check_node_managers_status", return_value=(True, reachable)),
+        patch("motor.controller.core.instance_manager.NodeManagerApiClient") as mock_client_cls,
+    ):
+        manager._is_effective_heartbeat_complete(instance)
+        manager._handle_inactive(InsStatus.ACTIVE, InsConditionEvent.INSTANCE_HEARTBEAT_TIMEOUT, instance)
+
+    policy.assert_not_called()
+    mock_client_cls.stop.assert_called_once_with(reachable[0])

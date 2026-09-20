@@ -10,11 +10,22 @@
 
 建议在正式部署前先阅读上述文档，按文档完成环境准备与配置后再使用本目录中的工具进行部署。
 
-## deploy.py 使用方法
+## 部署入口
+
+| 运行环境 | 入口 |
+|----------|------|
+| Kubernetes | `python3 deploy.py` |
+| Docker | `python3 docker_deploy.py` |
+| Slurm + Apptainer | `python3 slurm_deploy.py` |
+
+Slurm 的完整参数和共享文件系统要求见
+[Slurm 服务部署](../../docs/zh/user_guide/deployment/slurm/service_deployment.md)。
+
+## deploy.py使用方法
 
 ### 参数说明
 
-Motor**服务部署**参数说明
+MindIE Motor服务部署参数说明如下所示：
 
 | 参数 | 简写 | 说明 |
 |------|------|------|
@@ -180,7 +191,63 @@ Node selector 字段均为 JSON 对象。自定义标签会与 deployer 根据 `
 
 非 TTY（脚本/CI）场景按 `N` 处理。建议 NodePort 范围：`30000-32767`。
 
+同一 namespace 下由本服务自己占用的端口不算冲突，因此重复部署与 `--update_instance_num` 扩缩容不会被误判。InferServiceSet 模式下 CRD 会把 Service 重命名为 `{service_name}-{InferServiceSet 名}-{索引}-{role}`，该命名同样识别为本服务自有端口。
+
 说明：交互 remap 只修改本次部署使用的 `output_yamls`，**不会**自动回写 `user_config.json`。若需要把新端口持久化到配置里，请手动同步修改 `motor_deploy_config` 中对应的 `*_node_port` 字段。
+
+### vLLM Render Sidecar 配置
+
+vLLM Render 通过 `user_config.json` 中的 `motor_coordinator_config.render_config` 进行配置：
+
+```json
+{
+  "motor_coordinator_config": {
+    "render_config": {
+      "enable": true,
+      "endpoint": {
+        "host": "127.0.0.1",
+        "port": 8100
+      },
+      "timeout_ms": 5000,
+      "renderer_num_workers": 4,
+      "image_name": "vllm-render-cpu:v0.25.0-arm64"
+    }
+  }
+}
+```
+
+Deployer 会将 Render Sidecar 添加到 Coordinator Pod，并从当前 vLLM Engine 配置读取模型信息。`renderer_num_workers`
+控制 Render worker 数量，默认值为 `4`；`image_name` 指定独立 CPU 镜像，为空时复用服务镜像、只读挂载 Ascend
+驱动库且不申请 NPU。启用 `kv_cache_affinity` 调度时建议同时开启 Render，以复用同一份 prompt token ID。
+
+使用限制：
+
+- Render 镜像需同时提供 Render 和 Derender 接口。非流式请求要求 vLLM >= 0.24.0，流式请求要求 vLLM >= 0.27.0。
+- 非流式 Chat Completions 和 Completions 支持完整 Token In/Token Out；流式 Chat Completions 及 Handoff、Union 下的单/多 prompt Completions 支持完整链路。
+- 单 prompt 重调度继续使用 token-only replay；多 prompt 已输出后的逐 prompt replay、Trigger 多 prompt、SGLang 和本地 tokenizer 沿用原有边界。
+- Render 不可用、超时或接口不支持时回退本地 tokenizer；请求校验错误（400/422，以及带结构化错误响应的 404）和 Derender 失败直接返回客户端。
+- 流式 Derender 按 chunk 无状态调用；长 prompt 或高并发场景需评估 Sidecar 的 CPU 与通信开销。
+
+数据混淆权重可通过 `motor_coordinator_config.token_obfuscation_config.enable=true` 开启 token 混淆。
+`vocab_size` 与 `token_white_list` 都没有内置默认值：`vocab_size` 未配置时由 Coordinator 从被服务权重目录的
+`config.json` 自动读取（多模态取 `text_config.vocab_size`，可用 `model_path` 指定目录），显式配置优先；
+`token_white_list` 必须按离线权重混淆参数显式配置（Qwen3-32B /
+Qwen3-VL 验证权重使用的 37 个白名单 token 见 [数据混淆推理（PMCC）](../../docs/zh/user_guide/features/data_obfuscation.md)，也可从混淆权重目录的
+`obf_config.json` 中抄录）；`seed_content` 默认留空，开启时必须通过受控配置显式注入。
+Seed 可用于还原词表置换，必须与混淆权重同权限保管，禁止提交到代码仓库或写入日志。
+开启后支持流式和非流式 vLLM Render token-only 链路；Render、混淆或 token-only endpoint 失败时请求直接失败，
+不回退原生 OpenAI 路径。
+
+多模态数据混淆权重还可通过 `motor_coordinator_config.token_obfuscation_config.image_config.enable=true`
+开启图像混淆：Coordinator 在 Render 返回后，对 `features.kwargs_data` 中每个模态的张量载荷调用 SDK 的
+`image_render_obf`，将混淆后的绑定重新编码后转发给引擎（与 token 混淆共用 `seed_content`，要求 render 已开启）。
+几何参数（`patch_size` / `merge_size` / `longest_edge` / `shortest_edge` / `temporal_patch_size`）**可不配置**：
+未配置时 Coordinator 从被服务权重目录的 `preprocessor_config.json` 自动读取（目录取自
+`motor_engine_*_config.engine_config.model`，也可用 `image_config.model_path` 显式指定）；显式配置的值优先。
+这些值与权重混淆时使用的不一致会导致 SDK 只告警并原样返回（即请求未混淆），因此修改权重来源后需确认日志中
+无 `pixel_values D=... != expected ...` 告警。注意：`vocab_size` 与 `token_white_list` 仍需显式配置
+（模型目录中无记录）。SDK 报错或返回格式不符时请求失败（fail closed）；
+图像混淆不依赖客户端图片是内联 base64 还是远程 URL（Render 已统一取回并张量化）。
 
 ### env.json
 
@@ -206,34 +273,13 @@ Node selector 字段均为 JSON 对象。自定义标签会与 deployer 根据 `
 
 | 参数 | 自动管理方式 |
 |------|-------------|
-| `data-parallel-address` | Controller 根据组装结果确定 master DP 节点 IP，通过 `StartCmdMsg.master_dp_ip` → `--master-dp-ip` 传入 EngineServer |
-| `data-parallel-rank` | 由 Endpoint ID 决定，NodeManager Daemon 以 `--dp-rank` 传入 EngineServer |
-| `node-rank` | Controller 按 NodeManager 注册先后顺序分配（先注册 = 主节点 rank 0），通过 `StartCmdMsg.node_rank` → `--node-rank` 传入 EngineServer |
-| `master-addr` | EngineServer 在检测到跨节点 PCP/PP 模式（`nnodes > 1` 且 `master-port` 存在）时，自动将 `master-dp-ip` 作为 `--master-addr` 注入 vLLM |
-| `headless` | EngineServer 在跨节点 PCP/PP 模式下，对 `node-rank != 0` 的从节点自动追加 `--headless` |
+| `data-parallel-address` | Controller 根据组装结果确定 master DP 节点 IP，通过 `StartCmdMsg.master_dp_ip` 传给 Node Manager；vLLM Adapter 生成原生参数 |
+| `data-parallel-rank` | 由 Endpoint ID 决定，Node Manager 的 vLLM Adapter 直接生成原生参数 |
+| `node-rank` | Controller 按 Node Manager 注册先后顺序分配（先注册 = 主节点 rank 0），通过 `StartCmdMsg.node_rank` 传给 vLLM Adapter |
+| `master-addr` | vLLM Adapter 检测到跨节点 PCP/PP 模式（`nnodes > 1` 且 `master-port` 存在）时，自动将 `master-dp-ip` 作为 `--master-addr` 注入原生 vLLM 命令 |
+| `headless` | vLLM Adapter 在跨节点 PCP/PP 模式下，对 `node-rank != 0` 的从节点自动追加 `--headless` |
 
-> **注意**：跨节点 PCP / Prefill 跨机 PP 场景下，用户仅需在 `engine_config` 中配置 `nnodes` 和 `master-port`，**不要**手写 `master-addr` / `node-rank`（由运行时注入）。当前不支持同一实例内 `data_parallel_size > 1` 且 `nnodes > 1`。
+>[!NOTE]说明
+>跨节点 PCP/PP 场景下，用户仅需在 `engine_config` 中配置 `nnodes` 和 `master-port`，其余参数由 Motor 自动处理。当前不支持同一实例内 `data_parallel_size > 1` 且 `nnodes > 1`。
 
-### 跨机 PP 最小 `engine_config` 示例（Prefill）
-
-以 Prefill `TP=16, PP=2, nnodes=2`（每节点 16 卡）为例，手写或经 `vllm_to_motor` 生成后，相关字段如下：
-
-```json
-{
-  "data_parallel_size": 1,
-  "tensor_parallel_size": 16,
-  "pipeline_parallel_size": 2,
-  "nnodes": 2,
-  "master-port": 7060
-}
-```
-
-说明：
-
-- `nnodes` / `master-port`：用户（或 Deployer）写入；rendezvous 用。
-- `master-addr` / `node-rank` / `headless`：Motor 按上表自动注入，配置里不要写死。
-- 使用 `general_config` 从 vLLM 脚本转换时，若脚本中 `tp*pp` 跨多机，Deployer 会自动补上 `nnodes` 与默认 `master-port`（7060）。
-
-CLI 参数与 `engine_config` 键名的完整映射关系详见：
-
-👉 **[CLI 参数与 engine_config 映射指南](CLI 参数完整定义与校验见 `motor/config/endpoint.py` 中 `EndpointConfig.parse_cli_args`)**
+CLI 参数与 `engine_config` 键名的完整映射关系详见 [vLLM 原生配置适配器](../../motor/node_manager/core/services/native_engine/backends/vllm/config.py) 中的 `VLLMConfig`。

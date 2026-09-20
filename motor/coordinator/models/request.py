@@ -17,6 +17,7 @@ import anyio
 
 from motor.common.resources.instance import PDRole
 from motor.coordinator.domain.scheduling_constraint import SchedulingConstraint
+from motor.coordinator.render.models import TokenizedRequest
 from motor.coordinator.tracer.tracing import TraceObj
 from motor.coordinator.models.constants import OpenAIField
 from motor.coordinator.domain.agent_hint import AgentHintInfo
@@ -54,16 +55,28 @@ class RequestInfo(BaseModel):
     req_len: int = Field(..., description="Request body length")
     token_ids: list[int] | None = Field(
         default=None,
-        description="Prompt token ids tokenized once at routing (KV affinity); reused for "
-        "prefill load accounting so load and affinity share the same token unit",
+        description="Prompt token ids tokenized once before routing; reused for context budgeting, "
+        "prefill load accounting, and KV affinity",
+    )
+    engine_token_ids: list[int] | None = Field(
+        default=None,
+        exclude=True,
+        description="Obfuscated prompt token ids used by the engine and KV Conductor",
+    )
+    tokenized_requests: list[TokenizedRequest] = Field(
+        default_factory=list,
+        exclude=True,
+        description="Per-prompt Render results; one item for Chat and scalar Completion requests",
     )
     kv_affinity_debug: dict | None = Field(
         default=None,
         exclude=True,
-        description="Per-endpoint (matched_tokens, load_cost, prefill_cost) cached by the "
-        "kv_cache_affinity policy at selection; the worker forwards prefill_cost for the "
-        "scheduler's global fresh-load re-rank and logs matched/load for the committed endpoint. "
-        "Keyed by (instance_id, endpoint_id) tuples, so excluded from serialization.",
+        description="Per-endpoint (matched_tokens, load_cost, prefill_cost, tier_hit_tokens) "
+        "cached by the kv_cache_affinity policy at selection; tier_hit_tokens is "
+        "(hbm, cpu, disk) exclusive hit token counts when available. The worker forwards "
+        "prefill_cost for the scheduler's global fresh-load re-rank and logs matched/tier/load "
+        "for the committed endpoint. Keyed by (instance_id, endpoint_id) tuples, so excluded "
+        "from serialization.",
     )
     api: str = Field(..., description="API need to be forwarded")
     entry_api: str = Field(
@@ -89,6 +102,11 @@ class RequestInfo(BaseModel):
     _p_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
     _d_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
     _e_cancel_scope: anyio.CancelScope | None = PrivateAttr(default=None)
+    # Bound UnifiedPD trigger attempt; looked up by the Worker metaserver callback.
+    _trigger_attempt: object | None = PrivateAttr(default=None)
+    _trigger_batch_active: bool = PrivateAttr(default=False)
+    _trigger_batch_index: int | None = PrivateAttr(default=None)
+    _token_obfuscation_service: object | None = PrivateAttr(default=None)
     prompt_tokens_details: dict = Field(default={}, description="prefill prompt_tokens_details")
     prompt_token_ids: list = Field(default=[], description="prefill prompt_token_ids")
     cached_token_ids: list = Field(default=[], description="Cached token_ids")

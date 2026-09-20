@@ -9,7 +9,7 @@
 # See the Mulan PSL v2 for more details.
 
 """
-CoordinatorDaemon: unified process management for Mgmt, Scheduler, Infer.
+CoordinatorDaemon: unified process management for Mgmt, Obs, Infer.
 """
 
 from __future__ import annotations
@@ -17,12 +17,12 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
-import time
 
 from motor.config.coordinator import (
     CoordinatorConfig,
     ROLE_HEARTBEAT_INTERVAL_SEC,
     ROLE_HEARTBEAT_STALE_SEC,
+    ROLE_SHM_ISOLATED,
     ROLE_SHM_MASTER,
     ROLE_SHM_NAME,
     ROLE_SHM_STANDBY,
@@ -33,7 +33,6 @@ from motor.coordinator.process.constants import (
     PROCESS_KEY_INFERENCE,
     PROCESS_KEY_MGMT,
     PROCESS_KEY_OBS,
-    PROCESS_KEY_SCHEDULER,
     STOP_ORDER,
 )
 from motor.coordinator.process.inference_manager import (
@@ -42,7 +41,6 @@ from motor.coordinator.process.inference_manager import (
 )
 from motor.coordinator.process.mgmt_manager import MgmtProcessManager
 from motor.coordinator.process.obs_manager import ObsProcessManager
-from motor.coordinator.process.scheduler_manager import SchedulerProcessManager
 from motor.coordinator.daemon.role_shm_holder import RoleShmHolder
 from motor.common.standby.standby_manager import COORDINATOR_REPORT_EVENT_KEY, StandbyManager
 from motor.common.logger import get_logger
@@ -50,10 +48,14 @@ from motor.common.logger import get_logger
 logger = get_logger(__name__)
 
 
-class CoordinatorDaemon:
-    """Coordinator daemon: starts and monitors Mgmt / Scheduler / Infer processes.
+def _in_kubernetes() -> bool:
+    return bool(os.getenv("KUBERNETES_SERVICE_HOST") or os.getenv("POD_NAMESPACE"))
 
-    Scheduler and Mgmt run on both master and standby (Scheduler first so Mgmt can connect).
+
+class CoordinatorDaemon:
+    """Coordinator daemon: starts and monitors Mgmt / Obs / Infer processes.
+
+    Mgmt and Obs run on both master and standby (Mgmt binds ROUTER/PUB and creates SHM).
     With master/standby enabled: only Infer is started on master and stopped on standby
     (on_become_master / on_become_standby). Role shm is created by Daemon; role byte is written
     in on_role_changed callback so StandbyManager stays shm-agnostic (controller does not use shm).
@@ -96,19 +98,33 @@ class CoordinatorDaemon:
                 # Initial role standby so Mgmt does not report master until etcd lock is acquired.
                 self._write_role_shm_byte(ROLE_SHM_STANDBY)
 
-        # Scheduler first (both master and standby), then Mgmt, then Obs, so Mgmt connect() succeeds.
-        self._start_processes([PROCESS_KEY_SCHEDULER, PROCESS_KEY_MGMT, PROCESS_KEY_OBS])
+        # Mgmt first so ROUTER/PUB/SHM exist before Obs/Infer connect.
+        # Keep InferenceWorkers up on standby so promotion can go Ready quickly.
+        # Standby readiness stays 0/1; only master is 1/1.
+        self._start_processes([PROCESS_KEY_MGMT, PROCESS_KEY_OBS, PROCESS_KEY_INFERENCE])
 
         if self.config.standby_config.enable_master_standby:
+            # Deployed config still has ttl=15 / interval=5. That is the 30s flake:
+            # old master is 503'd out before the standby can take the lock, so
+            # kube-proxy has no Ready endpoint when the client fires.
+            sc = self.config.standby_config
+            if sc.master_lock_ttl > 8:
+                logger.warning(
+                    "Coordinator master_lock_ttl=%ss is too long for 30s recovery; using 8s",
+                    sc.master_lock_ttl,
+                )
+                sc.master_lock_ttl = 8
+            sc.master_standby_check_interval = min(sc.master_standby_check_interval, 2)
             self._standby_manager = StandbyManager(self.config)
             self._standby_manager.start(
                 on_become_master=self._on_become_master,
                 on_become_standby=self._on_become_standby,
                 report_event_key=COORDINATOR_REPORT_EVENT_KEY,
+                on_lock_unhealthy=self._on_master_lock_unhealthy,
+                on_lock_healthy=self._on_master_lock_healthy,
             )
             get_supervised_keys = self._get_supervised_keys
         else:
-            self._start_processes([PROCESS_KEY_INFERENCE])
             get_supervised_keys = None
 
         self._supervisor = SubprocessSupervisor(
@@ -147,10 +163,37 @@ class CoordinatorDaemon:
             self._report_coordinator_to_slave_event()
 
     def _on_become_standby(self) -> None:
-        """Called when this node becomes standby: write role shm (if any), then stop Inference only."""
+        """A running master lost the etcd lock (NIC isolation or etcd unreachable).
+
+        On Kubernetes, exit so kubelet drops this pod from the inference Service.
+        Outside Kubernetes there is no kubelet restart, so stay up as standby.
+        """
+        if _in_kubernetes():
+            if self._role_shm_holder is not None:
+                self._write_role_shm_byte(ROLE_SHM_ISOLATED)
+            logger.warning(
+                "Master lock lost; exiting so kubelet removes this pod from the inference Service immediately"
+            )
+            os._exit(1)
         if self._role_shm_holder is not None:
             self._write_role_shm_byte(ROLE_SHM_STANDBY)
-        self._stop_all_processes(exclude_processes={PROCESS_KEY_MGMT, PROCESS_KEY_OBS, PROCESS_KEY_SCHEDULER})
+        logger.warning("Master lock lost; remaining as standby outside Kubernetes")
+
+    def _on_master_lock_unhealthy(self) -> None:
+        """First renew miss: fail readiness now as an early Service-removal signal.
+
+        Do not exit yet — a single transient miss may recover on the retry. If the
+        renew ultimately fails, _on_become_standby exits the process.
+        """
+        if self._role_shm_holder is not None:
+            self._write_role_shm_byte(ROLE_SHM_ISOLATED)
+        logger.warning("Master lock renew missed; marking Coordinator not ready")
+
+    def _on_master_lock_healthy(self) -> None:
+        """etcd renew recovered before the lock was given up."""
+        if self._role_shm_holder is not None:
+            self._write_role_shm_byte(ROLE_SHM_MASTER)
+        logger.info("Master lock renew recovered; marking Coordinator ready")
 
     def _report_coordinator_to_slave_event(self) -> None:
         """Report coordinator master-to-slave event to controller observability."""
@@ -168,9 +211,7 @@ class CoordinatorDaemon:
         ControllerApiClient.report_alarms(event.model_dump(mode="json"))
 
     def _initialize_process_managers(self) -> None:
-        """Initialize Mgmt / Scheduler / Infer process managers."""
-        self._process_managers[PROCESS_KEY_SCHEDULER] = SchedulerProcessManager(self.config)
-
+        """Initialize Mgmt / Obs / Infer process managers."""
         self._process_managers[PROCESS_KEY_MGMT] = MgmtProcessManager(self.config)
 
         self._process_managers[PROCESS_KEY_OBS] = ObsProcessManager(self.config)
@@ -187,7 +228,7 @@ class CoordinatorDaemon:
             logger.warning("Shared socket not available, inference workers disabled")
 
     def _start_processes(self, names: list[str]) -> None:
-        """Start given process managers in order; sleep(2) after Scheduler."""
+        """Start given process managers in order."""
         for name in names:
             mgr = self._process_managers.get(name)
             if mgr is None:
@@ -202,11 +243,9 @@ class CoordinatorDaemon:
             except Exception as e:
                 logger.error("Error starting %s: %s", name, e, exc_info=True)
                 continue
-            if name == PROCESS_KEY_SCHEDULER:
-                time.sleep(2)
 
     def _stop_all_processes(self, exclude_processes: set[str] | None = None) -> None:
-        """Stop in order: Infer -> Mgmt -> Scheduler. Skip specified processes when exclude is set."""
+        """Stop in order: Infer -> Obs -> Mgmt. Skip specified processes when exclude is set."""
         exclude = exclude_processes or set()
         for name in STOP_ORDER:
             if name in exclude:
@@ -245,4 +284,4 @@ class CoordinatorDaemon:
             return set(self._process_managers)
         if self._standby_manager is not None and self._standby_manager.is_master():
             return set(self._process_managers)
-        return {PROCESS_KEY_SCHEDULER, PROCESS_KEY_MGMT, PROCESS_KEY_OBS}
+        return {PROCESS_KEY_MGMT, PROCESS_KEY_OBS, PROCESS_KEY_INFERENCE}

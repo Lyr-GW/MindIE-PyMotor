@@ -14,10 +14,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from motor.common.resources.instance import PDRole
-from motor.config.endpoint import EndpointConfig
+from motor.config.endpoint import EndpointConfig, EngineConfig
 from motor.config.tls_config import TLSConfig
 from motor.node_manager.core.services.native_engine.backends.base import build_endpoint_config
-from motor.node_manager.core.services.native_engine.backends.sglang.backend import SGLangBackend
+from motor.node_manager.core.services.native_engine.backends.sglang.backend import (
+    SGLANG_ZBAL_BOOTSTRAP_PORT,
+    SGLANG_ZBAL_BOOTSTRAP_URL_ENV,
+    SGLangBackend,
+)
 from motor.node_manager.core.services.native_engine.backends.vllm.backend import VllmBackend
 from motor.node_manager.core.services.native_engine.factory import get_backend
 from motor.node_manager.core.services.native_engine.models import LaunchContext
@@ -27,23 +31,29 @@ def _context(
     *,
     role: PDRole = PDRole.ROLE_P,
     headless: bool = False,
+    dp_rank: int = 2,
+    environment: dict | None = None,
+    snapshot_metadata: str | None = None,
+    master_dp_ip: str | None = "10.0.0.1",
+    engine_config_overrides: dict | None = None,
 ) -> LaunchContext:
     return LaunchContext(
         role=role,
         instance_id=7,
-        dp_rank=2,
+        dp_rank=dp_rank,
         node_rank=1,
         host="10.0.0.2",
         business_port=8002,
-        mgmt_port=9002,
         config_path="/config/user_config.json",
-        master_dp_ip="10.0.0.1",
+        master_dp_ip=master_dp_ip,
         kv_port=5002,
         lookup_rpc_port=6002,
         dp_rpc_port=7002,
         d2d_peer_ips=("10.0.0.3",),
-        environment={"VLLM_HOST_IP": "10.0.0.2"},
+        environment=environment or {"VLLM_HOST_IP": "10.0.0.2"},
         headless=headless,
+        snapshot_metadata=snapshot_metadata,
+        engine_config_overrides=engine_config_overrides or {},
     )
 
 
@@ -52,6 +62,8 @@ def _endpoint(
     engine_type: str,
     role: str,
     connector: str | None = None,
+    enable_virtual_inference: bool = False,
+    npu_usage_threshold: int = 3,
 ):
     engine_config = {}
     if connector is not None:
@@ -59,6 +71,7 @@ def _endpoint(
     return SimpleNamespace(
         engine_type=engine_type,
         role=role,
+        snapshot_metadata=None,
         deploy_config=SimpleNamespace(
             engine_config=engine_config,
             dispatch_profile=None,
@@ -66,6 +79,8 @@ def _endpoint(
                 health_collector_timeout=5,
                 health_collector_timeout_retry_attempts=3,
                 startup_timeout=1800,
+                enable_virtual_inference=enable_virtual_inference,
+                npu_usage_threshold=npu_usage_threshold,
             ),
             infer_tls_config=None,
         ),
@@ -121,8 +136,7 @@ def test_backend_prepares_command_and_probe_from_one_endpoint_config():
     build_endpoint.assert_called_once_with(context, "vllm")
     assert launch_spec.command.argv == ("vllm", "serve", "--model", "/models/glm-test")
     assert launch_spec.probe.path == "/health"
-    native_config.convert.assert_called_once_with()
-    native_config.validate.assert_called_once_with()
+    native_config.get_cli_args.assert_called_once_with()
 
 
 @pytest.mark.parametrize(
@@ -164,7 +178,6 @@ def test_vllm_backend_accepts_multi_connector_with_handoff_transport():
 @pytest.mark.parametrize(
     "connector,profile",
     [
-        ("MooncakeLayerwiseConnector", "trigger"),
         ("UnknownConnector", "unknown"),
     ],
 )
@@ -181,7 +194,17 @@ def test_vllm_backend_rejects_non_handoff_pd_connector(connector, profile):
         VllmBackend().prepare(context)
 
 
-def test_vllm_backend_rejects_explicit_trigger_profile():
+def test_vllm_backend_accepts_layerwise_connector():
+    context = _context()
+    spec = _build_with_config(
+        VllmBackend(),
+        context,
+        _endpoint(engine_type="vllm", role="prefill", connector="MooncakeLayerwiseConnector"),
+    )
+    assert spec.argv[:2] == ("vllm", "serve")
+
+
+def test_vllm_backend_accepts_explicit_trigger_profile():
     context = _context()
     endpoint = _endpoint(
         engine_type="vllm",
@@ -190,13 +213,8 @@ def test_vllm_backend_rejects_explicit_trigger_profile():
     )
     endpoint.deploy_config.dispatch_profile = "trigger"
 
-    with (
-        patch(
-            "motor.node_manager.core.services.native_engine.backends.base.build_endpoint_config", return_value=endpoint
-        ),
-        pytest.raises(ValueError, match="resolved dispatch profile is trigger"),
-    ):
-        VllmBackend().prepare(context)
+    spec = _build_with_config(VllmBackend(), context, endpoint)
+    assert spec.argv[:2] == ("vllm", "serve")
 
 
 def test_vllm_backend_allows_union_without_kv_connector():
@@ -236,6 +254,132 @@ def test_sglang_backend_rejects_encode_before_loading_config():
     build_endpoint.assert_not_called()
 
 
+# ------------------------------------------------------------------
+# SGLang generative health endpoint switch
+# ------------------------------------------------------------------
+
+
+def _sglang_prepare(*, dp_rank: int = 0, headless: bool = False, env=None, master_dp_ip: str | None = "10.0.0.1"):
+    context = _context(
+        role=PDRole.ROLE_D,
+        dp_rank=dp_rank,
+        headless=headless,
+        environment=env,
+        master_dp_ip=master_dp_ip,
+    )
+    endpoint = _endpoint(engine_type="sglang", role="decode")
+    return _prepare_with_config(SGLangBackend(), context, endpoint)
+
+
+@pytest.mark.parametrize(
+    "dp_rank, headless",
+    [
+        (0, False),
+        (1, False),
+        (0, True),
+    ],
+    ids=["dp0", "non_dp0", "headless"],
+)
+def test_sglang_backend_generation_env_always_true(dp_rank, headless):
+    """Motor never runs virtual inference for SGLang: the generative /health
+    switch is always pinned to true regardless of DP rank or headless.
+    """
+    spec = _sglang_prepare(dp_rank=dp_rank, headless=headless)
+
+    assert spec.command.env["SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION"] == "true"
+
+
+def test_sglang_backend_overrides_external_generation_env():
+    """The generative /health switch is pinned true, overriding any external value."""
+    external_env = {"VLLM_HOST_IP": "10.0.0.2", "SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false"}
+    spec = _sglang_prepare(env=external_env)
+
+    assert spec.command.env["SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION"] == "true"
+    assert spec.command.env["VLLM_HOST_IP"] == "10.0.0.2"
+
+
+def test_sglang_generation_env_true_even_with_non_error_log_level():
+    """Log-level gate is vLLM-only; SGLang generative /health stays forced on."""
+    spec = _sglang_prepare(env={"ASCEND_GLOBAL_LOG_LEVEL": "1"})
+
+    assert spec.command.env["SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION"] == "true"
+    assert spec.probe.path == "/health"
+
+
+def test_sglang_backend_probe_stays_lightweight_health():
+    spec = _sglang_prepare()
+
+    assert spec.probe.path == "/health"
+
+
+def test_sglang_backend_pins_generation_env_when_deploy_config_missing():
+    """Generative /health must stay pinned even if a stub/base path omits deploy_config."""
+    from motor.node_manager.core.services.native_engine.models import CommandSpec, LaunchSpec, ProbeSpec
+
+    context = _context(role=PDRole.ROLE_D, dp_rank=0)
+    base_spec = LaunchSpec(
+        command=CommandSpec(
+            argv=("python3", "-m", "sglang.launch_server"),
+            env={"SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION": "false", "KEEP": "1"},
+        ),
+        probe=ProbeSpec(path="/health", timeout_seconds=5.0, startup_timeout_seconds=1800.0),
+        deploy_config=None,
+    )
+    backend = SGLangBackend()
+    with patch(
+        "motor.node_manager.core.services.native_engine.backends.base.BaseNativeEngineBackend.prepare",
+        return_value=base_spec,
+    ):
+        spec = backend.prepare(context)
+
+    assert spec.deploy_config is None
+    assert spec.command.env["SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION"] == "true"
+    assert spec.command.env["KEEP"] == "1"
+    assert spec.probe.path == "/health"
+
+
+# ------------------------------------------------------------------
+# SGLang ZBAL bootstrap URL (PP rendezvous)
+# ------------------------------------------------------------------
+
+
+def test_sglang_backend_injects_zbal_bootstrap_url_from_master_dp_ip():
+    """PP ranks must rendezvous on Controller master_dp_ip, not each pod POD_IP."""
+    spec = _sglang_prepare(master_dp_ip="192.168.1.100")
+
+    assert spec.command.env[SGLANG_ZBAL_BOOTSTRAP_URL_ENV] == f"tcp://192.168.1.100:{SGLANG_ZBAL_BOOTSTRAP_PORT}"
+
+
+def test_sglang_backend_overrides_static_zbal_bootstrap_url():
+    """Static env.json POD_IP value must not win over Controller master_dp_ip."""
+    external_env = {
+        "VLLM_HOST_IP": "10.0.0.2",
+        SGLANG_ZBAL_BOOTSTRAP_URL_ENV: "tcp://10.0.0.2:24691",
+    }
+    spec = _sglang_prepare(env=external_env, master_dp_ip="192.168.1.100")
+
+    assert spec.command.env[SGLANG_ZBAL_BOOTSTRAP_URL_ENV] == "tcp://192.168.1.100:24691"
+
+
+def test_sglang_backend_skips_zbal_bootstrap_url_without_master_dp_ip():
+    external_env = {SGLANG_ZBAL_BOOTSTRAP_URL_ENV: "tcp://10.0.0.2:24691"}
+    spec = _sglang_prepare(env=external_env, master_dp_ip=None)
+
+    assert spec.command.env[SGLANG_ZBAL_BOOTSTRAP_URL_ENV] == "tcp://10.0.0.2:24691"
+
+
+def test_vllm_backend_does_not_inject_sglang_zbal_bootstrap_url():
+    """ZBAL bootstrap is SGLang-only; vLLM must not inherit this env."""
+    context = _context(role=PDRole.ROLE_P, master_dp_ip="192.168.1.100")
+    spec = _prepare_with_config(
+        VllmBackend(),
+        context,
+        _endpoint(engine_type="vllm", role="prefill", connector="MooncakeConnectorV1"),
+    )
+
+    assert SGLANG_ZBAL_BOOTSTRAP_URL_ENV not in spec.command.env
+
+
 def test_get_backend_rejects_unknown_engine():
     with pytest.raises(ValueError, match="Unsupported engine type"):
         get_backend("unknown")
@@ -256,7 +400,75 @@ def testbuild_endpoint_config_maps_launch_context_without_cli_globals():
     assert endpoint_config.dp_rank == 2
     assert endpoint_config.node_rank == 1
     assert endpoint_config.d2d_peer_ips == "10.0.0.3"
-    assert endpoint_config.snapshot_metadata is None
+
+
+@pytest.mark.parametrize(
+    ("snapshot_metadata", "expected_enable_auto_checkpoint"),
+    [
+        ("/snapshot/metadata.json", True),
+        (None, False),
+    ],
+)
+def test_build_endpoint_config_enables_auto_checkpoint_from_snapshot_metadata(
+    snapshot_metadata, expected_enable_auto_checkpoint
+):
+    context = _context(snapshot_metadata=snapshot_metadata)
+
+    with (
+        patch.object(EndpointConfig, "validate"),
+        patch.object(EndpointConfig, "load_deploy_config"),
+    ):
+        endpoint_config = build_endpoint_config(context, "vllm")
+
+    assert endpoint_config.snapshot_metadata == snapshot_metadata
+    assert endpoint_config.enable_auto_checkpoint is expected_enable_auto_checkpoint
+
+
+def _build_config_with_overrides(native_config, overrides):
+    engine_config = EngineConfig.from_dict(native_config)
+
+    def load_deploy_config(endpoint_config):
+        endpoint_config.deploy_config = SimpleNamespace(engine_config=engine_config)
+
+    with (
+        patch.object(EndpointConfig, "validate"),
+        patch.object(EndpointConfig, "load_deploy_config", autospec=True, side_effect=load_deploy_config),
+    ):
+        return build_endpoint_config(_context(engine_config_overrides=overrides), "vllm")
+
+
+def test_build_endpoint_config_merges_graph_reuse_overrides_without_losing_user_settings():
+    endpoint_config = _build_config_with_overrides(
+        {
+            "enforce-eager": True,
+            "compilation-config": {"cudagraph_mode": "FULL_AND_PIECEWISE", "level": 2},
+            "additional-config": {
+                "custom_option": "keep",
+                "ascend_compilation_config": {"enable_npugraph_ex": False, "enable_static_kernel": False},
+            },
+        },
+        {
+            "enforce_eager": False,
+            "compilation_config": {"cudagraph_mode": "FULL"},
+            "additional_config": {"ascend_compilation_config": {"enable_npugraph_ex": True}},
+        },
+    )
+    merged = endpoint_config.deploy_config.engine_config.configs
+    assert merged["enforce_eager"] is False
+    assert merged["compilation_config"] == {"cudagraph_mode": "FULL", "level": 2}
+    assert merged["additional_config"]["custom_option"] == "keep"
+    assert merged["additional_config"]["ascend_compilation_config"] == {
+        "enable_npugraph_ex": True,
+        "enable_static_kernel": False,
+    }
+
+
+def test_build_endpoint_config_rejects_non_object_native_config_required_for_graph_reuse():
+    with pytest.raises(ValueError, match="engine_config.compilation_config must be an object"):
+        _build_config_with_overrides(
+            {"compilation_config": "invalid"},
+            {"compilation_config": {"cudagraph_mode": "FULL"}},
+        )
 
 
 def test_backend_builds_native_health_probe_from_engine_config():
@@ -278,6 +490,20 @@ def test_backend_builds_native_health_probe_from_engine_config():
     assert probe.startup_timeout_seconds == 900
     assert probe.tls_config is tls_config
     assert probe.process_only is False
+
+
+def test_vllm_backend_uses_snapshot_health_probe():
+    context = _context(snapshot_metadata="/snapshot/metadata.json")
+    endpoint = _endpoint(
+        engine_type="vllm",
+        role="prefill",
+        connector="MooncakeConnectorV1",
+    )
+    endpoint.snapshot_metadata = context.snapshot_metadata
+
+    probe = _prepare_with_config(VllmBackend(), context, endpoint).probe
+
+    assert probe.path == "/snapshot/health"
 
 
 def test_headless_backend_uses_process_only_probe():

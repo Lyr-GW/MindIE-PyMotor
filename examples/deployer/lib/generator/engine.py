@@ -12,6 +12,7 @@ import lib.constant as C
 from lib.utils import (
     apply_node_selector_override,
     generate_unique_id,
+    get_pd_heterogeneous_chip_name,
     load_yaml,
     write_yaml,
     logger,
@@ -19,9 +20,11 @@ from lib.utils import (
     obtain_engine_instance_total,
     obtain_engine_e_instance_total,
     apply_volcano_queue_annotations,
+    get_config_key,
+    resolve_workload_image,
 )
 from lib.generator import k8s_utils
-from lib.generator.k8s_utils import set_engine_base_name, modify_sp_block_num
+from lib.generator.k8s_utils import set_engine_base_name, modify_sp_block_num, apply_additional_labels_annotations
 from lib.generator.storage import apply_storage_volumes, apply_dshm_size
 
 
@@ -31,17 +34,11 @@ def _pop_ring_controller_atlas_from_labels(labels):
 
 
 def _apply_a5_schedule_policy_annotation(template_metadata, hardware_type):
-    policy = C.A5_SCHEDULE_POLICY_BY_ACCELERATOR_TYPE.get(hardware_type)
-    if policy is None:
-        raise ValueError(
-            f"No huawei.com/schedule_policy mapping for A5 hardware_type '{hardware_type}'. "
-            f"Supported accelerator-type values: {list(C.A5_SCHEDULE_POLICY_BY_ACCELERATOR_TYPE.keys())}"
-        )
-    template_metadata.setdefault(C.ANNOTATIONS, {})[C.HUAWEI_SCHEDULE_POLICY_ANNOTATION] = policy
+    template_metadata.setdefault(C.ANNOTATIONS, {})[C.HUAWEI_SCHEDULE_POLICY_ANNOTATION] = C.A5_SCHEDULE_POLICY
     logger.info(
         "Applied A5 annotation %s=%s for hardware_type=%s",
         C.HUAWEI_SCHEDULE_POLICY_ANNOTATION,
-        policy,
+        C.A5_SCHEDULE_POLICY,
         hardware_type,
     )
 
@@ -68,11 +65,11 @@ def _append_a5_host_path_volumes(pod_spec, container):
 def apply_a5_dns_config(pod_spec, deploy_config):
     """Lower ndots so cluster FQDNs resolve directly without corporate search suffixes."""
     hardware_type = deploy_config.get(C.HARDWARE_TYPE) if deploy_config else None
-    if hardware_type not in C.HARDWARE_TYPE_950I_A5:
+    if hardware_type not in C.HARDWARE_TYPE_A5 and hardware_type not in C.HARDWARE_TYPE_A3:
         return
     pod_spec[C.DNS_CONFIG] = {C.DNS_OPTIONS: [{C.NAME: C.A5_DNS_NDOTS_OPTION, C.VALUE: C.A5_DNS_NDOTS_VALUE}]}
     logger.info(
-        "Applied A5 dnsConfig %s=%s for hardware_type=%s",
+        "Applied dnsConfig %s=%s for hardware_type=%s",
         C.A5_DNS_NDOTS_OPTION,
         C.A5_DNS_NDOTS_VALUE,
         hardware_type,
@@ -82,26 +79,17 @@ def apply_a5_dns_config(pod_spec, deploy_config):
 def apply_a5_engine_pod_config(pod_spec, container, deploy_config):
     """Apply A5-specific pod network and hostPath settings to engine pods."""
     hardware_type = deploy_config.get(C.HARDWARE_TYPE) if deploy_config else None
-    if hardware_type not in C.HARDWARE_TYPE_950I_A5:
+    if hardware_type not in C.HARDWARE_TYPE_A5 and hardware_type not in C.HARDWARE_TYPE_A3:
         return
-    _append_a5_host_path_volumes(pod_spec, container)
+    if hardware_type in C.HARDWARE_TYPE_A5:
+        _append_a5_host_path_volumes(pod_spec, container)
     apply_a5_dns_config(pod_spec, deploy_config)
-    logger.info("Applied A5 engine pod config for hardware_type=%s", hardware_type)
-
-
-def _apply_a5_inferservice_id_label(template_metadata, deploy_config, hardware_type):
-    if hardware_type not in ("850-SuperPod-Atlas-8", "950-SuperPod-Atlas-8"):
-        return
-    job_id = deploy_config.get(C.CONFIG_JOB_ID) if deploy_config else None
-    if not job_id:
-        logger.warning("job_id is missing in deploy config, skip applying A5 label %s", C.INFERSERVICE_ID_LABEL)
-        return
-    template_metadata.setdefault(C.LABELS, {})[C.INFERSERVICE_ID_LABEL] = job_id
+    logger.info("Applied engine pod config for hardware_type=%s", hardware_type)
 
 
 def apply_a5_workload(workload, deploy_config):
     hardware_type = deploy_config.get(C.HARDWARE_TYPE) if deploy_config else None
-    if hardware_type not in C.HARDWARE_TYPE_950I_A5:
+    if hardware_type not in C.HARDWARE_TYPE_A5:
         return
     template_section = workload.get(C.SPEC, {}).get(C.TEMPLATE)
     if template_section is not None:
@@ -111,7 +99,6 @@ def apply_a5_workload(workload, deploy_config):
         template_meta = workload.setdefault(C.METADATA, {})
     _pop_ring_controller_atlas_from_labels(template_meta.get(C.LABELS))
     _apply_a5_schedule_policy_annotation(template_meta, hardware_type)
-    _apply_a5_inferservice_id_label(template_meta, deploy_config, hardware_type)
 
 
 def update_engine_base_name(user_config):
@@ -125,6 +112,52 @@ def update_engine_base_name(user_config):
 
 def is_hybrid_deploy(deploy_config):
     return C.HYBRID_INSTANCES_NUM in deploy_config
+
+
+def _node_type_to_role(node_type):
+    return {
+        C.NODE_TYPE_E: C.ROLE_ENCODE,
+        C.NODE_TYPE_P: C.ROLE_PREFILL,
+        C.NODE_TYPE_D: C.ROLE_DECODE,
+        C.NODE_TYPE_U: C.ROLE_UNION,
+    }.get(node_type)
+
+
+def _is_controller_dp_scale_down_enabled(user_config):
+    controller_config = user_config.get(C.MOTOR_CONTROLLER_CONFIG) or {}
+    ft_config = controller_config.get(C.FAULT_TOLERANCE_CONFIG) or {}
+    if not isinstance(ft_config, dict):
+        return False
+    return ft_config.get(C.ENABLE_FAULT_TOLERANCE, True) in (True, 1) and ft_config.get(
+        C.ENABLE_DP_SCALE_DOWN, False
+    ) in (True, 1)
+
+
+def _is_engine_ft_enabled(user_config, role):
+    engine_key = {
+        C.ROLE_ENCODE: C.MOTOR_ENGINE_ENCODE_CONFIG,
+        C.ROLE_PREFILL: C.MOTOR_ENGINE_PREFILL_CONFIG,
+        C.ROLE_DECODE: C.MOTOR_ENGINE_DECODE_CONFIG,
+        C.ROLE_UNION: C.MOTOR_ENGINE_UNION_CONFIG,
+    }.get(role)
+    if not engine_key:
+        return False
+    engine_section = user_config.get(engine_key) or {}
+    native_engine_config = engine_section.get(C.ENGINE_CONFIG)
+    if not isinstance(native_engine_config, dict):
+        return False
+    return any(
+        native_engine_config.get(key) in (True, 1) for key in (C.ENABLE_FAULT_TOLERANCE, C.ENABLE_FAULT_TOLERANCE_KEBAB)
+    )
+
+
+def apply_engine_ft_labels(template, user_config, role):
+    """Let MindCluster reschedule a failed FT engine Pod instead of failing the whole instance."""
+    if not (_is_controller_dp_scale_down_enabled(user_config) and _is_engine_ft_enabled(user_config, role)):
+        return
+    labels = template.setdefault(C.METADATA, {}).setdefault(C.LABELS, {})
+    labels[C.FAULT_SCHEDULING_LABEL] = C.FAULT_SCHEDULING_EXTERNAL_FORCE_POD_FAILED
+    labels[C.POD_RESCHEDULING_LABEL] = C.POD_RESCHEDULING_ON
 
 
 def build_engine_env_items(role, deploy_config, job_name, include_kv_store=False):
@@ -192,7 +225,7 @@ def set_container_npu(container, npu_num, deploy_config=None):
     requests = container[C.RESOURCES].setdefault(C.REQUESTS, {})
     limits = container[C.RESOURCES].setdefault(C.LIMITS, {})
     hardware_type = deploy_config.get(C.HARDWARE_TYPE) if deploy_config else None
-    if hardware_type in C.HARDWARE_TYPE_950I_A5:
+    if hardware_type in C.HARDWARE_TYPE_A5:
         requests.pop(C.ASCEND_910_NPU_NUM, None)
         limits.pop(C.ASCEND_910_NPU_NUM, None)
         requests[C.ASCEND_950_NPU_NUM] = npu_num
@@ -217,45 +250,37 @@ def set_engine_npu(container, deploy_config, node_type):
 
 
 def apply_node_selector_by_hardware(pod_spec, hardware_type):
+    node_selector = pod_spec.setdefault(C.NODE_SELECTOR, {})
     if hardware_type in C.HARDWARE_TYPE_A2 or hardware_type in C.HARDWARE_TYPE_A3:
-        pod_spec[C.NODE_SELECTOR][C.ACCELERATOR] = C.ACCELERATOR_910
-    if hardware_type in C.HARDWARE_TYPE_950I_A5:
-        pod_spec[C.NODE_SELECTOR][C.ACCELERATOR] = C.ACCELERATOR_A5
-    pod_spec[C.NODE_SELECTOR][C.ACCELERATOR_TYPE] = k8s_utils.get_accelerator_type_from_cluster(hardware_type)
-
-
-def apply_pd_heterogeneous_node_selector(pod_spec, deploy_config, node_type):
-    if deploy_config.get(C.ENABLE_PD_HETEROGENEOUS) is not True:
+        # A2 and A3 share the same "accelerator" label, so accelerator-type is
+        # required to tell them apart and prevent cross-product P/D scheduling.
+        node_selector[C.ACCELERATOR] = C.ACCELERATOR_910
+        node_selector[C.ACCELERATOR_TYPE] = k8s_utils.get_accelerator_type_from_cluster(hardware_type)
         return
-    label_key = deploy_config.get(C.PD_HETEROGENEOUS_LABEL_KEY, C.DEFAULT_PD_HETEROGENEOUS_LABEL_KEY)
-    label_value_map = {
-        C.NODE_TYPE_P: deploy_config.get(
-            C.PD_HETEROGENEOUS_PREFILL_LABEL_VALUE, C.DEFAULT_PD_HETEROGENEOUS_PREFILL_VALUE
-        ),
-        C.NODE_TYPE_D: deploy_config.get(
-            C.PD_HETEROGENEOUS_DECODE_LABEL_VALUE, C.DEFAULT_PD_HETEROGENEOUS_DECODE_VALUE
-        ),
-    }
-    if node_type in label_value_map:
-        pod_spec[C.NODE_SELECTOR][label_key] = label_value_map[node_type]
-        logger.info(
-            "Applied PD heterogeneous node selector: node_type=%s, %s=%s",
-            node_type,
-            label_key,
-            label_value_map[node_type],
-        )
-    else:
-        logger.warning(
-            "PD heterogeneous enabled but unexpected node_type=%s, expected one of %s, node selector not applied",
-            node_type,
-            list(label_value_map.keys()),
-        )
+    # A5 uses accelerator=huawei-npu, which no A2/A3 node carries, so it needs
+    # no accelerator-type.
+    node_selector.pop(C.ACCELERATOR_TYPE, None)
+    if hardware_type in C.HARDWARE_TYPE_A5:
+        node_selector[C.ACCELERATOR] = C.ACCELERATOR_A5
+
+
+def apply_pd_heterogeneous_node_selector(pod_spec, user_config, node_type):
+    chip_name = get_pd_heterogeneous_chip_name(user_config, node_type)
+    if not chip_name:
+        return
+    pod_spec.setdefault(C.NODE_SELECTOR, {})[C.NPU_CHIP_NAME_LABEL] = chip_name
+    logger.info(
+        "Applied PD heterogeneous node selector: node_type=%s, %s=%s",
+        node_type,
+        C.NPU_CHIP_NAME_LABEL,
+        chip_name,
+    )
 
 
 # In certain cloud-based multi-tenant environments, machines in the same cluster
 # are often labeled with tenant-specific tags to support tenant-isolated
 # deployment of inference services.
-# Therefore, in addition to NPU node selectors such as
+# Therefore, in addition to hardware node selectors such as
 # "accelerator-type": "module-910b-8", user-defined custom node selectors are
 # also required.
 # These two selector sets are then merged to determine the final scheduling of
@@ -270,17 +295,18 @@ def apply_engine_node_selector_overrides(pod_spec, deploy_config, node_type):
     apply_node_selector_override(pod_spec, deploy_config, selector_key)
 
 
-def set_engine_node_selector(deployment_data, deploy_config, node_type):
+def set_engine_node_selector(deployment_data, user_config, node_type):
+    deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     modify_sp_block_num(deployment_data, node_type, deploy_config)
     hardware_type = deploy_config[C.HARDWARE_TYPE]
     pod_spec = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC]
     pod_spec[C.NODE_SELECTOR] = pod_spec.get(C.NODE_SELECTOR, {})
     apply_node_selector_by_hardware(pod_spec, hardware_type)
-    apply_pd_heterogeneous_node_selector(pod_spec, deploy_config, node_type)
+    apply_pd_heterogeneous_node_selector(pod_spec, user_config, node_type)
     apply_engine_node_selector_overrides(pod_spec, deploy_config, node_type)
 
 
-def set_weight_mount(pod_spec, container, weight_mount_path):
+def set_weight_mount(pod_spec, container, weight_mount_path, read_only=False):
     volume_found = False
     for volume in pod_spec.get(C.VOLUMES, []):
         if volume[C.NAME] == C.WEIGHT_MOUNT:
@@ -293,10 +319,15 @@ def set_weight_mount(pod_spec, container, weight_mount_path):
     for volume_mount in container.get(C.VOLUME_MOUNTS, []):
         if volume_mount[C.NAME] == C.WEIGHT_MOUNT:
             volume_mount[C.MOUNT_PATH] = weight_mount_path
+            if read_only:
+                volume_mount[C.K8S_READ_ONLY] = True
             volume_mount_found = True
             break
     if not volume_mount_found:
-        container.setdefault(C.VOLUME_MOUNTS, []).append({C.NAME: C.WEIGHT_MOUNT, C.MOUNT_PATH: weight_mount_path})
+        mount = {C.NAME: C.WEIGHT_MOUNT, C.MOUNT_PATH: weight_mount_path}
+        if read_only:
+            mount[C.K8S_READ_ONLY] = True
+        container.setdefault(C.VOLUME_MOUNTS, []).append(mount)
 
 
 def set_engine_weight_mount(deployment_data, container, deploy_config):
@@ -313,16 +344,17 @@ def modify_engine_yaml(deployment_data, user_config, index, node_type):
         container[C.SECURITY_CONTEXT] = {}
         container[C.SECURITY_CONTEXT][C.PRIVILEGED] = True
 
-    container[C.IMAGE] = deploy_config[C.IMAGE_NAME]
+    container[C.IMAGE] = resolve_workload_image(user_config, user_config.get(get_config_key(node_type), {}))
     job_name = f"{deploy_config[C.CONFIG_JOB_ID]}-{node_type}{index}-{generate_unique_id()}"
     set_engine_metadata(deployment_data, deploy_config, index, node_type, job_name)
+    apply_engine_ft_labels(deployment_data[C.SPEC][C.TEMPLATE], user_config, _node_type_to_role(node_type))
     container[C.NAME] = k8s_utils.g_engine_base_name
     if C.ENV not in container:
         container[C.ENV] = []
     set_engine_env(container, deploy_config, node_type, job_name)
     set_engine_replicas(deployment_data, deploy_config, node_type)
     set_engine_npu(container, deploy_config, node_type)
-    set_engine_node_selector(deployment_data, deploy_config, node_type)
+    set_engine_node_selector(deployment_data, user_config, node_type)
     set_engine_weight_mount(deployment_data, container, deploy_config)
     engine_pod_spec = deployment_data[C.SPEC][C.TEMPLATE][C.SPEC]
     apply_storage_volumes(engine_pod_spec, container, user_config)
@@ -330,6 +362,7 @@ def modify_engine_yaml(deployment_data, user_config, index, node_type):
     apply_a5_engine_pod_config(engine_pod_spec, container, deploy_config)
     apply_a5_workload(deployment_data, deploy_config)
     modify_log_mount(deployment_data, user_config, deployment_data[C.METADATA][C.NAME])
+    apply_additional_labels_annotations(deployment_data, user_config.get(get_config_key(node_type), {}))
 
 
 def validate_instance_nums(user_config):

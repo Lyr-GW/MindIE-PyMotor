@@ -12,7 +12,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -34,7 +34,9 @@ from motor.config.coordinator import CoordinatorConfig, ExceptionConfig, Schedul
 from motor.coordinator.domain import ScheduledResource
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
-from motor.coordinator.router.adapters.pd_protocol import EngineProtocolError
+from motor.coordinator.render.models import DerenderedStreamChunk
+from motor.coordinator.render.vllm_render_client import RenderTimeoutError
+from motor.coordinator.router.adapters.pd_protocol import EngineProtocolError, EngineRequest
 from motor.coordinator.router.dispatch_session import (
     AttemptContext,
     AttemptState,
@@ -43,8 +45,16 @@ from motor.coordinator.router.dispatch_session import (
 )
 from motor.common.utils.error import RequestCancelledError
 from motor.coordinator.router.rescheduler.rescheduler import Rescheduler, RetryRequestPlan
+from motor.coordinator.router.precision_sample.request import LogprobsRequestMetadata
 from motor.coordinator.router.strategies.unified_pd import UnifiedPDRouter
 from motor.coordinator.router.upstream_error import UpstreamHTTPError
+from tests.coordinator.router.token_only_support import (
+    TokenOnlyEngineClient,
+    assert_completion_derender,
+    assert_generate_requests,
+    make_render_client,
+    make_render_request_info,
+)
 
 _ROUTER_LOGGER = _resolve_logger_name("motor.coordinator.router.strategies.base")
 
@@ -60,7 +70,6 @@ def _instance(
         id=instance_id,
         ip="127.0.0.1",
         business_port=str(8100 + instance_id),
-        mgmt_port=str(9100 + instance_id),
         bootstrap_port=bootstrap_port,
         status=EndpointStatus.NORMAL,
     )
@@ -197,6 +206,38 @@ class _NativeHandoffPrefillClient(_Client):
         )
 
 
+async def _run_vllm_handoff(
+    monkeypatch, req_info: RequestInfo, p_client, *, d_client=None, render_client=None, sampling_manager=None
+):
+    config = _config()
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=_Scheduler(prefill_engine_type="vllm", decode_engine_type="vllm"),
+        request_manager=RequestManager(config),
+        sampling_manager=sampling_manager,
+    )
+    router.set_render_client(render_client)
+    d_client = d_client or _Client("decode")
+
+    @asynccontextmanager
+    async def _client_for(resource: ScheduledResource):
+        yield p_client if resource.instance.role == PDRole.ROLE_P else d_client
+
+    monkeypatch.setattr(router, "_client_for", _client_for)
+    return await router.handle_request(), d_client
+
+
+def _render_info(request_id, *, api="v1/chat/completions", stream=False, prompts=None):
+    is_chat = api == "v1/chat/completions"
+    data = {"model": "m", "stream": stream, "max_tokens": 8}
+    if is_chat:
+        data["messages"] = [{"role": "user", "content": "hello"}]
+    else:
+        data["prompt"] = ["first", "second"] if prompts and isinstance(prompts[0], list) else "hello"
+    return make_render_request_info(request_id, data, api, prompts or [10, 20])
+
+
 class _NativeSglangPrefillClient(_Client):
     async def post(self, path, json=None, headers=None, timeout=None):
         self.requests.append(json)
@@ -231,8 +272,8 @@ def test_collect_logprobs_removes_null_field_when_client_did_not_request_it():
     router.logger = MagicMock()
     sampling_state = {
         "enabled": True,
-        "client_logprobs": False,
         "lp_count": 1,
+        "logprobs_metadata": LogprobsRequestMetadata(False, False, 0, 1),
         "info": {},
     }
     chunk = b'data: {"choices":[{"logprobs":null,"token_ids":[1]}]}\n\n'
@@ -248,8 +289,8 @@ def test_collect_logprobs_skips_parse_for_plain_content_chunk():
     router.logger = MagicMock()
     sampling_state = {
         "enabled": True,
-        "client_logprobs": False,
         "lp_count": 1,
+        "logprobs_metadata": LogprobsRequestMetadata(False, False, 0, 1),
         "info": {},
     }
     chunk = b'data: {"choices":[{"delta":{"content":"hello"},"index":0}]}\n\n'
@@ -264,8 +305,8 @@ def test_collect_logprobs_keeps_original_bytes_when_only_token_ids_present():
     router.logger = MagicMock()
     sampling_state = {
         "enabled": True,
-        "client_logprobs": False,
         "lp_count": 1,
+        "logprobs_metadata": LogprobsRequestMetadata(False, False, 0, 1),
         "info": {},
     }
     chunk = b'data: {"choices":[{"token_ids":[1,2,3]}]}\n\n'
@@ -274,6 +315,93 @@ def test_collect_logprobs_keeps_original_bytes_when_only_token_ids_present():
 
     assert out is chunk
     assert sampling_state["info"]["cached_output_token_ids"] == [1, 2, 3]
+
+
+def test_collect_logprobs_caches_internal_width_before_trimming_stream_for_client():
+    router = UnifiedPDRouter.__new__(UnifiedPDRouter)
+    router.logger = MagicMock()
+    sampling_state = {
+        "enabled": True,
+        "lp_count": 3,
+        "logprobs_metadata": LogprobsRequestMetadata(True, True, 1, 3),
+        "info": {},
+    }
+    chunk = (
+        b'data: {"choices":[{"token_ids":[11],"logprobs":{"content":['
+        b'{"token":"token_id:11","logprob":-0.1,"top_logprobs":['
+        b'{"token":"token_id:11","logprob":-0.1},'
+        b'{"token":"token_id:12","logprob":-0.2},'
+        b'{"token":"token_id:13","logprob":-0.3}]}'
+        b"]}}]}\n\n"
+    )
+
+    out = router._collect_logprobs_from_stream_chunk(chunk, sampling_state)
+    payload = json.loads(out.removeprefix(b"data: ").strip())
+
+    assert sampling_state["info"]["cached_topk_logprobs"] == [{11: -0.1, 12: -0.2, 13: -0.3}]
+    assert len(payload["choices"][0]["logprobs"]["content"][0]["top_logprobs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_precision_sample_claim_injects_only_after_decode_admission():
+    router = UnifiedPDRouter.__new__(UnifiedPDRouter)
+    router.config = CoordinatorConfig()
+    router.config.precision_detection_config.precision_check_enabled = True
+    router.config.precision_detection_config.logprobs_count = 3
+    router.req_info = MagicMock(req_id="req-1")
+    router._sampling_manager = MagicMock()
+    router._sampling_manager.claim_sample = AsyncMock(side_effect=[False, True])
+    resource = ScheduledResource(instance=_instance(7, PDRole.ROLE_D))
+
+    denied_request = {"prompt": "hello"}
+    denied_state = router._init_sampling_state()
+    assert not await router._claim_precision_sample(resource, denied_request, denied_state)
+    assert "logprobs" not in denied_request
+
+    admitted_request = {"prompt": "hello"}
+    admitted_state = router._init_sampling_state()
+    assert await router._claim_precision_sample(resource, admitted_request, admitted_state)
+    assert admitted_request["logprobs"] == 3
+    assert admitted_state["enabled"] is True
+    assert router._sampling_manager.claim_sample.await_args_list[0].args[0] == 7
+
+
+@pytest.mark.asyncio
+async def test_precision_sample_claim_tokenized_preserves_client_width():
+    """Token-only bodies actually sent to the engine must carry the injected fields."""
+    router = UnifiedPDRouter.__new__(UnifiedPDRouter)
+    router.config = CoordinatorConfig()
+    router.config.precision_detection_config.precision_check_enabled = True
+    router.config.precision_detection_config.logprobs_count = 3
+    router.req_info = MagicMock(req_id="req-tokenized")
+    router._sampling_manager = MagicMock()
+    router._sampling_manager.claim_sample = AsyncMock(side_effect=[False, True])
+    resource = ScheduledResource(instance=_instance(7, PDRole.ROLE_D))
+
+    def _engine_body():
+        return {
+            "model": "m",
+            "sampling_params": {"max_tokens": 8, "logprobs": 5},
+            "request_id": "r",
+            "token_ids": [10, 20],
+        }
+
+    denied = EngineRequest(api="inference/v1/generate", body=_engine_body())
+    denied_state = router._init_sampling_state()
+    assert not await router._claim_precision_sample_tokenized(resource, [denied], denied_state)
+    assert "logprobs" not in denied.body
+    assert denied_state["enabled"] is False
+
+    admitted = EngineRequest(api="inference/v1/generate", body=_engine_body())
+    admitted_state = router._init_sampling_state()
+    assert await router._claim_precision_sample_tokenized(resource, [admitted], admitted_state)
+    assert admitted.body["logprobs"] == 5
+    assert admitted.body["sampling_params"]["logprobs"] == 5
+    assert admitted.body["return_token_ids"] is True
+    assert admitted.body["return_tokens_as_token_ids"] is True
+    assert admitted_state["enabled"] is True
+    assert admitted_state["logprobs_metadata"] is None
+    assert router._sampling_manager.claim_sample.await_args_list[-1].args[0] == 7
 
 
 class _StreamResponse:
@@ -316,6 +444,24 @@ class _StreamClient(_Client):
                 b'data: {"choices":[{"delta":{"content":"A"},"index":0}]}\n\n',
             ],
             exc_after_chunks=self.exc_after_chunks,
+        )
+
+
+class _TokenOnlyStreamClient(_Client):
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.paths = []
+
+    def stream(self, method, path, json=None, headers=None, timeout=None):
+        del method, timeout
+        self.paths.append(str(path))
+        self.requests.append(json)
+        self.headers.append(headers or {})
+        return _StreamResponse(
+            [
+                b'data: {"choices":[{"index":0,"token_ids":[30],"finish_reason":"stop"}]}\n\n',
+                b"data: [DONE]\n\n",
+            ]
         )
 
 
@@ -430,6 +576,7 @@ async def _invoke_asgi_response(response) -> list[dict]:
             AttemptStopReason.PEER_FAILED,
         ),
         (cancel_error.CLIENT_DISCONNECT, AttemptStopReason.CLIENT_DISCONNECT),
+        (cancel_error.INFER_TIMEOUT, AttemptStopReason.TIMEOUT),
         (cancel_error.DISPATCH_ABORT, AttemptStopReason.OTHER),
         (cancel_error.SCOPE_ABORT, AttemptStopReason.OTHER),
     ],
@@ -563,6 +710,400 @@ async def test_unified_pd_vllm_uses_native_handoff_before_selecting_decode(monke
     assert ReqState.PREFILL_END in req_info.status
     assert req_info.status[ReqState.P_ALLOCATED] <= req_info.status[ReqState.PREFILL_END]
     assert req_info.status[ReqState.PREFILL_END] <= req_info.status[ReqState.DECODE_END]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("api", "request_field"),
+    [("v1/chat/completions", "messages"), ("v1/completions", "prompt")],
+)
+async def test_unified_pd_stream_render_uses_token_only_handoff_round_trip(monkeypatch, api, request_field, caplog):
+    caplog.set_level("INFO")
+    req_info = _render_info("root-token-only-prefill", api=api, stream=True, prompts=[10, 20, 30])
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = _TokenOnlyStreamClient("decode")
+    render_client = AsyncMock()
+    render_choice = {"index": 0, "finish_reason": "stop"}
+    if api == "v1/chat/completions":
+        render_choice["delta"] = {"content": "A"}
+    else:
+        render_choice["text"] = "A"
+    render_client.derender_stream_chunk.return_value = DerenderedStreamChunk(
+        chunk={"choices": [render_choice]},
+        stream_state={"step": 1},
+    )
+    response, d_client = await _run_vllm_handoff(
+        monkeypatch,
+        req_info,
+        p_client,
+        d_client=d_client,
+        render_client=render_client,
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+
+    assert response.status_code == 200
+    assert p_client.paths == ["/inference/v1/generate"]
+    assert p_client.requests[0]["token_ids"] == [10, 20, 30]
+    assert d_client.paths == ["/inference/v1/generate"]
+    assert d_client.requests[0]["stream"] is True
+    assert d_client.requests[0]["token_ids"] == [10, 20, 30]
+    derender_payload = render_client.derender_stream_chunk.await_args.args[1]
+    assert derender_payload[f"{'chat' if api == 'v1/chat/completions' else 'completion'}_request"][request_field]
+    assert b'"A"' in b"".join(chunks)
+    assert ReqState.PREFILL_END in req_info.status
+    assert (
+        "token-only generate and derender success request_id=root-token-only-prefill prompt_count=1 stream=true"
+        in caplog.text
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_stream_render_reschedule_stays_token_only_and_reuses_derender_state(monkeypatch):
+    req_info = _render_info(
+        "root-token-only-reschedule",
+        api="v1/completions",
+        stream=True,
+        prompts=[10, 20],
+    )
+    config = _config()
+    config.exception_config.transport_max_retry = 2
+    config.exception_config.reschedule_enabled = True
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=_Scheduler(prefill_engine_type="vllm", decode_engine_type="vllm"),
+        request_manager=RequestManager(config),
+    )
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = _SequenceStreamClient(
+        "decode",
+        [
+            _StreamResponse(
+                [b'data: {"choices":[{"index":0,"token_ids":[30]}]}\n\n'],
+                exc_after_chunks=httpx.ReadError("after chunk"),
+            ),
+            _StreamResponse([b'data: {"choices":[{"index":0,"token_ids":[31],"finish_reason":"stop"}]}\n\n']),
+        ],
+    )
+    render_client = AsyncMock()
+    render_client.derender_stream_chunk.side_effect = [
+        DerenderedStreamChunk(
+            chunk={"choices": [{"index": 0, "text": "A"}]},
+            stream_state={"step": 1},
+        ),
+        DerenderedStreamChunk(
+            chunk={"choices": [{"index": 0, "text": "B", "finish_reason": "stop"}]},
+            stream_state={"step": 2},
+        ),
+    ]
+    router.set_render_client(render_client)
+
+    @asynccontextmanager
+    async def _client_for(resource: ScheduledResource):
+        yield p_client if resource.instance.role == PDRole.ROLE_P else d_client
+
+    monkeypatch.setattr(router, "_client_for", _client_for)
+
+    response = await router.handle_request()
+    messages = await _invoke_asgi_response(response)
+    body = b"".join(message["body"] for message in messages if message["type"] == "http.response.body")
+
+    assert messages[0]["status"] == 200
+    assert [request["token_ids"] for request in p_client.requests] == [[10, 20], [10, 20, 30]]
+    assert [request["token_ids"] for request in d_client.requests] == [[10, 20], [10, 20, 30]]
+    assert p_client.requests[1]["sampling_params"]["max_tokens"] == 1
+    assert d_client.requests[1]["sampling_params"]["max_tokens"] == 7
+    first_derender, retry_derender = render_client.derender_stream_chunk.await_args_list
+    assert first_derender.args[1]["stream_state"] is None
+    assert retry_derender.args[1]["stream_state"] == {"step": 1}
+    assert retry_derender.args[1]["prompt_token_ids"] == [10, 20]
+    assert body.count(b'"text":"A"') == 1
+    assert body.count(b'"text":"B"') == 1
+    assert b"ReadError" not in body
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_stream_completion_batch_uses_token_only_handoff(monkeypatch):
+    req_info = _render_info(
+        "root-stream-completion-batch",
+        api="v1/completions",
+        stream=True,
+        prompts=[[10], [20]],
+    )
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = _TokenOnlyStreamClient("decode")
+    render_client = AsyncMock()
+    render_client.derender_stream_chunk.side_effect = [
+        DerenderedStreamChunk(
+            chunk={"choices": [{"index": 0, "text": "first-result"}]},
+            stream_state={"step": 1},
+        ),
+        DerenderedStreamChunk(
+            chunk={"choices": [{"index": 0, "text": "second-result"}]},
+            stream_state={"step": 1},
+        ),
+    ]
+    response, _ = await _run_vllm_handoff(
+        monkeypatch,
+        req_info,
+        p_client,
+        d_client=d_client,
+        render_client=render_client,
+    )
+    _ = [chunk async for chunk in response.body_iterator]
+
+    assert p_client.paths == ["/inference/v1/generate"] * 2
+    assert [body["token_ids"] for body in p_client.requests] == [[10], [20]]
+    assert d_client.paths == ["/inference/v1/generate"] * 2
+    assert [body["token_ids"] for body in d_client.requests] == [[10], [20]]
+    assert render_client.derender_stream_chunk.await_count == 2
+    assert req_info.prompt_token_ids == []
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_decode_falls_back_when_token_only_is_unsupported(monkeypatch):
+    req_info = _render_info("root-token-only-fallback")
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = TokenOnlyEngineClient(PDRole.ROLE_D, unsupported_status=404)
+    render_client = AsyncMock()
+    response, _ = await _run_vllm_handoff(
+        monkeypatch, req_info, p_client, d_client=d_client, render_client=render_client
+    )
+
+    assert response.status_code == 200
+    assert d_client.paths == ["/inference/v1/generate", "/v1/chat/completions"]
+    render_client.derender.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_vllm_render_completes_token_only_round_trip(monkeypatch):
+    req_info = _render_info("root-token-round-trip", prompts=[10, 20, 30])
+    render_client = AsyncMock()
+    render_client.derender.return_value = {
+        "id": "engine-id",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    }
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = TokenOnlyEngineClient(PDRole.ROLE_D)
+
+    response, _ = await _run_vllm_handoff(
+        monkeypatch,
+        req_info,
+        p_client,
+        d_client=d_client,
+        render_client=render_client,
+    )
+    body = json.loads(response.body)
+
+    assert d_client.paths == ["/inference/v1/generate"]
+    derender_request = render_client.derender.await_args.args[1]
+    assert derender_request["prompt_tokens"] == 3
+    assert body["id"] == req_info.req_id
+    assert body["choices"][0]["message"]["content"] == "ok"
+    assert "prompt_token_ids" not in body
+    assert "token_ids" not in body["choices"][0]
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_handoff_single_completion_uses_single_request_lifecycle(monkeypatch):
+    req_info = _render_info(
+        "root-single-completion",
+        api="v1/completions",
+        prompts=[10, 20],
+    )
+    render_client = make_render_client(completion_count=1)
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = TokenOnlyEngineClient(PDRole.ROLE_D)
+
+    response, _ = await _run_vllm_handoff(
+        monkeypatch,
+        req_info,
+        p_client,
+        d_client=d_client,
+        render_client=render_client,
+    )
+
+    assert response.status_code == 200
+    assert [request["request_id"] for request in p_client.requests] == ["root-single-completion#a1"]
+    assert [request["request_id"] for request in d_client.requests] == ["root-single-completion#a1"]
+    assert_completion_derender(
+        render_client,
+        prompt_lengths=[2],
+        response_count=1,
+        original_request=req_info.req_data,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_handoff_completion_batch_fans_out_and_derenders_once(monkeypatch):
+    req_info = _render_info("root-completion-batch", api="v1/completions", prompts=[[10], [20, 21]])
+    render_client = make_render_client(completion_count=2)
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = TokenOnlyEngineClient(PDRole.ROLE_D)
+
+    response, _ = await _run_vllm_handoff(
+        monkeypatch,
+        req_info,
+        p_client,
+        d_client=d_client,
+        render_client=render_client,
+    )
+    body = json.loads(response.body)
+
+    assert_generate_requests(
+        p_client.requests,
+        request_ids=["root-completion-batch#a1#p0", "root-completion-batch#a1#p1"],
+        prompt_token_ids=[[10], [20, 21]],
+    )
+    assert [request["request_id"] for request in d_client.requests] == [
+        "root-completion-batch#a1#p0",
+        "root-completion-batch#a1#p1",
+    ]
+    assert_completion_derender(
+        render_client,
+        prompt_lengths=[1, 2],
+        response_count=2,
+        original_request=req_info.req_data,
+    )
+    assert [choice["text"] for choice in body["choices"]] == ["result-0", "result-1"]
+
+
+class _RecordingSamplingManager:
+    def __init__(self, *, claimed: bool = True) -> None:
+        self.claimed = claimed
+        self.claim_calls = []
+        self.samples = []
+
+    async def claim_sample(self, d_instance_id, now):
+        self.claim_calls.append((d_instance_id, now))
+        return self.claimed
+
+    def enqueue_sample(self, sample):
+        self.samples.append(sample)
+
+
+def _enable_precision_sampling(config) -> None:
+    config.precision_detection_config.precision_check_enabled = True
+    config.precision_detection_config.interval_seconds = 0.0
+    config.precision_detection_config.logprobs_count = 3
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_handoff_completion_batch_sampling_claims_and_injects_bodies(monkeypatch):
+    """A batch admission samples one independent prompt without crossing prompt boundaries."""
+    req_info = _render_info("root-batch-sampling", api="v1/completions", prompts=[[10], [20, 21]])
+    render_client = make_render_client(completion_count=2)
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+
+    class _LogprobDecodeClient(TokenOnlyEngineClient):
+        async def post(self, path, json=None, headers=None, timeout=None):
+            response = await super().post(path, json=json, headers=headers, timeout=timeout)
+            if str(path).endswith("/inference/v1/generate") and response.status_code == 200:
+                payload = response.json()
+                payload["choices"][0]["logprobs"] = {
+                    "token_logprobs": [-0.1, -0.2],
+                    "top_logprobs": [
+                        {"token_id:30": -0.1, "token_id:31": -0.3, "token_id:32": -0.5},
+                        {"token_id:31": -0.2, "token_id:33": -0.4, "token_id:34": -0.6},
+                    ],
+                }
+                return httpx.Response(200, json=payload, request=response.request)
+            return response
+
+    d_client = _LogprobDecodeClient(PDRole.ROLE_D)
+    sampling_manager = _RecordingSamplingManager()
+
+    config = _config()
+    _enable_precision_sampling(config)
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=_Scheduler(prefill_engine_type="vllm", decode_engine_type="vllm"),
+        request_manager=RequestManager(config),
+        sampling_manager=sampling_manager,
+    )
+    router.set_render_client(render_client)
+
+    @asynccontextmanager
+    async def _client_for(resource: ScheduledResource):
+        yield p_client if resource.instance.role == PDRole.ROLE_P else d_client
+
+    monkeypatch.setattr(router, "_client_for", _client_for)
+    response = await router.handle_request()
+    body = json.loads(response.body)
+
+    # Claimed once for the whole batch against the decode instance.
+    assert sampling_manager.claim_calls == [(2, sampling_manager.claim_calls[0][1])]
+    # Only one independent prompt is sampled; the rest of the batch stays unchanged.
+    assert len(d_client.requests) == 2
+    assert d_client.requests[0]["logprobs"] == 3
+    assert d_client.requests[0]["sampling_params"]["logprobs"] == 3
+    assert d_client.requests[0]["return_token_ids"] is True
+    assert d_client.requests[0]["return_tokens_as_token_ids"] is True
+    assert "logprobs" not in d_client.requests[1]
+    assert "logprobs" not in d_client.requests[1]["sampling_params"]
+    # The submitted sample contains only the selected prompt's raw GenerateResponse.
+    assert len(sampling_manager.samples) == 1
+    sample = sampling_manager.samples[0]
+    assert sample.p_instance_id == 1
+    assert sample.d_instance_id == 2
+    assert sample.output_token_ids == [30, 31]
+    assert sample.logprobs == [-0.1, -0.2]
+    # Motor-requested logprobs must not leak into the client-visible body.
+    assert [choice["text"] for choice in body["choices"]] == ["result-0", "result-1"]
+    assert all("logprobs" not in choice for choice in body["choices"])
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_handoff_completion_batch_no_admission_no_injection(monkeypatch):
+    """Batch token-only path without admission: decode bodies stay bare, no sample."""
+    req_info = _render_info("root-batch-no-admission", api="v1/completions", prompts=[[10], [20, 21]])
+    render_client = make_render_client(completion_count=2)
+    p_client = TokenOnlyEngineClient(PDRole.ROLE_P)
+    d_client = TokenOnlyEngineClient(PDRole.ROLE_D)
+    sampling_manager = _RecordingSamplingManager(claimed=False)
+
+    config = _config()
+    _enable_precision_sampling(config)
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=_Scheduler(prefill_engine_type="vllm", decode_engine_type="vllm"),
+        request_manager=RequestManager(config),
+        sampling_manager=sampling_manager,
+    )
+    router.set_render_client(render_client)
+
+    @asynccontextmanager
+    async def _client_for(resource: ScheduledResource):
+        yield p_client if resource.instance.role == PDRole.ROLE_P else d_client
+
+    monkeypatch.setattr(router, "_client_for", _client_for)
+    response = await router.handle_request()
+    body = json.loads(response.body)
+
+    assert len(sampling_manager.claim_calls) == 1
+    assert all("logprobs" not in request for request in d_client.requests)
+    assert not sampling_manager.samples
+    assert [choice["text"] for choice in body["choices"]] == ["result-0", "result-1"]
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_derender_timeout_does_not_repeat_decode(monkeypatch):
+    req_info = _render_info("root-derender-timeout")
+    render_client = AsyncMock()
+    render_client.derender.side_effect = RenderTimeoutError("Derender request timed out")
+    d_client = TokenOnlyEngineClient(PDRole.ROLE_D)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _run_vllm_handoff(
+            monkeypatch, req_info, TokenOnlyEngineClient(PDRole.ROLE_P), d_client=d_client, render_client=render_client
+        )
+
+    assert exc_info.value.status_code == 504
+    assert d_client.paths == ["/inference/v1/generate"]
+    render_client.derender.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1370,6 +1911,63 @@ async def test_unified_pd_release_inflight_deduplicates_same_action():
         assert scheduler.update_workload.await_count == 1
         assert attempt.release_flags.prefill_tokens
         assert not router._release_inflight
+    finally:
+        await request_manager.del_req_info(req_info.req_id)
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_release_finalize_failure_still_marks_released_and_is_not_resent():
+    """A finalize_release failure after a successful scheduler ACK must not leave the release
+    re-sendable, or a later re-enqueue would resend (double-subtract) the same delta.
+    """
+    req_info = RequestInfo(
+        req_id="root-release-finalize-failure",
+        req_data={"model": "m", "prompt": "hello", "stream": True, "max_tokens": 8},
+        api="v1/completions",
+        entry_api="v1/completions",
+        req_len=10,
+    )
+    config = _config()
+    request_manager = RequestManager(config)
+    scheduler = _Scheduler()
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=scheduler,
+        request_manager=request_manager,
+    )
+
+    await request_manager.add_req_info(req_info)
+    try:
+        attempt = await router._create_attempt(PDDispatchSession(req_info.req_id))
+        with patch.object(
+            router._workload_action_handler,
+            "finalize_release",
+            AsyncMock(side_effect=RuntimeError("finalize boom")),
+        ):
+            submitted = await router._release_attempt_resource(
+                attempt.prefill_resource,
+                attempt.attempt_seq,
+                WorkloadAction.RELEASE_TOKENS,
+                attempt,
+                wait=False,
+            )
+            assert submitted is True
+            await router._drain_release_tasks()
+
+        assert scheduler.update_workload.await_count == 1
+        assert attempt.release_flags.prefill_tokens  # marked despite finalize failing
+
+        # A later re-enqueue must short-circuit as already-marked and not call the scheduler again.
+        second = await router._release_attempt_resource(
+            attempt.prefill_resource,
+            attempt.attempt_seq,
+            WorkloadAction.RELEASE_TOKENS,
+            attempt,
+            wait=False,
+        )
+        assert second is False
+        assert scheduler.update_workload.await_count == 1
     finally:
         await request_manager.del_req_info(req_info.req_id)
 
@@ -2650,10 +3248,19 @@ async def test_unified_pd_nonstream_falls_back_to_hybrid_when_decode_pool_exhaus
         scheduler=scheduler,
         request_manager=RequestManager(config),
     )
+    render_client = MagicMock()
+    router.set_render_client(render_client)
     p_client = _NativeHandoffPrefillClient("prefill")
     fallback_calls = []
+    fallback_render_clients = []
 
     class _FallbackRouter:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def set_render_client(self, client):
+            fallback_render_clients.append(client)
+
         async def handle_request(self, *, manage_request_context):
             fallback_calls.append(manage_request_context)
             return JSONResponse({"choices": [{"text": "hybrid"}]})
@@ -2664,12 +3271,13 @@ async def test_unified_pd_nonstream_falls_back_to_hybrid_when_decode_pool_exhaus
         yield p_client
 
     monkeypatch.setattr(router, "_client_for", _client_for)
-    monkeypatch.setattr(router, "_build_hybrid_fallback_router", _FallbackRouter)
+    monkeypatch.setattr("motor.coordinator.router.strategies.unified_pd.PDHybridRouter", _FallbackRouter)
 
     response = await router.handle_request()
 
     assert json.loads(response.body)["choices"][0]["text"] == "hybrid"
     assert fallback_calls == [False]
+    assert fallback_render_clients == [render_client]
     assert len(p_client.requests) == 1
     assert scheduler.select_and_allocate.await_count == 2
     await router._drain_release_tasks()
@@ -2823,6 +3431,8 @@ async def test_unified_pd_stream_resumes_on_hybrid_with_token_replay_after_commi
         scheduler=scheduler,
         request_manager=RequestManager(config),
     )
+    render_session = MagicMock()
+    router._streaming_render_session = render_session
     p_client = _NativeHandoffPrefillClient("prefill")
     d_client = _SequenceStreamClient(
         "decode",
@@ -2860,6 +3470,9 @@ async def test_unified_pd_stream_resumes_on_hybrid_with_token_replay_after_commi
     assert b'"text":"B"' in body
     assert len(fallback_calls) == 1
     assert fallback_calls[0]["is_resume"] is True
+    assert fallback_calls[0]["retry_plan"].prompt_token_ids == (1, 2, 10)
+    assert fallback_calls[0]["render_session"] is render_session
+    render_session.finish_attempt.assert_called_once_with(True)
     assert fallback_calls[0]["api"] == "v1/completions"
     assert fallback_calls[0]["req_data"]["prompt"] == [1, 2, 10]
     assert fallback_calls[0]["req_data"]["max_tokens"] == 7
@@ -2884,3 +3497,68 @@ def test_retry_plan_preserves_max_completion_tokens_precedence_for_completion_re
     assert "messages" not in decode_request
     assert "max_completion_tokens" not in decode_request
     assert decode_request["max_tokens"] == 7
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_create_attempt_releases_p_when_d_allocation_cancelled():
+    req_info = RequestInfo(
+        req_id="req-w1-cancel",
+        req_data={"model": "m", "prompt": "hi"},
+        api="v1/completions",
+        entry_api="v1/completions",
+        req_len=3,
+    )
+    config = _config()
+    scheduler = _Scheduler()
+    p_instance = scheduler.p
+    p_endpoint = next(iter(next(iter(p_instance.endpoints.values())).values()))
+
+    async def _select_and_allocate(role, req_info, **_kwargs):
+        if role == PDRole.ROLE_P:
+            return p_instance, p_endpoint, Workload(active_tokens=3)
+        raise asyncio.CancelledError()
+
+    scheduler.select_and_allocate = _select_and_allocate
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=scheduler,
+        request_manager=RequestManager(config),
+    )
+    router._pd_uses_trigger = False
+
+    with pytest.raises(asyncio.CancelledError):
+        await router._create_attempt(PDDispatchSession(req_info.req_id))
+
+    await asyncio.sleep(0)
+    scheduler.update_workload.assert_called()
+    params = scheduler.update_workload.call_args.args[0]
+    assert params.workload_change.active_tokens == -3
+    assert params.workload_action == WorkloadAction.RELEASE_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_unified_pd_prepare_attempt_resource_rolls_back_when_bookkeeping_cancelled():
+    req_info = RequestInfo(
+        req_id="req-w2-cancel",
+        req_data={"model": "m", "prompt": "hi"},
+        api="v1/completions",
+        entry_api="v1/completions",
+        req_len=3,
+    )
+    config = _config()
+    scheduler = _Scheduler()
+    router = UnifiedPDRouter(
+        req_info,
+        config,
+        scheduler=scheduler,
+        request_manager=RequestManager(config),
+    )
+    router._request_manager.add_req_attempt_workload = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await router._prepare_attempt_resource(PDRole.ROLE_P, 1)
+
+    scheduler.update_workload.assert_called_once()
+    params = scheduler.update_workload.call_args.args[0]
+    assert params.workload_change.active_tokens < 0

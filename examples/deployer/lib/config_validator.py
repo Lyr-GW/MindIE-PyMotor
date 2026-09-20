@@ -13,7 +13,7 @@ import shutil
 import subprocess
 
 import lib.constant as C
-from lib.utils import logger, load_yaml
+from lib.utils import logger, load_yaml, get_pd_heterogeneous_chip_name
 from lib.generator.infer_service import get_infer_role, _find_infer_service_set_doc
 from lib.generator.k8s_utils import get_accelerator_type_from_cluster, get_deploy_mode_from_config
 from lib.update_config_whitelist import collect_changed_paths
@@ -33,6 +33,29 @@ PD_HYBRID_REQUIRED_DEPLOY_KEYS = {
     C.SINGLE_HYBRID_INSTANCE_POD_NUM,
     C.HYBRID_POD_NPU_NUM,
 }
+
+
+reserved_labels: dict[str, bool] = {"app": True}  # True 表示禁止用户通过 additional_labels 覆盖该标签
+
+
+def validate_reserved_labels(user_config: dict) -> None:
+    """Reject user-defined labels that override deployer-managed labels."""
+    if not isinstance(user_config, dict):
+        return
+
+    conflicts = []
+    for config_name, component_config in user_config.items():
+        if not isinstance(component_config, dict):
+            continue
+        additional_labels = component_config.get(C.ADDITIONAL_LABELS)
+        if not isinstance(additional_labels, dict):
+            continue
+        conflicting_labels = sorted(label for label in additional_labels if reserved_labels.get(label, False))
+        if conflicting_labels:
+            conflicts.append(f"{config_name}.{C.ADDITIONAL_LABELS}: {', '.join(conflicting_labels)}")
+
+    if conflicts:
+        raise ValueError(f"User-defined labels contain reserved labels: {'; '.join(conflicts)}")
 
 
 def resolve_config_paths(config_dir, user_config_path, env_config_path):
@@ -167,36 +190,20 @@ def validate_pd_hybrid_infer_service_template(user_config, infer_service_templat
         raise ValueError("PD hybrid with infer_service_set requires a 'union' role in infer_service_template.yaml.")
 
 
-def _get_pd_heterogeneous_config(deploy_config):
-    """Extract PD heterogeneous config from deploy_config, returns None if disabled."""
-    if deploy_config.get(C.ENABLE_PD_HETEROGENEOUS) is not True:
-        return None
-    label_key = deploy_config.get(C.PD_HETEROGENEOUS_LABEL_KEY, C.DEFAULT_PD_HETEROGENEOUS_LABEL_KEY)
-    prefill_value = deploy_config.get(C.PD_HETEROGENEOUS_PREFILL_LABEL_VALUE, C.DEFAULT_PD_HETEROGENEOUS_PREFILL_VALUE)
-    decode_value = deploy_config.get(C.PD_HETEROGENEOUS_DECODE_LABEL_VALUE, C.DEFAULT_PD_HETEROGENEOUS_DECODE_VALUE)
-    return {
-        "label_key": label_key,
-        "prefill_value": prefill_value,
-        "decode_value": decode_value,
-    }
-
-
 def _get_hardware_node_labels(hardware_type):
     """Extract nodeSelector labels determined by hardware_type.
 
     Returns dict of label key-value pairs. Raises ValueError for unknown types.
     """
     if hardware_type in C.HARDWARE_TYPE_A2 or hardware_type in C.HARDWARE_TYPE_A3:
+        # A2/A3 share "accelerator", so accelerator-type is required too.
         return {
             C.ACCELERATOR: C.ACCELERATOR_910,
             C.ACCELERATOR_TYPE: get_accelerator_type_from_cluster(hardware_type),
         }
-    if hardware_type in C.HARDWARE_TYPE_950I_A5:
-        return {
-            C.ACCELERATOR: C.ACCELERATOR_A5,
-            C.ACCELERATOR_TYPE: get_accelerator_type_from_cluster(hardware_type),
-        }
-    known = [*sorted(C.HARDWARE_TYPE_A2), *sorted(C.HARDWARE_TYPE_A3), *C.HARDWARE_TYPE_950I_A5]
+    if hardware_type in C.HARDWARE_TYPE_A5:
+        return {C.ACCELERATOR: C.ACCELERATOR_A5}
+    known = [*sorted(C.HARDWARE_TYPE_A2), *sorted(C.HARDWARE_TYPE_A3), *sorted(C.HARDWARE_TYPE_A5)]
     raise ValueError(f"Unknown hardware_type '{hardware_type}'. Supported values: {known}")
 
 
@@ -238,105 +245,31 @@ def _validate_node_labels_exist(labels, node_desc):
     logger.info(f"Node selector validated for {node_desc}: {labels} -> {len(nodes)} node(s) found")
 
 
-def validate_node_selectors(deploy_config):
+def validate_node_selectors(user_config):
     """Validate that cluster nodes exist for every nodeSelector combination to be used.
 
-    Always validates base hardware labels (accelerator-type, accelerator).
-    When PD heterogeneous deployment is enabled, additionally validates the
-    combined prefill/decode labels per node type.
+    Always validates base hardware labels (accelerator).
+    When Prefill/Decode chip names are set, additionally validates those labels.
     """
+    deploy_config = user_config[C.MOTOR_DEPLOY_CONFIG]
     hardware_type = deploy_config.get(C.HARDWARE_TYPE)
     base_labels = _get_hardware_node_labels(hardware_type)
+    prefill_chip = get_pd_heterogeneous_chip_name(user_config, C.NODE_TYPE_P)
+    decode_chip = get_pd_heterogeneous_chip_name(user_config, C.NODE_TYPE_D)
 
-    pd_config = _get_pd_heterogeneous_config(deploy_config)
-
-    if pd_config is not None:
-        label_key = pd_config["label_key"]
-        prefill_labels = {**base_labels, label_key: pd_config["prefill_value"]}
-        decode_labels = {**base_labels, label_key: pd_config["decode_value"]}
+    if prefill_chip or decode_chip:
+        prefill_labels = {**base_labels}
+        if prefill_chip:
+            prefill_labels[C.NPU_CHIP_NAME_LABEL] = prefill_chip
+        decode_labels = {**base_labels}
+        if decode_chip:
+            decode_labels[C.NPU_CHIP_NAME_LABEL] = decode_chip
         _validate_node_labels_exist(prefill_labels, "prefill(P)")
         _validate_node_labels_exist(decode_labels, "decode(D)")
         logger.info(
-            f"PD heterogeneous node selectors validated: prefill -> {prefill_labels}, decode -> {decode_labels}"
+            "PD heterogeneous node selectors validated: prefill -> %s, decode -> %s",
+            prefill_labels,
+            decode_labels,
         )
-    else:
-        _validate_node_labels_exist(base_labels, "engine")
-
-
-# Encode has no virtual-inference feature; only prefill/decode/union are checked.
-_ENGINE_CONFIG_TO_ENV = (
-    (C.MOTOR_ENGINE_PREFILL_CONFIG, C.MOTOR_ENGINE_PREFILL_ENV),
-    (C.MOTOR_ENGINE_DECODE_CONFIG, C.MOTOR_ENGINE_DECODE_ENV),
-    (C.MOTOR_ENGINE_UNION_CONFIG, C.MOTOR_ENGINE_UNION_ENV),
-)
-
-
-def _normalize_ascend_global_log_level(raw_value):
-    """Return stripped string level, or None when unset/empty (defaults to ERROR)."""
-    if raw_value is None:
-        return None
-    text = str(raw_value).strip()
-    return text if text else None
-
-
-def _resolve_ascend_global_log_level(env_config, engine_env_key):
-    """Resolve ASCEND_GLOBAL_LOG_LEVEL with common env as base and engine env override.
-
-    Returns (level, source_key). level/source are None when unset; callers treat that as ERROR.
-    """
-    if not isinstance(env_config, dict):
-        return None, None
-    common_env = env_config.get(C.MOTOR_COMMON_ENV) or {}
-    engine_env = env_config.get(engine_env_key) or {}
-    if not isinstance(common_env, dict):
-        common_env = {}
-    if not isinstance(engine_env, dict):
-        engine_env = {}
-    if C.ASCEND_GLOBAL_LOG_LEVEL in engine_env:
-        return (
-            _normalize_ascend_global_log_level(engine_env.get(C.ASCEND_GLOBAL_LOG_LEVEL)),
-            engine_env_key,
-        )
-    if C.ASCEND_GLOBAL_LOG_LEVEL in common_env:
-        return (
-            _normalize_ascend_global_log_level(common_env.get(C.ASCEND_GLOBAL_LOG_LEVEL)),
-            C.MOTOR_COMMON_ENV,
-        )
-    return None, None
-
-
-def enforce_virtual_inference_log_level(user_config, env_config):
-    """Disable virtual inference when ASCEND_GLOBAL_LOG_LEVEL is explicitly not ERROR (3).
-
-    Mutates user_config in place. Unset ASCEND_GLOBAL_LOG_LEVEL defaults to ERROR and
-    does not disable virtual inference. Only an explicit non-ERROR value forces off.
-    Encode roles are ignored (no virtual-inference feature).
-    """
-    if not isinstance(user_config, dict):
         return
-
-    for engine_config_key, engine_env_key in _ENGINE_CONFIG_TO_ENV:
-        engine_config = user_config.get(engine_config_key)
-        if not isinstance(engine_config, dict):
-            continue
-        health_check_config = engine_config.get(C.HEALTH_CHECK_CONFIG)
-        if not isinstance(health_check_config, dict):
-            continue
-        if health_check_config.get(C.ENABLE_VIRTUAL_INFERENCE) is not True:
-            continue
-
-        log_level, source = _resolve_ascend_global_log_level(env_config, engine_env_key)
-        # Unset defaults to ERROR (3); only explicit non-ERROR disables virtual inference.
-        if log_level is None or log_level == C.ASCEND_GLOBAL_LOG_LEVEL_ERROR:
-            continue
-
-        health_check_config[C.ENABLE_VIRTUAL_INFERENCE] = False
-        logger.warning(
-            "Virtual inference requires ASCEND_GLOBAL_LOG_LEVEL=%s (ERROR); "
-            "got %r for %s (source: %s). "
-            "Forcing enable_virtual_inference=false.",
-            C.ASCEND_GLOBAL_LOG_LEVEL_ERROR,
-            log_level,
-            engine_config_key,
-            source,
-        )
+    _validate_node_labels_exist(base_labels, "engine")

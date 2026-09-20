@@ -2,7 +2,7 @@
 
 ## 引擎一览
 
-MindIE PyMotor（以下简称 PyMotor）采用控制面（Controller/Coordinator）与数据面（推理引擎）解耦的架构，可对接多种大模型推理引擎。当前支持的引擎如下：
+MindIE Motor采用控制面（Controller/Coordinator）与数据面（推理引擎）解耦的架构，可对接多种大模型推理引擎。当前支持的引擎如下：
 
 | 推理引擎 | 支持状态 | 说明 |
 | --- | --- | --- |
@@ -11,11 +11,9 @@ MindIE PyMotor（以下简称 PyMotor）采用控制面（Controller/Coordinator
 
 在 `user_config.json` 的 `motor_engine_prefill_config` / `motor_engine_decode_config`（或混部场景的 `motor_engine_union_config`）中设置 `engine_type`，即可选择底层引擎。`engine_config` 与引擎启动命令参数对应，转换方法见 [user_config 全量参数说明](../configuration/config_reference.md)。
 
----
-
 ## vLLM
 
-vLLM 是当前 PyMotor 推荐的底层推理引擎，已与控制面深度对接。
+vLLM 是当前 MindIE Motor 推荐的底层推理引擎，已与控制面深度对接。
 
 ### 配置 vLLM
 
@@ -33,11 +31,11 @@ vLLM 是当前 PyMotor 推荐的底层推理引擎，已与控制面深度对接
 }
 ```
 
----
-
 ## SGLang
 
 SGLang 在多轮对话、Agent 搜索、Few-shot 等依赖前缀复用的场景中，常能较好利用 RadixAttention 等机制。
+
+**部署步骤**：K8s PD 分离请直接参考 [SGLang PD 分离服务部署指导](../deployment/k8s/pd_disaggregation_sglang.md)。示例典配见 `examples/infer_engines/sglang/`（如 `models/glm5.1/A3/`、`models/qwen_8b/A2/`）。
 
 ### 配置 SGLang
 
@@ -52,3 +50,9 @@ SGLang 在多轮对话、Agent 搜索、Few-shot 等依赖前缀复用的场景�
   }
 }
 ```
+
+SGLang PD 分离时，bootstrap 端口按 Pod/NodeManager 维度配置在
+`engine_config.disaggregation_bootstrap_port`（也兼容原生 CLI 风格的
+`disaggregation-bootstrap-port`）。NodeManager 将该端口作为 `bootstrap_port` 注册元数据，
+并由 Coordinator 的 SGLang Adapter 用于 Prefill/Decode 对接；它与推理业务端口
+`endpoint_config.service_ports` 是不同端口。未配置该字段时不生成 bootstrap 元数据。

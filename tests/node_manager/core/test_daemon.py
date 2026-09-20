@@ -10,16 +10,18 @@
 
 import os
 import json
-import signal
+import time
 import pytest
 from unittest.mock import patch, MagicMock, mock_open
+
+os.environ["USER_CONFIG_PATH"] = os.path.join(os.path.dirname(__file__), "..", "jsons", "user_config.json")
 
 from motor.node_manager.core.daemon import Daemon
 from motor.node_manager.core.services.registry import SERVICE_ENGINE
 from motor.config.node_manager import NodeManagerConfig
 from motor.common.resources.endpoint import Endpoint
 from motor.common.resources.instance import PDRole, ParallelConfig
-from motor.node_manager.core.services.native_engine.models import CommandSpec, LaunchSpec, ProbeSpec
+from motor.node_manager.core.services.native_engine.models import CommandSpec, LaunchSpec, ProbeSpec, RuntimeState
 
 
 def _recording_backend():
@@ -103,13 +105,42 @@ def daemon(config_data):
 
 @pytest.fixture
 def endpoints():
-    return [
-        Endpoint(id=i, ip=f"192.168.1.{100 + i}", business_port=str(8000 + i * 2), mgmt_port=str(9000 + i * 2))
-        for i in range(3)
-    ]
+    return [Endpoint(id=i, ip=f"192.168.1.{100 + i}", business_port=str(8000 + i * 2)) for i in range(3)]
 
 
 class TestDaemon:
+    def test_engine_ft_manager_starts_only_after_engines_are_ready(self, daemon, endpoints):
+        engine = daemon._services[SERVICE_ENGINE]
+        daemon._engine_ft_manager = MagicMock()
+        engine.wait_ready = MagicMock(return_value=True)
+
+        daemon._wait_engines_ready(endpoints, instance_id=7)
+
+        engine.wait_ready.assert_called_once_with(endpoints)
+        daemon._engine_ft_manager.start.assert_called_once_with(endpoints, instance_id=7)
+        assert daemon.engine_ready_event.is_set()
+
+    def test_engine_ft_manager_does_not_start_when_engine_readiness_times_out(self, daemon, endpoints):
+        engine = daemon._services[SERVICE_ENGINE]
+        daemon._engine_ft_manager = MagicMock()
+        engine.wait_ready = MagicMock(return_value=False)
+
+        daemon._wait_engines_ready(endpoints, instance_id=7)
+
+        daemon._engine_ft_manager.start.assert_not_called()
+        # Heartbeat must still be released to handle the failed startup.
+        assert daemon.engine_ready_event.is_set()
+
+    def test_engine_ft_manager_does_not_start_when_engine_readiness_raises(self, daemon, endpoints):
+        engine = daemon._services[SERVICE_ENGINE]
+        daemon._engine_ft_manager = MagicMock()
+        engine.wait_ready = MagicMock(side_effect=RuntimeError("probe failed"))
+
+        daemon._wait_engines_ready(endpoints, instance_id=7)
+
+        daemon._engine_ft_manager.start.assert_not_called()
+        assert daemon.engine_ready_event.is_set()
+
     @pytest.mark.parametrize(
         ("launch_env", "expected_host_ip", "expected_mc_ipv6"),
         [
@@ -142,7 +173,7 @@ class TestDaemon:
         mock_process = MagicMock(pid=12345)
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
 
         with patch.dict(os.environ, launch_env, clear=True):
             daemon.pull_engine(PDRole.ROLE_U, [endpoint], instance_id=1, master_dp_ip="192.168.1.100")
@@ -175,41 +206,26 @@ class TestDaemon:
 
         stop.assert_called_once_with(endpoints[1].id)
 
-    @pytest.mark.parametrize(
-        "invalid_endpoint,error_msg",
-        [
-            (Endpoint(id=0, ip="invalid_ip", business_port="8000", mgmt_port="9090"), "Failed to pull engine"),
-            (Endpoint(id=0, ip="192.168.1.1", business_port="999999", mgmt_port="9090"), "Failed to pull engine"),
-        ],
-    )
-    def test_pull_engine_invalid_params(self, daemon, invalid_endpoint, error_msg):
-        with pytest.raises(RuntimeError, match=error_msg):
-            daemon.pull_engine(PDRole.ROLE_U, [invalid_endpoint], instance_id=1, master_dp_ip="192.168.1.100")
-
-    def test_exit_daemon_delegates_to_process_supervisor(self, daemon):
-        supervisor = daemon._services[SERVICE_ENGINE].supervisor
-        with patch.object(supervisor, "stop_all", return_value=[1001, 1002]) as stop_all:
-            daemon.stop()
-        stop_all.assert_called_once_with()
-
-    def test_engine_exit_requests_pod_recovery_only_once(self, daemon):
+    def test_get_engine_runtime_state_passes_instance_id(self, daemon):
         engine = daemon._services[SERVICE_ENGINE]
-        engine.restart_on_failure = True
-        with (
-            patch.object(engine.supervisor, "dead_pids", return_value=[12345]),
-            patch("motor.node_manager.core.services.native_engine.service.os.kill") as kill,
-        ):
-            engine.health_check()
-            engine.health_check()
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
+        with patch.object(engine, "runtime_state", return_value=RuntimeState.READY) as runtime_state:
+            result = daemon.get_engine_runtime_state(endpoint, instance_id=42)
 
-        kill.assert_called_once_with(os.getpid(), signal.SIGTERM)
+        assert result == RuntimeState.READY
+        runtime_state.assert_called_once_with(endpoint, 42)
+
+    def test_get_engine_runtime_state_no_engine_returns_stopped(self, daemon):
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
+        with patch.object(daemon, "_services", {}):
+            assert daemon.get_engine_runtime_state(endpoint, instance_id=1) == RuntimeState.STOPPED
 
     @patch('subprocess.Popen')
     def test_native_metrics_target_uses_business_port(self, mock_popen, daemon):
         process = MagicMock(pid=12345)
         process.poll.return_value = None
         mock_popen.return_value = process
-        endpoint = Endpoint(id=0, ip="2001:db8::8", business_port="8000", mgmt_port="9000")
+        endpoint = Endpoint(id=0, ip="2001:db8::8", business_port="8000")
         daemon.pull_engine(PDRole.ROLE_U, [endpoint], instance_id=1, master_dp_ip="192.168.1.100")
 
         assert daemon.get_engine_metrics_target(endpoint) == "http://[2001:db8::8]:8000/metrics"
@@ -224,7 +240,7 @@ class TestDaemon:
         mock_process.poll.return_value = None  # Process is still running
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=5, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=5, ip="10.0.0.1", business_port="9000")
         instance_id = 1
         master_dp_ip = "192.168.1.100"
         daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id, master_dp_ip)
@@ -243,7 +259,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
         daemon.pull_engine(PDRole.ROLE_U, [endpoint], instance_id=1, master_dp_ip="192.168.1.100")
 
         context = _last_launch_context(daemon)
@@ -276,7 +292,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
         daemon.pull_engine(PDRole.ROLE_U, [endpoint], instance_id=1, master_dp_ip="192.168.1.100")
 
         context = _last_launch_context(daemon)
@@ -292,7 +308,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
         d2d_peer_ips = ["0:192.168.1.10", "0:192.168.1.11"]
 
         daemon.pull_engine(
@@ -314,7 +330,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
 
         daemon.pull_engine(
             PDRole.ROLE_P,
@@ -335,7 +351,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
 
         daemon.pull_engine(
             PDRole.ROLE_P,
@@ -356,8 +372,8 @@ class TestDaemon:
         mock_popen.return_value = mock_process
 
         endpoints = [
-            Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090"),
-            Endpoint(id=1, ip="10.0.0.1", business_port="9001", mgmt_port="9091"),
+            Endpoint(id=0, ip="10.0.0.1", business_port="9000"),
+            Endpoint(id=1, ip="10.0.0.1", business_port="9001"),
         ]
         d2d_peer_ips = ["0:192.168.1.10", "1:192.168.1.11"]
 
@@ -381,7 +397,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=1, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=1, ip="10.0.0.1", business_port="9000")
         d2d_peer_ips = ["0:192.168.1.10"]
 
         daemon.pull_engine(
@@ -402,7 +418,7 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=0, ip="10.0.0.1", business_port="9000")
         daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id=1, master_dp_ip="192.168.1.100")
 
         assert _last_launch_context(daemon).node_rank == 0
@@ -414,7 +430,344 @@ class TestDaemon:
         mock_process.poll.return_value = None
         mock_popen.return_value = mock_process
 
-        endpoint = Endpoint(id=1, ip="10.0.0.1", business_port="9000", mgmt_port="9090")
+        endpoint = Endpoint(id=1, ip="10.0.0.1", business_port="9000")
         daemon.pull_engine(PDRole.ROLE_P, [endpoint], instance_id=1, master_dp_ip="192.168.1.100", node_rank=2)
 
         assert _last_launch_context(daemon).node_rank == 2
+
+
+def _patch_restart_params(restart_params):
+    """Patch the RegisterManager the Daemon resolves relaunch params from."""
+    return patch(
+        "motor.node_manager.core.register_manager.RegisterManager",
+        return_value=MagicMock(get_restart_params=MagicMock(return_value=restart_params)),
+    )
+
+
+def _restart_params():
+    return {
+        "role": "prefill",
+        "endpoints": [Endpoint(id=i, ip=f"192.168.1.{100 + i}", business_port=str(8000 + i * 2)) for i in range(2)],
+        "instance_id": 1,
+        "master_dp_ip": "192.168.1.100",
+        "d2d_peer_ips": None,
+        "node_rank": 0,
+    }
+
+
+@patch("subprocess.Popen")
+def test_restart_engine_relaunches_engines_in_place(mock_popen, daemon, endpoints, capsys):
+    """restart_engine only touches the engine service: KV store and monitor
+    thread stay alive, the EngineFtManager is paused/resumed for the window.
+    """
+    mock_process = MagicMock(pid=12345)
+    mock_process.poll.return_value = None
+    mock_popen.return_value = mock_process
+
+    kv_service = MagicMock()
+    daemon._services["kv_store"] = kv_service
+    daemon.pull_engine(PDRole.ROLE_P, endpoints, 1, "192.168.1.100")
+    assert 12345 in daemon._services["engine"].pid_list()
+
+    engine_ft_manager = MagicMock()
+    daemon._engine_ft_manager = engine_ft_manager
+    engine_service = daemon._services["engine"]
+    engine_service.wait_ready = MagicMock(return_value=True)
+    with _patch_restart_params(_restart_params()):
+        daemon.restart_engine(1)
+
+    deadline = time.monotonic() + 1
+    while not engine_ft_manager.resume.called and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    kv_service.stop.assert_not_called()
+    assert daemon._monitor_thread is not None and daemon._monitor_thread.is_alive()
+    assert len(daemon._services["engine"].pid_list()) == len(_restart_params()["endpoints"])
+    engine_ft_manager.pause.assert_called_once()
+    engine_ft_manager.resume.assert_called_once()
+    assert not daemon.is_engine_restart_in_progress()
+    # The relaunch separator (with per-container count) hits the container
+    # stdout stream so log review can delimit relaunch #N.
+    assert engine_service._restart_count == 1
+    assert "[ENGINE RELAUNCH #1] instance_id=1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "prepare,error",
+    [
+        (lambda d: setattr(d, "_engine_restart_in_progress", True), "EngineRestartInProgressError"),
+        (lambda d: None, "EngineRestartParamError"),
+    ],
+    ids=["already_in_progress", "no_start_recorded"],
+)
+def test_restart_engine_rejects_invalid_requests(daemon, prepare, error):
+    """Overlapping relaunches and missing launch params are rejected, not raced."""
+    from motor.node_manager.core.daemon import EngineRestartInProgressError, EngineRestartParamError
+
+    expected = EngineRestartInProgressError if error == "EngineRestartInProgressError" else EngineRestartParamError
+    prepare(daemon)
+    with _patch_restart_params(None if error == "EngineRestartParamError" else _restart_params()):
+        with pytest.raises(expected):
+            daemon.restart_engine(1)
+
+
+def test_suicide_after_threshold_abnormal_observations(daemon):
+    """Continuous abnormal endpoint observations reach the threshold."""
+    with (
+        patch("motor.node_manager.core.daemon.HeartbeatManager") as mock_hb_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_hb = mock_hb_cls.return_value
+        mock_hb.endpoints_generation.return_value = 0
+        mock_hb.is_within_grace_period.return_value = False
+        mock_hb.has_abnormal_endpoints.return_value = True
+
+        daemon._last_endpoints_generation = 0
+        for _ in range(daemon._suicide_threshold):
+            daemon._check_suicide_condition()
+
+    assert daemon.should_suicide() is True
+
+
+def test_suicide_counter_reset_conditions(daemon):
+    """Healthy endpoints, the grace period or a generation change reset the counter."""
+    with (
+        patch("motor.node_manager.core.daemon.HeartbeatManager") as mock_hb_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_hb = mock_hb_cls.return_value
+        mock_hb.endpoints_generation.return_value = 0
+        mock_hb.is_within_grace_period.return_value = False
+        mock_hb.has_abnormal_endpoints.return_value = True
+
+        daemon._last_endpoints_generation = 0
+        daemon._suicide_abnormal_count = 4
+        mock_hb.has_abnormal_endpoints.return_value = False
+        daemon._check_suicide_condition()
+        assert daemon._suicide_abnormal_count == 0
+
+        daemon._suicide_abnormal_count = 4
+        mock_hb.is_within_grace_period.return_value = True
+        mock_hb.has_abnormal_endpoints.return_value = True
+        daemon._check_suicide_condition()
+        assert daemon._suicide_abnormal_count == 0
+
+        daemon._suicide_abnormal_count = 4
+        mock_hb.endpoints_generation.return_value = 1
+        daemon._check_suicide_condition()
+        assert daemon._suicide_abnormal_count == 0
+
+    assert not daemon.should_suicide()
+
+
+def test_freeze_suspends_counting_and_expires(daemon):
+    """A freeze window suspends counting; deadline expiry or abort resumes it."""
+    with (
+        patch("motor.node_manager.core.daemon.HeartbeatManager") as mock_hb_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_hb = mock_hb_cls.return_value
+        mock_hb.endpoints_generation.return_value = 0
+        mock_hb.is_within_grace_period.return_value = False
+        mock_hb.has_abnormal_endpoints.return_value = True
+
+        daemon._last_endpoints_generation = 0
+        daemon.freeze_suicide(60)
+        daemon._suicide_abnormal_count = 4
+        daemon._check_suicide_condition()
+        assert daemon._suicide_abnormal_count == 0
+        assert not daemon.should_suicide()
+
+    with patch("motor.node_manager.core.daemon.time.monotonic", return_value=1100.0):
+        assert not daemon.is_suicide_frozen()
+
+    daemon.unfreeze_suicide()
+    assert not daemon.is_suicide_frozen()
+
+
+def test_stale_engine_ft_finalize_cannot_release_new_transaction(daemon):
+    daemon.guard_engine_ft_transaction("old", 60)
+    with pytest.raises(RuntimeError, match="another engine FT transaction is active"):
+        daemon.guard_engine_ft_transaction("new", 60)
+    daemon.finalize_engine_ft_transaction("old", [], False)
+    daemon.guard_engine_ft_transaction("new", 60)
+
+    with pytest.raises(RuntimeError, match="stale engine FT transaction finalize"):
+        daemon.finalize_engine_ft_transaction("old", [], False)
+
+    assert daemon.is_suicide_frozen()
+    daemon.finalize_engine_ft_transaction("new", [], False)
+    assert not daemon.is_suicide_frozen()
+
+
+def test_commit_retired_endpoint_updates_monitors_and_filters_pid_death(daemon):
+    reporter = MagicMock()
+    daemon._engine_ft_manager = reporter
+    daemon._instance_id = 7
+    with (
+        patch("motor.node_manager.core.daemon.HeartbeatManager") as heartbeat_cls,
+        patch.object(daemon, "_report_engine_death", return_value=True) as report_death,
+    ):
+        daemon.commit_retired_endpoints([1])
+        daemon._handle_engine_deaths([(101, 1), (102, 0)])
+
+    heartbeat_cls.return_value.retire_endpoints.assert_called_once_with([1])
+    heartbeat_cls.return_value.validate_retire_endpoints.assert_called_once_with([1])
+    reporter.validate_retire_endpoints.assert_called_once_with([1])
+    reporter.retire_endpoints.assert_called_once_with([1])
+    report_death.assert_called_once_with(0, daemon._config.api_config.pod_ip, 7)
+
+
+def test_commit_retired_endpoint_validates_all_monitors_before_mutation(daemon):
+    reporter = MagicMock()
+    daemon._engine_ft_manager = reporter
+    reporter.validate_retire_endpoints.side_effect = ValueError("unknown rank")
+    with patch("motor.node_manager.core.daemon.HeartbeatManager") as heartbeat_cls:
+        with pytest.raises(ValueError, match="unknown rank"):
+            daemon.commit_retired_endpoints([9])
+
+    heartbeat_cls.return_value.retire_endpoints.assert_not_called()
+    reporter.retire_endpoints.assert_not_called()
+
+
+def test_freeze_does_not_shorten_existing_relaunch_window(daemon):
+    """A concurrent short death-report freeze must not replace relaunch freeze."""
+    with patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0):
+        daemon.freeze_suicide(720)
+
+    with patch("motor.node_manager.core.daemon.time.monotonic", return_value=1001.0):
+        daemon.freeze_suicide(180)
+
+    # 1500 is between the short deadline (1181) and the relaunch deadline (1720).
+    # A direct-assignment regression would expire here; max-based behavior stays frozen.
+    with patch("motor.node_manager.core.daemon.time.monotonic", return_value=1500.0):
+        assert daemon.is_suicide_frozen()
+    assert daemon._suicide_freeze_until == 1720.0
+
+    with patch("motor.node_manager.core.daemon.time.monotonic", return_value=1179.0):
+        assert daemon.is_suicide_frozen()
+
+    with patch("motor.node_manager.core.daemon.time.monotonic", return_value=1721.0):
+        assert not daemon.is_suicide_frozen()
+
+
+def test_engine_death_reported_and_deduped_by_pid(daemon):
+    """A dead engine PID freezes suicide and reports once; a fresh PID reports again."""
+    with (
+        patch("motor.node_manager.core.daemon.ControllerApiClient") as mock_client_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_client_cls.report_software_fault.return_value = True
+        daemon._config.fault_tolerance_config.engine_restart_wait_timeout_sec = 60.0
+        daemon._config.api_config.pod_ip = "10.0.0.1"
+        daemon._instance_id = 7
+
+        daemon._handle_engine_deaths([(12345, 0)])
+        daemon._handle_engine_deaths([(12345, 0)])
+        daemon._handle_engine_deaths([(54321, 0)])
+
+        assert daemon.is_suicide_frozen()
+        assert mock_client_cls.report_software_fault.call_count == 2
+        fault = mock_client_cls.report_software_fault.call_args_list[0][0][0]
+        assert fault["engine_id"] == 0
+        assert fault["engine_status"] == 1
+        assert fault["exception_type"] == "EngineDeadError"
+        assert fault["pod_ip"] == "10.0.0.1"
+        assert fault["instance_id"] == 7
+
+
+def test_engine_death_report_failure_retried_without_freeze(daemon):
+    """A failed report is neither deduped nor frozen: the next round retries and
+    the container-restart fallback stays live.
+    """
+    with (
+        patch("motor.node_manager.core.daemon.ControllerApiClient") as mock_client_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_client_cls.report_software_fault.side_effect = RuntimeError("controller down")
+        daemon._handle_engine_deaths([(12345, 0)])
+        assert 12345 not in daemon._reported_dead_pids
+        assert not daemon.is_suicide_frozen()
+
+        mock_client_cls.report_software_fault.side_effect = None
+        mock_client_cls.report_software_fault.return_value = True
+        daemon._handle_engine_deaths([(12345, 0)])
+        assert 12345 in daemon._reported_dead_pids
+        assert daemon.is_suicide_frozen()
+        assert mock_client_cls.report_software_fault.call_count == 2
+
+
+def test_engine_death_reported_without_freeze_when_relaunch_disabled(daemon):
+    """With enable_engine_relaunch off the death is still reported, but the
+    suicide arbitration is not frozen — the container-restart fallback (k8s)
+    stays live instead of waiting out the freeze window.
+    """
+    with (
+        patch("motor.node_manager.core.daemon.ControllerApiClient") as mock_client_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_client_cls.report_software_fault.return_value = True
+        daemon._config.fault_tolerance_config.enable_engine_relaunch = False
+        daemon._config.api_config.pod_ip = "10.0.0.1"
+
+        daemon._handle_engine_deaths([(12345, 0)])
+
+        assert mock_client_cls.report_software_fault.call_count == 1
+        assert 12345 in daemon._reported_dead_pids
+        assert not daemon.is_suicide_frozen()
+
+
+def test_abnormal_cold_start_endpoint_not_reported(daemon):
+    """An ABNORMAL endpoint that was never NORMAL is still loading — no death report."""
+    with (
+        patch("motor.node_manager.core.daemon.HeartbeatManager") as mock_hb_cls,
+        patch("motor.node_manager.core.daemon.ControllerApiClient") as mock_client_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_hb = mock_hb_cls.return_value
+        mock_hb.endpoints_generation.return_value = 0
+        mock_hb.is_within_grace_period.return_value = False
+        mock_hb.has_abnormal_endpoints.return_value = True
+        mock_hb.abnormal_endpoint_ids.return_value = [0, 1]
+        mock_hb.normal_endpoint_ids.return_value = []
+        mock_client_cls.report_software_fault.return_value = True
+
+        daemon._last_endpoints_generation = 0
+        for _ in range(5):
+            daemon._check_suicide_condition()
+
+        assert mock_client_cls.report_software_fault.call_count == 0
+
+
+def test_abnormal_after_normal_reported_until_recovery(daemon):
+    """Once an endpoint turned NORMAL, its ABNORMAL is reported — once, until recovery."""
+    with (
+        patch("motor.node_manager.core.daemon.HeartbeatManager") as mock_hb_cls,
+        patch("motor.node_manager.core.daemon.ControllerApiClient") as mock_client_cls,
+        patch("motor.node_manager.core.daemon.time.monotonic", return_value=1000.0),
+    ):
+        mock_hb = mock_hb_cls.return_value
+        mock_hb.endpoints_generation.return_value = 0
+        mock_hb.is_within_grace_period.return_value = False
+        mock_client_cls.report_software_fault.return_value = True
+
+        mock_hb.has_abnormal_endpoints.return_value = False
+        mock_hb.normal_endpoint_ids.return_value = [0]
+        daemon._last_endpoints_generation = 0
+        daemon._check_suicide_condition()
+
+        mock_hb.has_abnormal_endpoints.return_value = True
+        mock_hb.abnormal_endpoint_ids.return_value = [0]
+        mock_hb.normal_endpoint_ids.return_value = []
+        daemon._check_suicide_condition()
+        daemon._check_suicide_condition()
+        assert mock_client_cls.report_software_fault.call_count == 1
+        assert daemon.is_suicide_frozen()
+
+        daemon.unfreeze_suicide()
+        mock_hb.has_abnormal_endpoints.return_value = False
+        daemon._check_suicide_condition()
+        assert daemon._reported_abnormal_ep_ids == set()
+        mock_hb.has_abnormal_endpoints.return_value = True
+        daemon._check_suicide_condition()
+        assert mock_client_cls.report_software_fault.call_count == 2

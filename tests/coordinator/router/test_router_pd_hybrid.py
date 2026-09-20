@@ -11,11 +11,12 @@
 import asyncio
 import json
 from contextlib import contextmanager
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 from pytest import MonkeyPatch
-from fastapi import FastAPI, status, Request
+from fastapi import FastAPI, HTTPException, status, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 import pytest
 
@@ -32,15 +33,22 @@ from motor.config.tls_config import TLSConfig
 from motor.coordinator.domain.instance_manager import InstanceManager
 from motor.coordinator.router.strategies.pd_hybrid import PDHybridRouter
 from motor.common.resources.instance import Endpoint, PDRole, Instance, InsStatus, ParallelConfig
+from motor.common.resources.dispatch import DispatchPlan
 from motor.common.resources.endpoint import Workload
 from motor.coordinator.domain import InstanceReadiness
 from motor.coordinator.scheduler.scheduler import Scheduler
 from motor.coordinator.tracer.tracing import TracerManager
 from motor.coordinator.domain.request_manager import RequestManager
 from motor.coordinator.models.request import RequestInfo, ReqState
+
+from motor.coordinator.render.models import DerenderedStreamChunk
 from motor.coordinator.router.upstream_error import UpstreamHTTPError
 import motor.coordinator.router.dispatch as router
 from motor.common.logger import get_logger
+from tests.coordinator.router.token_only_support import (
+    make_render_client,
+    make_render_request_info,
+)
 
 TracerManager()
 
@@ -50,6 +58,191 @@ app = FastAPI()
 _config = CoordinatorConfig()
 _scheduler = Scheduler(instance_provider=InstanceManager(_config), config=_config)
 _request_manager = RequestManager(_config)
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_reuses_render_replay_context(monkeypatch):
+    config = CoordinatorConfig()
+    req_info = RequestInfo(
+        req_id="hybrid-render-replay",
+        req_data={"model": "model", "prompt": "hello", "stream": True},
+        req_len=5,
+        api="v1/completions",
+    )
+    hybrid = PDHybridRouter(
+        req_info,
+        config,
+        scheduler=MagicMock(),
+        request_manager=RequestManager(config),
+    )
+    retry_plan = MagicMock()
+    render_session = MagicMock()
+    observed = {}
+
+    async def _stream_attempt(*_args, **_kwargs):
+        observed["retry_plan"] = hybrid._active_retry_plan
+        observed["render_session"] = hybrid._streaming_render_session
+        yield b"chunk"
+
+    monkeypatch.setattr(hybrid, "do_encode", AsyncMock())
+    monkeypatch.setattr(hybrid, "_stream_inference_attempt", _stream_attempt)
+    monkeypatch.setattr(hybrid, "_report_cb", AsyncMock())
+
+    chunks = [
+        chunk
+        async for chunk in hybrid.stream_fallback_from_existing_context(
+            req_data=req_info.req_data,
+            attempt_id=2,
+            is_resume=True,
+            retry_plan=retry_plan,
+            render_session=render_session,
+        )
+    ]
+
+    assert chunks == [b"chunk"]
+    assert observed == {"retry_plan": retry_plan, "render_session": render_session}
+    render_session.begin_attempt.assert_called_once_with()
+    render_session.finish_attempt.assert_called_once_with(True)
+
+
+@pytest.mark.asyncio
+async def test_decode_colocation_is_last_hybrid_candidate_and_keeps_request_bare(monkeypatch):
+    decode = Instance(
+        job_name="decode",
+        model_name="model",
+        id=7,
+        role=PDRole.ROLE_D.value,
+        engine_type="vllm",
+        dispatch_capabilities=[DispatchPlan.CONCURRENT_ENGINE_SYNC.value, DispatchPlan.DECODE_COLOCATION.value],
+    )
+
+    class _DecodeOnlyScheduler:
+        async def get_unblocked_instances(self, role):
+            return [decode.id] if role == PDRole.ROLE_D else []
+
+        async def get_local_instances(self, role=None):
+            return {decode.id: decode} if role in (None, PDRole.ROLE_D) else {}
+
+    req_info = RequestInfo(
+        req_id="decode-fallback",
+        req_data={"model": "model", "prompt": "hello"},
+        req_len=5,
+        api="test",
+    )
+    config = CoordinatorConfig()
+    hybrid = PDHybridRouter(
+        req_info,
+        config,
+        scheduler=_DecodeOnlyScheduler(),
+        request_manager=RequestManager(config),
+    )
+    req_info.trace_obj.span = MagicMock()
+
+    forwarded = []
+
+    async def capture_generate_post(self, req_data, *, manage_request_context=True):
+        forwarded.append(req_data)
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(PDHybridRouter, "_generate_post", capture_generate_post)
+
+    assert await hybrid._resolve_candidate_roles() == (PDRole.ROLE_D,)
+    response = await hybrid.handle_request()
+    assert response.status_code == status.HTTP_200_OK
+    assert forwarded == [{"model": "model", "prompt": "hello"}]
+    assert "kv_transfer_params" not in forwarded[0]
+    assert "metaserver" not in forwarded[0]
+    assert "do_remote_prefill" not in forwarded[0]
+    assert req_info.trace_obj.meta_error_message == (
+        "No union or prefill instances available, degraded to decode co-location"
+    )
+    assert req_info.trace_obj.route_degradation == "decode_co_location"
+    req_info.trace_obj.span.set_attribute.assert_any_call("routing.degradation", "decode_co_location")
+
+
+@pytest.mark.asyncio
+async def test_decode_colocation_filters_allocation_without_pinning_first_candidate():
+    """A mixed Decode pool must keep scheduling among all eligible instances."""
+    eligible = Instance(
+        job_name="vllm-decode",
+        model_name="model",
+        id=7,
+        role=PDRole.ROLE_D.value,
+        engine_type="vllm",
+        dispatch_capabilities=[DispatchPlan.DECODE_COLOCATION.value],
+    )
+    ineligible = Instance(
+        job_name="sglang-decode",
+        model_name="model",
+        id=3,
+        role=PDRole.ROLE_D.value,
+        engine_type="sglang",
+        dispatch_capabilities=[DispatchPlan.CONCURRENT_ENGINE_SYNC.value],
+    )
+
+    class _MixedDecodeScheduler:
+        def __init__(self):
+            self.selection = None
+
+        async def get_unblocked_instances(self, role):
+            return [ineligible.id, eligible.id] if role == PDRole.ROLE_D else []
+
+        async def get_local_instances(self, role=None):
+            return {ineligible.id: ineligible, eligible.id: eligible} if role == PDRole.ROLE_D else {}
+
+        async def select_and_allocate(self, role, req_info, **kwargs):
+            self.selection = (role, kwargs)
+            return None
+
+    scheduler = _MixedDecodeScheduler()
+    req_info = RequestInfo(req_id="mixed-decode", req_data={"prompt": "hi"}, req_len=2, api="test")
+    config = CoordinatorConfig()
+    config.exception_config.max_retry = 1
+    hybrid = PDHybridRouter(req_info, config, scheduler=scheduler, request_manager=RequestManager(config))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await hybrid.prepare_resource(PDRole.ROLE_D)
+
+    assert exc_info.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+    assert scheduler.selection == (
+        PDRole.ROLE_D,
+        {
+            "target_instance_id": None,
+            "required_engine_type": "vllm",
+            "required_dispatch_capability": DispatchPlan.DECODE_COLOCATION.value,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_decode_colocation_does_not_bypass_disabled_fallback_in_hybrid_deploy():
+    decode = Instance(
+        job_name="decode",
+        model_name="model",
+        id=7,
+        role=PDRole.ROLE_D.value,
+        engine_type="vllm",
+        dispatch_capabilities=[DispatchPlan.DECODE_COLOCATION.value],
+    )
+
+    class _DecodeOnlyScheduler:
+        async def get_unblocked_instances(self, role):
+            return [decode.id] if role == PDRole.ROLE_D else []
+
+        async def get_local_instances(self, role=None):
+            return {decode.id: decode} if role == PDRole.ROLE_D else {}
+
+    config = CoordinatorConfig()
+    config.deploy_config.hybrid_instances_num = 1
+    config.scheduler_config.enable_pd_separation_fallback_to_hybrid = False
+    hybrid = PDHybridRouter(
+        RequestInfo(req_id="fallback-off", req_data={"prompt": "hi"}, req_len=2, api="test"),
+        config,
+        scheduler=_DecodeOnlyScheduler(),
+        request_manager=RequestManager(config),
+    )
+
+    assert await hybrid._resolve_candidate_roles() == ()
 
 
 @app.post("/v1/chat/completions")
@@ -91,6 +284,7 @@ class TestRouterPDHybrid:
         mock_instance = Instance(
             job_name=f"test-job-{instance_id}",
             model_name=f"test-model-{instance_id}",
+            engine_type="vllm",
             id=instance_id,
             role=role,
             status=InsStatus.ACTIVE,
@@ -99,11 +293,23 @@ class TestRouterPDHybrid:
         )
         return mock_instance
 
+    @staticmethod
+    def _render_router(req_info, render_client):
+        config = CoordinatorConfig()
+        result = PDHybridRouter(
+            req_info,
+            config,
+            scheduler=Scheduler(instance_provider=InstanceManager(config), config=config),
+            request_manager=RequestManager(config),
+        )
+        result.set_render_client(render_client)
+        return result
+
     @pytest.fixture
     def setup_pd_hybrid(self, monkeypatch: MonkeyPatch):
         # Create proper instance for PD hybrid flow
         mock_instance = self.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         # Mock functions (Scheduler uses get_required_instances_status for readiness)
@@ -130,9 +336,9 @@ class TestRouterPDHybrid:
         monkeypatch.setattr(InstanceManager, "get_required_instances_status", mock_get_required_instances_status)
         monkeypatch.setattr(InstanceManager, "has_required_instances", mock_has_required_instances)
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
 
         mock_scheduler_config = MagicMock()
         mock_scheduler_config.scheduler_type = SchedulerType.LOAD_BALANCE
@@ -353,10 +559,101 @@ class TestRouterPDHybrid:
         assert payload["choices"][0]["message"]["content"] == "hello"
 
     @pytest.mark.asyncio
+    async def test_pd_hybrid_render_uses_token_only_round_trip(
+        self,
+        monkeypatch: MonkeyPatch,
+        setup_pd_hybrid,
+    ):
+        generate_response = {
+            "request_id": "engine-id",
+            "choices": [{"index": 0, "token_ids": [30, 31], "finish_reason": "stop"}],
+        }
+        paths = []
+
+        async def mock_forward(self, api, req_data, client, timeout):
+            del self, req_data, client, timeout
+            paths.append(api)
+            response = MagicMock()
+            response.json.return_value = generate_response
+            return response
+
+        monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
+        req_data = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": False,
+            "max_tokens": 8,
+        }
+        req_info = make_render_request_info(
+            "rid-token-only-hybrid", req_data, "v1/chat/completions", [10, 20], req_len=99
+        )
+        render_client = AsyncMock()
+        render_client.derender.return_value = {
+            "id": "engine-id",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "token-only"}}],
+        }
+        response = await self._render_router(req_info, render_client).handle_request()
+        payload = json.loads(response.body.decode())
+
+        assert paths == ["inference/v1/generate"]
+        derender = render_client.derender.await_args.args[1]
+        assert (derender["generate_response"], derender["prompt_tokens"]) == (generate_response, 2)
+        assert payload["choices"][0]["message"]["content"] == "token-only"
+
+    @pytest.mark.asyncio
+    async def test_pd_hybrid_stream_completion_batch_uses_token_only_union(
+        self,
+        monkeypatch: MonkeyPatch,
+        setup_pd_hybrid,
+    ):
+        requests = []
+
+        async def mock_forward_stream(self, api, req_data, client, timeout, *, on_response_ready=None):
+            del self, client, timeout
+            requests.append((api, req_data))
+            if on_response_ready is not None:
+                on_response_ready()
+            yield b'data: {"choices":[{"index":0,"token_ids":[30],"finish_reason":"stop"}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+        monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward_stream)
+        req_data = {
+            "model": "test-model",
+            "prompt": ["first", "second"],
+            "stream": True,
+            "max_tokens": 8,
+        }
+        req_info = make_render_request_info(
+            "rid-stream-token-only-hybrid",
+            req_data,
+            "v1/completions",
+            [[10], [20]],
+            req_len=99,
+        )
+        render_client = AsyncMock()
+        render_client.derender_stream_chunk.side_effect = [
+            DerenderedStreamChunk(
+                chunk={"choices": [{"index": 0, "text": "first-result"}]},
+                stream_state={"step": 1},
+            ),
+            DerenderedStreamChunk(
+                chunk={"choices": [{"index": 0, "text": "second-result"}]},
+                stream_state={"step": 1},
+            ),
+        ]
+        response = await self._render_router(req_info, render_client).handle_request()
+        _ = [chunk async for chunk in response.body_iterator]
+
+        assert [api for api, _ in requests] == ["inference/v1/generate"] * 2
+        assert [body["token_ids"] for _, body in requests] == [[10], [20]]
+        assert render_client.derender_stream_chunk.await_count == 2
+        assert req_info.prompt_token_ids == []
+
+    @pytest.mark.asyncio
     async def test_pd_hybrid_fallback_to_prefill_when_hybrid_pool_empty(self, monkeypatch: MonkeyPatch, caplog):
         """PD degradation: pre-check empty U pool, schedule ROLE_P directly without U attempt."""
         mock_instance = self.create_mock_instance(0, PDRole.ROLE_P)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
         called_roles = []
 
@@ -386,9 +683,9 @@ class TestRouterPDHybrid:
             return resp
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
 
         req_info = RequestInfo(
@@ -426,7 +723,7 @@ class TestRouterPDHybrid:
     async def test_pd_hybrid_schedules_union_when_hybrid_pool_available(self, monkeypatch: MonkeyPatch):
         """True hybrid: pre-check finds U pool, schedule ROLE_U only."""
         mock_instance = self.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
         called_roles = []
 
@@ -456,9 +753,9 @@ class TestRouterPDHybrid:
             return resp
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
 
         req_info = RequestInfo(
@@ -542,7 +839,7 @@ class TestPDHybridTracer:
     @pytest.fixture
     def setup_role_u_hybrid(self, monkeypatch: MonkeyPatch):
         mock_instance = TestRouterPDHybrid.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         async def mock_get_available_instance_roles(self):
@@ -560,9 +857,9 @@ class TestPDHybridTracer:
             return [mock_instance.id] if role == PDRole.ROLE_U else []
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
 
     @pytest.mark.asyncio
     async def test_stream_creates_inference_span(
@@ -662,6 +959,8 @@ class TestPDHybridTracer:
 
         attribute_keys = [key for key, _ in attribute_calls]
         assert "TTFT(ms)" in attribute_keys
+        assert "TPOT(ms)" in attribute_keys
+        assert "TTOT(ms)" not in attribute_keys
         assert "TOKEN_COUNT" in attribute_keys
 
     @pytest.mark.asyncio
@@ -700,7 +999,7 @@ class TestPDHybridTracer:
     @pytest.mark.asyncio
     async def test_role_fallback_scheduling_events(self, monkeypatch: MonkeyPatch):
         mock_instance = TestRouterPDHybrid.create_mock_instance(0, PDRole.ROLE_P)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         async def mock_get_available_instance_roles(self):
@@ -728,9 +1027,9 @@ class TestPDHybridTracer:
             return resp
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
 
         req_info = RequestInfo(
@@ -802,15 +1101,16 @@ def _make_cancel_test_config(
 
 
 class _RecordingSamplingManager:
-    def __init__(self) -> None:
-        self.confirm_calls = []
+    def __init__(self, *, claimed: bool = True) -> None:
+        self.claimed = claimed
+        self.claim_calls = []
         self.samples = []
 
-    async def confirm_sample(self, key, now):
-        self.confirm_calls.append((key, now))
-        return True
+    async def claim_sample(self, d_instance_id, now):
+        self.claim_calls.append((d_instance_id, now))
+        return self.claimed
 
-    async def submit_sample(self, sample):
+    def enqueue_sample(self, sample):
         self.samples.append(sample)
 
 
@@ -820,7 +1120,7 @@ class TestPDHybridCancelReschedule:
     @pytest.fixture(name="hybrid_pool")
     def _hybrid_pool(self, monkeypatch: MonkeyPatch):
         mock_instance = TestRouterPDHybrid.create_mock_instance(0, PDRole.ROLE_U)
-        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000", mgmt_port="8000")
+        mock_endpoint = Endpoint(id=0, ip="127.0.0.1", business_port="8000")
         mock_instance.endpoints = {"127.0.0.1": {0: mock_endpoint}}
 
         async def mock_get_available_instance_roles(self):
@@ -838,9 +1138,9 @@ class TestPDHybridCancelReschedule:
             return [mock_instance.id] if role == PDRole.ROLE_U else []
 
         monkeypatch.setattr(Scheduler, "get_available_instance_roles", mock_get_available_instance_roles)
-        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances)
-        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate)
-        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload)
+        monkeypatch.setattr(Scheduler, "get_unblocked_instances", mock_get_unblocked_instances, raising=False)
+        monkeypatch.setattr(Scheduler, "select_and_allocate", mock_select_and_allocate, raising=False)
+        monkeypatch.setattr(Scheduler, "update_workload", mock_update_workload, raising=False)
 
     @staticmethod
     def _build_router(
@@ -927,6 +1227,71 @@ class TestPDHybridCancelReschedule:
         assert "error" not in body
         # Internal token id fields must not leak to the client.
         assert "token_ids" not in body
+
+    @pytest.mark.asyncio
+    async def test_stream_render_reschedule_stays_token_only_and_reuses_derender_state(
+        self,
+        monkeypatch: MonkeyPatch,
+        hybrid_pool,
+    ):
+        config = _make_cancel_test_config(monkeypatch, transport_max_retry=2, reschedule_enabled=True)
+        calls: list[tuple[str, dict]] = []
+
+        async def mock_forward(self, api, req_data, client, timeout, *, on_response_ready=None):
+            del self, client, timeout
+            calls.append((api, req_data.copy()))
+            if on_response_ready is not None:
+                on_response_ready()
+            if len(calls) == 1:
+                yield b'data: {"choices":[{"index":0,"token_ids":[10]}]}\n\n'
+                raise asyncio.CancelledError(f"{cancel_error.NODE_FAULT}: http://127.0.0.1:8000")
+            yield b'data: {"choices":[{"index":0,"token_ids":[11],"finish_reason":"stop"}]}\n\n'
+
+        monkeypatch.setattr(PDHybridRouter, "forward_stream_request", mock_forward)
+        req_data = {
+            "model": "test-model",
+            "prompt": "Hello",
+            "stream": True,
+            "max_tokens": 50,
+        }
+        req_info = make_render_request_info(
+            "render-reschedule-id",
+            req_data,
+            "v1/completions",
+            [1, 2],
+            req_len=99,
+        )
+        render_client = AsyncMock()
+        render_client.derender_stream_chunk.side_effect = [
+            DerenderedStreamChunk(
+                chunk={"choices": [{"index": 0, "text": "A"}]},
+                stream_state={"step": 1},
+            ),
+            DerenderedStreamChunk(
+                chunk={"choices": [{"index": 0, "text": "B", "finish_reason": "stop"}]},
+                stream_state={"step": 2},
+            ),
+        ]
+        router_obj = PDHybridRouter(
+            req_info,
+            config,
+            scheduler=Scheduler(instance_provider=InstanceManager(config), config=config),
+            request_manager=RequestManager(config),
+        )
+        router_obj.set_render_client(render_client)
+
+        response = await router_obj.handle_request()
+        body = await self._consume_stream(response)
+
+        assert [api for api, _ in calls] == ["inference/v1/generate"] * 2
+        assert [request["token_ids"] for _, request in calls] == [[1, 2], [1, 2, 10]]
+        assert calls[1][1]["sampling_params"]["max_tokens"] == 49
+        first_derender, retry_derender = render_client.derender_stream_chunk.await_args_list
+        assert first_derender.args[1]["stream_state"] is None
+        assert retry_derender.args[1]["stream_state"] == {"step": 1}
+        assert retry_derender.args[1]["prompt_token_ids"] == [1, 2]
+        assert body.count('"text":"A"') == 1
+        assert body.count('"text":"B"') == 1
 
     @pytest.mark.asyncio
     async def test_stream_client_disconnect_does_not_retry(self, monkeypatch: MonkeyPatch, hybrid_pool):
@@ -1041,7 +1406,7 @@ class TestPDHybridCancelReschedule:
         config.precision_detection_config = PrecisionDetectionConfig(
             precision_check_enabled=True,
             interval_seconds=0.0,
-            logprobs_count=1,
+            logprobs_count=3,
         )
         config.infer_tls_config = TLSConfig(enable_tls=False)
         sampling_manager = _RecordingSamplingManager()
@@ -1059,7 +1424,13 @@ class TestPDHybridCancelReschedule:
                             "text": "ok",
                             "finish_reason": "stop",
                             "token_ids": [101, 102],
-                            "logprobs": {"token_logprobs": [-0.1, -0.2]},
+                            "logprobs": {
+                                "token_logprobs": [-0.1, -0.2],
+                                "top_logprobs": [
+                                    {"token_id:101": -0.1, "token_id:111": -0.3, "token_id:121": -0.5},
+                                    {"token_id:102": -0.2, "token_id:112": -0.4, "token_id:122": -0.6},
+                                ],
+                            },
                         }
                     ],
                 }
@@ -1069,24 +1440,132 @@ class TestPDHybridCancelReschedule:
         monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
         router_obj = self._build_router(
             config,
-            {"model": "test-model", "prompt": "Hi", "stream": False},
+            {"model": "test-model", "prompt": "Hi", "stream": False, "logprobs": 1},
             sampling_manager=sampling_manager,
         )
 
         response = await router_obj.handle_request()
         payload = json.loads(response.body.decode())
 
-        assert forwarded_requests[0]["logprobs"] == 1
+        assert forwarded_requests[0]["logprobs"] == 3
         assert forwarded_requests[0]["return_token_ids"] is True
-        assert sampling_manager.confirm_calls[0][0] == (None, 0)
+        assert sampling_manager.claim_calls[0][0] == 0
         assert len(sampling_manager.samples) == 1
         sample = sampling_manager.samples[0]
         assert sample.p_instance_id is None
         assert sample.d_instance_id == 0
         assert sample.output_token_ids == [101, 102]
         assert sample.logprobs == [-0.1, -0.2]
-        assert "logprobs" not in payload["choices"][0]
+        assert sample.topk_logprobs == [
+            {101: -0.1, 111: -0.3, 121: -0.5},
+            {102: -0.2, 112: -0.4, 122: -0.6},
+        ]
+        assert payload["choices"][0]["logprobs"]["top_logprobs"] == [
+            {"token_id:101": -0.1},
+            {"token_id:102": -0.2},
+        ]
         assert "token_ids" not in payload["choices"][0]
+
+    @pytest.mark.asyncio
+    async def test_nonstream_token_only_sampling_injects_tokenized_body(self, monkeypatch: MonkeyPatch, hybrid_pool):
+        """Token-only path: the claimed sampling window must inject into the tokenized
+        body actually sent to the engine, not into the unused OpenAI fallback body.
+        """
+        config = _make_cancel_test_config(monkeypatch, transport_max_retry=1, reschedule_enabled=False)
+        config.precision_detection_config = PrecisionDetectionConfig(
+            precision_check_enabled=True,
+            interval_seconds=0.0,
+            logprobs_count=3,
+        )
+        config.infer_tls_config = TLSConfig(enable_tls=False)
+        sampling_manager = _RecordingSamplingManager()
+        forwarded_requests = []
+
+        async def mock_forward(self, api, req_data, client, timeout):
+            forwarded_requests.append(req_data.copy())
+            resp = MagicMock()
+            resp.json = MagicMock(
+                return_value={
+                    "request_id": req_data.get("request_id", "engine-id"),
+                    "choices": [
+                        {
+                            "index": 0,
+                            "token_ids": [101, 102],
+                            "finish_reason": "stop",
+                            "logprobs": {
+                                "token_logprobs": [-0.1, -0.2],
+                                "top_logprobs": [
+                                    {"token_id:101": -0.1, "token_id:111": -0.3, "token_id:121": -0.5},
+                                    {"token_id:102": -0.2, "token_id:112": -0.4, "token_id:122": -0.6},
+                                ],
+                            },
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+                }
+            )
+            return resp
+
+        monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
+        req_data = {"model": "test-model", "prompt": "Hi", "stream": False, "max_tokens": 8}
+        req_info = make_render_request_info("rid-token-only-sampling", req_data, "v1/completions", [10, 20], req_len=99)
+        router_obj = PDHybridRouter(
+            req_info,
+            config,
+            scheduler=Scheduler(instance_provider=InstanceManager(config), config=config),
+            request_manager=RequestManager(config),
+            sampling_manager=sampling_manager,
+        )
+        router_obj.set_render_client(make_render_client())
+
+        response = await router_obj.handle_request()
+        payload = json.loads(response.body.decode())
+
+        assert len(forwarded_requests) == 1
+        tokenized_body = forwarded_requests[0]
+        # The tokenized GenerateRequest body must carry the injected sampling fields.
+        assert tokenized_body["logprobs"] == 3
+        assert tokenized_body["sampling_params"]["logprobs"] == 3
+        assert tokenized_body["return_token_ids"] is True
+        assert tokenized_body["return_tokens_as_token_ids"] is True
+        assert sampling_manager.claim_calls[0][0] == 0
+        assert len(sampling_manager.samples) == 1
+        sample = sampling_manager.samples[0]
+        assert sample.p_instance_id is None
+        assert sample.d_instance_id == 0
+        assert sample.output_token_ids == [101, 102]
+        assert sample.logprobs == [-0.1, -0.2]
+        # Motor-requested logprobs must not leak into the client-visible body.
+        assert "logprobs" not in payload["choices"][0]
+
+    @pytest.mark.asyncio
+    async def test_nonstream_precision_sampling_does_not_inject_without_admission(
+        self, monkeypatch: MonkeyPatch, hybrid_pool
+    ):
+        config = _make_cancel_test_config(monkeypatch, transport_max_retry=1, reschedule_enabled=False)
+        config.precision_detection_config = PrecisionDetectionConfig(precision_check_enabled=True)
+        config.infer_tls_config = TLSConfig(enable_tls=False)
+        sampling_manager = _RecordingSamplingManager(claimed=False)
+        forwarded_requests = []
+
+        async def mock_forward(self, api, req_data, client, timeout):
+            forwarded_requests.append(req_data.copy())
+            resp = MagicMock()
+            resp.json = MagicMock(return_value={"choices": [{"text": "ok"}]})
+            return resp
+
+        monkeypatch.setattr(PDHybridRouter, "forward_request", mock_forward)
+        router_obj = self._build_router(
+            config,
+            {"model": "test-model", "prompt": "Hi", "stream": False},
+            sampling_manager=sampling_manager,
+        )
+
+        await router_obj.handle_request()
+
+        assert sampling_manager.claim_calls[0][0] == 0
+        assert "logprobs" not in forwarded_requests[0]
+        assert not sampling_manager.samples
 
     @pytest.mark.asyncio
     async def test_nonstream_client_disconnect_does_not_retry(self, monkeypatch: MonkeyPatch, hybrid_pool):

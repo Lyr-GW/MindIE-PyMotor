@@ -1,12 +1,13 @@
 # 接口说明
 
-MindIE Motor提供推理[业务接口](#业务接口)、[管理接口](#管理接口)、[指标接口](#指标接口)、[观测接口](#观测接口)和[内部接口](#内部接口)。
+MindIE Motor提供推理[业务接口](#业务接口)、[管理接口](#管理接口)、[指标接口](#指标接口)和[观测接口](#观测接口)。
 
 ## 业务接口
 
 MindIE Motor提供下列推理业务接口：
 
 - [OpenAI Chat Completion 接口](./service_interfaces.md#openai-chat-completion-接口)：`/v1/chat/completions`
+- [OpenAI Responses 接口](./service_interfaces.md#openai-responses-接口)：`/v1/responses`
 - [OpenAI Completion 接口](./service_interfaces.md#openai-completion-接口)：`/v1/completions`
 - [Anthropic Messages 接口](./service_interfaces.md#anthropic-messages-接口)：`/v1/messages`
 - [Anthropic Count Tokens 接口](./service_interfaces.md#anthropic-count-tokens-接口)：`/v1/messages/count_tokens`
@@ -37,7 +38,9 @@ MindIE Motor提供下列管理接口：
 - [启动探针接口](./management_interfaces.md#启动探针接口)：`/startup`
 - [存活探针接口](./management_interfaces.md#存活探针接口)：`/liveness`
 - [就绪探针接口](./management_interfaces.md#就绪探针接口)：`/readiness`
+- [实例查询接口](./management_interfaces.md#实例查询接口)：`/instances`
 - [实例刷新接口](./management_interfaces.md#实例刷新接口)：`/instances/refresh`
+- [精度告警状态清理接口](./management_interfaces.md#精度告警状态清理接口)：`/precision/alarm_cleared`
 - [根路径服务信息接口](./management_interfaces.md#根路径服务信息接口)：`/`
 - [健康状态查询接口](./management_interfaces.md#健康状态查询接口)：`/health`
 
@@ -124,32 +127,14 @@ Controller 观测接口提供模型服务清单与告警等运维观测数据（
 - 在Kubernetes集群内，观测接口端口使用[`user_config.json`](../configuration/config_reference.md#motor_controller_config)配置文件中`observability_api_port`定义的端口。
   - 当配置文件中无此配置项时，使用默认端口`1027`。
 
-## 内部接口
-
-EngineServer提供下列内部接口：
-
-- [Engine Server 快照接口](./engine_server_interfaces.md#engine-server-快照接口)，包括：
-  - [设备侧快照保存接口](./engine_server_interfaces.md#设备侧快照保存接口)：`/suspend`
-  - [设备解锁接口](./engine_server_interfaces.md#设备解锁接口)：`/device_unlock`
-  - [设备侧快照恢复接口](./engine_server_interfaces.md#设备侧快照恢复接口)：`/resume`
-- [MetaServer转发接口](./engine_server_interfaces.md#metaserver转发接口)：`/v1/metaserver`
-
->[!NOTE]说明
->
-> Engine Server 内部接口挂载在 Engine Server 推理面，**不在** Coordinator 推理接口上提供服务。
-
-### 内部接口的IP/端口
-
-- 内部接口IP：Engine Server 所在节点的 IP 或 `engine_server --host` 绑定的地址。
-- 内部接口端口：`engine_server --port` 指定的端口。
-
 ## 安全、认证与限流
 
 - 安全协议：`infer_tls_config.enable_tls` / `mgmt_tls_config.enable_tls` 为 `true` 时，推理/管理接口端口使用 `https`
+- 管理面鉴权：`mgmt_api_key_config.enable_api_key=true` 时，实例查询、实例刷新和精度告警状态清理接口必须携带 `X-Motor-Management-Key`；探针接口免鉴权。密钥由 `api_key_file` 指定的文件提供
 - 请求头：
   - 必选：`Content-Type: application/json`
   - 可选：API Key
-    - 对 `/v1/completions`、`/v1/chat/completions`、`/v1/messages`、`/v1/messages/count_tokens` 生效
+    - 对 `/v1/completions`、`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1/messages/count_tokens` 生效
     - Header 名称：`api_key_config.header_name`（默认 `Authorization`）
     - 前缀：`api_key_config.key_prefix`（默认 `Bearer`）
 - 限流（可选）：`rate_limit_config.enable_rate_limit=true` 时启用，超限返回 `429`

@@ -27,16 +27,28 @@ def _read_version() -> str:
     return match.group(1)
 
 
-# Conditionally include the kv-conductor binary when it was built (see build.sh).
-# When the Rust toolchain is unavailable, the binary does not exist and the
-# wheel is packaged without it — the Python runtime handles this gracefully.
+# Include the kv-conductor binary when build.sh produced or reused it. Official
+# packaging is bash build.sh: compile when bin/ is missing and cargo + libzmq
+# are present (existing bin skips cargo; missing zmq auto-skips; SKIP_KV_CONDUCTOR_BUILD=1
+# skips even when headers exist). The Python runtime handles a missing conductor gracefully.
 _package_data: dict[str, list[str]] = {
     "motor": ["version.info"],
+    # boot.sh compiles these sources for the protobuf runtime installed in
+    # the target image. They must be present even when generated modules
+    # happen to exist in a developer worktree.
+    "motor.common.etcd.proto": ["*.proto"],
 }
 
 _kv_bin = os.path.join("motor", "kv_conductor", "bin", "kv-conductor")
 if os.path.isfile(_kv_bin):
     _package_data["motor.kv_conductor"] = ["bin/kv-conductor"]
+
+# Include the workload-shm cdylib when build.sh (or a prebuilt copy) placed it in lib/.
+# Official packaging is bash build.sh, which refuses to emit a wheel without this file.
+# Source-dev / editable installs may omit it and load target/release via native.py.
+_shm_so = os.path.join("motor", "coordinator", "workload_shm_rs", "lib", "libmindie_workload_shm.so")
+if os.path.isfile(_shm_so):
+    _package_data["motor.coordinator.workload_shm_rs"] = ["lib/*"]
 
 setup(
     name="motor",
@@ -48,9 +60,4 @@ setup(
     package_data=_package_data,
     include_package_data=True,
     zip_safe=False,
-    entry_points={
-        "console_scripts": [
-            "engine_server = motor.engine_server.cli.main:main",
-        ]
-    },
 )

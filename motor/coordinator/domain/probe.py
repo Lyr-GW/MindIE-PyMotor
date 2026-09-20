@@ -22,8 +22,11 @@ from multiprocessing import shared_memory as shm_mod
 from typing import Protocol
 
 from motor.common.logger import get_logger
+from motor.common.resources.dispatch import is_decode_colocation_instance
+from motor.common.resources.instance import PDRole
 from motor.config.coordinator import (
     ROLE_HEARTBEAT_STALE_SEC,
+    ROLE_SHM_ISOLATED,
     ROLE_SHM_MASTER,
     ROLE_SHM_NAME,
     ROLE_SHM_SIZE,
@@ -54,6 +57,7 @@ class RoleHeartbeatResult:
     is_master: bool
     heartbeat_stale: bool
     orphaned: bool  # True if Mgmt is orphaned (parent != Daemon)
+    isolated: bool = False  # lock renew failed; stay out of the inference Service
 
 
 class LivenessResult(str, Enum):
@@ -114,7 +118,7 @@ class RoleShmDaemonLivenessProvider(DaemonLivenessProvider):
             ppid = os.getppid()
             if ppid != self._daemon_pid:
                 logger.warning("Mgmt orphaned (parent not Daemon): ppid=%s daemon_pid=%s", ppid, self._daemon_pid)
-                return RoleHeartbeatResult(is_master=False, heartbeat_stale=False, orphaned=True)
+                return RoleHeartbeatResult(is_master=False, heartbeat_stale=False, orphaned=True, isolated=False)
             logger.debug(
                 "Mgmt parent check: ppid=%s daemon_pid=%s role_shm=%s", ppid, self._daemon_pid, self._role_shm_name
             )
@@ -130,15 +134,22 @@ class RoleShmDaemonLivenessProvider(DaemonLivenessProvider):
         else:
             try:
                 is_master = shm.buf[0] == ROLE_SHM_MASTER
+                isolated = shm.buf[0] == ROLE_SHM_ISOLATED
                 heartbeat_stale = self._is_heartbeat_stale(shm.buf)
                 logger.debug(
-                    "Role shm read: name=%s byte=%s is_master=%s heartbeat_stale=%s",
+                    "Role shm read: name=%s byte=%s is_master=%s isolated=%s heartbeat_stale=%s",
                     self._role_shm_name,
                     shm.buf[0],
                     is_master,
+                    isolated,
                     heartbeat_stale,
                 )
-                return RoleHeartbeatResult(is_master=is_master, heartbeat_stale=heartbeat_stale, orphaned=False)
+                return RoleHeartbeatResult(
+                    is_master=is_master,
+                    heartbeat_stale=heartbeat_stale,
+                    orphaned=False,
+                    isolated=isolated,
+                )
             finally:
                 shm.close()
 
@@ -197,10 +208,12 @@ class ReadinessProbe:
         daemon_liveness: DaemonLivenessProvider,
         instance_manager: InstanceManager,
         enable_master_standby: bool,
+        allow_decode_only: bool = False,
     ):
         self._daemon = daemon_liveness
         self._instance_manager = instance_manager
         self._enable_master_standby = enable_master_standby
+        self._allow_decode_only = allow_decode_only
 
     @property
     def instance_manager(self) -> InstanceManager:
@@ -212,11 +225,25 @@ class ReadinessProbe:
         """Allow callers (e.g. ManagementServer tests) to inject a custom instance manager."""
         self._instance_manager = value
 
+    @property
+    def allow_decode_only(self) -> bool:
+        """Whether decode-only topology can serve through hybrid fallback."""
+        return self._allow_decode_only
+
+    @allow_decode_only.setter
+    def allow_decode_only(self, value: bool) -> None:
+        """Apply a hot-reloaded decode co-location policy."""
+        self._allow_decode_only = value
+
     async def check(self) -> ReadinessProbeOutput:
         readiness = await asyncio.to_thread(
             self._instance_manager.get_required_instances_status,
         )
-        is_run = readiness.is_run()
+        if readiness == InstanceReadiness.ONLY_DECODE:
+            decode_instances = self._instance_manager.get_available_instances(PDRole.ROLE_D).values()
+            is_run = self._allow_decode_only and any(is_decode_colocation_instance(item) for item in decode_instances)
+        else:
+            is_run = readiness.is_run()
 
         r = self._daemon.read_role_and_heartbeat()
         if r.orphaned:
@@ -224,7 +251,14 @@ class ReadinessProbe:
         elif r.heartbeat_stale:
             result = ReadinessResult.HEARTBEAT_STALE
         elif self._enable_master_standby:
-            result = ReadinessResult.OK_MASTER if r.is_master else ReadinessResult.NOT_MASTER
+            if r.isolated:
+                result = ReadinessResult.NOT_MASTER
+            elif r.is_master:
+                result = ReadinessResult.OK_MASTER
+            else:
+                # Standby stays 0/1, same as before this PR. Workers still run so
+                # promotion can become Ready without a cold start.
+                result = ReadinessResult.NOT_MASTER
         else:
             result = ReadinessResult.OK_STANDBY
         # Only report ready when result is OK_*; otherwise force False (orphaned/heartbeat_stale/not_master).
