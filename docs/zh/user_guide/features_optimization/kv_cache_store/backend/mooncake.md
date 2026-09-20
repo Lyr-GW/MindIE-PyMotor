@@ -2,7 +2,7 @@
 
 ## 特性介绍
 
-Mooncake 后端通过分布式共享内存池化机制实现跨引擎 KV 缓存共享，由 vllm-ascend 天然集成，**无需额外安装任何组件**。该特性允许 Prefill 引擎将 KV Cache 存入共享池，Decode 引擎从池中读取，实现 P/D 分离场景下的 KV 缓存复用，减少重复计算。
+Mooncake 后端通过分布式共享内存池化机制实现跨引擎 KV 缓存共享，由 vLLM Ascend 天然集成，**无需额外安装任何组件**。该特性允许 Prefill 引擎将 KV Cache 存入共享池，Decode 引擎从池中读取，实现 P/D 分离场景下的 KV 缓存复用，减少重复计算。
 
 ### 工作原理
 
@@ -42,7 +42,7 @@ Mooncake 池化有两种部署方式（store_mode 取值），区别在于池化
 >- `deploy.py` 对 Mooncake 后端强制校验 `eviction_high_watermark_ratio` 和 `eviction_ratio` 两项参数，缺失会直接报错，必须显式配置。
 >- embedded 模式下，引擎进程挂掉则其贡献的池化内存随之失效。
 >- standalone 模式下，store 进程的配置文件由 NodeManager 自动生成，无需手工配置。
->- 短请求（prompt < 128 token）不会入池，也不会产生 put 流量，这是 vllm-ascend 的设计行为，而非故障。
+>- 短请求（prompt < 128 token）不会入池，也不会产生 put 流量，这是 vLLM Ascend 的设计行为，而非故障。
 
 ## 特性使用
 
@@ -72,7 +72,7 @@ Mooncake 池化有两种部署方式（store_mode 取值），区别在于池化
 |------|-------|------|
 | Atlas 850 超节点服务器 | <ul><li>使用 UBOE 协议时：ASCEND_GLOBAL_RESOURCE_CONFIG={"comm_resource_config.protocol_desc":["uboe:device"]}</li><li>使用 UB 协议时：ASCEND_LOCAL_COMM_RES={"version":"1.3"}</li></ul> | UBOE / UB 二选一，按实际使用的通信协议配置。 |
 | Atlas 800I A3 超节点服务器 | ASCEND_ENABLE_USE_FABRIC_MEM=1 | **推荐方案**。<br>启用统一内存地址直传方案。若开启 SSD offload，相关内存大小需按 1GB 对齐,详见 vLLM Ascend 文档 [Fabric memory size alignment](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide/kv_pool.html#fabric-memory-size-alignment-a3-ascend-enable-use-fabric-mem-1)。 |
-| Atlas 800I A3 超节点服务器 | ASCEND_BUFFER_POOL=4:8 | **推荐方案**，当[表 1](#table001)依赖列软件版本不满足时，使用该方案。<br>配置 NPU Device 上用于聚合与 KV 传输的 buffer 个数与大小（例如 `4:8` 表示 4 个 8MB buffer）。 |
+| Atlas 800I A3 超节点服务器 | ASCEND_BUFFER_POOL=4:8 | 当[表 1](#table001)依赖列软件版本不满足时，使用该方案。<br>配置 NPU Device 上用于聚合与 KV 传输的 buffer 个数与大小（例如 `4:8` 表示 4 个 8MB buffer）。 |
 | Atlas 800I A2 推理服务器 | — | 无需额外环境变量，通用必配项即可。 |
 
 ### 使用场景
@@ -258,12 +258,12 @@ Mooncake 池化有两种部署方式（store_mode 取值），区别在于池化
     >[!NOTE] 说明
     >`<配置目录>` 为已按上文完成 Mooncake 配置的 `user_config.json`、`env.json` 所在目录，请替换为实际路径。
 
-  NodeManager 会自动拉起 mooncake_store_service 进程，自动生成 store 配置文件。
-  部署完成后：
+    NodeManager 会自动拉起 mooncake_store_service 进程，自动生成 store 配置文件。
+    部署完成后：
 
-   - 日志应出现 mooncake master 连接成功标志。
-   - store 进程配置文件自动生成在引擎配置同目录（mooncake_store_config.json）。
-   - Prefill 和 Decode 引擎均成功注册到 mooncake_master。
+    - 日志应出现 mooncake master 连接成功标志。
+    - store 进程配置文件自动生成在引擎配置同目录（mooncake_store_config.json）。
+    - Prefill 和 Decode 引擎均成功注册到 mooncake_master。
 
     >[!NOTE] 说明
     >
@@ -580,7 +580,7 @@ deploy.py 对 Mooncake 后端强制校验这两个参数，必须显式配置，
 
 **原因分析：**
 
-`AscendStoreConnector` 按 128 token 的 chunk 粒度做入池判定（`can_save`），只有 token 数达到一个完整 chunk 时才真正触发存池 put。短请求（prompt < 128 token）不会入池，也不会产生 put 流量，这是 vllm-ascend 的设计行为，而非故障。
+`AscendStoreConnector` 按 128 token 的 chunk 粒度做入池判定（`can_save`），只有 token 数达到一个完整 chunk 时才真正触发存池 put。短请求（prompt < 128 token）不会入池，也不会产生 put 流量，这是 vLLM Ascend 的设计行为，而非故障。
 
 **解决步骤：**
 
