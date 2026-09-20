@@ -614,6 +614,13 @@ curl -X POST localhost:13333/query -d '{"model":"test","block_size":128,"token_i
 
 ### Build & Test
 
+`bash build.sh` 编 kv-conductor 的规则（`scripts/ensure_rust.sh`）：
+
+- 已有 `motor/kv_conductor/bin/kv-conductor` 且 Rust 输入未变 → 跳过 cargo，复用镜像/本地产物
+- 改过 `src/*.rs` / `Cargo.toml` / `Cargo.lock` / `build.rs` / `rust-toolchain*` → 自动重编；成功后写 `bin/kv-conductor.srcsha`
+- 无 `.srcsha` 时（官方镜像常见）看该 crate 相对 git 的 Rust 脏树；只改 Python / `tests/` 不触发
+- `SKIP_KV_CONDUCTOR_BUILD=0` 仍强制重编（官方 Dockerfile）；`=1` 永不编
+
 ```bash
 cd motor/kv_conductor
 cargo build --release

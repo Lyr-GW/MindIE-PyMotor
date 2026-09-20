@@ -1,6 +1,6 @@
 # 基于vllm-ascend安装MindIE Motor
 
-先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。**首次打包依赖 Rust 工具链（rustc + cargo）**：`bash build.sh` 会自动探测已有 cargo，找不到且缺 `.so` 时则联网 rustup 安装（默认国内 rsproxy 镜像），详见下文「构建依赖：Rust 工具链」。已有 `lib/*.so` / `bin/kv-conductor` 则跳过对应 cargo；缺了才编。wheel 始终必须含 workload-shm；有 cargo + libzmq 且缺 conductor 二进制时再编 kv-conductor，缺 libzmq 时自动跳过（也可显式 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`）。改 `.rs` 后用 `SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0` 强制重编；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。官方 Dockerfile 默认两个 SKIP 为 `0`，镜像内按目标 ABI 编译。
+先打出带 `libmindie_workload_shm.so` 的 wheel 再灌进镜像。**首次打包依赖 Rust 工具链（rustc + cargo）**：`bash build.sh` 会自动探测已有 cargo，找不到且缺 `.so` 时则联网 rustup 安装（默认国内 rsproxy 镜像），详见下文「构建依赖：Rust 工具链」。已有 `lib/*.so` / `bin/kv-conductor` 且 Rust 未改则跳过对应 cargo；缺了或改过 `.rs` / `Cargo.toml` 才编。wheel 始终必须含 workload-shm；有 cargo + libzmq 且缺 conductor 二进制时再编 kv-conductor，缺 libzmq 时自动跳过（也可显式 `SKIP_KV_CONDUCTOR_BUILD=1 bash build.sh`）。`SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0` 仍可强制重编；离线用 `WORKLOAD_SHM_PREBUILT`。缺 `.so` 时 `build.sh` 拒绝出包。官方 Dockerfile 默认两个 SKIP 为 `0`，镜像内按目标 ABI 编译。
 
 ## 构建开发测试镜像
 
@@ -85,7 +85,7 @@ Dockerfile 的构建过程包括：
 
 ### 构建依赖：Rust 工具链
 
-`bash build.sh` 会把 `libmindie_workload_shm.so` 打进 wheel（**必需**，Coordinator 没有 Python 账本回退，缺库直接拒绝出包）：已有 `lib/*.so` 则跳过 cargo，缺了才编。缺 `bin/kv-conductor` 且有 cargo + libzmq 时还会顺带编 kv-conductor（可选）。官方 Dockerfile 默认 `SKIP_WORKLOAD_SHM_BUILD=0` 与 `SKIP_KV_CONDUCTOR_BUILD=0`，镜像内始终按目标 ABI 编译。因此制作镜像的容器内需要 **Rust 工具链（rustc + cargo）**，以及编译所需的 C 工具链和依赖库：
+`bash build.sh` 会把 `libmindie_workload_shm.so` 打进 wheel（**必需**，Coordinator 没有 Python 账本回退，缺库直接拒绝出包）：已有 `lib/*.so` 且 Rust 未改则跳过 cargo，缺了或改过 `.rs` 才编。缺 `bin/kv-conductor`（或 conductor Rust 已改）且有 cargo + libzmq 时还会顺带编 kv-conductor（可选）。官方 Dockerfile 默认 `SKIP_WORKLOAD_SHM_BUILD=0` 与 `SKIP_KV_CONDUCTOR_BUILD=0`，镜像内始终按目标 ABI 编译。因此制作镜像的容器内需要 **Rust 工具链（rustc + cargo）**，以及编译所需的 C 工具链和依赖库：
 
 | 组件 | 用途 | 是否必需 |
 |---|---|---|

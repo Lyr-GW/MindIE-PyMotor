@@ -51,7 +51,7 @@ pip install --no-deps --force-reinstall dist/motor-*.whl
 # pip install --no-deps --force-reinstall /path/to/motor-*.whl
 ```
 
-`--no-deps`：whl 不声明依赖，须先装 `requirements.txt`。离线场景见 [附录 A](#附录-a离线安装)。已有 `lib/*.so` / `bin/kv-conductor` 时 `bash build.sh` 默认跳过 cargo；改 `.rs` 后用 `SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0`。不能装 rustup 时用 `WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so`。打出的 wheel **必须**含 `libmindie_workload_shm.so`，缺库时 `build.sh` 拒绝出包并打印 `refusing to emit`；缺 conductor 二进制且有 cargo + libzmq 时同时含 `kv-conductor`（`unzip -l dist/motor-*.whl | grep -E 'kv-conductor|libmindie_workload_shm.so'`）。开关细节见仓库根 `AGENTS.md`「构建」。
+`--no-deps`：whl 不声明依赖，须先装 `requirements.txt`。离线场景见 [附录 A](#附录-a离线安装)。已有 `lib/*.so` / `bin/kv-conductor` 且 Rust 未改时 `bash build.sh` 默认跳过 cargo（复用镜像产物）；改 `.rs` 后会自动重编。`SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0` 仍可强制重编。不能装 rustup 时用 `WORKLOAD_SHM_PREBUILT=/path/to/libmindie_workload_shm.so`。打出的 wheel **必须**含 `libmindie_workload_shm.so`，缺库时 `build.sh` 拒绝出包并打印 `refusing to emit`；缺 conductor 二进制且有 cargo + libzmq 时同时含 `kv-conductor`（`unzip -l dist/motor-*.whl | grep -E 'kv-conductor|libmindie_workload_shm.so'`）。开关细节见仓库根 `AGENTS.md`「构建」。
 
 ---
 

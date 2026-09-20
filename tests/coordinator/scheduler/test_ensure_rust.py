@@ -141,7 +141,7 @@ def test_motor_var_is_explicit_zero_false_when_unset(tmp_path: Path):
 
 
 def test_motor_var_is_explicit_zero_true_when_set_to_zero(tmp_path: Path):
-    """SKIP_WORKLOAD_SHM_BUILD=0 is the only way to force cargo rebuild of an existing .so."""
+    """SKIP_WORKLOAD_SHM_BUILD=0 is the explicit force-rebuild; rust edits also rebuild."""
     env = _isolated_env(tmp_path)
     env["SKIP_WORKLOAD_SHM_BUILD"] = "0"
     result = subprocess.run(  # noqa: S603
@@ -396,3 +396,150 @@ def test_skip_cxx_install_does_not_attempt_package_install(tmp_path: Path):
     )
     assert result.returncode != 0
     assert "SKIP_CXX_INSTALL=1" in result.stderr
+
+
+def _write_demo_crate(root: Path) -> Path:
+    """Minimal rust crate plus an existing artifact (image / last build)."""
+    crate = root / "crate"
+    (crate / "src").mkdir(parents=True)
+    (crate / "src" / "lib.rs").write_text("pub fn f() {}\n", encoding="utf-8")
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n',
+        encoding="utf-8",
+    )
+    (crate / "wrapper.py").write_text("# not a rust input\n", encoding="utf-8")
+    (crate / "tests").mkdir()
+    (crate / "tests" / "integration_test.rs").write_text("fn unused() {}\n", encoding="utf-8")
+    return crate
+
+
+def _write_artifact(root: Path) -> Path:
+    artifact = root / "out" / "libdemo.so"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_text("fake-native\n", encoding="utf-8")
+    return artifact
+
+
+def _git_commit_all(repo: Path, message: str) -> None:
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def _run_rust_helper(home: Path, snippet: str, extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    env = _isolated_env(home)
+    env["PATH"] = "/usr/bin:/bin"
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(  # noqa: S603
+        ["bash", "-c", f"source '{_ENSURE_RUST}' && {snippet}"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=_SUBPROCESS_TIMEOUT_SEC,
+    )
+
+
+def test_fingerprint_changes_only_when_release_rust_inputs_change(tmp_path: Path):
+    """Python / crate tests/ must not invalidate the image binary fingerprint."""
+    crate = _write_demo_crate(tmp_path)
+    first = _run_rust_helper(tmp_path, f"motor_rust_source_fingerprint '{crate}'")
+    assert first.returncode == 0, first.stderr
+    baseline = first.stdout.strip()
+    assert baseline and baseline != "empty"
+
+    (crate / "wrapper.py").write_text("# edited python\n", encoding="utf-8")
+    (crate / "tests" / "integration_test.rs").write_text("fn other() {}\n", encoding="utf-8")
+    ignored = _run_rust_helper(tmp_path, f"motor_rust_source_fingerprint '{crate}'")
+    assert ignored.returncode == 0, ignored.stderr
+    assert ignored.stdout.strip() == baseline
+
+    (crate / "src" / "lib.rs").write_text("pub fn f() { let _x = 1; }\n", encoding="utf-8")
+    changed = _run_rust_helper(tmp_path, f"motor_rust_source_fingerprint '{crate}'")
+    assert changed.returncode == 0, changed.stderr
+    assert changed.stdout.strip() != baseline
+
+
+def test_needs_rebuild_when_artifact_missing(tmp_path: Path):
+    """First-time / missing image binary must still compile."""
+    crate = _write_demo_crate(tmp_path)
+    missing = tmp_path / "out" / "missing.so"
+    result = _run_rust_helper(
+        tmp_path,
+        f"motor_rust_crate_needs_rebuild '{crate}' '{missing}'",
+    )
+    assert result.returncode == 0
+
+
+def test_image_artifact_skips_cargo_when_rust_tree_is_clean(tmp_path: Path):
+    """Motor image: bin/lib already present, rust matches git → reuse, no cargo."""
+    crate = _write_demo_crate(tmp_path)
+    artifact = _write_artifact(tmp_path)
+    _git_commit_all(crate, "image snapshot")
+    result = _run_rust_helper(
+        tmp_path,
+        f"motor_rust_crate_needs_rebuild '{crate}' '{artifact}'",
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_dirty_rust_rebuilds_image_artifact_without_fingerprint(tmp_path: Path):
+    """Editing src/*.rs in a container must rebuild even if bin/ came from the image."""
+    crate = _write_demo_crate(tmp_path)
+    artifact = _write_artifact(tmp_path)
+    _git_commit_all(crate, "image snapshot")
+    (crate / "src" / "lib.rs").write_text("pub fn f() { let _y = 2; }\n", encoding="utf-8")
+    result = _run_rust_helper(
+        tmp_path,
+        f"motor_rust_crate_needs_rebuild '{crate}' '{artifact}'",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_python_only_edit_does_not_rebuild_rust(tmp_path: Path):
+    """kv_conductor/__init__.py edits must not trigger cargo."""
+    crate = _write_demo_crate(tmp_path)
+    artifact = _write_artifact(tmp_path)
+    _git_commit_all(crate, "image snapshot")
+    (crate / "wrapper.py").write_text("# rust-unrelated\n", encoding="utf-8")
+    result = _run_rust_helper(
+        tmp_path,
+        f"motor_rust_crate_needs_rebuild '{crate}' '{artifact}'",
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+
+
+def test_matching_fingerprint_skips_rebuild(tmp_path: Path):
+    """After a local cargo build, the recorded srcsha must skip the next run."""
+    crate = _write_demo_crate(tmp_path)
+    artifact = _write_artifact(tmp_path)
+    write = _run_rust_helper(
+        tmp_path,
+        f"motor_write_rust_source_fingerprint '{crate}' '{artifact}' && "
+        f"motor_rust_crate_needs_rebuild '{crate}' '{artifact}'",
+    )
+    assert write.returncode != 0, write.stdout + write.stderr
+    assert (tmp_path / "out" / "libdemo.so.srcsha").is_file()
+
+
+def test_stale_fingerprint_forces_rebuild(tmp_path: Path):
+    """Changing Cargo.toml after a recorded build must compile again."""
+    crate = _write_demo_crate(tmp_path)
+    artifact = _write_artifact(tmp_path)
+    primed = _run_rust_helper(
+        tmp_path,
+        f"motor_write_rust_source_fingerprint '{crate}' '{artifact}'",
+    )
+    assert primed.returncode == 0, primed.stderr
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "demo"\nversion = "0.2.0"\nedition = "2021"\n',
+        encoding="utf-8",
+    )
+    result = _run_rust_helper(
+        tmp_path,
+        f"motor_rust_crate_needs_rebuild '{crate}' '{artifact}'",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

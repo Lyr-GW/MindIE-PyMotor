@@ -636,10 +636,10 @@ ABI 版本：在 `.so` 导出 `mindie_wl_abi_version() -> uint32_t`，与 `SCHEM
 
 ### 8.5 构建与打包
 
-`build.sh` 在 kv-conductor 段落后增加同样的优先级链，并在此之前 `source scripts/ensure_rust.sh`（PATH / `$HOME/.cargo`；仅当缺产物或显式 `SKIP_*=0` 时 rustup）。默认 **已有产物跳过 cargo，缺了才编**。wheel 仍必须含 workload-shm；kv-conductor 仅在缺 `bin/` 且 cargo + libzmq 时编译，缺 zmq 自动跳过。强制重编：`SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0`。永不编 conductor：`SKIP_KV_CONDUCTOR_BUILD=1`。离线：`WORKLOAD_SHM_PREBUILT`。
+`build.sh` 在 kv-conductor 段落后增加同样的优先级链，并在此之前 `source scripts/ensure_rust.sh`（PATH / `$HOME/.cargo`；仅当缺产物、Rust 源码已改或显式 `SKIP_*=0` 时 rustup）。默认 **已有产物且 Rust 未改则跳过 cargo**（复用镜像 bin/.so）。wheel 仍必须含 workload-shm；kv-conductor 在缺 `bin/` 或 conductor Rust 已改、且 cargo + libzmq 时编译，缺 zmq 自动跳过。强制重编：`SKIP_WORKLOAD_SHM_BUILD=0` / `SKIP_KV_CONDUCTOR_BUILD=0`。永不编 conductor：`SKIP_KV_CONDUCTOR_BUILD=1`。离线：`WORKLOAD_SHM_PREBUILT`。
 
 1. `WORKLOAD_SHM_PREBUILT` → copy `.so`
-2. `lib/libmindie_workload_shm.so` 已存在且未显式 `SKIP_WORKLOAD_SHM_BUILD=0` → 跳过 cargo
+2. `lib/libmindie_workload_shm.so` 已存在、Rust 未改、且未显式 `SKIP_WORKLOAD_SHM_BUILD=0` → 跳过 cargo
 3. 有 cargo → `cargo build --release`，copy `target/release/libmindie_workload_shm.so`（macOS 为 `dylib`）到 `motor/coordinator/workload_shm_rs/lib/`（`SKIP_WORKLOAD_SHM_BUILD=1` 但缺库时忽略 SKIP）
 4. 否则 **ERROR + exit 1**，禁止打出不含 `.so` 的 wheel（报错含 `refusing to emit dist/motor-*.whl`）。pip wheel 之后再断言 archive 含 `motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so`；断言失败则 **删除刚打出的 wheel**。若本次编出了 kv-conductor，archive 也必须含 `motor/kv_conductor/bin/kv-conductor`。源码开发仍可走 `target/release`，运行时缺库响亮失败、**不要**静默回退到错误账本
 

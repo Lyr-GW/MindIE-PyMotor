@@ -16,6 +16,8 @@
 #                         is not fatal; build.sh then auto-skips kv-conductor)
 #   motor_try_kv_conductor_cargo_build — conductor-only compile; g++/zmq-sys
 #                         failure returns 1 (do not treat missing cargo as a skip)
+#   motor_rust_crate_needs_rebuild — skip cargo when the image/local artifact
+#                         matches current rust inputs; rebuild after .rs edits
 # A rustup proxy at ~/.cargo/bin/cargo is not enough: after a 5xx component download
 # rustup rolls back the toolchain but leaves the shim, and `cargo --version` fails
 # with "no default is configured". Treat that as missing cargo.
@@ -311,6 +313,124 @@ motor_try_kv_conductor_cargo_build() {
 motor_var_is_explicit_zero() {
     local name="${1:?}"
     [[ "${!name+set}" == "set" && "${!name}" == "0" ]]
+}
+
+# Files that change the release artifact of a Motor Rust crate. Crate-level
+# tests/, Python wrappers, and target/bin/lib outputs do not.
+# $1 is a path relative to the crate root (optional leading ./).
+motor_is_rust_build_input() {
+    local rel="${1#./}"
+    case "${rel}" in
+        Cargo.toml|Cargo.lock|build.rs|rust-toolchain|rust-toolchain.toml|.cargo/config|.cargo/config.toml)
+            return 0
+            ;;
+    esac
+    [[ "${rel}" == src/* && "${rel}" == *.rs ]]
+}
+
+# Print crate-relative rust inputs, one per line, LC_ALL=C sorted.
+motor_rust_source_list() {
+    local crate_dir="${1:?}"
+    local file rel
+    [[ -d "${crate_dir}" ]] || return 0
+    (
+        cd "${crate_dir}" || exit 1
+        find . \( -path './target' -o -path './bin' -o -path './lib' -o -path './.git' -o -path './tests' \) -prune -o -type f -print \
+            | LC_ALL=C sort
+    ) | while IFS= read -r file; do
+        rel="${file#./}"
+        if motor_is_rust_build_input "${rel}"; then
+            printf '%s\n' "${rel}"
+        fi
+    done
+}
+
+# SHA-256 of rust inputs (paths + contents). "empty" when the crate has none.
+motor_rust_source_fingerprint() {
+    local crate_dir="${1:?}"
+    local list file
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        echo "no-sha256sum"
+        return 0
+    fi
+    list="$(motor_rust_source_list "${crate_dir}")"
+    if [[ -z "${list}" ]]; then
+        echo "empty"
+        return 0
+    fi
+    (
+        cd "${crate_dir}" || exit 1
+        while IFS= read -r file; do
+            printf 'F %s\n' "${file}"
+            sha256sum -- "${file}"
+        done <<< "${list}"
+    ) | sha256sum | awk '{print $1}'
+}
+
+motor_rust_source_fingerprint_file() {
+    printf '%s.srcsha\n' "${1:?}"
+}
+
+motor_write_rust_source_fingerprint() {
+    local crate_dir="${1:?}"
+    local artifact="${2:?}"
+    local dest fp
+    dest="$(motor_rust_source_fingerprint_file "${artifact}")"
+    fp="$(motor_rust_source_fingerprint "${crate_dir}")"
+    mkdir -p "$(dirname "${dest}")"
+    printf '%s\n' "${fp}" > "${dest}"
+}
+
+# True when rust build inputs under crate_dir differ from HEAD or are untracked.
+# No git / not a work tree → not dirty (reuse the image artifact).
+motor_rust_sources_dirty() {
+    local crate_dir="${1:?}"
+    local repo_root prefix path rel
+    command -v git >/dev/null 2>&1 || return 1
+    git -C "${crate_dir}" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+    repo_root="$(git -C "${crate_dir}" rev-parse --show-toplevel)"
+    prefix="$(git -C "${crate_dir}" rev-parse --show-prefix)"
+    prefix="${prefix%/}"
+
+    while IFS= read -r path; do
+        [[ -z "${path}" ]] && continue
+        rel="${path}"
+        if [[ -n "${prefix}" && "${path}" == "${prefix}/"* ]]; then
+            rel="${path#"${prefix}/"}"
+        fi
+        if motor_is_rust_build_input "${rel}"; then
+            return 0
+        fi
+    done < <(
+        git -C "${repo_root}" diff --name-only HEAD -- "${prefix:-.}" 2>/dev/null
+        git -C "${repo_root}" ls-files --others --exclude-standard -- "${prefix:-.}" 2>/dev/null
+    )
+    return 1
+}
+
+# True when cargo should run for this crate: missing artifact, rust inputs
+# changed since the last recorded build, or (image binary, no .srcsha) the
+# crate's rust tree is dirty vs git. SKIP_*=0 force remains in build.sh.
+motor_rust_crate_needs_rebuild() {
+    local crate_dir="${1:?}"
+    local artifact="${2:?}"
+    local current stored storefile
+    if [[ ! -f "${artifact}" ]]; then
+        return 0
+    fi
+    storefile="$(motor_rust_source_fingerprint_file "${artifact}")"
+    if [[ -f "${storefile}" ]] && command -v sha256sum >/dev/null 2>&1; then
+        current="$(motor_rust_source_fingerprint "${crate_dir}")"
+        stored="$(tr -d '[:space:]' < "${storefile}")"
+        if [[ -n "${current}" && "${current}" == "${stored}" ]]; then
+            return 1
+        fi
+        return 0
+    fi
+    if motor_rust_sources_dirty "${crate_dir}"; then
+        return 0
+    fi
+    return 1
 }
 
 # Convenience single knob: SKIP_RUST_BUILD=1 means "no Rust source changed since

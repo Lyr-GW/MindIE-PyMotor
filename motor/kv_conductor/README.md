@@ -33,7 +33,8 @@ bash build.sh
 `build.sh` 会自动检测 kv-conductor 二进制：
 
 - `KV_CONDUCTOR_PREBUILT=/path/to/binary` → 使用指定的预构建二进制
-- `bin/kv-conductor` 已存在且未设 `SKIP_KV_CONDUCTOR_BUILD=0` → 跳过 cargo，直接打包
+- `bin/kv-conductor` 已存在且 Rust 源码未改（镜像预编译产物 / 上次编译指纹）且未设 `SKIP_KV_CONDUCTOR_BUILD=0` → 跳过 cargo，直接打包
+- 已有 `bin/` 但改过 `src/*.rs` / `Cargo.toml` 等 → 自动 `cargo build --release`
 - `SKIP_KV_CONDUCTOR_BUILD=1` → 跳过 cargo（无 bin 则省略该 crate）
 - 缺二进制、有 `cargo` 且能探测到 libzmq（`pkg-config --exists libzmq` 或 `zmq.h`）→ `cargo build --release` 并复制到 `bin/`
 - 有 `cargo` 但缺 libzmq → **WARNING 后自动跳过**（不因此让整个 `build.sh` 失败）

@@ -45,13 +45,16 @@ echo "Using motor_version=${MOTOR_VERSION}"
 # Jenkins often has rustup under $HOME/.cargo or /root/.cargo while the job PATH
 # does not. Nightly previously skipped native crates and shipped an empty wheel.
 # Source cargo env first. rustup only if a crate actually needs compiling:
-# missing lib/*.so or bin/kv-conductor, or an explicit SKIP_*=0 force-rebuild.
-# Existing artifacts skip cargo (and rustup). Offline: SKIP_RUST_INSTALL=1 plus
+# missing lib/*.so or bin/kv-conductor, rust sources changed, or SKIP_*=0.
+# Unchanged rust + existing artifacts skip cargo (and rustup) so a Motor image
+# can reuse the in-image binary. Offline: SKIP_RUST_INSTALL=1 plus
 # WORKLOAD_SHM_PREBUILT or an already-copied .so.
 #
-# Default: reuse lib/*.so and bin/kv-conductor when those files already exist.
-# SKIP_WORKLOAD_SHM_BUILD=0 / SKIP_KV_CONDUCTOR_BUILD=0 force a rebuild after
-# .rs changes. SKIP_RUST_BUILD=1 fills both SKIP flags if they were unset.
+# Default: reuse lib/*.so and bin/kv-conductor when those files already exist
+# and rust inputs are unchanged (fingerprint, or image binary + clean git tree).
+# Rust edits rebuild automatically. SKIP_WORKLOAD_SHM_BUILD=0 /
+# SKIP_KV_CONDUCTOR_BUILD=0 still force a rebuild (official Dockerfile).
+# SKIP_RUST_BUILD=1 fills both SKIP flags if they were unset.
 
 KV_CONDUCTOR_DIR="./motor/kv_conductor"
 KV_CONDUCTOR_BIN_DIR="$KV_CONDUCTOR_DIR/bin"
@@ -67,13 +70,15 @@ motor_source_cargo_env || true
 
 _shm_needs_cargo="0"
 if [[ -z "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
-    if [[ ! -f "$WORKLOAD_SHM_LIB" ]] || motor_var_is_explicit_zero SKIP_WORKLOAD_SHM_BUILD; then
+    if motor_var_is_explicit_zero SKIP_WORKLOAD_SHM_BUILD \
+        || motor_rust_crate_needs_rebuild "$WORKLOAD_SHM_DIR" "$WORKLOAD_SHM_LIB"; then
         _shm_needs_cargo="1"
     fi
 fi
 _kv_needs_cargo="0"
 if [[ -z "${KV_CONDUCTOR_PREBUILT:-}" && "${SKIP_KV_CONDUCTOR_BUILD:-0}" != "1" ]]; then
-    if [[ ! -f "$KV_CONDUCTOR_BIN" ]] || motor_var_is_explicit_zero SKIP_KV_CONDUCTOR_BUILD; then
+    if motor_var_is_explicit_zero SKIP_KV_CONDUCTOR_BUILD \
+        || motor_rust_crate_needs_rebuild "$KV_CONDUCTOR_DIR" "$KV_CONDUCTOR_BIN"; then
         _kv_needs_cargo="1"
     fi
 fi
@@ -105,8 +110,8 @@ fi
 
 # --- Required workload-shm (coordinator) build ---
 # Default: reuse motor/coordinator/workload_shm_rs/lib/libmindie_workload_shm.so
-# if it already exists. Compile only when the file is missing (or when
-# SKIP_WORKLOAD_SHM_BUILD=0 is set explicitly to force a rebuild after .rs changes).
+# when it exists and rust inputs are unchanged. Compile when the file is missing
+# or rust sources changed (or SKIP_WORKLOAD_SHM_BUILD=0 forces a rebuild).
 # PREBUILT always copies over lib/. Missing .so after this step is a hard error.
 
 echo "=== workload-shm ==="
@@ -119,14 +124,19 @@ if [[ -n "${WORKLOAD_SHM_PREBUILT:-}" ]]; then
     mkdir -p "$WORKLOAD_SHM_LIB_DIR"
     cp "$WORKLOAD_SHM_PREBUILT" "$WORKLOAD_SHM_LIB"
     chmod +x "$WORKLOAD_SHM_LIB"
+    motor_write_rust_source_fingerprint "$WORKLOAD_SHM_DIR" "$WORKLOAD_SHM_LIB"
     echo "workload-shm library ready (pre-built): $WORKLOAD_SHM_LIB"
 
-elif [[ -f "$WORKLOAD_SHM_LIB" ]] && ! motor_var_is_explicit_zero SKIP_WORKLOAD_SHM_BUILD; then
-    echo "workload-shm library ready (existing, skip cargo): $WORKLOAD_SHM_LIB"
+elif [[ -f "$WORKLOAD_SHM_LIB" ]] && ! motor_var_is_explicit_zero SKIP_WORKLOAD_SHM_BUILD \
+    && ! motor_rust_crate_needs_rebuild "$WORKLOAD_SHM_DIR" "$WORKLOAD_SHM_LIB"; then
+    echo "workload-shm library ready (existing, rust unchanged): $WORKLOAD_SHM_LIB"
 
 elif motor_cargo_usable; then
     if [[ "${SKIP_WORKLOAD_SHM_BUILD:-0}" == "1" ]]; then
         echo "[WARNING] SKIP_WORKLOAD_SHM_BUILD=1 ignored because $WORKLOAD_SHM_LIB is missing."
+    fi
+    if [[ -f "$WORKLOAD_SHM_LIB" ]]; then
+        echo "workload-shm rust sources changed (or SKIP_WORKLOAD_SHM_BUILD=0); rebuilding..."
     fi
     echo "Building workload-shm from source (cargo build --release)..."
     (
@@ -142,6 +152,7 @@ elif motor_cargo_usable; then
     mkdir -p "$WORKLOAD_SHM_LIB_DIR"
     cp "$_shm_built" "$WORKLOAD_SHM_LIB"
     chmod +x "$WORKLOAD_SHM_LIB"
+    motor_write_rust_source_fingerprint "$WORKLOAD_SHM_DIR" "$WORKLOAD_SHM_LIB"
     echo "workload-shm library ready (cargo-built): $WORKLOAD_SHM_LIB"
 
 elif [[ -f "$WORKLOAD_SHM_LIB" ]]; then
@@ -169,11 +180,12 @@ fi
 echo ""
 
 # --- Optional kv-conductor ---
-# Default: reuse motor/kv_conductor/bin/kv-conductor if present.
-# Compile only when the binary is missing (conductor-specific skip if no zmq/g++).
-# SKIP_KV_CONDUCTOR_BUILD=0 forces cargo even when bin/ exists.
-# SKIP_KV_CONDUCTOR_BUILD=1 never compiles; omits the crate if bin/ is also missing.
-# This script never apt-installs libzmq.
+# Default: reuse motor/kv_conductor/bin/kv-conductor when present and rust
+# inputs are unchanged (typical Motor image: ship the in-image binary).
+# Compile when the binary is missing or rust sources changed (conductor-only
+# skip if no zmq/g++). SKIP_KV_CONDUCTOR_BUILD=0 forces cargo even when bin/
+# exists. SKIP_KV_CONDUCTOR_BUILD=1 never compiles; omits the crate if bin/ is
+# also missing. This script never apt-installs libzmq.
 
 echo "=== kv-conductor ==="
 
@@ -187,19 +199,25 @@ if [[ -n "${KV_CONDUCTOR_PREBUILT:-}" ]]; then
     mkdir -p "$KV_CONDUCTOR_BIN_DIR"
     cp "$KV_CONDUCTOR_PREBUILT" "$KV_CONDUCTOR_BIN"
     chmod +x "$KV_CONDUCTOR_BIN"
+    motor_write_rust_source_fingerprint "$KV_CONDUCTOR_DIR" "$KV_CONDUCTOR_BIN"
     echo "kv-conductor binary ready (pre-built): $KV_CONDUCTOR_BIN"
     _kv_ready="1"
 
-elif [[ -f "$KV_CONDUCTOR_BIN" ]] && ! motor_var_is_explicit_zero SKIP_KV_CONDUCTOR_BUILD; then
-    echo "kv-conductor binary ready (existing, skip cargo): $KV_CONDUCTOR_BIN"
+elif [[ -f "$KV_CONDUCTOR_BIN" ]] && ! motor_var_is_explicit_zero SKIP_KV_CONDUCTOR_BUILD \
+    && ! motor_rust_crate_needs_rebuild "$KV_CONDUCTOR_DIR" "$KV_CONDUCTOR_BIN"; then
+    echo "kv-conductor binary ready (existing, rust unchanged): $KV_CONDUCTOR_BIN"
     _kv_ready="1"
 
 elif [[ "${SKIP_KV_CONDUCTOR_BUILD:-0}" == "1" ]]; then
     echo "SKIP_KV_CONDUCTOR_BUILD=1: skipping kv-conductor cargo build."
 
 elif motor_cargo_usable && motor_zmq_available; then
+    if [[ -f "$KV_CONDUCTOR_BIN" ]]; then
+        echo "kv-conductor rust sources changed (or SKIP_KV_CONDUCTOR_BUILD=0); rebuilding..."
+    fi
     echo "Building kv-conductor from source (cargo build --release)..."
     if motor_try_kv_conductor_cargo_build "$KV_CONDUCTOR_DIR" "$KV_CONDUCTOR_BIN"; then
+        motor_write_rust_source_fingerprint "$KV_CONDUCTOR_DIR" "$KV_CONDUCTOR_BIN"
         echo "kv-conductor binary ready (cargo-built): $KV_CONDUCTOR_BIN"
         _kv_ready="1"
     else

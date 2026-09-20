@@ -49,7 +49,7 @@ kv-conductor 已集成在 motor wheel 包内，随 `build.sh` 打包，按以下
   KV_CONDUCTOR_PREBUILT=/path/to/kv-conductor bash build.sh
   ```
 
-- **已有 `bin/kv-conductor`**：默认跳过 cargo，直接打进 wheel。改过 Rust 后设 `SKIP_KV_CONDUCTOR_BUILD=0` 强制重编。
+- **已有 `bin/kv-conductor`**：Rust 未改则跳过 cargo，直接打进 wheel（复用镜像产物）。改过 `src/*.rs` / `Cargo.toml` 等会自动重编；`SKIP_KV_CONDUCTOR_BUILD=0` 仍可强制重编。
 - **有 cargo 且缺二进制**：`bash build.sh` 在探测到 libzmq 后 `cargo build --release` 并打包。
 - **两者皆无**：跳过编译并输出 [WARNING]，kv-conductor 不包含在 wheel 中（其他功能不受影响）。
 
