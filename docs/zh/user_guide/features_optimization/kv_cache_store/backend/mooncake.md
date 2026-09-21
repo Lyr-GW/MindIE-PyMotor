@@ -116,7 +116,7 @@ Mooncake 池化有两种部署方式（store_mode 取值），区别在于池化
     | eviction_ratio | 无 | 是 | 单次驱逐比例，建议值为：0.1；`deploy.py` 强制校验，缺失报错。 |
 
     >[!NOTE] 说明
-    >可选配置 `target_job_id` 复用其他推理服务的 kv_store（值为目标服务的 `job_id`），行为说明见 [KV 池化 README — 多套服务共享 kv_store](../README.md#step3)。
+    >可选配置 `target_job_id` 复用其他推理服务的 kv_store（值为目标服务的 `job_id`），行为说明见 [KV 池化 README — 多套服务共享 kv_store](../../../features/kv_cache_store/README.md#step3)。
 
 2. 参考[环境准备](#环境准备)章节在 `env.json` 中配置通用环境变量，确保 Prefill 和 Decode 配置一致。
 
