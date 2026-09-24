@@ -40,14 +40,14 @@
 
 ### 请求拥堵事件
 
-`simple` 限流器在每次判定后，用**当前剩余令牌数** `available` 与 `max_requests` 的比例比较，并向 Controller 上报 `ReqCongestionEvent`：
+`simple` 限流器在每次判定后，用已用额度 `used = max_requests - available`（容量减去当前剩余令牌）与 `max_requests` 的比例比较，并向 Controller 上报 `ReqCongestionEvent`：
 
 | 条件 | 行为 |
 |------|------|
-| 尚未上报，且 `available >= int(max_requests × 0.85)` | 上报一次，告警状态置位 |
-| 已经上报，且 `available < int(max_requests × 0.75)` | 再上报一次，并清除告警状态 |
+| 尚未上报，且 `used >= int(max_requests × 0.85)` | 上报一次，告警状态置位 |
+| 已经上报，且 `used < int(max_requests × 0.75)` | 再上报一次，并清除告警状态 |
 
-事件固定为 `alarm_id=0xFC001005`、名称 `Coordinator Request Congestion Alarm`、级别 MAJOR、`reason_id=DEALING_WITH_CONGESTION`。触发和恢复使用同一个 `reason_id`。附加信息里的数字是当时的剩余令牌数。状态在置位后不会重复上报，直到剩余令牌落到 75% 阈值之下。
+事件固定为 `alarm_id=0xFC001005`、名称 `Coordinator Request Congestion Alarm`、级别 MAJOR、`reason_id=DEALING_WITH_CONGESTION`。触发和恢复使用同一个 `reason_id`。附加信息里的数字是已用额度。空载满桶时 `used` 很小，不会告警。状态在置位后不会重复上报，直到已用额度落到 75% 阈值之下。
 
 ### 请求体大小
 
