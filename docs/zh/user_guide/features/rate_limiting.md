@@ -30,7 +30,7 @@
 
 令牌足够则放行，否则立即拒绝，不排队。`skip_paths` 中的路径按前缀匹配（`startswith`），命中后直接放行，不消耗令牌，也不做请求体大小检查。
 
-推理面可以按 `inference_workers_config.num_workers` 启动多个 Worker 进程，默认 `4`。每个进程各自持有一只令牌桶，桶之间不共享。因此单个 Coordinator 上 `simple` 限流的总通过量大约是 `max_requests × num_workers`，不是配置里的单个 `max_requests`。
+推理面可以按 `inference_workers_config.num_workers` 启动多个 Worker 进程，默认 `4`。每个进程各自持有一只令牌桶，桶之间不共享，拥堵告警也按进程各自上报，Coordinator 不做去重。因此单个 Coordinator 上 `simple` 限流的总通过量大约是 `max_requests × num_workers`，不是配置里的单个 `max_requests`。多个 Worker 同时接近额度时，Controller 会收到多条拥堵事件。
 
 `scope` 默认是 `global`。当前 `simple` 实现固定使用这一只全局桶，把 `scope` 改成其他值不会变成按 IP 或按用户限流。
 
@@ -42,10 +42,14 @@
 
 | 条件 | 行为 |
 |------|------|
-| 尚未上报，且 `used >= int(max_requests × 0.85)` | 上报一次，告警状态置位 |
-| 已经上报，且 `used < int(max_requests × 0.75)` | 再上报一次，并清除告警状态 |
+| 尚未上报，且 `used >= int(max_requests × 0.85)` | 上报。Controller 接受后才置位；未接受则保持未上报 |
+| 已经上报，且 `used < int(max_requests × 0.75)` | 再上报。Controller 接受后才清除；未接受则保持已上报 |
 
-事件固定为 `alarm_id=0xFC001005`、名称 `Coordinator Request Congestion Alarm`、级别 MAJOR、`reason_id=DEALING_WITH_CONGESTION`。触发和恢复使用同一个 `reason_id`。附加信息里的数字是已用额度。空载满桶时 `used` 很小，不会告警。状态在置位后不会重复上报，直到已用额度落到 75% 阈值之下。
+`ControllerApiClient.report_alarms` 失败时不抛异常，返回 `ok=false`（HTTP 非 200 或传输异常）。限流器忽略过这个返回值时，状态会提前置位，Controller 恢复后也不再补报。现在只有返回 `ok` 才翻转状态。未接受时不挡住本次请求，并由之后的请求重试，间隔约 1 秒，避免 Controller 不可达时每个请求都同步打一次上报。
+
+事件固定为 `alarm_id=0xFC001005`、名称 `Coordinator Request Congestion Alarm`、级别 MAJOR、`reason_id=DEALING_WITH_CONGESTION`。触发和恢复使用同一个 `reason_id`。附加信息里的数字是已用额度。空载满桶时 `used` 很小，不会告警。状态在置位后不会重复上报，直到已用额度落到 75% 阈值之下。告警按推理 Worker 进程各报各的，与上一节的独立令牌桶一致。
+
+`max_requests` 为 1、2、3、4、7、8 时，`int(max_requests × 0.85)` 与 `int(max_requests × 0.75)` 相等，触发和恢复之间没有滞回区间，已用额度在该整数附近来回时会反复上报。其中 `max_requests` 为 1 时，恢复条件是 `used < 0`，置位之后不会清除。`max_requests >= 10` 时两个整数阈值至少相差 1。
 
 **请求体大小**
 
@@ -138,7 +142,7 @@ OLC 中间件创建失败时，Coordinator 记录错误日志 `Using simple rate
 | 引擎 | 与推理引擎类型无关 |
 | 特性互斥 | 无 |
 | 软件依赖 | `provider=olc` 时需要安装 [OLC](https://gitcode.com/openFuyao/olc-python)（`olc-python` v0.1.0） |
-| 其他限制 | <ul><li>`simple` 按每个推理 Worker 进程独立计数，总通过量约为 `max_requests × num_workers`</li><li>`scope` 不改变分桶方式，当前固定为进程内全局桶</li><li>启动时未开启限流时，热更新不能补装中间件</li><li>成功加载的 `olc` 不能通过热更新切换提供者或规则目录</li></ul> |
+| 其他限制 | <ul><li>`simple` 按每个推理 Worker 进程独立计数，总通过量约为 `max_requests × num_workers`</li><li>拥堵告警同样按 Worker 进程分别上报，不会在 Coordinator 内合并成一条</li><li>`max_requests` 为 1、2、3、4、7、8 时，85% 与 75% 取整后阈值相同，边界附近可能反复上报；为 1 时告警置位后不会清除</li><li>`scope` 不改变分桶方式，当前固定为进程内全局桶</li><li>启动时未开启限流时，热更新不能补装中间件</li><li>成功加载的 `olc` 不能通过热更新切换提供者或规则目录</li></ul> |
 
 ## 特性使用
 
