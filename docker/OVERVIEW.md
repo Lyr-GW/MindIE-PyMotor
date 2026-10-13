@@ -10,7 +10,7 @@
 
     - [AscendHub Image Registry](https://www.hiascend.com/en/developer/ascendhub/detail/f1690465f39847a8b0a1f9e5b36a03c4)
     - [MindIE-Motor Documentation](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docs/zh/index.md)
-    - [Atlas Community](https://www.hiascend.com/en)
+    - [Atlas Developer Community](https://www.hiascend.com/en)
     - [Report an Issue](https://gitcode.com/Ascend/MindIE-Motor/issues)
 
 ## MindIE-Motor
