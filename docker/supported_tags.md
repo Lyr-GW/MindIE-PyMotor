@@ -12,12 +12,12 @@ Current published tag format: `<MotorVersion>-vllm_ascend<EngineVersion>-<ChipSe
 
 | Tag | Dockerfile | Architecture |
 |---|---|---|
-| `3.1.1-vllm_ascend0.23.0.post1-a2-ubuntu22.04-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.1.1-vllm_ascend0.23.0.post1-a2-ubuntu22.04-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.1.1-vllm_ascend0.23.0.post1-a2-openeuler24.03-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.1.1-vllm_ascend0.23.0.post1-a2-openeuler24.03-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.1.1-vllm_ascend0.23.0.post1-a3-ubuntu22.04-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.1.1-vllm_ascend0.23.0.post1-a3-ubuntu22.04-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.1.1-vllm_ascend0.23.0.post1-a3-openeuler24.03-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.1.1-vllm_ascend0.23.0.post1-a3-openeuler24.03-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.1.1-vllm_ascend0.23.0.post1-a5-ubuntu22.04-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.1.1-vllm_ascend0.23.0.post1-a5-ubuntu22.04-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.1.1-vllm_ascend0.23.0.post1-a5-openeuler24.03-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.1.1-vllm_ascend0.23.0.post1-a5-openeuler24.03-py3.12/Dockerfile) | arm64 / x86_64 |
+| `3.1.1-vllm_ascend0.23.0.post1-a2-ubuntu22.04-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.1.1-vllm_ascend0.23.0.post1-a2-openeuler24.03-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.1.1-vllm_ascend0.23.0.post1-a3-ubuntu22.04-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.1.1-vllm_ascend0.23.0.post1-a3-openeuler24.03-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.1.1-vllm_ascend0.23.0.post1-a5-ubuntu22.04-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.1.1-vllm_ascend0.23.0.post1-a5-openeuler24.03-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
 
 ## MindIE-Motor 3.2.0b3
 
@@ -25,12 +25,12 @@ Released to pair with the vllm-ascend v0.26.0rc2 images, in which vllm-ascend fi
 
 | Tag | Dockerfile | Architecture |
 |---|---|---|
-| `3.2.0b3-vllm_ascend0.26.0rc2-a2-ubuntu22.04-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.2.0b3-vllm_ascend0.26.0rc2-a2-ubuntu22.04-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.2.0b3-vllm_ascend0.26.0rc2-a2-openeuler24.03-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.2.0b3-vllm_ascend0.26.0rc2-a2-openeuler24.03-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.2.0b3-vllm_ascend0.26.0rc2-a3-ubuntu22.04-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.2.0b3-vllm_ascend0.26.0rc2-a3-ubuntu22.04-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.2.0b3-vllm_ascend0.26.0rc2-a3-openeuler24.03-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.2.0b3-vllm_ascend0.26.0rc2-a3-openeuler24.03-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.2.0b3-vllm_ascend0.26.0rc2-a5-ubuntu22.04-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.2.0b3-vllm_ascend0.26.0rc2-a5-ubuntu22.04-py3.12/Dockerfile) | arm64 / x86_64 |
-| `3.2.0b3-vllm_ascend0.26.0rc2-a5-openeuler24.03-py3.12` | [Dockerfile](https://gitcode.com/Ascend/MindIE-Motor/blob/master/docker/mindie-motor-vllm/3.2.0b3-vllm_ascend0.26.0rc2-a5-openeuler24.03-py3.12/Dockerfile) | arm64 / x86_64 |
+| `3.2.0b3-vllm_ascend0.26.0rc2-a2-ubuntu22.04-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.2.0b3-vllm_ascend0.26.0rc2-a2-openeuler24.03-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.2.0b3-vllm_ascend0.26.0rc2-a3-ubuntu22.04-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.2.0b3-vllm_ascend0.26.0rc2-a3-openeuler24.03-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.2.0b3-vllm_ascend0.26.0rc2-a5-ubuntu22.04-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
+| `3.2.0b3-vllm_ascend0.26.0rc2-a5-openeuler24.03-py3.12` | Dockerfile 待上传 | arm64 / x86_64 |
 
 ## vllm_ascend_deepseek_v4.1_flash
 
