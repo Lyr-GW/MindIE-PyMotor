@@ -34,6 +34,7 @@ DEFAULT_TEMPO_PORT = 3200
 DEFAULT_OTLP_GRPC_PORT = 4317
 DEFAULT_OTLP_HTTP_PORT = 4318
 DEFAULT_PORT_FORWARD_BASE = 19000
+KV_POOL_SERVICE_PREFIX = "mindie-motor-kvs-master"
 
 ENGINE_POD_RE = re.compile(
     r"^(?P<base>vllm|mindie-server|mindie-llm|sglang)(?:-(?P<role>p|d|e)(?P<idx>\d+))(?:-|$)",
@@ -94,6 +95,7 @@ class DiscoveryResult:
     coordinator_pod_name: str
     coordinator_is_primary: bool
     engine_targets: list[dict[str, Any]]
+    pool_targets: list[dict[str, Any]]
     port_forwards: list[PortForwardSpec]
     warnings: list[str]
 
@@ -169,6 +171,37 @@ def _service_ports(service: dict[str, Any]) -> list[dict[str, Any]]:
     spec = service.get("spec", {})
     ports = spec.get("ports", [])
     return ports if isinstance(ports, list) else []
+
+
+def _format_target(host: str, port: int) -> str:
+    """Format an address and port, bracketing IPv6 literals for Prometheus."""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{port}"
+
+
+def _discover_pool_target(services: Sequence[dict[str, Any]], namespace: str) -> dict[str, Any] | None:
+    """Find the one namespace-local KV pool service exposing a unique metrics port."""
+    candidates: list[dict[str, Any]] = []
+    for service in services:
+        name = _service_name(service)
+        if not name.startswith(KV_POOL_SERVICE_PREFIX):
+            continue
+        cluster_ip = str(service.get("spec", {}).get("clusterIP", ""))
+        metrics_ports = [port for port in _service_ports(service) if port.get("name") == "metrics"]
+        if not cluster_ip or cluster_ip.lower() == "none" or len(metrics_ports) != 1:
+            continue
+        try:
+            port_number = int(metrics_ports[0].get("port"))
+        except (TypeError, ValueError):
+            continue
+        candidates.append({"name": name, "host": cluster_ip, "port": port_number})
+    if len(candidates) > 1:
+        names = ", ".join(sorted(item["name"] for item in candidates))
+        raise RuntimeError(f"multiple KV pool services found in namespace '{namespace}': {names}")
+    if not candidates:
+        return None
+    return candidates[0]
 
 
 def _has_keyword(text: str, keywords: Sequence[str]) -> bool:
@@ -572,6 +605,8 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
     coordinator_pod_name = ""
     coordinator_is_primary = False
     engine_targets: list[dict[str, Any]] = []
+    pool_targets: list[dict[str, Any]] = []
+    pool_service: dict[str, Any] | None = None
     port_forwards: list[PortForwardSpec] = []
 
     if _is_kubectl_ready():
@@ -579,6 +614,21 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
             svc_json = _run_kubectl_json(["get", "svc", "-n", namespace])
             services = svc_json.get("items", [])
             mode = "kubernetes"
+
+            pool_service = _discover_pool_target(services, namespace)
+            if pool_service:
+                pool_targets = [
+                    {
+                        "target": _format_target(pool_service["host"], pool_service["port"]),
+                        "labels": {
+                            "cluster": namespace,
+                            "motor_component": "kv_pool",
+                            "pool_service": pool_service["name"],
+                        },
+                    }
+                ]
+            else:
+                warnings.append(f"no KV pool Service found in namespace '{namespace}'.")
 
             coord_match = _find_service_nodeport(
                 services=services,
@@ -707,11 +757,30 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
         coordinator_pod_name=coordinator_pod_name,
         coordinator_is_primary=coordinator_is_primary,
         engine_targets=engine_targets,
+        pool_targets=pool_targets,
         port_forwards=port_forwards,
         warnings=warnings,
     )
     if runtime == "docker":
         _apply_docker_gateway(result, args.port_forward_base)
+        if pool_service is not None:
+            local_port = (
+                max(
+                    (spec.local_port for spec in port_forwards),
+                    default=args.port_forward_base - 1,
+                )
+                + 1
+            )
+            port_forwards.append(
+                PortForwardSpec(
+                    namespace=namespace,
+                    pod_ip=pool_service["host"],
+                    remote_port=pool_service["port"],
+                    local_port=local_port,
+                    pod_name=pool_service["name"],
+                )
+            )
+            pool_targets[0]["target"] = _format_target("host.docker.internal", local_port)
     return result
 
 
@@ -852,6 +921,9 @@ def _build_prometheus_config(result: DiscoveryResult) -> str:
     lines.append("")
     lines.extend(_render_job("motor-engine", result.engine_targets, metrics_path="/metrics", honor_labels=True))
     lines.append("")
+    if result.pool_targets:
+        lines.extend(_render_job("motor-kv-pool", result.pool_targets, metrics_path="/metrics"))
+        lines.append("")
     lines.extend(
         _render_job(
             "vllm-profiling",
