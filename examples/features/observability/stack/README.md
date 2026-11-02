@@ -24,9 +24,11 @@ Grafana 默认：<http://localhost:3000>（`motor` / `motor`）。
 会在该 namespace 中查找名称为 `mindie-motor-kvs-master` 或以此前缀开头的 Service；候选必须有
 ClusterIP 和唯一的 `metrics` 命名端口。恰好一个有效候选时，生成 `motor-kv-pool` scrape job，并附带
 `cluster=<namespace>`、`motor_component=kv_pool` 和 `pool_service` 标签。没有候选时会告警且不生成该 job；
-多个候选时发现失败，避免混合不同池。Docker 模式通过观测机本地 TCP 转发访问 Service ClusterIP，
-Prometheus target 使用 `host.docker.internal`；Native 模式直接访问 Service 地址。IPv6 地址会按 Prometheus
-target 格式加方括号。可用 `MOTOR_PORT_FORWARD_BASE` 更改 Docker 转发端口起点。
+多个候选时发现失败，避免混合不同池。抓取目标解析为该 Service 的 Ready Endpoints（PodIP 和 `metrics`
+端口），避免让栈外观测机直接访问通常不可路由的 Service ClusterIP。Docker 模式通过观测机本地 TCP 转发
+访问 PodIP，Prometheus target 使用 `host.docker.internal`；Native 模式直接访问 PodIP。没有 Ready metrics
+endpoint 时会告警且不生成 pool job。IPv6 地址会按 Prometheus target 格式加方括号。可用
+`MOTOR_PORT_FORWARD_BASE` 更改 Docker 转发端口起点。
 
 切换后端时重新用对应 namespace 启动栈，例如：
 
@@ -52,8 +54,8 @@ python3 scripts/simulate-business-load.py --model <model-name> --duration 60 --r
 ```
 
 默认向 `http://127.0.0.1:1027/v1/chat/completions` 发送请求。可用 `--url` 指向目标 API、
-`--prompt` 设置请求内容；需要认证时设置 `MOTOR_API_KEY`。对比请求前后的池计数和容量时，使用不同的
-长前缀可减少 Prefill 前缀缓存命中对分配观测的影响。
+`--prompt` 设置请求内容；需要认证时设置 `MOTOR_API_KEY`。对比请求前后的池计数和容量时，启用
+`--unique-prefixes` 会把唯一 token 放在 prompt 开头，减少 Prefill 前缀缓存命中对分配观测的影响。
 
 ## 代理 / 内网拉镜像
 
