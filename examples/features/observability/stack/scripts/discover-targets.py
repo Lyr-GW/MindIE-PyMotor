@@ -195,13 +195,39 @@ def _discover_pool_target(services: Sequence[dict[str, Any]], namespace: str) ->
             port_number = int(metrics_ports[0].get("port"))
         except (TypeError, ValueError):
             continue
-        candidates.append({"name": name, "host": cluster_ip, "port": port_number})
+        candidates.append({"name": name, "cluster_ip": cluster_ip, "port": port_number})
     if len(candidates) > 1:
         names = ", ".join(sorted(item["name"] for item in candidates))
         raise RuntimeError(f"multiple KV pool services found in namespace '{namespace}': {names}")
     if not candidates:
         return None
     return candidates[0]
+
+
+def _discover_pool_endpoints(service_name: str, namespace: str) -> list[dict[str, Any]]:
+    """Resolve ready PodIP targets behind the KV pool Service metrics port."""
+    endpoint_json = _run_kubectl_json(["get", "endpoints", service_name, "-n", namespace])
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, int]] = set()
+    for subset in endpoint_json.get("subsets", []):
+        metrics_ports = [port for port in subset.get("ports", []) if port.get("name") == "metrics"]
+        if len(metrics_ports) != 1:
+            continue
+        port_number = int(metrics_ports[0].get("port") or 0)
+        for address in subset.get("addresses", []):
+            pod_ip = str(address.get("ip", ""))
+            if not pod_ip or not port_number or (pod_ip, port_number) in seen:
+                continue
+            seen.add((pod_ip, port_number))
+            targets.append(
+                {
+                    "target": _format_target(pod_ip, port_number),
+                    "pod_ip": pod_ip,
+                    "port": port_number,
+                    "pod_name": str((address.get("targetRef") or {}).get("name", "")),
+                }
+            )
+    return targets
 
 
 def _has_keyword(text: str, keywords: Sequence[str]) -> bool:
@@ -617,16 +643,27 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
 
             pool_service = _discover_pool_target(services, namespace)
             if pool_service:
-                pool_targets = [
-                    {
-                        "target": _format_target(pool_service["host"], pool_service["port"]),
-                        "labels": {
-                            "cluster": namespace,
-                            "motor_component": "kv_pool",
-                            "pool_service": pool_service["name"],
-                        },
-                    }
-                ]
+                try:
+                    pool_endpoints = _discover_pool_endpoints(pool_service["name"], namespace)
+                except subprocess.CalledProcessError as exc:
+                    pool_endpoints = []
+                    warnings.append(f"failed to list KV pool endpoints for {pool_service['name']}: {exc}.")
+                for endpoint in pool_endpoints:
+                    pool_targets.append(
+                        {
+                            "target": endpoint["target"],
+                            "labels": {
+                                "cluster": namespace,
+                                "motor_component": "kv_pool",
+                                "pool_service": pool_service["name"],
+                                "pool_pod": endpoint["pod_name"],
+                            },
+                        }
+                    )
+                if not pool_targets:
+                    warnings.append(
+                        f"KV pool Service {pool_service['name']} has no ready metrics endpoints in namespace '{namespace}'."
+                    )
             else:
                 warnings.append(f"no KV pool Service found in namespace '{namespace}'.")
 
@@ -764,23 +801,22 @@ def _discover(namespace: str, node_ip: str, args: argparse.Namespace) -> Discove
     if runtime == "docker":
         _apply_docker_gateway(result, args.port_forward_base)
         if pool_service is not None:
-            local_port = (
+            next_port = (
                 max(
                     (spec.local_port for spec in port_forwards),
                     default=args.port_forward_base - 1,
                 )
                 + 1
             )
-            port_forwards.append(
-                PortForwardSpec(
-                    namespace=namespace,
-                    pod_ip=pool_service["host"],
-                    remote_port=pool_service["port"],
-                    local_port=local_port,
-                    pod_name=pool_service["name"],
+            for item in pool_targets:
+                host, remote_port = _split_target(item["target"])
+                item["target"], next_port = _register_docker_port_forward(
+                    result,
+                    host=host,
+                    remote_port=remote_port,
+                    pod_name=item["labels"].get("pool_pod") or pool_service["name"],
+                    next_port=next_port,
                 )
-            )
-            pool_targets[0]["target"] = _format_target("host.docker.internal", local_port)
     return result
 
 

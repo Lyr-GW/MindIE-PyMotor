@@ -31,8 +31,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--rate", type=float, default=1, help="Requests per second, capped at 20 (default: 1).")
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--timeout", type=float, default=120)
-    parser.add_argument("--unique-prefixes", action="store_true", help="Append a unique token to each prompt.")
+    parser.add_argument("--unique-prefixes", action="store_true", help="Prefix each prompt with a unique token.")
     return parser.parse_args()
+
+
+def _build_prompt(prompt: str, unique_prefixes: bool) -> str:
+    if not unique_prefixes:
+        return prompt
+    return f"Request token: {uuid4().hex}\n{prompt}"
 
 
 def _send_stream(url: str, model: str, prompt: str, max_tokens: int, timeout: float, api_key: str) -> None:
@@ -79,11 +85,8 @@ def main() -> int:
             break
         started += 1
         try:
-            prompt = args.prompt
-            if args.unique_prefixes:
-                prompt = f"{prompt}\nRequest token: {uuid4().hex}"
-            request_timeout = min(args.timeout, max(deadline - time.monotonic(), 0.1))
-            _send_stream(args.url, args.model, prompt, args.max_tokens, request_timeout, api_key)
+            prompt = _build_prompt(args.prompt, args.unique_prefixes)
+            _send_stream(args.url, args.model, prompt, args.max_tokens, args.timeout, api_key)
             succeeded += 1
         except (HTTPError, URLError, TimeoutError, OSError, RuntimeError) as exc:
             failed += 1
