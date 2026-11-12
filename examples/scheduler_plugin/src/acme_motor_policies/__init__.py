@@ -14,7 +14,7 @@ from motor.coordinator.scheduler.policy.api import LoadBalancingPolicy, RankedCa
 
 
 class WeightedLoadPolicy(LoadBalancingPolicy):
-    api_version = 1
+    api_version = 2
 
     def rank(self, selection: SelectionInput) -> list[RankedCandidate]:
         weight = float(self.options.get("instance_weight", 0.05))

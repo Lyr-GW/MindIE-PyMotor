@@ -428,6 +428,9 @@ def test_loader_only_imports_selected_entry_point(monkeypatch):
     other.load.assert_not_called()
     with pytest.raises(ValueError, match="exactly one"):
         load_policy("missing", {})
+    Policy.api_version = 1
+    with pytest.raises(ValueError, match="API version"):
+        load_policy("chosen", {})
 
 
 @pytest.mark.asyncio

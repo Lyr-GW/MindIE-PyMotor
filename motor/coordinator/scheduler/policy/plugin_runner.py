@@ -65,7 +65,7 @@ class PolicyRunner:
                 if response.get("ready") is not True:
                     raise ValueError(response.get("error", "Missing plugin ready response"))
                 self._counts["loads"] += 1
-                logger.info("Scheduling plugin loaded name=%s api_version=1", self.config.name)
+                logger.info("Scheduling plugin loaded name=%s api_version=2", self.config.name)
             except asyncio.CancelledError:
                 await self._stop()
                 raise

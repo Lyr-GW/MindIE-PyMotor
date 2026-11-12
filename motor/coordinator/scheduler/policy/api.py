@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-SUPPORTED_POLICY_API_VERSION = 1
+SUPPORTED_POLICY_API_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)

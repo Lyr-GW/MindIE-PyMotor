@@ -44,7 +44,8 @@ Prefill 和 Decode 的内置策略仍分别由原配置决定，轮询、负载�
 ## 接口与上下文
 
 公共接口位于 `motor.coordinator.scheduler.policy.api`。继承 `LoadBalancingPolicy`，
-声明 `api_version = 1`，实现同步 `rank(selection) -> Sequence[RankedCandidate]`。
+声明 `api_version = 2`，实现同步 `rank(selection) -> Sequence[RankedCandidate]`。
+本次公开接口使用 API v2，与历史分支的进程内 API v1 草案区分；旧版本会在加载时拒绝并回退。
 返回非空候选子集，按优先顺序排列，分数必须有限；Motor 使用返回顺序，不另行按分数排序。
 候选必须来自本次输入，不允许重复或返回已排除的 ID。空结果也会回退。
 
