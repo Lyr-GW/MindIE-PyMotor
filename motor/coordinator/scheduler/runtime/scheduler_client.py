@@ -27,6 +27,7 @@ from motor.config.coordinator import (
     KV_AFFINITY_MODE_UNIFIED,
     KV_AFFINITY_MODES,
     KvAffinityConfig,
+    PolicyPluginConfig,
 )
 from motor.coordinator.domain import (
     InstanceReadiness,
@@ -65,6 +66,8 @@ from motor.coordinator.scheduler.policy.dynamic_bucket import (
 from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
+from motor.coordinator.scheduler.policy.api import CandidateId, CandidateSnapshot, RequestContext, SelectionInput
+from motor.coordinator.scheduler.policy.plugin_runner import PolicyRunner
 from motor.coordinator.scheduler.runtime.dp_stats import DpStatsLogger
 from motor.coordinator.scheduler.runtime.kv_usage import (
     KvUsageShmReader,
@@ -666,6 +669,7 @@ class SchedulerClientConfig:
     decode_scheduler_type: str | None = None
     # Optional default applied to both roles when the per-role fields are unset (tests).
     scheduler_type: str | None = None
+    policy_plugin: PolicyPluginConfig | None = None
     client_index: int = 0
     client_count: int = 1
     endpoint_instance_score_weight: float = 0.05
@@ -703,8 +707,16 @@ class AsyncSchedulerClient:
     # instead of raising AttributeError.
     _cache_declarations: CacheDeclarationTable | None = None
     _cache_lifecycle_task: asyncio.Task | None = None
+    _policy_runner: PolicyRunner | None = None
 
     def __init__(self, config: SchedulerClientConfig):
+        if config.policy_plugin is not None:
+            config.policy_plugin.validate()
+        self._policy_runner = (
+            PolicyRunner(config.policy_plugin)
+            if config.policy_plugin is not None and config.policy_plugin.name.strip()
+            else None
+        )
         self.scheduler_address = config.scheduler_address
         self.timeout = config.timeout
         self._client_index = max(0, config.client_index)
@@ -817,6 +829,8 @@ class AsyncSchedulerClient:
 
     async def connect(self) -> bool:
         success = await self._transport.connect()
+        if self._policy_runner is not None:
+            await self._policy_runner.start()
         if success:
             await self._init_cache()
         if success and self._push_subscriber:
@@ -836,6 +850,8 @@ class AsyncSchedulerClient:
         return success
 
     async def disconnect(self) -> None:
+        if self._policy_runner is not None:
+            await self._policy_runner.close()
         await self._stop_dp_stats_task()
         await self._stop_cache_lifecycle_task()
         try:
@@ -1405,6 +1421,104 @@ class AsyncSchedulerClient:
         except Exception as e:
             logger.warning("on_instance_refreshed callback failed: %s", e)
 
+    def policy_metrics_text(self) -> str:
+        """Return only this inference worker's plugin samples."""
+        return self._policy_runner.metrics_text() if self._policy_runner is not None else ""
+
+    async def _try_rank_external_policy(
+        self,
+        role: PDRole,
+        req_info: RequestInfo,
+        required_engine_type: str | None,
+        required_dispatch_capability: str | None,
+        excluded: set[tuple[int, int]],
+        attempt: int,
+    ) -> tuple[Instance, Endpoint, float, float] | None:
+        """Snapshot/provider failures must also preserve the built-in request path."""
+        try:
+            return await self._rank_external_policy(
+                role,
+                req_info,
+                required_engine_type,
+                required_dispatch_capability,
+                excluded,
+                attempt,
+            )
+        except Exception as exc:
+            self._policy_runner.record_fallback(type(exc).__name__)
+            return None
+
+    async def _rank_external_policy(
+        self,
+        role: PDRole,
+        req_info: RequestInfo,
+        required_engine_type: str | None,
+        required_dispatch_capability: str | None,
+        excluded: set[tuple[int, int]],
+        attempt: int,
+    ) -> tuple[Instance, Endpoint, float, float] | None:
+        """Build a public snapshot after core filtering and validate the returned identity."""
+        from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_BLOCKED
+
+        instances = self._cache.get_instances(role)
+        if not instances:
+            instances = list((await self.get_available_instances(role)).values())
+        instances = self._filter_instances(instances, required_engine_type, required_dispatch_capability)
+        instances = self._apply_priority_load_gate(instances, req_info, role)
+        snapshots = []
+        pairs = {}
+        generations = {}
+        for instance in instances:
+            if self.is_instance_blocked(instance.id):
+                continue
+            for endpoint in instance.get_all_endpoints():
+                pair = (instance.id, endpoint.id)
+                meta = self._workload_reader.entry_meta(*pair)
+                if pair in excluded or meta is None or int(meta.get("flags", 0)) & FLAG_BLOCKED:
+                    continue
+                identity = CandidateId(*pair)
+                pairs[identity] = (instance, endpoint)
+                generations[identity] = int(meta["generation"])
+                snapshots.append(
+                    CandidateSnapshot(
+                        id=identity,
+                        active_tokens=float(endpoint.workload.active_tokens),
+                        instance_active_tokens=float(instance.gathered_workload.active_tokens),
+                        node_address=str(endpoint.ip),
+                        engine_type=str(instance.engine_type or ""),
+                        kv_cache_usage=get_endpoint_kv_cache_usage(instance, endpoint),
+                    )
+                )
+        if not snapshots:
+            self._policy_runner.record_fallback("no_eligible_candidates")
+            return None
+        data = req_info.req_data
+        token_ids = getattr(req_info, "token_ids", None)
+        selection = SelectionInput(
+            request=RequestContext(
+                request_id=req_info.req_id,
+                role=role.value,
+                model_name=str(data.get("model", "")),
+                prompt_tokens=len(token_ids) if isinstance(token_ids, list) else 0,
+                max_output_tokens=data.get("max_completion_tokens", data.get("max_tokens")),
+                user=data.get("user") if isinstance(data.get("user"), str) else None,
+                session_id=getattr(getattr(req_info, "agent_hint_info", None), "session_id", None),
+            ),
+            candidates=tuple(snapshots),
+            excluded=frozenset(CandidateId(*pair) for pair in excluded),
+            attempt=attempt,
+        )
+        ranked = await self._policy_runner.rank(selection)
+        if not ranked:
+            return None
+        instance, endpoint = pairs[ranked[0].id]
+        meta = self._workload_reader.entry_meta(instance.id, endpoint.id)
+        if meta is None or int(meta["generation"]) != generations[ranked[0].id]:
+            self._policy_runner.record_fallback("membership_changed")
+            return None
+        expected = next(item.active_tokens for item in snapshots if item.id == ranked[0].id)
+        return instance, endpoint, ranked[0].score, expected
+
     async def select_and_allocate(
         self,
         role: "PDRole",
@@ -1413,6 +1527,7 @@ class AsyncSchedulerClient:
         target_instance_id: int | None = None,
         required_engine_type: str | None = None,
         required_dispatch_capability: str | None = None,
+        _use_plugin: bool = True,
     ) -> tuple[Instance, Endpoint, Workload] | None:
         """Select locally, then CAS-commit on schema-4 SHM (no ALLOCATE_ONLY ZMQ)."""
         from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_BLOCKED
@@ -1538,7 +1653,27 @@ class AsyncSchedulerClient:
                     req_info.req_id,
                 )
 
-        if target_instance_id is not None:
+        plugin_choice = None
+        if (
+            _use_plugin
+            and self._policy_runner is not None
+            and target_instance_id is None
+            and role.value in self._policy_runner.config.roles
+        ):
+            plugin_choice = await self._try_rank_external_policy(
+                role,
+                req_info,
+                normalized_engine_type or None,
+                normalized_dispatch_capability or None,
+                set(),
+                0,
+            )
+        plugin_active = plugin_choice is not None
+        if plugin_active:
+            proposed_instance, proposed_endpoint, _ = plugin_choice[:3]
+            candidate_policy = "plugin:" + self._policy_runner.config.name
+            candidate_endpoints = [{"instance_id": proposed_instance.id, "endpoint_id": proposed_endpoint.id}]
+        elif target_instance_id is not None:
             instances = await self.get_available_instances(role)
             instances = {
                 candidate.id: candidate
@@ -1662,7 +1797,9 @@ class AsyncSchedulerClient:
                 ]
 
         scheduler_type = self._scheduler_type_for_role(role)
-        if scheduler_type == "round_robin":
+        if plugin_active:
+            demand = calculate_demand_workload(role, req_info)
+        elif scheduler_type == "round_robin":
             demand = Workload()
         elif scheduler_type == "dynamic_bucket":
             demand = make_dynamic_bucket_allocation_workload(req_info)
@@ -1697,11 +1834,52 @@ class AsyncSchedulerClient:
             # First attempt reuses the candidate-selection refresh above; later retries re-read.
             if _attempt > 0:
                 await self._refresh_cache_from_workload_reader(role)
+            if plugin_active and _attempt > 0:
+                plugin_choice = None
+                if _attempt < 3:
+                    plugin_choice = await self._try_rank_external_policy(
+                        role,
+                        req_info,
+                        normalized_engine_type or None,
+                        normalized_dispatch_capability or None,
+                        excluded,
+                        _attempt,
+                    )
+                if plugin_choice is None:
+                    if _attempt >= 3:
+                        self._policy_runner.record_fallback("cas_retry_limit")
+                    logger.warning(
+                        "Scheduling plugin reselect failed; using built-in strategy req_id=%s", req_info.req_id
+                    )
+                    return await self.select_and_allocate(
+                        role,
+                        req_info,
+                        target_instance_id=target_instance_id,
+                        required_engine_type=required_engine_type,
+                        required_dispatch_capability=required_dispatch_capability,
+                        _use_plugin=False,
+                    )
+            if plugin_active:
+                selected = plugin_choice[:3]
+                # Revalidate after the async plugin call. CAS below checks SHM generation/flags/load.
+                valid = select_valid_candidate(
+                    self._arbitration_context(role),
+                    (selected[0].id, selected[1].id),
+                    role,
+                    normalized_engine_type or None,
+                    normalized_dispatch_capability or None,
+                )
+                if valid is None:
+                    excluded.add((selected[0].id, selected[1].id))
+                    continue
+                selected = (valid[0], valid[1], selected[2])
             ctx = self._arbitration_context(role)
             open_pairs = [pair for pair in candidate_pairs if pair not in excluded] or (
                 [proposed] if proposed not in excluded else []
             )
-            if use_authoritative:
+            if plugin_active:
+                pass
+            elif use_authoritative:
                 selected = select_authoritative_allocate_candidate(
                     ctx,
                     proposed,
@@ -1757,6 +1935,8 @@ class AsyncSchedulerClient:
                 isl,
             )
             decision_expected = float(out_endpoint.workload.active_tokens if out_endpoint.workload is not None else 0.0)
+            if plugin_active:
+                decision_expected = plugin_choice[3]
             meta = self._workload_reader.entry_meta(out_instance.id, out_endpoint.id)
             if meta is None or int(meta.get("flags", 0)) & FLAG_BLOCKED:
                 excluded.add(pair)

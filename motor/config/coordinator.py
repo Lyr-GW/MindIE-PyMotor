@@ -397,9 +397,43 @@ class KvAffinityConfig:
 
 
 @dataclass
+class PolicyPluginConfig:
+    """Optional external endpoint policy. Changes take effect after worker restart."""
+
+    name: str = ""
+    options: dict[str, Any] = field(default_factory=dict)
+    roles: list[str] = field(default_factory=lambda: ["prefill", "decode", "union", "encode"])
+    timeout_ms: int = 50
+    startup_timeout_ms: int = 5000
+    cooldown_seconds: float = 30.0
+
+    def validate(self) -> None:
+        """Reject malformed configuration without importing any plugin code."""
+        if not isinstance(self.name, str) or len(self.name) > 128:
+            raise ValueError("policy_plugin.name must be a string of at most 128 characters")
+        if not isinstance(self.options, dict):
+            raise ValueError("policy_plugin.options must be a JSON object")
+        json.dumps(self.options, allow_nan=False)
+        if (
+            not isinstance(self.roles, list)
+            or not self.roles
+            or any(role not in ("prefill", "decode", "union", "encode") for role in self.roles)
+        ):
+            raise ValueError("policy_plugin.roles must contain prefill/decode/union/encode")
+        for key in ("timeout_ms", "startup_timeout_ms"):
+            value = getattr(self, key)
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 60000:
+                raise ValueError("policy_plugin.%s must be an integer in [1, 60000]" % key)
+        value = self.cooldown_seconds
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 1:
+            raise ValueError("policy_plugin.cooldown_seconds must be finite and >= 1")
+
+
+@dataclass
 class SchedulerConfig:
     prefill_scheduler_type: SchedulerType = field(default=SchedulerType.LOAD_BALANCE)
     decode_scheduler_type: SchedulerType = field(default=SchedulerType.LOAD_BALANCE)
+    policy_plugin: PolicyPluginConfig = field(default_factory=PolicyPluginConfig)
     enable_pd_separation_fallback_to_hybrid: bool = True
     # Weight of the instance average workload in endpoint-first load balancing.
     # 0 means pure global endpoint minimum; small values preserve instance pressure awareness.
@@ -1128,6 +1162,12 @@ class CoordinatorConfig:
         )
 
         allowed_scheduler_types = ", ".join(item.value for item in SchedulerType)
+        try:
+            if not isinstance(self.scheduler_config.policy_plugin, PolicyPluginConfig):
+                raise ValueError("policy_plugin must be a JSON object")
+            self.scheduler_config.policy_plugin.validate()
+        except (TypeError, ValueError) as exc:
+            self._errors.append(str(exc))
         if not isinstance(self.scheduler_config.prefill_scheduler_type, SchedulerType):
             self._errors.append(f"prefill_scheduler_type must be one of: {allowed_scheduler_types}")
         if not isinstance(self.scheduler_config.decode_scheduler_type, SchedulerType):

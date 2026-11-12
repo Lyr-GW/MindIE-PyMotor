@@ -86,6 +86,7 @@ nav:
           - 主备倒换: design/fault_tolerance/standby.md
           - 精度检测: design/fault_tolerance/precision_detection.md
       - KV Conductor: design/kv_conductor.md
+      - 候选选点插件: design/scheduler_policy_plugin.md
       - Coordinator 调度热路径 Rust 重构: design/coordinator_scheduler_rust.md
       - 扩缩容: design/scaling.md
       - CRD 部署设计: design/crd_deployment.md
