@@ -15,6 +15,7 @@ import json
 import sys
 from dataclasses import asdict
 from importlib.metadata import entry_points
+from io import TextIOBase
 
 from motor.coordinator.scheduler.policy.api import (
     SUPPORTED_POLICY_API_VERSION,
@@ -67,7 +68,7 @@ def decode_selection(payload: dict) -> SelectionInput:
     )
 
 
-def main(protocol_output=None) -> None:
+def main(protocol_output: TextIOBase | None = None) -> None:
     """Keep plugin stdout separate from protocol output, including constructor output."""
     if protocol_output is None:
         protocol_output = sys.stdout
