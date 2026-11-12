@@ -57,7 +57,9 @@
         }
       },
       "kv-cache-dtype": "fp8",
-      "attention_config.indexer_kv_dtype": "fp8",
+      "attention_config": {
+        "indexer_kv_dtype": "fp8"
+      },
       "additional_config": {
         "enable_cpu_binding": "True",
         "multistream_overlap_shared_expert": "True",
@@ -110,7 +112,9 @@
         }
       },
       "kv-cache-dtype": "fp8",
-      "attention_config.indexer_kv_dtype": "fp8",
+      "attention_config": {
+        "indexer_kv_dtype": "fp8"
+      },
       "additional_config": {
         "enable_cpu_binding": "True",
         "ascend_compilation_config": {
