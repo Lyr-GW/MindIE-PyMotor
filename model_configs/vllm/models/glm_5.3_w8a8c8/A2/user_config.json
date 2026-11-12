@@ -43,7 +43,9 @@
       "enable-auto-tool-choice": true,
       "reasoning-parser": "glm47",
       "kv-cache-dtype": "int8",
-      "attention_config.indexer_kv_dtype": "int8",
+      "attention_config": {
+        "indexer_kv_dtype": "int8"
+      },
       "additional_config": {
         "enable_dsa_cp": true,
         "enable_flashcomm1": true,
@@ -97,7 +99,9 @@
       "enable-auto-tool-choice": true,
       "reasoning-parser": "glm47",
       "kv-cache-dtype": "int8",
-      "attention_config.indexer_kv_dtype": "int8",
+      "attention_config": {
+        "indexer_kv_dtype": "int8"
+      },
       "additional_config": {
         "recompute_scheduler_enable": true
       },
