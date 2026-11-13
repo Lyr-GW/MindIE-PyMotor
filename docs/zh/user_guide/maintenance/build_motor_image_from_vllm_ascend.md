@@ -14,6 +14,9 @@
 - [MindIE Motor 升级](#mindie-motor升级)
 - [MindIE Motor 卸载](#mindie-motor卸载)
 
+> [!NOTE]说明
+> 如需在麒麟（Kylin）系统上制作镜像，请参考[基于麒麟系统的 MindIE Motor 镜像制作指导](build_motor_image_on_kylin.md)。
+
 ## 使用MindIE Motor官方完整镜像
 
 1. 进入 [昇腾官方镜像仓库](https://www.hiascend.com/developer/ascendhub)，搜索 `motor`，按设备型号选择对应 MindIE Motor 镜像。
@@ -89,14 +92,14 @@ make build-pymotor-image \
   OUTPUT=type=registry
 ```
 
-> [!NOTE]说明
+> [!NOTE] 说明
 > `master` Dockerfile 会把当前工作区中的 `motor`、`scripts` 和 `examples` 复制到镜像中，因此未提交的代码修改也会进入镜像。构建过程需要访问基础镜像仓库和 Python 软件源；离线环境请使用后文的手动方式。
 
 ### 手动构建
 
 ### 依赖下载（可选）
 
->[!NOTE]说明
+>[!NOTE] 说明
 >如果制作镜像的机器可以访问互联网，请直接跳转至[获取基础镜像](#获取基础镜像以vllm-ascend为例)小节；如果制作镜像的服务器不能联网，请执行当前步骤。
 
 在有网的环境执行如下步骤：
@@ -162,7 +165,7 @@ make build-pymotor-image \
 docker pull quay.io/ascend/vllm-ascend:v0.13.0
 ```
 
->[!NOTE]说明
+>[!NOTE] 说明
 >为提高下载速度，可将`quay.io`替换为`quay.nju.edu.cn`。
 
 #### 安装MindIE Motor

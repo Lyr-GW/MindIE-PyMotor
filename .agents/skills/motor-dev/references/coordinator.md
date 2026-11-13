@@ -26,7 +26,12 @@ CoordinatorDaemon (parent process, async main loop)
 
 **Process lifecycle:**
 
-- Start order: Mgmt (bind ROUTER/PUB + create SHM) → Obs → Inference
+- Start invocation order: Mgmt → Obs → Inference. `_start_processes()` calls each manager's `start()` in turn;
+  `BaseProcessManager.start()` starts child processes and checks liveness, without waiting for Mgmt socket binding,
+  SHM creation, or readiness. Child initialization can overlap subsequent starts, so this is not an initialization
+  completion order or a dependency-readiness barrier. A failed manager start is logged and the loop continues.
+  Mgmt binds ROUTER/PUB and creates SHM during its own initialization; use component code, logs, and readiness
+  checks to assess actual connection, waiting, retry, and failure behavior.
 - Stop order: Inference → Obs → Mgmt (reverse, via `STOP_ORDER` constant)
 - Termination: `terminate()` → `join(timeout=10s)` → `kill()` (three-stage, graceful first)
 - Health supervision: `SubprocessSupervisor` monitors child PIDs, auto-restarts dead processes
@@ -274,6 +279,23 @@ gate; it does not rebuild the global N-lowest-load set or preserve longest-prefi
 `scheduled.score` on the fast path is the candidate-validation load score, not the unified score.
 P/U affinity commits `max(0, isl - weighted_matched_tokens)`; `overlap_credit`, `prefill_load_scale`
 and `load_weight` affect ranking, not that delta. Release uses the committed workload.
+
+**Session affinity / Agent Hint KVC:** session stickiness is opt-in via
+`MOTOR_SESSION_AFFINITY=1`; multi-worker coordinators must also set
+`MOTOR_SESSION_AFFINITY_SHARED=1` so the pin table lives in shared memory.
+`MOTOR_SESSION_AFFINITY_PLACEMENT=balanced` spreads new pins by pinned-session
+count instead of falling through to the policy; epoch mismatches invalidate the
+pin and parent pins propagate to child sessions. `MOTOR_SESSION_AFFINITY_ROUTE=0`
+keeps the pin as a location ledger only (KVC manage requests use it, routing
+does not). The out-of-band `/agent-status` channel drives the KVC lifecycle
+(`kvc_lifecycle_config`) with four canonical states: `pause` starts Motor-owned
+idle timers (`idle_offload_s` / `idle_evict_s`; 0 disables each stage),
+`resume` cancels them and prefetches an offloaded session, plain `running`
+never prefetches, and `finalize` evicts. `tool`/`suspend` are deprecated wire
+aliases for `pause`; only a `running` event with a newer epoch may reuse a
+finalized `session_id` as a fresh context generation. Actions are serialized
+through a bounded queue and gated by `offload_kv_usage_high_water`. Per-worker
+counters are exported as `motor:kvc_*_total{worker="N"}` (`agent_hint_metrics.py`).
 
 **Registration config:** Runtime fields live in `scheduler_config.kv_conductor_config`.
 Deployer requires top-level `user_config.kv_conductor_config.http_server_port` to enable its service.
