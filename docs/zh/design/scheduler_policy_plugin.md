@@ -228,7 +228,7 @@ Loader 只导入与配置名完全匹配的条目。零条或多条匹配均失�
 对象是 `LoadBalancingPolicy` 子类、API 版本为 2、重写了同步 `rank()`，然后执行构造函数。
 历史 API v1 插件不会被当成 v2 接受；未选中的入口不会执行 `.load()`。
 包需安装在 Worker 使用的 Python 环境，Motor 与插件版本由部署系统共同锁定。
-完整实现和 wheel 构建安装步骤见 [示例包](../../../examples/scheduler_plugin/README.md)。
+完整实现和 wheel 构建安装步骤见 [示例包](../../../examples/scheduler_plugin/README.md)。 从零接入步骤见[中文快速接入指南](../user_guide/features/scheduler_policy_plugin.md)。
 
 ## 7. 进程协议与调用时序
 

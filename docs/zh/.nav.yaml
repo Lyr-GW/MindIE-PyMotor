@@ -38,6 +38,7 @@ nav:
           - EPD 分离: user_guide/features/EPD_disaggregation.md
           - PD 分离: user_guide/features/pd_disaggregation.md
           - 动态分桶调度: user_guide/features/dynamic_bucket.md
+          - 自定义选点插件快速接入: user_guide/features/scheduler_policy_plugin.md
           - KV Cache 亲和: user_guide/features/kvcache_affinity.md
           - Agent Hint 会话亲和与调度: user_guide/features/agent_hint.md
           - KV Cache Store:

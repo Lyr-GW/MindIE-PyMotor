@@ -30,3 +30,5 @@ used on plugin failure, timeout, cooldown or saturation.
 
 See [the developer contract](../../docs/zh/design/scheduler_policy_plugin.md)
 for API, isolation, metrics and limitations.
+
+中文快速接入指南：[编写、安装和启用自定义选点插件](../../docs/zh/user_guide/features/scheduler_policy_plugin.md)。
