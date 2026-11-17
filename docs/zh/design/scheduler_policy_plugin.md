@@ -1,6 +1,6 @@
 # Coordinator 候选实例 / Endpoint 选点插件设计
 
-> 状态：PR !1434 的 API v2 选点扩展按角色独立配置与隔离执行；本版角色隔离路径需重新执行集群验收。
+> API v2 支持按角色配置插件并隔离执行。
 > 需求追踪：[Issue #844](https://gitcode.com/Ascend/MindIE-Motor/issues/844)。
 > 本文描述当前实现，后续扩展在风险与演进章节单独列出。
 
@@ -274,28 +274,17 @@ Loader 只导入与配置名完全匹配的条目。零条或多条匹配均失�
 包需安装在 Worker 使用的 Python 环境，Motor 与插件版本由部署系统共同锁定。
 完整实现和 wheel 构建安装步骤见 [示例包](../../../examples/scheduler_plugin/README.md)。 从零接入步骤见[中文快速接入指南](../user_guide/features/inference_scheduling/scheduler_policy_plugin.md)。
 
-### 6.3 按角色插件的实现分解
+### 6.3 按角色运行
 
-实现链路如下，扩展角色配置时应同时检查各层，不能只修改 JSON 示例：
+配置校验后，SchedulerClient 将每个角色映射到独立的 `PolicyRunner`。同一配置项覆盖多个角色时，每个角色仍拥有独立的进程、锁、冷却状态和指标。
 
-| 层 / 关键入口 | 实现职责与不变量 |
-|--------------|------------------|
-| `motor/config/coordinator.py`：`PolicyPluginConfig.validate()`、`normalize_policy_plugins()` 与 `CoordinatorConfig.from_json()` | 把 JSON 对象项转换为配置实例，验证字段、未知键、role 非空数组、项内重复与跨项角色重叠；规范化保留每项的 role 数组，Client 再展开。非法配置须让调用方明确失败，不能被通用异常处理变成默认空配置 |
-| 同文件：`SchedulerConfig.policy_plugin`、`SchedulerConfig.__post_init__()` 与 `CoordinatorConfig.validate_config()` | 默认空列表；直接构造和 JSON 加载都验证完整列表，限制每种实际角色只能归属一项 |
-| `scheduler_connection_manager.py`：`SchedulerConnectionManager.from_config()` | 只向 Inference Worker 的 `SchedulerClientConfig` 传递配置；Mgmt/Obs 不创建客户 Runner |
-| `scheduler_client.py`：`AsyncSchedulerClient.__init__()` | 建立 `dict[role, PolicyRunner]`，逐项遍历 role 数组，按角色构造 `PolicyRunner(item, role=role)`；索引键为角色，不能以 name 或配置项去重合并 |
-| 同文件：`connect()` / `disconnect()` | 并发预加载全部配置角色，并发回收全部 Runner；单个加载失败由该 Runner 进入冷却，不阻止其他角色可用 |
-| 同文件：`select_and_allocate()`、`_try_rank_external_policy()`、`_rank_external_policy()` | pin 优先；按本次 role 获取 Runner，快照、插件调用、fallback 计数和 CAS 重选始终归属同一角色；缺少映射直接走 base |
-| `plugin_runner.py`：`start()` / `rank()` / `close()` / `_restart()` | 每实例维护进程、互斥锁、冷却期限、至多一个恢复任务和指标；P 的故障/繁忙不会占用 D 的锁或重置其进程 |
-| `scheduler_client.py`：`policy_metrics_text()`；`PolicyRunner.metrics_text()` | 输出各 Runner 的 `{policy,role}` 样本，按 metric family 分组，每组的 `# TYPE` 元数据只出现一次 |
-| `tests/config/`、`tests/coordinator/scheduler/test_policy_plugin.py` | 拦截非法 schema、角色路由、同名独立性、故障隔离、并发生命周期与合并指标回归；执行矩阵见第 13 节 |
+Worker 并发加载和关闭各角色插件。选点时优先处理 pin，再调用当前角色的 Runner；插件不可用时回退到该角色的内置策略。CAS 冲突时刷新快照并重试，最多调用插件三次。
 
-这一实现不改变 API v2：`SelectionInput.request.role` 已携带角色，`rank()` 签名与子进程排序消息不需要升级版本。
-配置角色负责选择 Runner，请求上下文角色用于让客户算法理解此次选点，两者必须一致。
+`SelectionInput.request.role` 标识当前角色，`rank()` 接口保持 API v2。代码入口见 [3.3 代码组织](#33-代码组织)。
 
 ### 6.4 旧单对象配置迁移
 
-PR !1434 尚未合入，旧单对象 `roles` 草案不作为兼容格式保留。加载时应报明确迁移错误，而非自动拆分或忽略。
+旧单对象 `roles` 草案不再支持，加载时会报迁移错误。
 以下旧配置不可继续使用：
 
 ```json
@@ -319,7 +308,7 @@ PR !1434 尚未合入，旧单对象 `roles` 草案不作为兼容格式保留�
 ```
 
 禁用全部插件改为删除 `policy_plugin` 或设为 `[]`；禁用某角色则从 role 数组移除该角色（数组空时删除整项），不能填写空 name。
-此迁移只影响本 PR 的插件草案配置，原内置 `scheduler_type` 的迁移机制继续有效。
+此迁移只影响插件草案配置，原内置 `scheduler_type` 的迁移机制继续有效。
 
 ## 7. 进程协议与调用时序
 
@@ -515,51 +504,25 @@ Prefill/Decode 的现有配置、旧 `scheduler_type` 的迁移逻辑、KV 亲�
 
 ### 13.1 契约与集成测试
 
-| 验证对象 | 现有专项用例 |
-|----------|--------------|
-| 真实包发现、构造输出不污染协议、排序与退出回收 | `test_real_entry_point_ranks_and_shutdown_reaps_child` |
-| 持续异常、阻塞、崩溃、空/非法结果与冷却 | `test_repeated_plugin_failure_is_bounded_and_cools_down` |
-| 加载失败和加载阻塞 | `test_missing_and_hung_loader_fall_back` |
-| 繁忙、取消和迟到响应隔离 | `test_busy_call_falls_back_and_cancellation_discards_late_reply` |
-| 默认配置、角色范围、pin 和已有策略分配 | `test_plugin_config_json_and_existing_config_defaults`、`test_pins_and_role_scope_preserve_core_selection`、`test_disabled_plugin_keeps_builtin_allocations` |
-| 冲突刷新、expected 快照与成员变化 | `test_cas_conflicts_reinvoke_plugin_with_fresh_snapshot`、`test_plugin_uses_decision_snapshot_for_cas_expected`、`test_membership_change_while_ranking_falls_back` |
-| 失败后恢复、关闭时中断阻塞调用 | `test_shutdown_interrupts_busy_plugin_and_cooldown_recovers` |
-| 真实 SHM CAS 分配及释放 | `test_real_plugin_with_native_shm_allocation_and_release` |
-| 指标抓取 | `test_worker_metaserver_exposes_plugin_metrics` |
-| 同项 P/D 的异常、超时、繁忙和冷却隔离、全部子进程回收 | `test_shared_config_keeps_other_role_healthy_and_reaps_all_children` |
-| P/D 不同参数和同名插件指标分组 | `test_prefill_and_decode_use_their_own_plugin_options`、`test_same_name_role_configs_get_independent_runners` |
+专项测试覆盖插件发现、配置校验、角色隔离、故障回退、CAS 分配与释放、生命周期和指标。先运行专项测试，再运行调度与配置回归：
 
 ```bash
 bash tests/run_tests.sh --serial tests/coordinator/scheduler/test_policy_plugin.py
 bash tests/run_tests.sh --serial tests/coordinator/scheduler/ tests/coordinator/core/test_config.py tests/config/
 ```
 
-先执行专项，再执行模块与配置回归。原生用例需要可加载的 Rust SHM 库，硬编码 `/dev/shm` 的用例需要 Linux 环境。
-某次验证的通过数、环境排除项和原始结果写入 PR/Issue，不作为本文的长期机制常量。
-
-角色版还需按下表验证；表中规定应有的行为，不代表某次执行已经通过：
-
-| 场景 | 必须观察到的结果 | 最小验证层 |
-|------|------------------|------------|
-| 未配置 / `[]` | 零 Runner、零插件子进程，四种角色维持原内置路径 | 配置与 SchedulerClient 回归 |
-| 一个 item 的 `role: ["prefill", "decode"]` | 两个 Runner 与进程；配置复用但锁、计数和恢复状态独立 | 配置展开与真实子进程测试 |
-| P/D 不同 name/options/预算，或同 name 不同 options | 请求角色调用相应算法与参数，日志/指标归属正确 | 真实 Entry Point + 核心分配 |
-| role 字符串、空数组、非法角色、项内重复、跨项重叠、缺字段、未知键、旧对象/roles | JSON 加载和直接配置均明确拒绝；错误带项索引，不能静默变为默认配置 | 配置单元测试 |
-| P 异常 / 超时 / 忙 / 冷却时 D 正常 | P 回退其内置策略；D 仍调用自己的插件，计数和恢复互不影响 | 并发故障注入 |
-| 只配置 P，或只配置 D；U/E 未显式包含 | 已配置角色可调用插件，其余角色直接 base；pin 仍优先 | 角色路由测试 |
-| 某角色 CAS 冲突 / 成员变化 / 三次耗尽 | 只重调该角色 Runner，expected 来自相应快照，耗尽回原内置路径 | SHM/CAS 集成测试 |
-| 多角色并发预加载、失败恢复和关闭 | 启动不串行累积多个握手预算；每角色最多一个进程，关闭回收所有 PID 与任务 | 生命周期测试 |
-| 同名与异名 Runner 指标合并 | `{policy,role}` 样本可区分，TYPE family 不重复；无 Runner 时插件指标文本为空 | Worker metaserver 抓取测试 |
+原生用例需要可加载的 Rust SHM 库；使用 `/dev/shm` 的用例需要 Linux。
 
 ### 13.2 集群验收
 
-在相同模型、后端、Worker 数、角色策略、请求分布和负载下对比插件禁用、健康启用、持续异常和持续超时场景。
-至少覆盖 P/D 分别使用不同入口、同项多角色、P 故障而 D 健康、D 故障而 P 健康，以及显式 Union 配置。
-通过带 role 的调用日志和指标确认各角色的实际参与率，核对每 Worker 最多四个子进程且重启/关闭无遗留。
-确认最终引擎选点符合示例预期，核对故障窗口的请求成功率、插件参与比例、回退数、调度时延及进程数量。
-保存失败原因与后端健康证据，不能只看成功请求时延或用回退日志推断请求一定成功。
-旧单 Runner 配置的历史集群报告不覆盖本版角色映射、P/D 并发隔离或多子进程生命周期，需针对新版本重新执行验收。
-本版未设定未经评审的性能收益目标；单次通过数、模型/硬件信息、commit 和原始证据放在 PR/Issue 中。
+在相同模型、后端、Worker 数和请求负载下，比较插件禁用、正常运行、异常和超时场景。重点检查：
+
+1. P/D 使用不同入口或共用配置时，日志和指标是否对应各自角色。
+2. P 或 D 故障时，故障角色是否回退，另一角色是否仍正常调用插件；混部场景需显式验证 Union。
+3. 选点结果、请求成功率、插件调用和回退数是否符合预期；同时记录调度时延及后端健康状态。
+4. 每个 Worker 最多有四个插件子进程，重启和关闭后无遗留进程。
+
+保存测试环境、commit 和原始结果。旧单 Runner 的集群结果不能代替角色隔离版本的验收。
 
 ## 14. 风险与后续演进
 

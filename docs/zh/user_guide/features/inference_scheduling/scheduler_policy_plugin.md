@@ -2,15 +2,17 @@
 
 本文介绍如何编写、安装并启用一个自定义实例/endpoint 选点插件。示例按候选 endpoint 当前负载从小到大排序；Motor 核心继续负责候选过滤、最终分配和负载释放。
 
-## 1. 准备
+## 环境准备
 
-- Coordinator 需使用包含选点插件 API v2 的 Motor 版本。插件包必须安装在 **Inference Worker 使用的同一个 Python 环境**。
-- 准备 Python 打包环境（`pip`、`setuptools>=61` 和 `wheel`）。示例使用当前环境构建，不自动下载隔离构建依赖。本文命令中的 `python` 应指向目标 Motor 环境使用的解释器；可通过服务启动命令确认解释器路径。
-- 准备已有的 `user_config.json`，并确认 Coordinator 能正常连接可用的推理实例。下面的配置片段应合并到已有文件中，不要用片段覆盖整个配置文件。
+- Coordinator 已部署，并能连接可用的推理实例；Motor 版本支持选点插件 API v2。
+- 已准备 `user_config.json`，以及 `pip`、`setuptools>=61` 和 `wheel`。
+- 确认 Inference Worker 使用的 Python 解释器。本文的 `python` 命令均使用该解释器，插件也必须安装在同一环境。
 
 插件只对已确定角色的候选池排序，不能切换混部或 PD 分离拓扑。显式指定实例和有效的会话亲和 pin 优先，不调用插件。
 
-## 2. 编写插件
+## 使用步骤
+
+### 步骤 1：编写插件
 
 创建一个最小工程：
 
@@ -59,7 +61,7 @@ class LeastLoadPolicy(LoadBalancingPolicy):
 
 请求长度、模型、用户和会话字段等可用数据及其限制见[设计文档的“接口与上下文”章节](../../../design/scheduler_policy_plugin.md)。示例中的用户/会话元数据不是认证的租户身份。
 
-## 3. 注册并打包
+### 步骤 2：注册并安装插件
 
 在工程根目录的 `pyproject.toml` 中注册 Entry Point：
 
@@ -119,9 +121,9 @@ print("Entry Point 加载成功；本地示例首选 instance=2, endpoint=0")
 PY
 ```
 
-该检查只验证包发现和策略输出；是否被运行中的 Worker 加载及实际选点，还需执行第 5 节。
+该检查只验证包发现和策略输出；是否被运行中的 Worker 加载及实际选点，还需执行步骤 4。
 
-### 容器部署
+#### 容器部署
 
 对于 Docker/Kubernetes，将 wheel 及其依赖放入 **Coordinator 实际使用的镜像**，并安装到启动 Motor 的 Python 环境。下面是构建镜像时的示意；`<motor-python>` 需替换为基础镜像中 Motor 使用的解释器路径：
 
@@ -133,9 +135,9 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
 确认构建阶段有权限向该 Python 环境安装包，并为所有运行 Inference Worker 的 Coordinator 副本使用包含插件的镜像。不要只在本机或单个临时容器安装：容器替换后包可能丢失。镜像更新与重启按现有部署方式执行。
 
-## 4. 配置并开启
+### 步骤 3：配置并启用插件
 
-在现有 `user_config.json` 的 `motor_coordinator_config.scheduler_config` 中加入 `policy_plugin`：
+将以下配置合并到现有 `user_config.json` 的 `motor_coordinator_config.scheduler_config` 中，保留文件中的其他配置：
 
 ```json
 {
@@ -190,17 +192,19 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
 保留已有内置策略：`prefill_scheduler_type` 是 P/U/E 的默认和回退策略，`decode_scheduler_type` 是 D 的默认和回退策略。
 角色未配置、插件繁忙、故障或超时时，使用该角色原配置的内置策略。删除 `policy_plugin` 或设为 `[]` 可禁用全部插件，不创建子进程。
-每个 Worker 最多四个插件子进程；修改包或配置后需重启所有相关 Inference Worker，运行时安装不会触发自动发现。
+每个 Worker 最多四个插件子进程。
 
 旧草案的单对象 `policy_plugin: {"name": ..., "roles": [...]}` 会明确报迁移错误。
 需改为外层列表，并把键 `roles` 改成 `role` 数组；旧 `["prefill", "union"]` 可以保留在新的一项中。
 缺少 role/name、未知键、重复角色、空 role 数组或非法预算是配置错误，不能依靠运行时回退忽略。完整迁移示例见[设计文档](../../../design/scheduler_policy_plugin.md#64-旧单对象配置迁移)。
 
-## 5. 验证插件已接入
+配置完成后，按现有部署方式重启所有相关 Inference Worker。修改插件包或配置后也需要重启，运行时不会自动发现新插件。
 
-1. 查看每个 Inference Worker 的日志，确认存在 `Scheduling plugin loaded`，其中 `name=mycompany.prefill_load role=prefill` 与 `name=mycompany.decode_load role=decode` 分别出现。同时可查看子进程输出中的包名、版本及 Entry Point 来源。
-2. 向现有推理服务发送一条正常请求，使其经过 `role` 数组中启用的角色。在处理该请求的 Worker 日志中查找 `scheduled` 行，按实际角色确认 `policy=plugin:mycompany.prefill_load` 或 `plugin:mycompany.decode_load`，并核对所选 instance/endpoint 与示例策略预期。
-3. 检查对应 Worker metaserver 的指标。将下面地址替换为可从当前环境访问的 Worker 地址及端口：
+### 步骤 4：验证插件
+
+1. **检查加载日志。** 查看每个 Inference Worker 的日志，确认 `Scheduling plugin loaded` 分别包含 `name=mycompany.prefill_load role=prefill` 和 `name=mycompany.decode_load role=decode`。子进程日志还会记录包名、版本和 Entry Point 来源。
+2. **检查选点结果。** 向推理服务发送一条经过已启用角色的正常请求。在处理请求的 Worker 日志中查找 `scheduled`，确认 `policy` 显示对应插件名，并核对所选 instance/endpoint 是否符合预期。
+3. **检查调用指标。** 将以下地址替换为可访问的 Worker metaserver 地址及端口，然后执行：
 
    ```bash
    WORKER_METASERVER_URL="http://127.0.0.1:12000"
@@ -209,13 +213,15 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
    默认端口为 `inference_workers_config.worker_metaserver_base_port + worker_index`，起始值为 `12000`。监听地址优先使用 `POD_IP`，否则使用 Coordinator 的监听地址；`127.0.0.1` 只是示例，不保证在容器网络中可访问。设置 `worker_metaserver_base_port=0` 会关闭该抓取口。
 
-`motor_policy_loads_total` 增加表示加载成功，`motor_policy_calls_total` 增加表示发生插件排序调用；`errors`、`timeouts` 和 `fallbacks` 用于检查故障或回退。指标带有 `{policy,role}` 标签，是**每 Worker、每角色**的样本，不由 Obs 自动汇总。推理端口可由多个 Worker 共同监听，单次请求不一定落到正在查看的 Worker，因此应检查所有相关 Worker；pin 路径和未启用的角色不会调用插件。
+   `motor_policy_loads_total` 增加表示加载成功；`motor_policy_calls_total` 增加表示插件参与了排序。使用 `errors`、`timeouts` 和 `fallbacks` 检查故障或回退。
 
-## 6. 常见问题
+   指标按 Worker 和角色分别统计，Obs 不自动汇总。单次请求不一定落到正在查看的 Worker，应检查所有相关 Worker；pin 路径和未启用的角色不会调用插件。
+
+## 常见问题
 
 | 现象 | 检查和处理 |
 |------|------------|
-| 提示未找到入口或匹配多个入口 | 在实际 Worker 使用的 Python 环境运行第 3 节的 Entry Point 检查；核对插件名和安装包，移除重复注册的包。 |
+| 提示未找到入口或匹配多个入口 | 在实际 Worker 使用的 Python 环境运行步骤 2 的 Entry Point 检查；核对插件名和安装包，移除重复注册的包。 |
 | 启动后只有内置策略 | 检查配置列表是否包含请求角色、`name` 是否注册、所有 Worker 是否安装了包，以及修改后是否已重启。显式 pin 和有效会话亲和会优先使用原路径。 |
 | 日志提示插件失败或 `fallbacks` 增长 | 按 role/name 查找 `Scheduling plugin failed` 或 `Scheduling plugin fallback`；检查构造参数、异常、候选 ID、重复 ID、空结果和非有限分数。 |
 | `timeouts` 增长 | 检查 `rank()` 是否阻塞、执行时间及 `timeout_ms`。Worker 在插件繁忙或冷却时也会回退；预算不是端到端请求的硬时限。 |
