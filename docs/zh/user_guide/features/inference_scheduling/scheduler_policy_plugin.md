@@ -196,7 +196,7 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
 旧草案的单对象 `policy_plugin: {"name": ..., "roles": [...]}` 会明确报迁移错误。
 需改为外层列表，并把键 `roles` 改成 `role` 数组；旧 `["prefill", "union"]` 可以保留在新的一项中。
-缺少 role/name、未知键、重复角色、空 role 数组或非法预算是配置错误，不能依靠运行时回退忽略。完整迁移示例见[设计文档](../../../design/scheduler_policy_plugin.md#64-旧单对象配置迁移)。
+缺少 role/name、未知键、重复角色、空 role 数组或非法预算是配置错误，不能依靠运行时回退忽略。完整迁移示例见[设计文档](../../../design/scheduler_policy_plugin.md#旧单对象配置迁移)。
 
 配置完成后，按现有部署方式重启所有相关 Inference Worker。修改插件包或配置后也需要重启，运行时不会自动发现新插件。
 
