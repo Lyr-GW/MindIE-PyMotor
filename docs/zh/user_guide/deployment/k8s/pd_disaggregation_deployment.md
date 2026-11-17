@@ -57,29 +57,7 @@
 
 ## 配置获取
 
-   1. MindIE Motor已在下表中提供了常用模型的配置示例(deepseek_v4.1_flash、glm 5.2、glm 5.3等)，**用户修改少量配置后可直接使用**。
-
-      <table>
-        <tr><th style="font-size:18px" align="center" colspan="4">常用模型</th></tr>
-        <tr>
-          <th align="left">模型</th>
-          <th align="center">Atlas 800I A2</th>
-          <th align="center">Atlas 800I A3 超节点</th>
-          <th align="center">Atlas 950系列服务器</th>
-        </tr>
-        <tr><td>DeepSeek-V4.1-Flash </td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>GLM-5.3-Flash </td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>GLM-5.2 </td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>GLM-5.3 </td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>DeepSeek-V4-Flash </td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v4_flash/A2">A2</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v4_flash/A3">A3</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v4_flash/A5">A5</a></td></tr>
-        <tr><td>GLM-5.1 </td><td align="center"><a href="../../../../../model_configs/vllm/models/glm_5.1/A2">A2</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/glm_5.1/A3">A3</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/glm_5.1/A5">A5</a></td></tr>
-        <tr><td>DeepSeek-V3.1</td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v3.1/A2">A2</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v3.1/A3">A3</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v3.1/A5">A5</a></td></tr>
-        <tr><td>DeepSeek-V4-Pro</td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v4_pro/A2">A2</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v4_pro/A3">A3</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/deepseek_v4_pro/A5">A5</a></td></tr>
-        <tr><td>GLM-5</td><td align="center"><a href="../../../../../model_configs/vllm/models/glm_5/A2">A2</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/glm_5/A3">A3</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/glm_5/A5">A5</a></td></tr>
-        <tr><td>Qwen3-235B</td><td align="center"><a href="../../../../../model_configs/vllm/models/qwen_235b/A2">A2</a></td><td align="center"><a href="../../../../../model_configs/vllm/models/qwen_235b/A3">A3</a></td><td align="center">—</td></tr>
-      </table>
-
-      对于未提供典型配置的模型，可参考 [MindIE Motor 配置自动生成指导](../../../../../model_configs/vllm/models/README.md)，自动生成配置文件 `user_config.json` 与 `env.json`。
+   1. MindIE Motor已在[常用模型配置连接](../README.md#常用模型)中提供了常用模型的配置示例(deepseek_v4.1_flash、glm 5.2、glm 5.3等)，请选择与模型及硬件匹配的配置示例，修改少量配置后可直接使用。对于未提供典型配置的模型，可参考 [MindIE Motor 配置自动生成指导](../../../../../model_configs/vllm/models/README.md)，自动生成配置文件 `user_config.json` 与 `env.json`。
 
    2. 保存配置至服务器
 
@@ -235,7 +213,7 @@ Coordinator记录一段时间内接收到的请求数量，达到阈值后停止
 删除rate_limit_config参数配置块，或将enable_rate_limit参数设置为：false。
 
 >[!NOTE] 说明
->该特性详细文档请参考[服务限流](../../features/rate_limiting.md)。字段说明请参考 [user_config.json配置文件全量参数说明](../../configuration/config_reference.md#motor_coordinator_config)中的rate_limit_config字段。
+>该特性详细文档请参考[服务限流](../../features/fault_tolerance/rate_limiting.md)。字段说明请参考 [user_config.json配置文件全量参数说明](../../configuration/config_reference.md#motor_coordinator_config)中的rate_limit_config字段。
 
 ### 虚拟推理健康探测
 
@@ -267,7 +245,7 @@ NodeManager负责原生引擎的就绪探测、进程监管和虚推健康探测
 
 **日志级别限制**
 
-vLLM虚推仅允许在最终引擎环境ASCEND_GLOBAL_LOG_LEVEL=3（未配置时默认为ERROR）时开启。该特性详细文档请参考[虚拟推理健康探测](../../features/sim_inference.md)。
+vLLM虚推仅允许在最终引擎环境ASCEND_GLOBAL_LOG_LEVEL=3（未配置时默认为ERROR）时开启。该特性详细文档请参考[虚拟推理健康探测](../../features/fault_tolerance/sim_inference.md)。
 
 ### KV Cache亲和调度
 
@@ -310,7 +288,7 @@ MindIE Motor的KV Cache亲和性调度能力依赖 Mooncake 社区的 Mooncake C
 删除上述配置项。
 
 >[!NOTE] 说明
->需要确保镜像中已安装KV Conductor组件，该特性详细文档请参考[KV Cache亲和性调度](../../features/kvcache_affinity.md)。
+>需要确保镜像中已安装KV Conductor组件，该特性详细文档请参考[KV Cache亲和性调度](../../features/inference_scheduling/kvcache_affinity.md)。
 
 ### PD异构（PR/DT）调度
 
@@ -368,7 +346,7 @@ Ascend 950PR&950DT系列产品分为PR、DT两类，两者的内存存在差异�
 
 **开启特性**
 
-该特性详细文档请参考[KV池化能力](../../features/kv_cache_store/README.md)。
+该特性详细文档请参考[KV池化能力](../../features/inference_scheduling/kv_cache_store/README.md)。
 
 **关闭特性**
 

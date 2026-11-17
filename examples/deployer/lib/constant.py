@@ -120,6 +120,10 @@ MOTOR_COMMON_ENV = "motor_common_env"
 WEIGHT_MOUNT = "weight-mount"
 KV_CACHE_STORE_CONFIG = "kv_cache_store_config"
 TARGET_JOB_ID = "target_job_id"
+# Explicit mooncake master address. Accepts "host:port", "etcd://h1:2379;h2:2379" (HA) or
+# "redis://host:6379" (HA). When set, both mooncake clients use it verbatim and the deployer
+# does not create a local kv-store pod.
+MASTER_SERVER_ADDRESS = "master_server_address"
 KV_STORE_BACKEND = "backend"
 KV_CACHE_STORE_PORT = "port"
 KV_STORE_EVICTION_HIGH_WATERMARK_RATIO = "eviction_high_watermark_ratio"
@@ -255,6 +259,7 @@ ENV_COORDINATOR_SERVICE = "COORDINATOR_SERVICE"
 ENV_COORDINATOR_INFER_SERVICE = "COORDINATOR_INFER_SERVICE"
 ENV_COORDINATOR_OBS_SERVICE = "COORDINATOR_OBS_SERVICE"
 ENV_KVS_MASTER_SERVICE = "KVS_MASTER_SERVICE"
+ENV_KV_STORE_EXTERNAL = "KV_STORE_EXTERNAL"
 ENV_KV_CONDUCTOR_SERVICE = "KV_CONDUCTOR_SERVICE"
 ENV_KV_CACHE_STORE_PORT = "KV_CACHE_STORE_PORT"
 ENV_KV_STORE_EVICTION_HIGH_WATERMARK_RATIO = "KV_STORE_EVICTION_HIGH_WATERMARK_RATIO"
@@ -443,12 +448,15 @@ VOLCANO_QUEUE_ANNOTATION = "scheduling.volcano.sh/queue-name"
 # Edit these literals to change host devices and binds. Do not add --rm.
 # Host binds /root/ascend/log, /root/.cache, /var/coredump, /data match K8s hostPath
 # (plog-path / cache-path / coredump / data). docker_deploy.py mkdir -p these before create.
-# Engine / single-container templates use --shm-size=4g to match K8s dshm emptyDir sizeLimit 4Gi.
+# Engine / single-container templates use --shm-size=256g to match K8s dshm emptyDir sizeLimit 256Gi.
 # CTRL / KVS YAML has no dshm volume, so those templates omit --shm-size.
 # motor_deploy_config.dshm_size overrides an existing --shm-size line only (does not insert one).
+# --security-opt seccomp=unconfined matches K8s yaml_template seccompProfile.type: Unconfined
+# (avoids RuntimeError: can't start new thread when default seccomp blocks clone3).
 ENTER_DOCKER_RUN_A2 = """docker run -it --name "$NAME" -u root \\
+  --security-opt seccomp=unconfined \\
   --net=host \\
-  --shm-size=4g \\
+  --shm-size=256g \\
   -e ASCEND_RUNTIME_OPTIONS=NODRV \\
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
   -e NAME="$NAME" \\
@@ -481,8 +489,9 @@ ENTER_DOCKER_RUN_A2 = """docker run -it --name "$NAME" -u root \\
 """
 
 ENTER_DOCKER_RUN_A3 = """docker run -it --name "$NAME" -u root \\
+  --security-opt seccomp=unconfined \\
   --net=host \\
-  --shm-size=4g \\
+  --shm-size=256g \\
   -e ASCEND_RUNTIME_OPTIONS=NODRV \\
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
   -e NAME="$NAME" \\
@@ -523,8 +532,9 @@ ENTER_DOCKER_RUN_A3 = """docker run -it --name "$NAME" -u root \\
 """
 
 ENTER_DOCKER_RUN_A5 = """docker run -it --name "$NAME" -u root \\
+  --security-opt seccomp=unconfined \\
   --net=host \\
-  --shm-size=4g \\
+  --shm-size=256g \\
   -e ASCEND_RUNTIME_OPTIONS=NODRV \\
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
   -e NAME="$NAME" \\
@@ -562,8 +572,9 @@ ENTER_DOCKER_RUN_A5 = """docker run -it --name "$NAME" -u root \\
 """
 
 ENTER_DOCKER_RUN_A5_POD16 = """docker run -it --name "$NAME" -u root \\
+  --security-opt seccomp=unconfined \\
   --net=host \\
-  --shm-size=4g \\
+  --shm-size=256g \\
   -e ASCEND_RUNTIME_OPTIONS=NODRV \\
   -e LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver \\
   -e NAME="$NAME" \\
@@ -610,6 +621,7 @@ ENTER_DOCKER_RUN_A5_POD16 = """docker run -it --name "$NAME" -u root \\
 """
 
 ENTER_DOCKER_RUN_CTRL = """docker run -it --name "$NAME" -u root \\
+  --security-opt seccomp=unconfined \\
   --net=host \\
   -e NAME="$NAME" \\
   -e WEIGHT="$WEIGHT" \\
@@ -623,6 +635,7 @@ ENTER_DOCKER_RUN_CTRL = """docker run -it --name "$NAME" -u root \\
 """
 
 ENTER_DOCKER_RUN_KVS = """docker run -it --name "$NAME" -u root \\
+  --security-opt seccomp=unconfined \\
   --net=host \\
   -e NAME="$NAME" \\
   -e WEIGHT="$WEIGHT" \\

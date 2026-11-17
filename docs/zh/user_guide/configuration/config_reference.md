@@ -128,7 +128,11 @@ motor_controller_config字段配置样例如下所示：
     "configmap_prefix": "mindx-dl-deviceinfo-",
     "k8s_cert_path": "",
     "enable_scale_p2d": false,
+    "enable_fast_recovery": false,
+    "enable_hbm_uce_recovery": true,
     "enable_token_reinference": true,
+    "enable_no_fault_code_recovery": true,
+    "hbm_uce_clearance_timeout_sec": 60,
     "scale_p2d_d_instance_reinit_wait_timeout": 60
   },
   "observability_config": {
@@ -207,11 +211,18 @@ motor_controller_config字段配置样例如下所示：
 | configmap_prefix |string|configmap前缀，默认值："mindx-dl-deviceinfo-"。|
 | k8s_cert_path |string|安全证书路径，默认为空。|
 | enable_scale_p2d | bool | 是否启用ScaleP2D弹性扩缩容，默认值：true。取值如下：<ul><li>true：启用</li><li>false：不启用</li></ul> |
-| enable_token_reinference | bool | 是否启用Token Reinference 故障恢复，默认值：true。取值如下：<ul><li>true：启用</li><li>false：不启用</li></ul> |
+| enable_fast_recovery | bool | 快恢总开关，默认 false；开启后还需 enable_fault_tolerance 与相应分支开关。关闭时直接走常规恢复路径。 |
+| enable_hbm_uce_recovery | bool | 默认 true。1801 + 软件 UNHEALTHY；单次 abort retry，独立清码，失败且清码成功转 relaunch，否则重配置。 |
+| enable_token_reinference | bool | 默认 true。灵衢 0x00F1FEF5 / 0x08520003 + 软件 UNHEALTHY；复用无故障码快恢两轮及 relaunch 回退，不等待清码。 |
+| enable_no_fault_code_recovery | bool | 默认 true。未命中 HBM/灵衢码且无严重硬件阻断的 UNHEALTHY；先无 abort，全 DP 明确失败后才携带 abort 再试一次；失败回退 relaunch。 |
+| hbm_uce_clearance_timeout_sec | int | HBM 快恢之后独立等待所在节点全部设备 1801 清除的期限，默认 60 秒，引擎恢复失败也检查。 |
+| recovery_round_timeout_sec | int | 每轮等待全部 DP HEALTHY 的超时，默认 60 秒，范围 10–3600。第一轮超时不补发第二轮；无故障码/token 转 relaunch，HBM 按清码结果回退。 |
+| recovery_poll_interval_sec | float | 状态轮询间隔，默认 1 秒，范围 0.1–60。 |
+| engine_relaunch_stability_sec | int | 无故障码/token relaunch 后连续 NORMAL 的观察窗口，默认 60 秒，范围 1–3600；窗口内复发转重配置。 |
 | scale_p2d_d_instance_reinit_wait_timeout |int|ScaleP2D执行抢占前，等待D实例自恢复（重初始化）的最长时间，单位：秒，默认值：60。<br>等待期间若D实例恢复为initial/active，则不再执行ScaleP2D；超时后若D实例仍处于inactive等可抢占状态，则继续后续P实例选择流程。|
 | enable_dp_scale_up | bool | DP 扩容开关，默认值：false。必须与缩容开关 `enable_dp_scale_down` 同时开启。两者都为 true 时，扩容接口 `/controller/fault_tolerance/recover` 才可用。|
 | enable_dp_scale_down | bool | Controller 统一控制 DP 域缩容的开关，默认值：false。该开关同时适用于 Prefill 和 Decode 实例，不需要在 `motor_engine_prefill_config`、`motor_engine_decode_config` 中重复配置。既有 Controller 总开关 `enable_fault_tolerance` 默认为 true；若显式关闭，总 FT 流程（包括 DP 缩容）均不执行，但不会阻止 Controller 启动。该开关不会自动启用引擎侧 FT、external-lb、MC2 Mask、EP 或 EPLB。引擎能力不足时，FtGate 拒绝缩容并进入原故障恢复流程。<br>DP master 切换时，`engine_config.data-parallel-master-port` 作为 store 基础端口；NodeManager 按“基础端口 + 新 master 的全局 DP rank”生成本轮 `dp_store_port`。例如基础端口为 29500 时，DP1、DP2 成为 master 将分别使用 29501、29502，以避免同一 Pod 内连续切主复用仍被占用的监听端口。该端口仅在当前 master 被移除并发生 master 重选时使用；master 不变的缩容轮次不会重建 TCPStore。启用 DP 缩容时须预留 `[data-parallel-master-port, data-parallel-master-port + dp_size - 1]` 端口区间，配置加载阶段会校验该区间不超过 65535。|
-| fault_collection_timeout_seconds | float | Controller 收集同一 DP 域引擎故障状态的超时时间，单位：秒，取值范围 `(0, 600]`，默认值：60.0。收到首个 `UNHEALTHY` 或 `DEAD` 后立即通知 Coordinator 隔离实例并开始计时，不再从引擎 `cpu-distributed-timeout-seconds` 推导。|
+| fault_collection_timeout_seconds | float | Controller 收集同一 DP 域引擎故障状态的超时时间，单位：秒，取值范围 `(0, 600]`，默认值：120.0。快恢和缩容共用此窗口，从首个 `UNHEALTHY` 或 `DEAD` 开始计时，后续上报不续期；状态到齐立即选策略，超时未收齐则重配置。UNHEALTHY 的快恢暂停新调度并保留在途请求，DEAD 走撤下实例流程，不再从引擎 `cpu-distributed-timeout-seconds` 推导。|
 | dp_scale_down_config.request_timeout_sec | float | Controller 调用 NodeManager FT 接口的超时，单位：秒，取值范围 `(0, 60]`，默认值：11.0。该值须为 NodeManager 到引擎的默认 5 秒请求留出响应余量。|
 | dp_scale_down_config.poll_interval_sec | float | 缩容执行期间查询引擎 FT 状态的间隔，单位：秒，取值范围 `(0, 60]`，默认值：1.0。|
 | dp_scale_down_config.execution_deadline_sec | float | 等待引擎完成缩容恢复的 Motor 侧截止时间，单位：秒，取值范围 `[1, 600]`，默认值：30.0。达到截止时间仍为 recovering 时直接进入原故障恢复流程。这些参数仅对缩容阶段生效，扩容阶段各阶段超时时间默认为最大值。|
@@ -491,7 +502,7 @@ motor_coordinator_config字段配置样例如下所示：
 | enable | bool | 是否启用与数据混淆权重配套的 token 混淆。默认值：`false`。要求 `render_config.enable=true` 且 `render_config.enable_token_only_decode=true`。开启后支持流式和非流式 vLLM Render token-only 请求，任何混淆或 Render 失败都会拒绝请求，不回退原生 OpenAI 推理。 |
 | model_path | string | 可选，显式指定被服务的权重目录（用于从其中读取 `vocab_size`）。默认值为空，此时使用 `motor_engine_{prefill,decode,encode,union}_config.engine_config.model`（多模型共存时必须显式指定）。 |
 | vocab_size | int | 混淆词表大小。**默认值：`0`（未配置）**，未配置时从权重目录 `config.json` 读取（多模态模型取 `text_config.vocab_size`，纯文本模型取顶层 `vocab_size`），显式配置始终优先。必须与权重混淆参数一致（Qwen3-32B / Qwen3-VL 为 `151936`）。 |
-| token_white_list | list[int] | 不参与置换的 token ID（特殊 token 等）。默认值为空，启用 token 混淆时必须显式配置，且必须与权重混淆参数一致；Qwen3-32B / Qwen3-VL 验证权重使用的 37 个白名单 token 见 [数据混淆推理（PMCC）](../features/data_obfuscation.md#使用样例)。该参数**无法从模型目录推导**，只能由权重混淆方提供。 |
+| token_white_list | list[int] | 不参与置换的 token ID（特殊 token 等）。默认值为空，启用 token 混淆时必须显式配置，且必须与权重混淆参数一致；Qwen3-32B / Qwen3-VL 验证权重使用的 37 个白名单 token 见 [数据混淆推理（PMCC）](../features/maintenance_testing_security/data_obfuscation.md#使用样例)。该参数**无法从模型目录推导**，只能由权重混淆方提供。 |
 | seed_content | string | 数据混淆因子。默认值为空；启用 token 混淆时必须显式配置。该值可还原词表置换，必须与混淆权重同权限保管，通过受控配置注入，禁止提交到代码仓库或写入日志。 |
 | **token_obfuscation_config.image_config字段** |-|-|
 | enable | bool | 是否对 Render 返回的多模态图像张量做数据混淆（与数据混淆权重的视觉部分配套）。默认值：`false`。开启后 Coordinator 对 `features.kwargs_data` 中每个模态的张量载荷调用 SDK 的 `image_render_obf`，再把混淆后的载荷转发给引擎；Render 未启用或 SDK 抛错时请求失败（fail closed），不会把明文张量送进引擎。混淆结果的正确性（置换内容与载荷格式）由 SDK 保证，Coordinator 不做解析与结构校验。**要求 `render_config.enable=true` 且 `render_config.enable_token_only_decode=true`**，与 `token_obfuscation_config.enable` 相互独立，共用同一个 `seed_content`。 |
@@ -534,7 +545,7 @@ motor_coordinator_config字段配置样例如下所示：
 | max_timeout_s | float | 熔断时长上限（秒）。默认值：`300.0`。 |
 | **scheduler_config字段** |-|-|
 | prefill_scheduler_type | string | Prefill / encode / union 实例的调度类型，默认值：load_balance。可选 `load_balance` / `round_robin` / `kv_cache_affinity`；不支持 `dynamic_bucket`。 |
-| decode_scheduler_type | string | Decode 实例的调度类型，默认值：load_balance。可选 `load_balance` / `round_robin` / `dynamic_bucket`，动态分桶详见[动态分桶调度](../features/dynamic_bucket.md)。枚举也接受 `kv_cache_affinity`，但 Decode 实例仍按 load_balance 选择并在启动时打印 warning。 |
+| decode_scheduler_type | string | Decode 实例的调度类型，默认值：load_balance。可选 `load_balance` / `round_robin` / `dynamic_bucket`，动态分桶详见[动态分桶调度](../features/inference_scheduling/dynamic_bucket.md)。枚举也接受 `kv_cache_affinity`，但 Decode 实例仍按 load_balance 选择并在启动时打印 warning。 |
 | policy_plugin | list[object] | 可选外部实例/endpoint 排序插件，默认 `[]`，不创建子进程。每项必填非空 `role` 数组（`prefill` / `decode` / `union` / `encode`）和 Entry Point `name`；同项可覆盖 P/D，展开后每角色仍独立运行。`options={}`、`timeout_ms=50`、`startup_timeout_ms=5000`、`cooldown_seconds=30`。项内重复/跨项角色重叠、未知键或非法配置报错；旧单对象 `roles` 格式需迁移。未配置角色或插件失败/超时/忙时使用该角色原内置策略；Union 需显式配置，变更需重启 Worker。详见[选点插件](../../design/scheduler_policy_plugin.md)。 |
 | scheduler_type | string | **已废弃**。存量配置仍可使用，读取时把值迁移到未单独配置的 `prefill_scheduler_type` 和 `decode_scheduler_type` 并打 warning。由于 Prefill 不支持 `dynamic_bucket`，动态分桶必须改用 `decode_scheduler_type` 单独配置。 |
 | enable_pd_separation_fallback_to_hybrid | bool | PD 分离场景下，当不存在兼容且未熔断的 P/D pair 时，是否允许降级使用混部路由，默认值为 `true`。候选优先级为 Union → Prefill → Decode；Decode 兜底仅适用于上报 `decode_colocation` capability 的 vLLM 实例，关闭后无兼容 pair 时返回 503。 |
@@ -578,7 +589,7 @@ motor_coordinator_config字段配置样例如下所示：
 | **mgmt_api_key_config字段** |-|管理面独立 API Key 配置，仅保护实例查询、实例刷新和精度告警状态清理接口。启动、存活和就绪探针不鉴权。请求头固定为 `X-Motor-Management-Key`。|
 | enable_api_key | bool | 是否开启管理面 API Key 鉴权。可选：`true` / `false`。默认值：`false`。|
 | api_key_file | string | API Key 文件路径。开启鉴权时必填；文件必须仅含一行非空密钥。Controller 与 Coordinator 分开部署时需挂载内容相同的密钥文件。|
-| **rate_limit_config字段** |-|行为与示例见 [服务限流](../features/rate_limiting.md)。|
+| **rate_limit_config字段** |-|行为与示例见 [服务限流](../features/fault_tolerance/rate_limiting.md)。|
 | enable_rate_limit | bool | 是否开启请求限流。可选：`true` / `false`。默认值：`false` |
 | provider |string|限流提供者。simple使用内置令牌桶；OLC使用过载控制库（需额外安装及配置）。|
 | max_requests | int | 限流时间窗口内允许的最大请求数。默认值：`1000`。 |
@@ -622,14 +633,14 @@ motor_coordinator_config字段配置样例如下所示：
 | endpoint |string|链路追踪数据的上报地址或后端服务的接入点，默认值为空。|
 | root_sampling_rate |float|根采样率，针对没有父Span（即请求的入口点，如HTTP请求的第一次进入）的追踪数据的采样概率。默认值为1.0，表示所有新的根请求都会被记录。如果设置为0.5，则只有一半的新请求会被记录，另一半则会被丢弃。|
 | remote_parent_sampled |float|远程父采样率（当父Span被采样时），当前Span的父Span来自另一个服务（远程调用），且远程的父Span已经被采样时，当前Span的采样概率。默认值：1.0，表示当前调用100%被记录。|
-| remote_parent_not_sampled |float|远程父采样率（当父Span未被采样时），当前Span的父Span来自另一个服务（远程调用），但远程的父Span没有被采样时，当前Span的采样概率。默认值：1.0，表示当前调用100%被记录。|
+| remote_parent_not_sampled |float|远程父采样率（当父Span未被采样时），当前Span的父Span来自另一个服务（远程调用），但远程的父Span没有被采样时，当前Span的采样概率。默认值：1.0，表示当前调用100%被记录。可配置为0，表示当前调用完全不记录。|
 | local_parent_sampled |float|本地父采样率（当父Span被采样时），当前Span的父Span来自同一个服务实例内（本地调用），且父Span已经被采样时，当前Span的采样概率。默认值：1.0，表示当前调用100%被记录。|
-| local_parent_not_sampled |float|本地父采样率（当父Span未被采样时），当前Span的父Span来自同一个服务实例内（本地调用），但父Span未被采样时，当前Span的采样概率。默认值：1.0，表示当前调用100%被记录。|
+| local_parent_not_sampled |float|本地父采样率（当父Span未被采样时），当前Span的父Span来自同一个服务实例内（本地调用），但父Span未被采样时，当前Span的采样概率。默认值：1.0，表示当前调用100%被记录。可配置为0，表示当前调用完全不记录。|
 | **scheduler_config.kv_conductor_config字段** |-|完整 `user_config.json` 推荐配置在顶层 `kv_conductor_config`，Coordinator 加载时合并至本节所列的运行时路径；deployer 启用服务仍要求顶层显式配置 `http_server_port`。旧 `prefill_kv_event_config` 仅保留部分字段兼容，见[自动推导与兼容](#kv_conductor_config-自动推导与兼容)。|
 | conductor_service |string|conductor服务IP或域名，默认为空。|
 | http_server_port |int|KV Conductor的HTTP服务端口，默认值：13333，取值范围：[1024,65535]。|
 | query_encoding |string|Conductor `/query` 请求编码，默认 `msgpack`，合法值为 `msgpack` / `json`。响应按服务器 Content-Type 解码，请求不自动降级。先升级 conductor 再升级 Coordinator；新 Coordinator 对接仅支持 JSON 的旧 conductor 时显式设为 `json`。不要写在旧 `prefill_kv_event_config` 下，该字段不在旧配置迁移列表中。|
-| block_size |int|正整数，默认 `128`。必须对齐主注意力组 KV 事件的粒度；DeepSeek V4 / 混合 KV 不一定等于引擎 `--block-size`，也不固定为 512，见[混合 KV 配置](../features/kvcache_affinity.md#deepseek-v4)。|
+| block_size |int|正整数，默认 `128`。必须对齐主注意力组 KV 事件的粒度；DeepSeek V4 / 混合 KV 不一定等于引擎 `--block-size`，也不固定为 512，见[混合 KV 配置](../features/inference_scheduling/kvcache_affinity.md#deepseek-v4)。|
 | endpoint |string|HBM 事件端口的回退模式，默认为空；从 Prefill 或 Union 的 `kv-events-config.endpoint` 推导。格式 `tcp://*:<port>`，注册 HBM 时替换 IP 并加 DP 秩。|
 | replay_endpoint |string|引擎回放端口模式，默认为空；从 Prefill 或 Union 事件配置推导。格式 `tcp://*:<port>`，注册 HBM 时替换 IP 并加 DP 秩。回放受历史缓冲及首次实例注册限制，不保证每个 DP 自动恢复。|
 | engine_type |string|引擎类型，默认值：vLLM。|
@@ -800,7 +811,7 @@ motor_engine_union_config字段用于**PD混部场景**，配置同一类 union 
 | port_allocator_config.remote_check_timeout_seconds |float|远程检测超时时间，默认值：1.0。|
 | port_allocator_config.bind_host |string|绑定主机地址，默认值：0.0.0.0。|
 | **kv_cache_store_config字段** |-|-|
-| kv_cache_store_config | object | KV 池化配置（`enable`/`backend`/`store_mode`/`global_segment_size`/`local_buffer_size`/`store_http_port` 等），未配置则不启用池化。完整字段与默认值见 [KV 池化 README — kv_cache_store_config](../features/kv_cache_store/README.md)；Mooncake `standalone` 部署模式说明见 [Mooncake 后端文档](../features/kv_cache_store/backend/mooncake.md#场景二standalone-模式配置)。 |
+| kv_cache_store_config | object | KV 池化配置（`enable`/`backend`/`store_mode`/`global_segment_size`/`local_buffer_size`/`store_http_port`/`master_server_address` 等），未配置则不启用池化。完整字段与默认值见 [KV 池化 README — kv_cache_store_config](../features/inference_scheduling/kv_cache_store/README.md)；Mooncake `standalone` 部署模式说明见 [Mooncake 后端文档](../features/inference_scheduling/kv_cache_store/mooncake.md#场景二standalone-模式配置)。 |
 
 ## motor_engine_prefill_config/motor_engine_decode_config
 
@@ -1029,7 +1040,7 @@ Prefill 和 Decode 分别生成能力快照、独立通过 FtGate，不要求两
 | port_allocator_config.remote_check_timeout_seconds |float|远程检测超时时间，默认值：1.0。|
 | port_allocator_config.bind_host |string|绑定主机地址，默认值：0.0.0.0。|
 | **kv_cache_store_config字段** |-|-|
-| kv_cache_store_config | object | KV 池化配置（`enable`/`backend`/`store_mode`/`global_segment_size`/`local_buffer_size`/`store_http_port` 等），未配置则不启用池化。完整字段与默认值见 [KV 池化 README — kv_cache_store_config](../features/kv_cache_store/README.md)；Mooncake `standalone` 部署模式说明见 [Mooncake 后端文档](../features/kv_cache_store/backend/mooncake.md#场景二standalone-模式配置)。 |
+| kv_cache_store_config | object | KV 池化配置（`enable`/`backend`/`store_mode`/`global_segment_size`/`local_buffer_size`/`store_http_port`/`master_server_address` 等），未配置则不启用池化。完整字段与默认值见 [KV 池化 README — kv_cache_store_config](../features/inference_scheduling/kv_cache_store/README.md)；Mooncake `standalone` 部署模式说明见 [Mooncake 后端文档](../features/inference_scheduling/kv_cache_store/mooncake.md#场景二standalone-模式配置)。 |
 
 PD模式下P与D**各自独立配置**"health_check_config"，未配置时使用代码默认值。
 
@@ -1059,7 +1070,7 @@ PD模式下P与D**各自独立配置**"health_check_config"，未配置时使用
 
 ### health_check_config
 
-可选虚推（虚拟推理）健康探测配置，位于 `motor_engine_prefill_config` / `motor_engine_decode_config` 模块，默认关闭，机制说明见 [虚推健康探测](../features/sim_inference.md)。
+可选虚推（虚拟推理）健康探测配置，位于 `motor_engine_prefill_config` / `motor_engine_decode_config` 模块，默认关闭，机制说明见 [虚推健康探测](../features/fault_tolerance/sim_inference.md)。
 
 **表7** health_check_config字段参数说明
 

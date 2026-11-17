@@ -35,9 +35,14 @@
 
 MindIE Motor 是面向大语言模型分布式推理的请求调度框架，提供一键式 PD 分离与 PD 混部部署。它基于云原生插件化架构，对接 [vLLM-Ascend](https://github.com/vllm-project/vllm-ascend) 与 [SGLang](https://github.com/sgl-project/sglang) 原生引擎，结合高性能调度与负载均衡，构建高可用、可扩展的大规模推理服务。
 
-<a href="./docs/zh/imgs/MindIE-Motor-architecture-zh.svg" title="点击查看大图">
-<img src="./docs/zh/imgs/MindIE-Motor-architecture-zh.svg" alt="MindIE Motor 架构" width="100%"/>
+<a href="./docs/zh/imgs/MindIE-Motor-architecture-zh.png" title="点击查看大图">
+<img src="./docs/zh/imgs/MindIE-Motor-architecture-zh.png" alt="MindIE Motor 架构" width="100%"/>
 </a>
+
+## 🗺️ 路线图 (roadmap)
+
+- 2026 Q3：[Issue链接](https://gitcode.com/Ascend/MindIE-Motor/issues/350) ✅（已完成）
+- 2026 Q4：[Issue链接](https://gitcode.com/Ascend/MindIE-Motor/issues/849) 🚧（开发中）
 
 ## 🖥️ 服务部署
 
@@ -64,23 +69,28 @@ MindIE Motor 是面向大语言模型分布式推理的请求调度框架，提�
     <td class="gap" width="24" style="border:none;padding:0;background:transparent"><img alt="" src="./docs/zh/imgs/gap.png" width="24" height="1"></td>
     <td valign="top">
       <table>
-        <tr><th style="font-size:18px" align="center" colspan="4">🤖 常用模型</th></tr>
+         <tr><th style="font-size:18px" align="center" colspan="5">🤖 常用模型</th></tr>
         <tr>
           <th align="left">模型</th>
           <th align="center">Atlas 800I A2</th>
           <th align="center">Atlas 800I A3 超节点</th>
           <th align="center">Atlas 950系列服务器</th>
+          <th align="center">适配状态</th>
         </tr>
-        <tr><td>DeepSeek-V4.1-Flash</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>GLM-5.3-Flash</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>GLM-5.2</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>GLM-5.3</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td></tr>
-        <tr><td>DeepSeek-V4-Flash</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_flash/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_flash/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_flash/A5">A5</a></td></tr>
-        <tr><td>GLM-5.1</td><td align="center"><a href="./model_configs/vllm/models/glm_5.1/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.1/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.1/A5">A5</a></td></tr>
-        <tr><td>DeepSeek-V3.1</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v3.1/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v3.1/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v3.1/A5">A5</a></td></tr>
-        <tr><td>DeepSeek-V4-Pro</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_pro/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_pro/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_pro/A5">A5</a></td></tr>
-        <tr><td>GLM-5</td><td align="center"><a href="./model_configs/vllm/models/glm_5/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5/A5">A5</a></td></tr>
-        <tr><td>Qwen3-235B</td><td align="center"><a href="./model_configs/vllm/models/qwen_235b/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/qwen_235b/A3">A3</a></td><td align="center">—</td></tr>
+        <tr><td>DeepSeek-V4.1-Flash</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4.1_flash/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4.1_flash/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4.1_flash/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>DeepSeek-V4-Pro</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_pro/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_pro/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_pro/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>DeepSeek-V4-Flash</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_flash/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_flash/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v4_flash/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>DeepSeek-V3.1</td><td align="center"><a href="./model_configs/vllm/models/deepseek_v3.1/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v3.1/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/deepseek_v3.1/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>GLM-5.3-Flash</td><td align="center"><a href="./model_configs/vllm/models/glm_5.3_flash/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.3_flash/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.3_flash/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>GLM-5.3</td><td align="center"><a href="./model_configs/vllm/models/glm_5.3/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.3/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.3/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>GLM-5.2</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td><td align="center">待适配</td></tr>
+        <tr><td>GLM-5.1</td><td align="center"><a href="./model_configs/vllm/models/glm_5.1/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.1/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5.1/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>GLM-5</td><td align="center"><a href="./model_configs/vllm/models/glm_5/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/glm_5/A5">A5</a></td><td align="center">已完成</td></tr>
+        <tr><td>Kimi K3.1 PRO</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td><td align="center">待适配（预计12月份）</td></tr>
+        <tr><td>MiniMax-M3.1-Flash</td><td align="center">A2</td><td align="center">A3</td><td align="center">A5</td><td align="center">待适配（预计11/21）</td></tr>
+        <tr><td>Qwen3.8-Flash-Next</td><td align="center"><a href="./model_configs/vllm/models/qwen3.8_flash_next/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/qwen3.8_flash_next/A3">A3</a></td><td align="center"><a href="./model_configs/vllm/models/qwen3.8_flash_next/A5">A5</a></td><td align="center">已完成</td></tr>
+       <tr><td>Qwen3-235B</td><td align="center"><a href="./model_configs/vllm/models/qwen_235b/A2">A2</a></td><td align="center"><a href="./model_configs/vllm/models/qwen_235b/A3">A3</a></td><td align="center">—</td><td align="center">已完成</td></tr>
+        <tr><td colspan="5">适配状态以本表中的 MindIE Motor 配置链接为准。</td></tr>
       </table>
     </td>
   </tr>
@@ -95,36 +105,36 @@ MindIE Motor 是面向大语言模型分布式推理的请求调度框架，提�
     <td valign="top">
       <table>
         <tr><th style="font-size:18px" align="center" colspan="2">⚡ 极致性能</th></tr>
-        <tr><td align="left" width="320">PD 分离</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/pd_disaggregation.md">链接</a></td></tr>
-        <tr><td align="left" width="320">EPD 分离（多模态）</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/EPD_disaggregation.md">链接</a></td></tr>
-        <tr><td align="left" width="320">KV Cache 亲和性调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/kvcache_affinity.md">链接</a></td></tr>
-        <tr><td align="left" width="320">Agent Hint 会话亲和与调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/agent_hint.md">链接</a></td></tr>
-        <tr><td align="left" width="320">动态分桶调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/dynamic_bucket.md">链接</a></td></tr>
-        <tr><td align="left" width="320">Mooncake KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/kv_cache_store/backend/mooncake.md">链接</a></td></tr>
-        <tr><td align="left" width="320">MemCache KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/kv_cache_store/backend/memcache.md">链接</a></td></tr>
-        <tr><td align="left" width="320">Yuanrong KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/kv_cache_store/backend/yuanrong.md">链接</a></td></tr>
-        <tr><td align="left" width="320">UCM KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/kv_cache_store/backend/ucm.md">链接</a></td></tr>
-        <tr><td align="left" width="320">max_tokens 自适应</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/max_tokens_adaptation.md">链接</a></td></tr>
+        <tr><td align="left" width="320">PD 分离</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/pd_disaggregation.md">链接</a></td></tr>
+        <tr><td align="left" width="320">EPD 分离（多模态）</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/EPD_disaggregation.md">链接</a></td></tr>
+        <tr><td align="left" width="320">KV Cache 亲和性调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/kvcache_affinity.md">链接</a></td></tr>
+        <tr><td align="left" width="320">Agent Hint 会话亲和与调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/agent_hint.md">链接</a></td></tr>
+        <tr><td align="left" width="320">动态分桶调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/dynamic_bucket.md">链接</a></td></tr>
+        <tr><td align="left" width="320">Mooncake KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/kv_cache_store/mooncake.md">链接</a></td></tr>
+        <tr><td align="left" width="320">MemCache KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/kv_cache_store/memcache.md">链接</a></td></tr>
+        <tr><td align="left" width="320">Yuanrong KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/kv_cache_store/yuanrong.md">链接</a></td></tr>
+        <tr><td align="left" width="320">UCM KV Cache 池化后端</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/kv_cache_store/ucm.md">链接</a></td></tr>
+        <tr><td align="left" width="320">max_tokens 自适应</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/inference_scheduling/max_tokens_adaptation.md">链接</a></td></tr>
       </table>
     </td>
     <td class="gap" width="24" style="border:none;padding:0;background:transparent"><img alt="" src="./docs/zh/imgs/gap.png" width="24" height="1"></td>
     <td valign="top">
       <table>
         <tr><th style="font-size:18px" align="center" colspan="2">🛡️ 稳定可靠</th></tr>
-        <tr><td align="left" width="320">请求重调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/fault_tolerance/rescheduler.md">链接</a></td></tr>
+        <tr><td align="left" width="320">请求重调度</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/fault_tolerance/request_rescheduler.md">链接</a></td></tr>
         <tr><td align="left" width="320">缩P保D</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/fault_tolerance/scale_p2d.md">链接</a></td></tr>
         <tr><td align="left" width="320">主备倒换</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/fault_tolerance/standby.md">链接</a></td></tr>
         <tr><td align="left" width="320">异常实例重启</td><td align="center" width="72"><a href="./docs/zh/design/fault_tolerance/overview.md">链接</a></td></tr>
-        <tr><td align="left" width="320">虚推健康探测</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/sim_inference.md">链接</a></td></tr>
-        <tr><td align="left" width="320">服务限流</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/rate_limiting.md">链接</a></td></tr>
+        <tr><td align="left" width="320">虚推健康探测</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/fault_tolerance/sim_inference.md">链接</a></td></tr>
+        <tr><td align="left" width="320">服务限流</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/fault_tolerance/rate_limiting.md">链接</a></td></tr>
         <tr><td align="left" width="320">RAS monitor 服务健康监控</td><td align="center" width="72"><a href="./examples/features/fault_tolerance/ras_monitor/readme.md">链接</a></td></tr>
-        <tr><td align="left" width="320">自动弹性扩缩容</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/auto_scaling.md">链接</a></td></tr>
-        <tr><td align="left" width="320">手动扩缩容</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/manual_scaling.md">链接</a></td></tr>
-        <tr><td align="left" width="320">容器快照</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/container_snapshot.md">链接</a></td></tr>
-        <tr><td align="left" width="320">D2D 权重加载</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/startup_acceleration.md">链接</a></td></tr>
-        <tr><td align="left" width="320">数据混淆推理（PMCC）</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/data_obfuscation.md">链接</a></td></tr>
-        <tr><td align="left" width="320">精度检测</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/precision_detection.md">链接</a></td></tr>
-        <tr><td align="left" width="320">请求耗时追踪</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/tracing.md">链接</a></td></tr>
+        <tr><td align="left" width="320">自动弹性扩缩容</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/scaling_deployment/auto_scaling.md">链接</a></td></tr>
+        <tr><td align="left" width="320">手动扩缩容</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/scaling_deployment/manual_scaling.md">链接</a></td></tr>
+        <tr><td align="left" width="320">容器快照</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/scaling_deployment/container_snapshot.md">链接</a></td></tr>
+        <tr><td align="left" width="320">D2D 权重加载</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/scaling_deployment/startup_acceleration.md">链接</a></td></tr>
+        <tr><td align="left" width="320">数据混淆推理（PMCC）</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/maintenance_testing_security/data_obfuscation.md">链接</a></td></tr>
+        <tr><td align="left" width="320">精度检测</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/maintenance_testing_security/precision_detection.md">链接</a></td></tr>
+        <tr><td align="left" width="320">请求耗时追踪</td><td align="center" width="72"><a href="./docs/zh/user_guide/features/maintenance_testing_security/tracing.md">链接</a></td></tr>
       </table>
     </td>
   </tr>

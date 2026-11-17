@@ -71,4 +71,4 @@ See [the developer contract](../../docs/zh/design/scheduler_policy_plugin.md)
 for API, isolation, metrics, migration and validation requirements. Historical
 single-runner cluster results do not validate the role-isolated runtime.
 
-中文快速接入指南：[编写、安装和启用自定义选点插件](../../docs/zh/user_guide/features/scheduler_policy_plugin.md)。
+中文快速接入指南：[编写、安装和启用自定义选点插件](../../docs/zh/user_guide/features/inference_scheduling/scheduler_policy_plugin.md)。
