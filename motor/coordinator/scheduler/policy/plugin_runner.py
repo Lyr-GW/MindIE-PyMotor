@@ -30,10 +30,11 @@ logger = get_logger(__name__)
 
 
 class PolicyRunner:
-    """One subprocess per configured inference worker, with no unbounded task queue."""
+    """One subprocess per configured worker role, with no unbounded task queue."""
 
-    def __init__(self, config: PolicyPluginConfig) -> None:
+    def __init__(self, config: PolicyPluginConfig, role: str | None = None) -> None:
         self.config = config
+        self.role = role or (config.role[0] if config.role else "unknown")
         self._process: Process | None = None
         self._lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
@@ -65,7 +66,7 @@ class PolicyRunner:
                 if response.get("ready") is not True:
                     raise ValueError(response.get("error", "Missing plugin ready response"))
                 self._counts["loads"] += 1
-                logger.info("Scheduling plugin loaded name=%s api_version=2", self.config.name)
+                logger.info("Scheduling plugin loaded name=%s role=%s api_version=2", self.config.name, self.role)
             except asyncio.CancelledError:
                 await self._stop()
                 raise
@@ -116,7 +117,10 @@ class PolicyRunner:
 
     def metrics_text(self) -> str:
         """Worker-local Prometheus counters; scrape every worker's metaserver."""
-        label = '{policy=%s}' % json.dumps(self.config.name, ensure_ascii=False)
+        label = '{policy=%s,role=%s}' % (
+            json.dumps(self.config.name, ensure_ascii=False),
+            json.dumps(self.role, ensure_ascii=False),
+        )
         lines = []
         for event in ("loads", "load_errors", "calls", "errors", "timeouts", "fallbacks"):
             name = "motor_policy_%s_total" % event
@@ -129,7 +133,7 @@ class PolicyRunner:
     def record_fallback(self, reason: str) -> None:
         """Count core-side fallbacks that happen outside a plugin invocation."""
         self._counts["fallbacks"] += 1
-        logger.warning("Scheduling plugin fallback name=%s reason=%s", self.config.name, reason)
+        logger.warning("Scheduling plugin fallback name=%s role=%s reason=%s", self.config.name, self.role, reason)
 
     async def _exchange(self, payload: dict) -> dict:
         encoded = json.dumps(payload, allow_nan=False).encode("utf-8") + b"\n"
@@ -174,8 +178,9 @@ class PolicyRunner:
 
     async def _fail(self, exc: Exception) -> None:
         logger.warning(
-            "Scheduling plugin failed name=%s reason=%s error=%s; falling back to configured built-in strategy",
+            "Scheduling plugin failed name=%s role=%s reason=%s error=%s; falling back to configured built-in strategy",
             self.config.name,
+            self.role,
             type(exc).__name__,
             str(exc)[:512],
         )

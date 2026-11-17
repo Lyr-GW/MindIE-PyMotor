@@ -15,6 +15,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 from typing import Any, Awaitable, Callable
 
 import msgspec
@@ -30,6 +31,7 @@ from motor.config.coordinator import (
     KvAffinityConfig,
     KvcLifecycleConfig,
     PolicyPluginConfig,
+    normalize_policy_plugins,
 )
 from motor.coordinator.domain import (
     InstanceReadiness,
@@ -677,7 +679,7 @@ class SchedulerClientConfig:
     decode_scheduler_type: str | None = None
     # Optional default applied to both roles when the per-role fields are unset (tests).
     scheduler_type: str | None = None
-    policy_plugin: PolicyPluginConfig | None = None
+    policy_plugin: list[PolicyPluginConfig] | list[dict] | None = None
     client_index: int = 0
     client_count: int = 1
     endpoint_instance_score_weight: float = 0.05
@@ -720,16 +722,11 @@ class AsyncSchedulerClient:
     # instead of raising AttributeError.
     _cache_declarations: CacheDeclarationTable | None = None
     _cache_lifecycle_task: asyncio.Task | None = None
-    _policy_runner: PolicyRunner | None = None
+    _policy_runners = MappingProxyType({})
 
     def __init__(self, config: SchedulerClientConfig):
-        if config.policy_plugin is not None:
-            config.policy_plugin.validate()
-        self._policy_runner = (
-            PolicyRunner(config.policy_plugin)
-            if config.policy_plugin is not None and config.policy_plugin.name.strip()
-            else None
-        )
+        plugin_configs = normalize_policy_plugins(config.policy_plugin if config.policy_plugin is not None else [])
+        self._policy_runners = {role: PolicyRunner(item, role=role) for item in plugin_configs for role in item.role}
         self.scheduler_address = config.scheduler_address
         self.timeout = config.timeout
         self._client_index = max(0, config.client_index)
@@ -846,8 +843,7 @@ class AsyncSchedulerClient:
 
     async def connect(self) -> bool:
         success = await self._transport.connect()
-        if self._policy_runner is not None:
-            await self._policy_runner.start()
+        await asyncio.gather(*(runner.start() for runner in self._policy_runners.values()))
         if success:
             await self._init_cache()
         if success and self._push_subscriber:
@@ -867,8 +863,7 @@ class AsyncSchedulerClient:
         return success
 
     async def disconnect(self) -> None:
-        if self._policy_runner is not None:
-            await self._policy_runner.close()
+        await asyncio.gather(*(runner.close() for runner in self._policy_runners.values()), return_exceptions=True)
         await self._stop_dp_stats_task()
         await self._stop_cache_lifecycle_task()
         try:
@@ -1494,7 +1489,16 @@ class AsyncSchedulerClient:
 
     def policy_metrics_text(self) -> str:
         """Return only this inference worker's plugin samples."""
-        return self._policy_runner.metrics_text() if self._policy_runner is not None else ""
+        families: dict[str, list[str]] = {}
+        for runner in self._policy_runners.values():
+            family: list[str] = []
+            for line in runner.metrics_text().splitlines():
+                if line.startswith("# TYPE "):
+                    family = families.setdefault(line, [line])
+                else:
+                    family.append(line)
+        lines = [line for family in families.values() for line in family]
+        return "\n".join(lines) + ("\n" if lines else "")
 
     async def _try_rank_external_policy(
         self,
@@ -1516,7 +1520,9 @@ class AsyncSchedulerClient:
                 attempt,
             )
         except Exception as exc:
-            self._policy_runner.record_fallback(type(exc).__name__)
+            runner = self._policy_runners.get(getattr(role, "value", None) or "union")
+            if runner is not None:
+                runner.record_fallback(type(exc).__name__)
             return None
 
     async def _rank_external_policy(
@@ -1560,15 +1566,17 @@ class AsyncSchedulerClient:
                         kv_cache_usage=get_endpoint_kv_cache_usage(instance, endpoint),
                     )
                 )
+        role_value = getattr(role, "value", None) or "union"
+        runner = self._policy_runners[role_value]
         if not snapshots:
-            self._policy_runner.record_fallback("no_eligible_candidates")
+            runner.record_fallback("no_eligible_candidates")
             return None
         data = req_info.req_data
         token_ids = getattr(req_info, "token_ids", None)
         selection = SelectionInput(
             request=RequestContext(
                 request_id=req_info.req_id,
-                role=role.value,
+                role=role_value,
                 model_name=str(data.get("model", "")),
                 prompt_tokens=len(token_ids) if isinstance(token_ids, list) else 0,
                 max_output_tokens=data.get("max_completion_tokens", data.get("max_tokens")),
@@ -1579,13 +1587,13 @@ class AsyncSchedulerClient:
             excluded=frozenset(CandidateId(*pair) for pair in excluded),
             attempt=attempt,
         )
-        ranked = await self._policy_runner.rank(selection)
+        ranked = await runner.rank(selection)
         if not ranked:
             return None
         instance, endpoint = pairs[ranked[0].id]
         meta = self._workload_reader.entry_meta(instance.id, endpoint.id)
         if meta is None or int(meta["generation"]) != generations[ranked[0].id]:
-            self._policy_runner.record_fallback("membership_changed")
+            runner.record_fallback("membership_changed")
             return None
         expected = next(item.active_tokens for item in snapshots if item.id == ranked[0].id)
         return instance, endpoint, ranked[0].score, expected
@@ -1726,12 +1734,8 @@ class AsyncSchedulerClient:
                 )
 
         plugin_choice = None
-        if (
-            _use_plugin
-            and self._policy_runner is not None
-            and target_instance_id is None
-            and role.value in self._policy_runner.config.roles
-        ):
+        plugin_runner = self._policy_runners.get(role_str)
+        if _use_plugin and plugin_runner is not None and target_instance_id is None:
             plugin_choice = await self._try_rank_external_policy(
                 role,
                 req_info,
@@ -1743,7 +1747,7 @@ class AsyncSchedulerClient:
         plugin_active = plugin_choice is not None
         if plugin_active:
             proposed_instance, proposed_endpoint, _ = plugin_choice[:3]
-            candidate_policy = "plugin:" + self._policy_runner.config.name
+            candidate_policy = "plugin:" + plugin_runner.config.name
             candidate_endpoints = [{"instance_id": proposed_instance.id, "endpoint_id": proposed_endpoint.id}]
         elif target_instance_id is not None:
             instances = await self.get_available_instances(role)
@@ -1919,9 +1923,12 @@ class AsyncSchedulerClient:
                     )
                 if plugin_choice is None:
                     if _attempt >= 3:
-                        self._policy_runner.record_fallback("cas_retry_limit")
+                        plugin_runner.record_fallback("cas_retry_limit")
                     logger.warning(
-                        "Scheduling plugin reselect failed; using built-in strategy req_id=%s", req_info.req_id
+                        "Scheduling plugin reselect failed name=%s role=%s; using built-in strategy req_id=%s",
+                        plugin_runner.config.name,
+                        role_str,
+                        req_info.req_id,
                     )
                     return await self.select_and_allocate(
                         role,

@@ -235,16 +235,35 @@ set `query_encoding: "json"` explicitly for JSON-only conductor binaries.
 **Built-in factory registration** (`factory.py`): `SchedulingPolicyFactory` maps built-in policy name → class.
 
 **External endpoint policies** use `LoadBalancingPolicy.rank(SelectionInput)` in `policy/api.py`,
-registered as an Entry Point in `mindie_motor.scheduling_policies`. Optional
-`scheduler_config.policy_plugin` supplies name/options/roles and timeout/cooldown budgets.
-`PolicyRunner` preloads one killable JSON subprocess per inference worker; Obs/Mgmt never load it.
-Busy, failed, unavailable or timed-out plugins fall back to the role's existing built-in strategy.
-Core filtering and pins take precedence; unconfigured clients execute the existing path.
-CAS retries refresh the snapshot and re-invoke the plugin (at most three plugin attempts).
-The CAS expected load comes from the snapshot sent to the plugin, not mutable post-await objects.
-Plugin commits use the generic demand formula; release stays in the core.
-Worker metaserver `GET /metrics` exports worker-local `motor_policy_*` counters and timing.
-See `docs/zh/design/scheduler_policy_plugin.md` and `tests/coordinator/scheduler/test_policy_plugin.py`.
+registered as an Entry Point in `mindie_motor.scheduling_policies` (API v2).
+`scheduler_config.policy_plugin` is a list of items with a required non-empty `role` array,
+name/options and timeout/cooldown budgets. `normalize_policy_plugins()` in `motor/config/coordinator.py`
+validates the list, rejects unknown keys, old single-object/`roles` schema, duplicate roles within
+an item and overlapping roles across items. Missing config / `[]` creates no Runner or subprocess.
+Malformed JSON plugin config must raise explicitly rather than disappear in generic `from_json` fallback.
+
+`AsyncSchedulerClient` expands each item's role array into `dict[role, PolicyRunner]` using
+`PolicyRunner(item, role=role)`. The same name or item can cover P/D, but each actual role owns
+an independent process, lock, cooldown deadline, recovery task, policy state and metrics.
+There are at most four plugin children per inference Worker; Obs/Mgmt never load them.
+`connect()` concurrently preloads all configured roles; `disconnect()` concurrently closes them,
+interrupting in-flight rank calls and reaping every child. A P failure or busy call does not block D's Runner.
+
+`select_and_allocate()` handles valid core pins first, then uses only the current role's Runner.
+Unconfigured roles directly execute the existing built-in path. Busy, failed, unavailable or timed-out
+plugins fall back to that role's built-in strategy: `prefill_scheduler_type` for P/U/E,
+`decode_scheduler_type` for D. Union/Encode must be explicitly included and do not inherit Prefill plugins.
+CAS retries refresh the snapshot and re-invoke the same role's Runner (at most three plugin attempts),
+then re-enter the built-in path with `_use_plugin=False`. CAS expected load comes from the snapshot
+sent to the plugin, not mutable post-await objects. Plugin commits use the generic demand formula;
+release stays in the core. `SelectionInput.request.role` already carries the role; `rank()` remains API v2.
+
+Worker metaserver `GET /metrics` exports worker-local `motor_policy_*` counters and timing with
+`{policy,role}` labels. `policy_metrics_text()` groups Runner samples by family and emits each family's
+`# TYPE` once. Worker load/fault/fallback logs include both role and name. Scrape each Worker's metaserver;
+Obs does not aggregate these samples. See `docs/zh/design/scheduler_policy_plugin.md` for the
+implementation map, schema migration and acceptance matrix, and
+`tests/coordinator/scheduler/test_policy_plugin.py` for lifecycle, isolation, CAS and metrics tests.
 
 The policy is selected per role by `SchedulerConfig.type_for_role()`: `prefill_scheduler_type` serves Prefill, Encode and Union; `decode_scheduler_type` serves Decode. Both default to `LOAD_BALANCE`; Decode supports load balance / round robin / dynamic bucket, while KV affinity applies only to P/U. Deprecated `scheduler_type` migrates only to role fields that are not explicitly configured. When a role uses `kv_cache_affinity`, a sub-mode is chosen by `kv_affinity.mode`:
 

@@ -1,6 +1,6 @@
 # Coordinator 候选实例 / Endpoint 选点插件设计
 
-> 状态：PR !1434 已实现 API v2 与隔离执行路径；集群成功率和吞吐验收尚未完成。
+> 状态：PR !1434 的 API v2 选点扩展按角色独立配置与隔离执行；本版角色隔离路径需重新执行集群验收。
 > 需求追踪：[Issue #844](https://gitcode.com/Ascend/MindIE-Motor/issues/844)。
 > 本文描述当前实现，后续扩展在风险与演进章节单独列出。
 
@@ -22,7 +22,7 @@ Python 决定建议选点，Rust SHM 执行最终原子分配，Mgmt 管理成�
 |----|------|----------|
 | R1 | 独立交付 | 按文档构建并安装客户 wheel，只改可选配置即可参与选点，无需修改或重建 Motor 源码 |
 | R2 | 存量兼容 | 不配置插件时执行原有内置路径，原配置、过滤、pin、分配和释放语义保持 |
-| R3 | 故障回退 | 插件加载失败、异常、超时、崩溃、非法输出或繁忙时，使用该角色原配置的内置策略 |
+| R3 | 按角色独立与故障回退 | P/D 可使用不同插件名或参数；某角色加载失败、异常、超时、崩溃、非法输出或繁忙时，仅该角色使用原配置的内置策略 |
 | R4 | 可观测与一致性 | 加载、故障和回退有日志指标；插件结果不能绕过核心约束或修改负载账本 |
 
 R3 的请求成功率验收以前端请求有效、后端可用且原内置策略能够调度为前提。
@@ -38,33 +38,32 @@ R3 的请求成功率验收以前端请求有效、后端可用且原内置策�
 
 ## 2. 现有路径与扩展位置
 
-按职责可以把当前路径理解为四步；这不是新增的四阶段插件框架：
+扩展位于角色内选点与原子分配之间，整体流程如下；CAS 细节见第 8 节：
 
-```text
-请求解析 / token 信息准备
-          |
-          v
-Router 拓扑选择                         核心
-          |
-          v
-确定本次角色、处理 pin、准备可用候选      核心
-          |
-          +-- 有效 pin -----------------------------+
-          |                                         |
-          +-- 插件未启用 / 角色未启用 --> 原内置策略  |
-          |                                         |
-          +-- 启用外部选点 --> 插件排序               |
-                                  |                 |
-                             失败 / 忙              |
-                                  v                 |
-                              原内置策略            |
-                                  |                 |
-                                  +-----------------+
-                                  v
-                        核心校验 / SHM CAS 提交
-                                  |
-                                  v
-                        转发引擎 / 完成后释放
+```plantuml
+@startuml
+start
+:请求解析 / token 信息准备;
+:Router 确定拓扑与本次角色;
+:核心过滤并处理显式 / 会话 pin;
+if (有效 pin?) then (是)
+  :原 pin 分配路径;
+else (否)
+  if (role 有配置的 Runner?) then (是)
+    :该 role 的插件排序与核心 CAS
+冲突刷新并重调同 role，最多三次;
+    if (插件路径完成分配?) then (是)
+      :使用已提交的插件选点;
+    else (失败 / 忙 / 冷却 / 重试耗尽)
+      :该 role 的原内置策略与 CAS;
+    endif
+  else (否)
+    :该 role 的原内置策略与 CAS;
+  endif
+endif
+:转发引擎 / 完成后核心释放;
+stop
+@enduml
 ```
 
 PD 分离请求可能分别进行 P、D 选点，插件看到的是本次角色的候选池，不是任意角色混合的全局资源池。
@@ -74,31 +73,39 @@ PD 分离请求可能分别进行 P、D 选点，插件看到的是本次角色�
 
 ### 3.1 进程和数据流
 
-```text
-CoordinatorDaemon
-|
-+-- Mgmt       成员表、熔断、SHM owner、控制面 ZMQ
-+-- Obs        现有观测能力，不执行客户插件
-+-- Inference Worker N
-      |
-      +-- AsyncSchedulerClient
-      |     核心过滤、上下文快照、结果校验、CAS、释放
-      +-- PolicyRunner
-      |     子进程管理、超时、冷却、回退信号、进程内指标
-      +-- Worker metaserver GET /metrics
-      |
-      +-- Plugin subprocess（配置启用时一个）
-            Entry Point Loader -> 客户 LoadBalancingPolicy.rank()
-
-Worker  -- JSON-lines stdin --> Plugin subprocess
-Worker  <-- JSON-lines stdout -- Plugin subprocess
-插件普通 stdout 输出和加载来源信息 --> stderr
-Worker  <---- atomic load / CAS ----> Rust POSIX SHM
+```plantuml
+@startuml
+package CoordinatorDaemon {
+  component "Mgmt\n成员 / 熔断 / SHM owner" as M
+  component "Obs\n现有观测能力" as O
+  package "Inference Worker N" {
+    component "AsyncSchedulerClient\n核心过滤 / 快照 / CAS / 释放" as C
+    component "role -> PolicyRunner\n每角色独立 lock / cooldown / metrics" as R
+    component "Worker metaserver\nGET /metrics" as H
+    component "Prefill plugin subprocess" as P
+    component "Decode plugin subprocess" as D
+    component "Union / Encode subprocess\n仅显式配置时创建" as U
+    C --> R : 按本次 role 查找
+    R --> P : JSON-lines
+    R --> D : JSON-lines
+    R --> U : JSON-lines
+    R --> H : 合并角色指标
+  }
+}
+database "Rust POSIX SHM" as S
+M --> S : 成员 / 熔断状态
+C --> S : atomic load / CAS
+note bottom of R
+每 Worker 最多 4 个 Runner / 子进程
+Mgmt 与 Obs 不加载插件
+end note
+@enduml
 ```
 
 插件进程通过当前 Python 解释器启动，安装环境与 Worker 一致。
 `SchedulerConnectionManager.from_config()` 只在 `worker_index` 非空时传入插件配置，Mgmt/Obs 不预加载插件。
-Worker 的 `connect()` 阶段预加载，`disconnect()` 阶段关闭；配置缺省或名称为空时不创建 Runner/子进程。
+Worker 的 `connect()` 阶段并发预加载全部已配置角色，`disconnect()` 阶段并发关闭全部 Runner。
+配置缺省或 `[]` 时不创建 Runner/子进程；列表项不能用空名称表示禁用。
 
 ### 3.2 所有权与不可越过的边界
 
@@ -110,17 +117,17 @@ Worker 的 `connect()` 阶段预加载，`disconnect()` 阶段关闭；配置缺
 | KV 命中索引 | KV Conductor | 本版不提供命中查询；可读取已有缓存使用率 |
 | 建议排序 | 客户策略 | 返回合法候选子集及分数 |
 | 最终分配、负载 delta、释放 | Worker 核心 + Rust CAS | 无写权限，不接受插件提交的 delta |
-| 插件实例与私有状态 | 插件子进程 | 每 Worker 独立，不是跨 Worker 全局状态 |
+| 插件实例与私有状态 | 插件子进程 | 每 Worker、每角色独立；同名入口也分别构造，不共享插件对象或私有状态 |
 
 ### 3.3 代码组织
 
 | 文件 | 职责 |
 |------|------|
-| `motor/config/coordinator.py` | `PolicyPluginConfig`、缺省配置与参数校验 |
+| `motor/config/coordinator.py` | `PolicyPluginConfig`、`normalize_policy_plugins()`、角色数组校验与配置错误传播 |
 | `motor/coordinator/scheduler/policy/api.py` | 公共 DTO 和 `LoadBalancingPolicy` |
 | `motor/coordinator/scheduler/policy/plugin_worker.py` | 精确发现 Entry Point、加载校验、协议服务 |
 | `motor/coordinator/scheduler/policy/plugin_runner.py` | 有界调用、输出校验、回收、冷却恢复和指标 |
-| `motor/coordinator/scheduler/runtime/scheduler_client.py` | 快照构造、插件接入、CAS 重选及内置回退 |
+| `motor/coordinator/scheduler/runtime/scheduler_client.py` | 展开 role→Runner、并发生命周期、快照、同角色 CAS 重选与内置回退、指标合并 |
 | `motor/coordinator/scheduler/runtime/scheduler_connection_manager.py` | 按进程身份传入配置 |
 | `motor/coordinator/api_server/inference_server.py` | Worker 插件指标抓取口 |
 | `examples/scheduler_plugin/` | 独立 wheel 示例 |
@@ -134,7 +141,7 @@ Worker 的 `connect()` 阶段预加载，`disconnect()` 阶段关闭；配置缺
 | 发现方式 | 已安装包的 Entry Point | 按名称配置，不接受配置中的任意源码文件路径；包仍需部署系统安装 |
 | 执行位置 | 独立 Python 子进程 | 可回收阻塞代码；新增 IPC 和解释器开销，不是安全沙箱 |
 | 通信 | 有界 JSON-lines | 只传公共数据，不使用 pickle；不传递活的内部对象 |
-| 并发 | 每 Worker 一次在途排序，忙时回退 | 避免无界排队；高并发下插件参与率可能下降 |
+| 并发 | 每 Worker、每角色一次在途排序，忙时仅该角色回退 | 避免无界排队；P 与 D 不共用执行锁，最多四个子进程 |
 | 回退目标 | 当前角色原配置的内置策略 | 保留客户已有 P/D 策略选择，不统一强制切为负载均衡 |
 | CAS 冲突 | 刷新快照后重调同一插件 | 不盲目提交旧排序第二名；插件选点最多尝试三次 |
 | 未配置路径 | 保留现有内置实现 | 降低兼容风险；本版未将四种内置算法全部迁到 `rank()` |
@@ -149,7 +156,7 @@ Worker 的 `connect()` 阶段预加载，`disconnect()` 阶段关闭；配置缺
 
 继承 `motor.coordinator.scheduler.policy.api.LoadBalancingPolicy`，声明 `api_version = 2`，
 实现同步 `rank(selection: SelectionInput) -> Sequence[RankedCandidate]`。
-构造函数接受 `options` JSON 对象；插件可维护私有状态，但进程重启后不会保留，多个 Worker 之间也不共享。
+构造函数接受 `options` JSON 对象；插件可维护私有状态，但进程重启后不会保留，多个 Worker 或角色之间也不共享。相同 Entry Point 可以用于多个角色，但各项 options、预算和运行状态独立。
 
 返回非空候选子集，顺序就是优先顺序；分数约定越小越优，核心不会再按分数排序。
 返回空列表不是拒绝请求的机制，而是触发内置回退。插件不能借此实现强制租户准入或安全隔离。
@@ -185,35 +192,62 @@ user/session 信息不是认证身份，插件不能据此宣称完成了安全�
 
 ### 6.1 配置入口
 
-在 `motor_coordinator_config.scheduler_config` 下增加可选对象：
+在 `motor_coordinator_config.scheduler_config` 下配置可选列表。每项将**一个或多个角色**映射到一个插件入口，列表顺序不决定调度优先级：
 
 ```json
 {
   "prefill_scheduler_type": "kv_cache_affinity",
   "decode_scheduler_type": "load_balance",
-  "policy_plugin": {
-    "name": "acme.weighted_load",
-    "roles": ["prefill", "union"],
-    "options": {"instance_weight": 0.05},
-    "timeout_ms": 50,
-    "startup_timeout_ms": 5000,
-    "cooldown_seconds": 30
-  }
+  "policy_plugin": [
+    {
+      "role": ["prefill"],
+      "name": "acme.prefill_weighted",
+      "options": {"instance_weight": 0.05},
+      "timeout_ms": 50,
+      "startup_timeout_ms": 5000,
+      "cooldown_seconds": 30
+    },
+    {
+      "role": ["decode"],
+      "name": "acme.decode_weighted",
+      "options": {"instance_weight": 0.2},
+      "timeout_ms": 100,
+      "startup_timeout_ms": 5000,
+      "cooldown_seconds": 10
+    }
+  ]
 }
 ```
 
+上例演示 P/D 使用不同入口名；示例包默认只注册 `acme.weighted_load`，上述两个名称需按第 6.2 节额外注册。
+若 P/D 使用同名 `acme.weighted_load` 且参数和预算相同，可合并为一个配置项：
+
+```json
+{
+  "policy_plugin": [
+    {"role": ["prefill", "decode"], "name": "acme.weighted_load", "options": {"instance_weight": 0.05}}
+  ]
+}
+```
+
+一项复用的是配置，仍会创建两个独立策略实例；需要不同 options 或预算时拆为两项。
+Union 不继承 Prefill 的插件配置；要在混部路由启用插件，必须在某项的 `role` 数组中显式添加 `"union"`。Encode 同理。
+
 | 字段 | 默认值 | 校验与作用 |
 |------|--------|------------|
-| name | 空字符串 | 最多 128 个字符；去除空白后为空则禁用，其他名称按 Entry Point 精确匹配 |
-| options | `{}` | 可 JSON 序列化的对象，不允许 NaN/Infinity；传给构造函数 |
-| roles | prefill/decode/union/encode | 非空角色列表，仅列出的角色调用插件 |
-| timeout_ms | 50 | 单次排序交换的等待预算，整数 1–60000 毫秒 |
-| startup_timeout_ms | 5000 | 启动握手的等待预算，整数 1–60000 毫秒 |
-| cooldown_seconds | 30 | 故障后恢复冷却期，有限数值且至少 1 秒 |
+| role | 无，必填 | 非空字符串数组，仅允许 `prefill` / `decode` / `union` / `encode`；项内重复和跨项角色重叠均报错，不接受字符串简写 |
+| name | 无，必填 | 非空字符串，最多 128 个字符；按 Entry Point 精确匹配，空白名称非法 |
+| options | `{}` | 可 JSON 序列化的对象，不允许 NaN/Infinity；只传给该角色策略的构造函数 |
+| timeout_ms | 50 | 该角色单次排序交换的等待预算，整数 1–60000 毫秒，不接受 bool |
+| startup_timeout_ms | 5000 | 该角色启动握手的等待预算，整数 1–60000 毫秒，不接受 bool |
+| cooldown_seconds | 30 | 该角色故障后恢复冷却期，有限数值且至少 1 秒，不接受 bool |
 
-插件是可选覆盖项，原来的 Prefill/Decode 内置策略配置仍保留，用于禁用和失败回退。
-配置自身类型或数值不合法会进入 Coordinator 配置校验错误；这与合法配置但插件包加载失败不同。
-修改名称、options、roles 或预算后需要重启 Worker，不支持热加载或运行中安装后自动重新发现。
+未配置和 `[]` 等价，全部使用内置路径；显式 `null` 不是禁用写法，应报类型错误。展开后最多四种角色，每种角色只能对应一个配置项。外层列表最多四项。
+非列表、非对象列表项、缺少 role/name、未知键、非法角色或数值均为配置错误，不能被当成插件不可用而静默禁用。
+修改列表、名称、options 或预算后需重启 Worker，不支持热加载或运行中安装后自动发现。
+
+`prefill_scheduler_type` 继续决定 P/U/E 的默认与回退策略，`decode_scheduler_type` 决定 D 的默认与回退策略。
+因此只配置 Prefill 插件时，Decode、Union 和 Encode 仍直接运行各自内置策略。
 
 ### 6.2 包注册与启动校验
 
@@ -224,11 +258,68 @@ user/session 信息不是认证身份，插件不能据此宣称完成了安全�
 "acme.weighted_load" = "acme_motor_policies:WeightedLoadPolicy"
 ```
 
+同包可额外注册两个名称指向同一示例类，供第 6.1 节配置使用；这是插件包作者需要新增的元数据，并非当前示例 wheel 已有入口：
+
+```toml
+[project.entry-points."mindie_motor.scheduling_policies"]
+"acme.prefill_weighted" = "acme_motor_policies:WeightedLoadPolicy"
+"acme.decode_weighted" = "acme_motor_policies:WeightedLoadPolicy"
+```
+
+两个入口也可以由客户包注册为不同类；Motor 只依赖公共 API 与配置名，不要求 P/D 算法相同。
+
 Loader 只导入与配置名完全匹配的条目。零条或多条匹配均失败，并检查：
 对象是 `LoadBalancingPolicy` 子类、API 版本为 2、重写了同步 `rank()`，然后执行构造函数。
 历史 API v1 插件不会被当成 v2 接受；未选中的入口不会执行 `.load()`。
 包需安装在 Worker 使用的 Python 环境，Motor 与插件版本由部署系统共同锁定。
 完整实现和 wheel 构建安装步骤见 [示例包](../../../examples/scheduler_plugin/README.md)。 从零接入步骤见[中文快速接入指南](../user_guide/features/scheduler_policy_plugin.md)。
+
+### 6.3 按角色插件的实现分解
+
+实现链路如下，扩展角色配置时应同时检查各层，不能只修改 JSON 示例：
+
+| 层 / 关键入口 | 实现职责与不变量 |
+|--------------|------------------|
+| `motor/config/coordinator.py`：`PolicyPluginConfig.validate()`、`normalize_policy_plugins()` 与 `CoordinatorConfig.from_json()` | 把 JSON 对象项转换为配置实例，验证字段、未知键、role 非空数组、项内重复与跨项角色重叠；规范化保留每项的 role 数组，Client 再展开。非法配置须让调用方明确失败，不能被通用异常处理变成默认空配置 |
+| 同文件：`SchedulerConfig.policy_plugin`、`SchedulerConfig.__post_init__()` 与 `CoordinatorConfig.validate_config()` | 默认空列表；直接构造和 JSON 加载都验证完整列表，限制每种实际角色只能归属一项 |
+| `scheduler_connection_manager.py`：`SchedulerConnectionManager.from_config()` | 只向 Inference Worker 的 `SchedulerClientConfig` 传递配置；Mgmt/Obs 不创建客户 Runner |
+| `scheduler_client.py`：`AsyncSchedulerClient.__init__()` | 建立 `dict[role, PolicyRunner]`，逐项遍历 role 数组，按角色构造 `PolicyRunner(item, role=role)`；索引键为角色，不能以 name 或配置项去重合并 |
+| 同文件：`connect()` / `disconnect()` | 并发预加载全部配置角色，并发回收全部 Runner；单个加载失败由该 Runner 进入冷却，不阻止其他角色可用 |
+| 同文件：`select_and_allocate()`、`_try_rank_external_policy()`、`_rank_external_policy()` | pin 优先；按本次 role 获取 Runner，快照、插件调用、fallback 计数和 CAS 重选始终归属同一角色；缺少映射直接走 base |
+| `plugin_runner.py`：`start()` / `rank()` / `close()` / `_restart()` | 每实例维护进程、互斥锁、冷却期限、至多一个恢复任务和指标；P 的故障/繁忙不会占用 D 的锁或重置其进程 |
+| `scheduler_client.py`：`policy_metrics_text()`；`PolicyRunner.metrics_text()` | 输出各 Runner 的 `{policy,role}` 样本，按 metric family 分组，每组的 `# TYPE` 元数据只出现一次 |
+| `tests/config/`、`tests/coordinator/scheduler/test_policy_plugin.py` | 拦截非法 schema、角色路由、同名独立性、故障隔离、并发生命周期与合并指标回归；执行矩阵见第 13 节 |
+
+这一实现不改变 API v2：`SelectionInput.request.role` 已携带角色，`rank()` 签名与子进程排序消息不需要升级版本。
+配置角色负责选择 Runner，请求上下文角色用于让客户算法理解此次选点，两者必须一致。
+
+### 6.4 旧单对象配置迁移
+
+PR !1434 尚未合入，旧单对象 `roles` 草案不作为兼容格式保留。加载时应报明确迁移错误，而非自动拆分或忽略。
+以下旧配置不可继续使用：
+
+```json
+{
+  "policy_plugin": {
+    "name": "acme.weighted_load",
+    "roles": ["prefill", "union"],
+    "options": {"instance_weight": 0.05}
+  }
+}
+```
+
+需把外层对象改为列表，并将 `roles` 改名为 `role`；数组中的角色仍可复用同一项配置：
+
+```json
+{
+  "policy_plugin": [
+    {"role": ["prefill", "union"], "name": "acme.weighted_load", "options": {"instance_weight": 0.05}}
+  ]
+}
+```
+
+禁用全部插件改为删除 `policy_plugin` 或设为 `[]`；禁用某角色则从 role 数组移除该角色（数组空时删除整项），不能填写空 name。
+此迁移只影响本 PR 的插件草案配置，原内置 `scheduler_type` 的迁移机制继续有效。
 
 ## 7. 进程协议与调用时序
 
@@ -251,13 +342,14 @@ Loader 只导入与配置名完全匹配的条目。零条或多条匹配均失�
 ```plantuml
 @startuml
 participant "Inference Worker / SchedulerClient" as W
-participant "PolicyRunner" as R
+participant "PolicyRunner[role]" as R
 participant "Plugin subprocess" as P
 participant "Rust SHM" as S
 W -> S : load entries / flags / generation
 S --> W : load snapshot
 W -> W : core filter and pin handling
-W -> R : rank(SelectionInput)
+W -> W : runner = runners[role]
+W -> R : rank(SelectionInput with request.role)
 R -> P : JSON selection
 P -> P : customer rank()
 P --> R : JSON ranked candidates
@@ -289,7 +381,7 @@ W -> W : cache patch, statistics, scheduled log
 | 结果 | 核心行为 |
 |------|----------|
 | OK | 记录实际提交值，更新 Worker cache、DP 统计并返回资源 |
-| Changed | 刷新 SHM 负载，以同一插件重新排序 |
+| Changed | 刷新 SHM 负载，以同一角色的 Runner 重新排序 |
 | Blocked / SlotInvalid，或候选复核失败 | 排除该候选，刷新后重调插件 |
 | generation 复核变化 | 放弃插件结果，回到内置策略 |
 | 插件第三次选点之后仍需重试 | 记录 `cas_retry_limit`，以 `_use_plugin=False` 重新进入原内置路径 |
@@ -320,7 +412,9 @@ W -> W : cache patch, statistics, scheduled log
 | 冷却期 | 立即回退 | 到期后的请求触发至多一个后台恢复任务 |
 | 正在关闭 / 已关闭 | 不再启动插件 | 取消恢复任务、终止进程并等待回收 |
 
-一个客户算法实例只服务一个 Worker。策略内部计数器和轮询位置不能据此宣称跨 Worker 全局公平。
+一个客户算法实例只服务一个 Worker 的一个角色。同名入口在 P/D 配置中各构造一次，
+不共享状态、锁、冷却、恢复任务或指标。P 阻塞/冷却时 D 仍可排序；同角色后续请求忙时立即回退。
+策略内部计数器和轮询位置不能据此宣称跨 Worker 或跨角色全局公平。
 进程退出后私有状态丢失，客户算法需要允许重新构造。
 
 ### 9.2 预算的准确含义
@@ -328,14 +422,15 @@ W -> W : cache patch, statistics, scheduled log
 `startup_timeout_ms` 约束启动消息交换的等待，覆盖握手期间的加载和构造；不包含之前创建 OS 子进程的整个耗时。
 `timeout_ms` 约束一次排序消息交换等待。DTO 转换、同步 JSON 编解码/校验和进程回收仍有开销，
 同步 Python 工作也不能被 asyncio 计时器强制抢占，因此这不是整次调度或端到端请求的硬时限。
-一次调度至多消耗三次插件排序预算，之后执行内置策略自己的重试逻辑。
+一次角色分配至多消耗三次该角色插件排序预算，之后执行内置策略自己的重试逻辑。
+不同角色预算分别计算；多角色请求的端到端耗时还受拓扑时序和引擎处理影响。
 
 ### 9.3 失败、取消与回收
 
 ```plantuml
 @startuml
 participant "SchedulerClient" as W
-participant "PolicyRunner" as R
+participant "PolicyRunner[role]" as R
 participant "Plugin subprocess" as P
 W -> R : rank(selection)
 R -> P : JSON selection
@@ -353,7 +448,10 @@ end
 
 Runner 故障会回收进程并设置冷却期限；繁忙回退、快照构建失败、成员变化或 CAS 重试耗尽不等同于 Runner 故障，
 不会因此自动重启一个正常进程。请求取消会终止在途进程并传播取消信号，不转换成成功回退，也不设置新的故障冷却期限。
-Worker 正常关闭时先取消后台恢复，再中断在途调用、回收子进程；不等待长达 60 秒的客户排序预算结束。
+Worker 正常关闭时并发关闭全部角色 Runner；每个 Runner 先取消自己的后台恢复，再中断在途调用、回收子进程，
+不等待长达 60 秒的客户排序预算结束。`connect()` 并发预加载也避免把多个角色的启动预算串行累加。
+若 Worker 数为 N、配置角色数为 K，则健康状态最多有 N×K 个插件子进程，0≤K≤4；
+同一角色恢复前先回收旧进程，不建立额外执行池。每进程解释器和客户包的内存/CPU 开销需纳入部署容量评估。
 本版不保证 Worker 被 SIGKILL 后阻塞插件进程的自动回收，也不提供对任意客户派生进程的安全隔离。
 
 ## 10. 异常与降级矩阵
@@ -374,14 +472,16 @@ Worker 正常关闭时先取消后台恢复，再中断在途调用、回收子�
 
 ### 11.1 日志
 
-加载时记录名称、发行包、包版本、Entry Point 对象及 API 版本。
-故障告警包含插件名、异常类型和截断说明；核心侧回退记录 `membership_changed`、`cas_retry_limit` 等原因。
+Worker 加载日志记录角色、名称和 API 版本；子进程输出发行包、包版本及 Entry Point 对象。
+故障告警包含角色、插件名、异常类型和截断说明；核心侧回退记录 `membership_changed`、`cas_retry_limit` 等原因。
 成功选点日志沿用 `scheduled`，策略名称为 `plugin:<name>`；回退成功时显示实际内置策略名。
 普通客户输出进入子进程 stderr，不作为响应协议。客户异常说明仍需避免包含敏感请求内容。
 
 ### 11.2 指标语义与抓取
 
-Worker metaserver `GET /metrics` 暴露进程内样本，标签为配置中的 `policy` 名称。
+Worker metaserver `GET /metrics` 暴露进程内样本，标签为配置中的 `policy` 名称与 `role`。
+例如同名插件的 `{policy="acme.weighted_load",role="prefill"}` 与 `role="decode"` 分别计数，不能合并为一个 Runner。
+合并文本按指标 family 分组，每组的 `# TYPE` 声明只输出一次，后面连续跟各角色样本。
 
 | 指标 | 含义 |
 |------|------|
@@ -409,7 +509,7 @@ Prefill/Decode 的现有配置、旧 `scheduler_type` 的迁移逻辑、KV 亲�
 示例 `acme.weighted_load` 按 `active_tokens + instance_weight * instance_active_tokens` 排序，
 支持在存在匹配候选时优先选择 `preferred_node`。这是示例算法，不是内置负载均衡的行为等价替代。
 安装在 Worker 的同一 Python 环境，重启后生效；部署和回滚应同时管理 Motor API 版本、插件包和配置。
-禁用名称并重启 Worker 可恢复原策略路径，运行中故障则走前述自动回退。
+从配置移除对应角色并重启 Worker 可恢复该角色原策略路径，运行中故障则走前述自动回退。
 
 ## 13. 测试与验收
 
@@ -426,6 +526,8 @@ Prefill/Decode 的现有配置、旧 `scheduler_type` 的迁移逻辑、KV 亲�
 | 失败后恢复、关闭时中断阻塞调用 | `test_shutdown_interrupts_busy_plugin_and_cooldown_recovers` |
 | 真实 SHM CAS 分配及释放 | `test_real_plugin_with_native_shm_allocation_and_release` |
 | 指标抓取 | `test_worker_metaserver_exposes_plugin_metrics` |
+| 同项 P/D 的异常、超时、繁忙和冷却隔离、全部子进程回收 | `test_shared_config_keeps_other_role_healthy_and_reaps_all_children` |
+| P/D 不同参数和同名插件指标分组 | `test_prefill_and_decode_use_their_own_plugin_options`、`test_same_name_role_configs_get_independent_runners` |
 
 ```bash
 bash tests/run_tests.sh --serial tests/coordinator/scheduler/test_policy_plugin.py
@@ -435,23 +537,40 @@ bash tests/run_tests.sh --serial tests/coordinator/scheduler/ tests/coordinator/
 先执行专项，再执行模块与配置回归。原生用例需要可加载的 Rust SHM 库，硬编码 `/dev/shm` 的用例需要 Linux 环境。
 某次验证的通过数、环境排除项和原始结果写入 PR/Issue，不作为本文的长期机制常量。
 
+角色版还需按下表验证；表中规定应有的行为，不代表某次执行已经通过：
+
+| 场景 | 必须观察到的结果 | 最小验证层 |
+|------|------------------|------------|
+| 未配置 / `[]` | 零 Runner、零插件子进程，四种角色维持原内置路径 | 配置与 SchedulerClient 回归 |
+| 一个 item 的 `role: ["prefill", "decode"]` | 两个 Runner 与进程；配置复用但锁、计数和恢复状态独立 | 配置展开与真实子进程测试 |
+| P/D 不同 name/options/预算，或同 name 不同 options | 请求角色调用相应算法与参数，日志/指标归属正确 | 真实 Entry Point + 核心分配 |
+| role 字符串、空数组、非法角色、项内重复、跨项重叠、缺字段、未知键、旧对象/roles | JSON 加载和直接配置均明确拒绝；错误带项索引，不能静默变为默认配置 | 配置单元测试 |
+| P 异常 / 超时 / 忙 / 冷却时 D 正常 | P 回退其内置策略；D 仍调用自己的插件，计数和恢复互不影响 | 并发故障注入 |
+| 只配置 P，或只配置 D；U/E 未显式包含 | 已配置角色可调用插件，其余角色直接 base；pin 仍优先 | 角色路由测试 |
+| 某角色 CAS 冲突 / 成员变化 / 三次耗尽 | 只重调该角色 Runner，expected 来自相应快照，耗尽回原内置路径 | SHM/CAS 集成测试 |
+| 多角色并发预加载、失败恢复和关闭 | 启动不串行累积多个握手预算；每角色最多一个进程，关闭回收所有 PID 与任务 | 生命周期测试 |
+| 同名与异名 Runner 指标合并 | `{policy,role}` 样本可区分，TYPE family 不重复；无 Runner 时插件指标文本为空 | Worker metaserver 抓取测试 |
+
 ### 13.2 集群验收
 
 在相同模型、后端、Worker 数、角色策略、请求分布和负载下对比插件禁用、健康启用、持续异常和持续超时场景。
+至少覆盖 P/D 分别使用不同入口、同项多角色、P 故障而 D 健康、D 故障而 P 健康，以及显式 Union 配置。
+通过带 role 的调用日志和指标确认各角色的实际参与率，核对每 Worker 最多四个子进程且重启/关闭无遗留。
 确认最终引擎选点符合示例预期，核对故障窗口的请求成功率、插件参与比例、回退数、调度时延及进程数量。
 保存失败原因与后端健康证据，不能只看成功请求时延或用回退日志推断请求一定成功。
-本版尚无集群端到端成功率或吞吐测量结论，也未设定未经评审的性能收益目标。
+旧单 Runner 配置的历史集群报告不覆盖本版角色映射、P/D 并发隔离或多子进程生命周期，需针对新版本重新执行验收。
+本版未设定未经评审的性能收益目标；单次通过数、模型/硬件信息、commit 和原始证据放在 PR/Issue 中。
 
 ## 14. 风险与后续演进
 
 | 风险或边界 | 当前处理 / 后续条件 |
 |------------|--------------------|
-| IPC 开销和单进程繁忙 | 立即回退并计数；扩容执行池前需定义有界并发、状态一致性和参与率目标 |
+| IPC 开销和同角色进程繁忙 | 立即回退并计数；扩容执行池前需定义有界并发、状态一致性和参与率目标 |
 | 子进程重新加载导致私有状态丢失 | 接口要求可重新构造；不承诺全局轮询、公平性或跨 Worker 会话状态 |
 | 快照陈旧、成员变化 | generation 复核与 expected CAS；争用时刷新并重调，不承诺最优性 |
 | 普通输出与协议混用 | 导入之前重定向 stdout；真实子进程用例拦截回归 |
 | 平台和强制退出 | 当前为 POSIX 回收；Windows 和父进程强制死亡后的回收需另外设计 |
-| 安全与资源 | 插件具有同用户系统权限；JSON 大小和并发限制不是 CPU/内存配额或安全沙箱 |
+| 安全与资源 | 每 Worker 最多四个插件子进程；同用户系统权限，JSON 大小和并发限制不是 CPU/内存配额或安全沙箱 |
 | 更丰富上下文 | 完整硬件拓扑、KV 命中特征和认证租户身份需要新的数据来源与接口评审 |
 | 更大调度范围 | 分桶/筛选插件链和跨 Router 拓扑分流需独立设计，不能默认为本版已支持 |
 

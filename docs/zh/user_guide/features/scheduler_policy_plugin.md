@@ -55,7 +55,7 @@ class LeastLoadPolicy(LoadBalancingPolicy):
 - 继承 `LoadBalancingPolicy`，声明 `api_version = 2`，实现**同步** `rank()`。
 - 返回按优先级排列的非空 `RankedCandidate` 列表；Motor 使用返回顺序，不会替插件重新排序。
 - 返回的 ID 必须来自本次候选，不能重复或属于 `selection.excluded`；分数必须是有限数值。
-- 不要修改 Motor 状态、执行长时间阻塞操作或依赖跨 Worker 共享的插件对象。每个启用插件的 Inference Worker 有自己的插件进程。
+- 不要修改 Motor 状态、执行长时间阻塞操作或依赖跨 Worker 共享的插件对象。每个启用插件的 Inference Worker 按角色拥有独立插件进程，同一配置项覆盖多个角色时也不会共享实例。
 
 请求长度、模型、用户和会话字段等可用数据及其限制见[设计文档的“接口与上下文”章节](../../design/scheduler_policy_plugin.md)。示例中的用户/会话元数据不是认证的租户身份。
 
@@ -75,12 +75,14 @@ requires-python = ">=3.10"
 
 [project.entry-points."mindie_motor.scheduling_policies"]
 "mycompany.least_load" = "my_motor_policy:LeastLoadPolicy"
+"mycompany.prefill_load" = "my_motor_policy:LeastLoadPolicy"
+"mycompany.decode_load" = "my_motor_policy:LeastLoadPolicy"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 ```
 
-等号左边的 `mycompany.least_load` 是配置中要填写的**插件名**；右边是 `Python 模块:类名`。同一 Python 环境中该插件名必须唯一。其他插件依赖应在包元数据中声明，并随部署环境准备好。
+等号左边的 `mycompany.least_load` 是配置中要填写的**插件名**；右边是 `Python 模块:类名`。同一 Python 环境中每个插件名必须唯一。这里注册三个入口名指向同一示例类，P/D 可以按名称分别配置；客户也可以让两个入口指向自己的不同实现。其他插件依赖应在包元数据中声明，并随部署环境准备好。
 
 进入 `my_motor_policy/` 工程目录，构建并安装：
 
@@ -141,14 +143,24 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
     "scheduler_config": {
       "prefill_scheduler_type": "load_balance",
       "decode_scheduler_type": "load_balance",
-      "policy_plugin": {
-        "name": "mycompany.least_load",
-        "roles": ["prefill", "union"],
-        "options": {"instance_weight": 0.05},
-        "timeout_ms": 100,
-        "startup_timeout_ms": 5000,
-        "cooldown_seconds": 30
-      }
+      "policy_plugin": [
+        {
+          "role": ["prefill"],
+          "name": "mycompany.prefill_load",
+          "options": {"instance_weight": 0.05},
+          "timeout_ms": 100,
+          "startup_timeout_ms": 5000,
+          "cooldown_seconds": 30
+        },
+        {
+          "role": ["decode"],
+          "name": "mycompany.decode_load",
+          "options": {"instance_weight": 0.2},
+          "timeout_ms": 50,
+          "startup_timeout_ms": 5000,
+          "cooldown_seconds": 10
+        }
+      ]
     }
   }
 }
@@ -156,19 +168,38 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
 | 配置 | 作用 |
 |------|------|
-| `name` | 必须与 Entry Point 名称完全一致；空字符串表示不启用 |
-| `roles` | 指定调用插件的角色；可选 `prefill`、`decode`、`union`、`encode` |
-| `options` | 传给插件构造函数，本例中的权重由 `self.options` 读取 |
-| `timeout_ms` | 单次插件排序交换的等待预算，示例为 100 毫秒 |
-| `startup_timeout_ms` | 插件启动握手等待预算 |
-| `cooldown_seconds` | 插件故障后后台恢复前的冷却时间 |
+| `role` | 必填非空数组，可选 `prefill`、`decode`、`union`、`encode`；不接受字符串，项内重复或与其他项重叠均报错 |
+| `name` | 必填非空字符串，必须与 Entry Point 名称完全一致 |
+| `options` | 传给该项各角色插件的构造函数，默认 `{}` |
+| `timeout_ms` | 单次插件排序交换的等待预算，默认 50 毫秒，本例 P 为 100 毫秒 |
+| `startup_timeout_ms` | 插件启动握手等待预算，默认 5000 毫秒 |
+| `cooldown_seconds` | 该角色插件故障后后台恢复前的冷却时间，默认 30 秒 |
 
-保留已有的 Prefill/Decode 内置策略配置：插件不适用于当前角色、繁忙、故障或超时时，Motor 会使用该角色原配置的内置策略。修改插件包或配置后，按部署方式重启所有相关 Inference Worker；运行时安装不会触发自动发现。
+上例 P/D 使用不同入口名、参数和预算。若使用同名插件且配置相同，可合并：
+
+```json
+{
+  "policy_plugin": [
+    {"role": ["prefill", "decode"], "name": "mycompany.least_load", "options": {"instance_weight": 0.05}}
+  ]
+}
+```
+
+合并只复用配置；P/D 仍分别拥有插件实例、子进程、锁、冷却和指标。一方繁忙或失败不会占用另一方的插件执行通道。
+也可以分两项使用相同 name 和不同 options。Union 不继承 Prefill 的插件配置：混部场景需显式加入 `"union"`；Encode 同理。
+
+保留已有内置策略：`prefill_scheduler_type` 是 P/U/E 的默认和回退策略，`decode_scheduler_type` 是 D 的默认和回退策略。
+角色未配置、插件繁忙、故障或超时时，使用该角色原配置的内置策略。删除 `policy_plugin` 或设为 `[]` 可禁用全部插件，不创建子进程。
+每个 Worker 最多四个插件子进程；修改包或配置后需重启所有相关 Inference Worker，运行时安装不会触发自动发现。
+
+旧草案的单对象 `policy_plugin: {"name": ..., "roles": [...]}` 会明确报迁移错误。
+需改为外层列表，并把键 `roles` 改成 `role` 数组；旧 `["prefill", "union"]` 可以保留在新的一项中。
+缺少 role/name、未知键、重复角色、空 role 数组或非法预算是配置错误，不能依靠运行时回退忽略。完整迁移示例见[设计文档](../../design/scheduler_policy_plugin.md#64-旧单对象配置迁移)。
 
 ## 5. 验证插件已接入
 
-1. 查看每个 Inference Worker 的日志，确认存在 `Scheduling plugin loaded name=mycompany.least_load api_version=2`。同时可查看子进程输出中的包名、版本及 Entry Point 来源。
-2. 向现有推理服务发送一条正常请求，使其经过 `roles` 中启用的角色。在处理该请求的 Worker 日志中查找 `scheduled` 行，确认 `policy=plugin:mycompany.least_load`，并核对所选 instance/endpoint 与示例策略预期。
+1. 查看每个 Inference Worker 的日志，确认存在 `Scheduling plugin loaded`，其中 `name=mycompany.prefill_load role=prefill` 与 `name=mycompany.decode_load role=decode` 分别出现。同时可查看子进程输出中的包名、版本及 Entry Point 来源。
+2. 向现有推理服务发送一条正常请求，使其经过 `role` 数组中启用的角色。在处理该请求的 Worker 日志中查找 `scheduled` 行，按实际角色确认 `policy=plugin:mycompany.prefill_load` 或 `plugin:mycompany.decode_load`，并核对所选 instance/endpoint 与示例策略预期。
 3. 检查对应 Worker metaserver 的指标。将下面地址替换为可从当前环境访问的 Worker 地址及端口：
 
    ```bash
@@ -178,15 +209,15 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
    默认端口为 `inference_workers_config.worker_metaserver_base_port + worker_index`，起始值为 `12000`。监听地址优先使用 `POD_IP`，否则使用 Coordinator 的监听地址；`127.0.0.1` 只是示例，不保证在容器网络中可访问。设置 `worker_metaserver_base_port=0` 会关闭该抓取口。
 
-`motor_policy_loads_total` 增加表示加载成功，`motor_policy_calls_total` 增加表示发生插件排序调用；`errors`、`timeouts` 和 `fallbacks` 用于检查故障或回退。指标是**每 Worker 进程内**的样本，不由 Obs 自动汇总。推理端口可由多个 Worker 共同监听，单次请求不一定落到正在查看的 Worker，因此应检查所有相关 Worker；pin 路径和未启用的角色不会调用插件。
+`motor_policy_loads_total` 增加表示加载成功，`motor_policy_calls_total` 增加表示发生插件排序调用；`errors`、`timeouts` 和 `fallbacks` 用于检查故障或回退。指标带有 `{policy,role}` 标签，是**每 Worker、每角色**的样本，不由 Obs 自动汇总。推理端口可由多个 Worker 共同监听，单次请求不一定落到正在查看的 Worker，因此应检查所有相关 Worker；pin 路径和未启用的角色不会调用插件。
 
 ## 6. 常见问题
 
 | 现象 | 检查和处理 |
 |------|------------|
 | 提示未找到入口或匹配多个入口 | 在实际 Worker 使用的 Python 环境运行第 3 节的 Entry Point 检查；核对插件名和安装包，移除重复注册的包。 |
-| 启动后只有内置策略 | 检查 `name` 是否非空、`roles` 是否覆盖请求角色、所有 Worker 是否安装了包，以及修改后是否已重启。显式 pin 和有效会话亲和会优先使用原路径。 |
-| 日志提示插件失败或 `fallbacks` 增长 | 查找 `Scheduling plugin failed` 或 `Scheduling plugin fallback`；检查构造参数、异常、候选 ID、重复 ID、空结果和非有限分数。 |
+| 启动后只有内置策略 | 检查配置列表是否包含请求角色、`name` 是否注册、所有 Worker 是否安装了包，以及修改后是否已重启。显式 pin 和有效会话亲和会优先使用原路径。 |
+| 日志提示插件失败或 `fallbacks` 增长 | 按 role/name 查找 `Scheduling plugin failed` 或 `Scheduling plugin fallback`；检查构造参数、异常、候选 ID、重复 ID、空结果和非有限分数。 |
 | `timeouts` 增长 | 检查 `rank()` 是否阻塞、执行时间及 `timeout_ms`。Worker 在插件繁忙或冷却时也会回退；预算不是端到端请求的硬时限。 |
 | 指标无法访问或 `calls` 为 0 | 检查对应 Worker 的 metaserver 是否启用、地址和端口是否可达；确认请求命中该 Worker 和启用的角色，且未走 pin。 |
 

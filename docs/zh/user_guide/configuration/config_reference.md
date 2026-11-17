@@ -535,7 +535,7 @@ motor_coordinator_config字段配置样例如下所示：
 | **scheduler_config字段** |-|-|
 | prefill_scheduler_type | string | Prefill / encode / union 实例的调度类型，默认值：load_balance。可选 `load_balance` / `round_robin` / `kv_cache_affinity`；不支持 `dynamic_bucket`。 |
 | decode_scheduler_type | string | Decode 实例的调度类型，默认值：load_balance。可选 `load_balance` / `round_robin` / `dynamic_bucket`，动态分桶详见[动态分桶调度](../features/dynamic_bucket.md)。枚举也接受 `kv_cache_affinity`，但 Decode 实例仍按 load_balance 选择并在启动时打印 warning。 |
-| policy_plugin | object | 可选外部实例/endpoint 排序插件。默认禁用。`name` 为 Entry Point 名称，`roles` 指定角色，`options` 传入构造函数；`timeout_ms=50`、`startup_timeout_ms=5000`、`cooldown_seconds=30`。异常、超时或忙时回退该角色原内置策略，配置变更需重启 Worker。详见[选点插件](../../design/scheduler_policy_plugin.md)。 |
+| policy_plugin | list[object] | 可选外部实例/endpoint 排序插件，默认 `[]`，不创建子进程。每项必填非空 `role` 数组（`prefill` / `decode` / `union` / `encode`）和 Entry Point `name`；同项可覆盖 P/D，展开后每角色仍独立运行。`options={}`、`timeout_ms=50`、`startup_timeout_ms=5000`、`cooldown_seconds=30`。项内重复/跨项角色重叠、未知键或非法配置报错；旧单对象 `roles` 格式需迁移。未配置角色或插件失败/超时/忙时使用该角色原内置策略；Union 需显式配置，变更需重启 Worker。详见[选点插件](../../design/scheduler_policy_plugin.md)。 |
 | scheduler_type | string | **已废弃**。存量配置仍可使用，读取时把值迁移到未单独配置的 `prefill_scheduler_type` 和 `decode_scheduler_type` 并打 warning。由于 Prefill 不支持 `dynamic_bucket`，动态分桶必须改用 `decode_scheduler_type` 单独配置。 |
 | enable_pd_separation_fallback_to_hybrid | bool | PD 分离场景下，当不存在兼容且未熔断的 P/D pair 时，是否允许降级使用混部路由，默认值为 `true`。候选优先级为 Union → Prefill → Decode；Decode 兜底仅适用于上报 `decode_colocation` capability 的 vLLM 实例，关闭后无兼容 pair 时返回 503。 |
 | endpoint_instance_score_weight | float | endpoint 优先负载均衡时实例平均负载权重。默认值：`0.05`。 |
