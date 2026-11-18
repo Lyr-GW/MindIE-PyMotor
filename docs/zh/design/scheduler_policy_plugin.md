@@ -21,8 +21,11 @@ MindIE Motor 提供轮询、负载均衡、KV 亲和和动态分桶等内置选�
 ```mermaid
 flowchart TD
     R[Router 确定角色] --> C[Inference Worker：过滤候选并处理 pin]
-    C --> P[按角色选择 PolicyRunner]
-    P --> S[插件子进程：候选排序]
+    C -->|角色配置了客户插件| P[按角色选择 PolicyRunner]
+    P --> S[客户插件子进程：候选排序]
+    C -->|未配置客户插件| B[按策略名查找内置插件]
+    P -->|不可用或回退| B
+    B --> C
     S --> C
     C --> M[Rust SHM：CAS 分配与负载记账]
     C --> E[转发请求并在完成后释放负载]
@@ -33,16 +36,30 @@ flowchart TD
 |------|------|
 | Router | 确定请求的拓扑和角色。 |
 | Inference Worker | 过滤候选、处理 pin、调用插件，并执行结果校验、分配和释放。 |
-| PolicyRunner | 管理对应角色的插件进程、调用、超时、冷却和指标。 |
-| 插件子进程 | 接收请求和候选快照，返回候选排序。 |
+| 内置插件注册表 | 按角色配置的策略名解析进程内插件。 |
+| PolicyRunner | 管理对应角色的客户插件进程、调用、超时、冷却和指标。 |
+| 客户插件子进程 | 接收请求和候选快照，返回候选排序。 |
 | Rust SHM | 保存负载与成员状态，通过 CAS 完成原子分配。 |
 | Worker metaserver | 暴露该 Worker 的插件指标。 |
 
-每个 Worker 按已配置角色分别创建 Runner 和子进程，最多四个。即使多个角色使用同一个插件名，也不共享进程、锁、冷却状态或插件对象。Mgmt 和 Obs 不加载插件。
+每个 Worker 按配置了客户插件的角色分别创建 Runner 和子进程，最多四个。即使多个角色使用同一个插件名，也不共享进程、锁、冷却状态或插件对象。Mgmt 和 Obs 不加载客户插件。
 
 子进程与 Worker 使用相同的 Python 环境和系统权限。进程隔离用于回收故障插件，不是安全沙箱；当前进程回收依赖 POSIX。
 
-### 插件接口
+### 内置选点插件
+
+Worker 内置注册表按策略名提供 `round_robin`、`load_balance`、`kv_cache_affinity` 和 `dynamic_bucket` 四个进程内插件。`prefill_scheduler_type` 和 `decode_scheduler_type` 选择对应角色的默认插件，使用原配置即可。客户插件可通过 Entry Point 独立安装，在 Worker 的子进程中运行。客户插件不可用时，Worker 调用相应角色的内置插件。
+
+内置插件实现 `BuiltinEndpointPolicy`。Worker 调用 `rank()` 获取建议候选和实际执行排序的策略名，再由该策略的 `prepare_candidates()` 组装 CAS 候选。负载需求按该角色**配置的**内置策略计算，因而内置策略之间的降级也保留原有记账语义。候选过滤、pin、CAS 提交和释放由核心执行。内置插件随 Motor 交付，无需额外安装 wheel。
+
+| 内置插件 | 候选与回退 |
+|----------|-----------|
+| `round_robin` | 使用 Worker 的角色轮询计数和起始偏移选择实例，再选择 endpoint。 |
+| `load_balance` | 复用现有负载打分与 Decode KV 用量惩罚，缺少候选时回退轮询。 |
+| `kv_cache_affinity` | 保留 Conductor 查询、命中率门槛及 CAS 所需的命中信息。无法按亲和选点时回退负载均衡。 |
+| `dynamic_bucket` | 按请求长度选择桶，将桶内候选交给核心按实时负载重选，无法分桶时回退负载均衡。 |
+
+### 客户插件接口
 
 插件继承抽象基类 `EndpointSelectionPolicy`，声明 `api_version = 2`，并实现同步方法 `rank(selection)`。基类定义候选排序契约，具体算法由插件提供。构造参数 `options` 来自配置。
 API v2 草案中的 `LoadBalancingPolicy` 仍可作为兼容别名导入。
@@ -112,7 +129,7 @@ flowchart TD
 
 CAS 使用插件决策时的负载快照，避免等待插件期间负载变化导致旧排序被误提交。冲突时刷新快照并重调同一角色插件；成员 generation 变化或三次选点仍未成功时，重新走内置策略。其他 CAS 错误沿用核心调度失败路径。
 
-插件只提供排序，不决定负载增量。插件路径由核心计算并提交负载；回退时使用对应内置策略的原有计算方式。
+客户插件提供排序，负载增量由核心计算并提交。内置插件沿用各自的负载计算规则，核心负责提交。
 
 ### 3. 故障回退与恢复
 
@@ -206,6 +223,7 @@ endpoint 负载 + instance_weight × 实例负载
 |------|------|
 | `motor/config/coordinator.py` | 插件配置及角色校验。 |
 | `motor/coordinator/scheduler/policy/api.py` | 插件接口和数据结构。 |
+| `motor/coordinator/scheduler/runtime/builtin_endpoint_policy.py` | Worker 内置选点插件及注册表。 |
 | `motor/coordinator/scheduler/policy/plugin_runner.py`、`plugin_worker.py` | 插件进程管理、加载、调用和结果校验。 |
 | `motor/coordinator/scheduler/runtime/scheduler_client.py` | 角色路由、候选快照、CAS 分配和回退。 |
 | `tests/coordinator/scheduler/test_policy_plugin.py` | 插件契约、故障隔离、分配和指标测试。 |

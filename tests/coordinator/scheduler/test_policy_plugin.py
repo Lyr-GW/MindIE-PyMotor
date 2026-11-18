@@ -384,7 +384,7 @@ async def test_prefill_and_decode_use_their_own_plugin_options(plugin_distributi
         await client.disconnect()
 
 
-async def scheduler_with_pool(spec=None, scheduler_type="load_balance"):
+async def scheduler_with_pool(spec=None, scheduler_type="load_balance", role=PDRole.ROLE_P):
     plugin_configs = spec if isinstance(spec, list) else [spec] if spec else []
     client = AsyncSchedulerClient(SchedulerClientConfig(scheduler_type=scheduler_type, policy_plugin=plugin_configs))
     instances = [
@@ -392,7 +392,7 @@ async def scheduler_with_pool(spec=None, scheduler_type="load_balance"):
             id=i,
             job_name="job-%s" % i,
             model_name="model",
-            role="prefill",
+            role=role.value,
             engine_type="vllm",
             endpoints={
                 "pod": {
@@ -404,7 +404,7 @@ async def scheduler_with_pool(spec=None, scheduler_type="load_balance"):
         )
         for i in (1, 2)
     ]
-    await client._cache.replace_all(PDRole.ROLE_P, instances)
+    await client._cache.replace_all(role, instances)
     client._refresh_cache_from_workload_reader = AsyncMock()
     client.get_available_instances = AsyncMock(return_value={i.id: i for i in instances})
     native = Mock()
@@ -546,14 +546,27 @@ async def test_snapshot_failure_and_retry_exhaustion_use_builtin(plugin_distribu
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("strategy", ["round_robin", "load_balance", "kv_cache_affinity", "dynamic_bucket"])
-async def test_disabled_plugin_keeps_builtin_allocations(strategy):
-    client, native, request = await scheduler_with_pool(scheduler_type=strategy)
+@pytest.mark.parametrize(
+    ("strategy", "role", "expected_demand"),
+    [
+        ("round_robin", PDRole.ROLE_P, 0),
+        ("load_balance", PDRole.ROLE_P, 10),
+        ("kv_cache_affinity", PDRole.ROLE_P, 10),
+        ("dynamic_bucket", PDRole.ROLE_D, 10),
+    ],
+)
+async def test_disabled_plugin_keeps_builtin_allocations(strategy, role, expected_demand):
+    client, native, request = await scheduler_with_pool(scheduler_type=strategy, role=role)
     try:
+        if role == PDRole.ROLE_D:
+            request.req_len = 99
+            _, selected_policy = await client._select_endpoint_candidates_with_policy(request, role)
+            assert selected_policy == "dynamic_bucket"
         assert client._policy_runners == {}
-        result = await client.select_and_allocate(PDRole.ROLE_P, request)
+        result = await client.select_and_allocate(role, request)
         assert result is not None
-        assert result[2].active_tokens == (0 if strategy == "round_robin" else 10)
+        assert result[2].active_tokens == expected_demand
+        assert native.cas_add.call_args.args[4] == expected_demand
     finally:
         await client.disconnect()
 

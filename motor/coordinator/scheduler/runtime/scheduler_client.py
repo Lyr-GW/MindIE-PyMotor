@@ -57,24 +57,18 @@ from motor.coordinator.fault_tolerance.precision.streak_result import (
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.allocate_arbitration import (
     ArbitrationContext,
-    log_load_balance_all_candidates,
     select_authoritative_allocate_candidate,
     select_valid_candidate,
 )
 from motor.coordinator.scheduler.policy.dynamic_bucket import (
-    DynamicBucketPolicy,
     DynamicBucketSelector,
-    get_request_token_length,
-    make_dynamic_bucket_allocation_workload,
 )
-from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
-from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
-from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
 from motor.coordinator.scheduler.policy.api import CandidateId, CandidateSnapshot, RequestContext, SelectionInput
 from motor.coordinator.scheduler.policy.plugin_runner import PolicyRunner
 from motor.coordinator.scheduler.runtime.agent_hint_lifecycle import (
     build_manage_request_body,
 )
+from motor.coordinator.scheduler.runtime.builtin_endpoint_policy import get_builtin_endpoint_policy
 from motor.coordinator.scheduler.runtime.dp_stats import DpStatsLogger
 from motor.coordinator.scheduler.runtime.kv_usage import (
     KvUsageShmReader,
@@ -94,10 +88,8 @@ from motor.coordinator.scheduler.runtime.session_affinity import (
 )
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     AGENT_STATUS_TOPIC,
-    CANDIDATE_POLICY_DYNAMIC_BUCKET,
     CANDIDATE_POLICY_KV_CACHE_AFFINITY,
     CANDIDATE_POLICY_LOAD_BALANCE,
-    CANDIDATE_POLICY_ROUND_ROBIN,
     CIRCUIT_BREAKER_TOPIC,
     INSTANCE_CHANGE_TOPIC,
     SchedulerRequest,
@@ -114,9 +106,6 @@ logger = get_logger(__name__)
 # Callback signature: receives active endpoint list [(ip, port), ...], returns None
 OnInstanceRefreshedCallback = Callable[[list[tuple[str, str]]], Awaitable[None]]
 
-# Number of affinity-ranked candidates a prefill request proposes to the scheduler. The scheduler
-# re-picks among them by its authoritative workload ledger, spreading bursts across the top few.
-_AFFINITY_CANDIDATE_TOPK = 3
 _MAX_CAS_ALLOCATE_ATTEMPTS = 64
 # Upper bound on declarations released per keeper tick: a burst of simultaneous
 # expiries releases in batches instead of one long event-loop stall.
@@ -544,8 +533,6 @@ OnCircuitBreakerChangeNotify = Callable[[int, str], Awaitable[None]]
 
 # ZMQ PUB does not queue; SUB must be ready before PUB sends. Short delay after connect.
 _INSTANCE_PUB_SUB_SETTLE_MS = 150
-# Roles that should use kv_cache_affinity scheduling.
-_KVA_SELECT_ROLES = frozenset({PDRole.ROLE_P, PDRole.ROLE_U})
 
 
 class _InstancePushSubscriber:
@@ -1635,6 +1622,7 @@ class AsyncSchedulerClient:
             )
             return None
 
+        builtin_policy = get_builtin_endpoint_policy(self._scheduler_type_for_role(role))
         global_affinity = False
         normalized_engine_type = str(required_engine_type or "").strip().lower()
         proposed_instance: Instance
@@ -1814,81 +1802,30 @@ class AsyncSchedulerClient:
             candidate_endpoints = [{"instance_id": instance.id, "endpoint_id": endpoint.id}]
             proposed_instance, proposed_endpoint = instance, endpoint
         else:
-            request_top_k = (
-                _AFFINITY_CANDIDATE_TOPK
-                if (
-                    role in _KVA_SELECT_ROLES
-                    and self._scheduler_type_for_role(role) == "kv_cache_affinity"
-                    and self._kv_affinity_mode != KV_AFFINITY_MODE_UNIFIED
-                )
-                else 1
-            )
             candidates, candidate_policy = await self._select_endpoint_candidates_with_policy(
                 req_info,
                 role,
-                top_k=request_top_k,
+                top_k=builtin_policy.candidate_count(self, role),
                 required_engine_type=normalized_engine_type or None,
                 required_dispatch_capability=normalized_dispatch_capability or None,
             )
             if not candidates:
                 return None
             proposed_instance, proposed_endpoint, _ = candidates[0]
-            affinity_debug = getattr(req_info, "kv_affinity_debug", None)
-            global_affinity = (
-                candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY
-                and isinstance(affinity_debug, dict)
-                and any(rec[2] is not None for rec in affinity_debug.values())
+            candidate_endpoints, global_affinity = get_builtin_endpoint_policy(candidate_policy).prepare_candidates(
+                self,
+                candidates,
+                role,
+                req_info,
+                normalized_engine_type or None,
+                normalized_dispatch_capability or None,
             )
-            if global_affinity:
-                allowed_instance_ids = {
-                    candidate.id
-                    for candidate in self._filter_instances(
-                        self._cache.get_instances(role),
-                        normalized_engine_type or None,
-                        normalized_dispatch_capability or None,
-                    )
-                }
-                candidate_endpoints = [
-                    {
-                        "instance_id": ins_id,
-                        "endpoint_id": ep_id,
-                        "matched_tokens": rec[0],
-                        "prefill_cost": rec[2],
-                    }
-                    for (ins_id, ep_id), rec in affinity_debug.items()
-                    if rec[2] is not None and ins_id in allowed_instance_ids
-                ]
-            elif candidate_policy == CANDIDATE_POLICY_KV_CACHE_AFFINITY and isinstance(affinity_debug, dict):
-                candidate_endpoints = []
-                for cand_instance, cand_endpoint, _score in candidates:
-                    item = {"instance_id": cand_instance.id, "endpoint_id": cand_endpoint.id}
-                    rec = affinity_debug.get((cand_instance.id, cand_endpoint.id))
-                    if rec is not None:
-                        item["matched_tokens"] = rec[0]
-                    candidate_endpoints.append(item)
-            elif candidate_policy == CANDIDATE_POLICY_DYNAMIC_BUCKET:
-                candidate_endpoints = self._get_dynamic_bucket_candidates(
-                    role,
-                    proposed_instance.id,
-                    proposed_endpoint.id,
-                    normalized_engine_type or None,
-                    normalized_dispatch_capability or None,
-                )
-            else:
-                candidate_endpoints = [
-                    {"instance_id": cand_instance.id, "endpoint_id": cand_endpoint.id}
-                    for cand_instance, cand_endpoint, _score in candidates
-                ]
 
-        scheduler_type = self._scheduler_type_for_role(role)
-        if plugin_active:
-            demand = calculate_demand_workload(role, req_info)
-        elif scheduler_type == "round_robin":
-            demand = Workload()
-        elif scheduler_type == "dynamic_bucket":
-            demand = make_dynamic_bucket_allocation_workload(req_info)
-        else:
-            demand = calculate_demand_workload(role, req_info)
+        demand = (
+            calculate_demand_workload(role, req_info)
+            if plugin_active
+            else builtin_policy.calculate_demand(role, req_info)
+        )
         token_ids = getattr(req_info, "token_ids", None)
         isl = float(len(token_ids)) if isinstance(token_ids, list) and token_ids else 0.0
         candidate_pairs = [(int(item["instance_id"]), int(item["endpoint_id"])) for item in candidate_endpoints]
@@ -2938,139 +2875,19 @@ class AsyncSchedulerClient:
         req_info: RequestInfo,
         top_k: int = 1,
     ) -> tuple[list[tuple[Instance, Endpoint, float]], str]:
+        policy_name = self._scheduler_type_for_role(role)
         if not instances:
-            return [], self._scheduler_type_for_role(role)
-        st = self._scheduler_type_for_role(role)
-        if st == "load_balance":
-            candidates = self._select_endpoint_candidates_by_load_balance(
-                instances, role, top_k, req_id=req_info.req_id
-            )
-            if candidates:
-                return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-            logger.warning("load_balance failed, falling back to round-robin")
-        elif st == "kv_cache_affinity":
-            # Affinity ranking applies to KVA-eligible roles only; others fall through to
-            # the load_balance -> round_robin chain below.
-            if role in _KVA_SELECT_ROLES:
-                # Propose the top-k affinity-ranked candidates. The scheduler re-picks among them
-                # by its authoritative (fresh) workload ledger, so a burst spreads across the top
-                # candidates without a client-local in-flight overlay.
-                ranked = KvCacheAffinityPolicy.select_endpoint_candidates_from_list(
-                    instances,
-                    req_info,
-                    mode=self._kv_affinity_mode,
-                    overlap_credit=self._kv_affinity_overlap_credit,
-                    prefill_load_scale=self._kv_affinity_prefill_load_scale,
-                    load_weight=self._kv_affinity_load_weight,
-                    load_gate_topn=self._kv_affinity_load_gate_topn,
-                    w_npu=self._kv_affinity_w_npu,
-                    w_cpu=self._kv_affinity_w_cpu,
-                    w_disk=self._kv_affinity_w_disk,
-                    hit_rate_threshold=self._kv_affinity_hit_rate_threshold,
-                    top_k=max(1, top_k),
-                )
-                if ranked:
-                    return ranked, CANDIDATE_POLICY_KV_CACHE_AFFINITY
-                if ranked is None:
-                    logger.warning("kv_cache_affinity unavailable (no conductor match), falling back to load_balance")
-            candidates = self._select_endpoint_candidates_by_load_balance(
-                instances, role, top_k, req_id=req_info.req_id
-            )
-            if candidates:
-                return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-            logger.warning("load_balance unavailable, falling back to round-robin")
-        elif st == "dynamic_bucket":
-            if role in (PDRole.ROLE_E, PDRole.ROLE_P):
-                candidates = self._select_endpoint_candidates_by_load_balance(instances, role, top_k)
-                if candidates:
-                    return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-                logger.warning("dynamic_bucket load_balance unavailable for role=%s", role)
-            else:
-                req_length = get_request_token_length(req_info)
-                eligible_instances = [instance for instance in instances if not self.is_instance_blocked(instance.id)]
-                if req_length is not None:
-                    selected = DynamicBucketPolicy.select_endpoint_from_list(
-                        eligible_instances,
-                        req_length,
-                        self._dynamic_bucket_selector,
-                    )
-                    if selected is not None:
-                        instance, endpoint = selected
-                        return [(instance, endpoint, 0.0)], CANDIDATE_POLICY_DYNAMIC_BUCKET
-                logger.warning(
-                    "dynamic_bucket unavailable req_id=%s, falling back to load_balance",
-                    req_info.req_id,
-                )
-                candidates = self._select_endpoint_candidates_by_load_balance(instances, role, top_k)
-                if candidates:
-                    return candidates, CANDIDATE_POLICY_LOAD_BALANCE
-                logger.warning("dynamic_bucket unavailable, falling back to round-robin")
-        # Round-robin path: default policy or load_balance fallback
-        if role not in self._instance_rr_counters:
-            self._instance_rr_counters[role] = 0
-        n = len(instances)
-        start_offset = (n * self._client_index) // self._client_count if n else 0
-        counter = self._instance_rr_counters[role]
-        effective_counter = counter + start_offset
-        selected_instance, next_counter = RoundRobinPolicy.select_instance_from_list(instances, effective_counter)
-        self._instance_rr_counters[role] = next_counter - start_offset
-        if not selected_instance:
-            return [], CANDIDATE_POLICY_ROUND_ROBIN
-        selected = self._select_endpoint_for_instance(selected_instance, role)
-        if not selected:
-            return [], CANDIDATE_POLICY_ROUND_ROBIN
-        instance, endpoint = selected
-        return [(instance, endpoint, 0.0)], CANDIDATE_POLICY_ROUND_ROBIN
+            return [], policy_name
+        return get_builtin_endpoint_policy(policy_name).rank(self, instances, role, req_info, top_k)
 
     def _select_endpoint_for_instance(
         self, instance: Instance, role: PDRole | None = None
     ) -> tuple[Instance, Endpoint] | None:
         if not instance:
             return None
-        all_endpoints = instance.get_all_endpoints()
-        if not all_endpoints:
-            return None
-        st = self._scheduler_type_for_role(role)
-        if st in ("load_balance", "kv_cache_affinity", "dynamic_bucket"):
-            ep = LoadBalancePolicy.select_endpoint_from_instance(instance)
-            if ep:
-                return (instance, ep)
-            return (instance, all_endpoints[0])
-        ep = RoundRobinPolicy.select_endpoint_from_instance(
-            instance, self._endpoint_rr_counters, is_blocked=self.is_instance_blocked
-        )
-        return (instance, ep) if ep else None
-
-    def _get_dynamic_bucket_candidates(
-        self,
-        role: PDRole,
-        instance_id: int,
-        endpoint_id: int,
-        required_engine_type: str | None = None,
-        required_dispatch_capability: str | None = None,
-    ) -> list[dict[str, int]]:
-        """Return every endpoint in the selected bucket for fresh CAS re-selection."""
-        role_instances = self._filter_instances(
-            self._cache.get_instances(role),
-            required_engine_type,
-            required_dispatch_capability,
-        )
-        candidates = DynamicBucketPolicy.build_bucket_endpoints(
-            [instance for instance in role_instances if not self.is_instance_blocked(instance.id)],
-            self._dynamic_bucket_selector.short_bucket_count,
-            self._dynamic_bucket_selector.long_bucket_count,
-        )
-        selected_bucket = next(
-            (item.bucket for item in candidates if item.instance.id == instance_id and item.endpoint.id == endpoint_id),
-            None,
-        )
-        if selected_bucket is None:
-            return [{"instance_id": instance_id, "endpoint_id": endpoint_id}]
-        return [
-            {"instance_id": item.instance.id, "endpoint_id": item.endpoint.id}
-            for item in candidates
-            if item.bucket == selected_bucket
-        ]
+        policy = get_builtin_endpoint_policy(self._scheduler_type_for_role(role))
+        endpoint = policy.select_endpoint(self, instance)
+        return (instance, endpoint) if endpoint else None
 
     async def _init_cache(self) -> None:
         """Load initial instance cache via GET_AVAILABLE_INSTANCES."""
@@ -3078,34 +2895,3 @@ class AsyncSchedulerClient:
             await self.get_available_instances(None)
         except Exception as e:
             logger.warning("Failed to initialize instance cache: %s", e, exc_info=True)
-
-    def _select_endpoint_candidates_by_load_balance(
-        self,
-        instances: list[Instance],
-        role: PDRole,
-        top_k: int = 1,
-        *,
-        req_id: str | None = None,
-    ) -> list[tuple[Instance, Endpoint, float]]:
-        # Equal-score (tie) requests are broken uniformly at random by the policy itself, so
-        # equal-load requests spread across nodes without a per-client rotation offset.
-        log_load_balance_all_candidates(
-            instances,
-            role,
-            req_id,
-            is_blocked=self.is_instance_blocked,
-            instance_score_weight=self._endpoint_instance_score_weight,
-            exclude_highest_kv_usage=(role == PDRole.ROLE_D),
-            kv_usage_provider=get_endpoint_kv_cache_usage if role == PDRole.ROLE_D else None,
-        )
-        candidates = LoadBalancePolicy.select_endpoint_candidates_from_list(
-            instances,
-            role,
-            top_k=max(1, top_k),
-            instance_score_weight=self._endpoint_instance_score_weight,
-            is_blocked=self.is_instance_blocked,
-            # D 实例：评分上叠加 KV usage 惩罚项，避免调度到 KV cache 快满的实例。
-            exclude_highest_kv_usage=(role == PDRole.ROLE_D),
-            kv_usage_provider=get_endpoint_kv_cache_usage if role == PDRole.ROLE_D else None,
-        )
-        return [(candidate.instance, candidate.endpoint, candidate.score) for candidate in candidates]
