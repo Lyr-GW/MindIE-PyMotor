@@ -21,7 +21,7 @@ from motor.coordinator.scheduler.policy.api import (
     SUPPORTED_POLICY_API_VERSION,
     CandidateId,
     CandidateSnapshot,
-    LoadBalancingPolicy,
+    EndpointSelectionPolicy,
     RequestContext,
     SelectionInput,
 )
@@ -30,7 +30,7 @@ ENTRY_POINT_GROUP = "mindie_motor.scheduling_policies"
 MAX_MESSAGE_BYTES = 1024 * 1024
 
 
-def load_policy(name: str, options: dict) -> LoadBalancingPolicy:
+def load_policy(name: str, options: dict) -> EndpointSelectionPolicy:
     """Load exactly one configured class and validate its API contract."""
     entries = [entry for entry in entry_points(group=ENTRY_POINT_GROUP) if entry.name == name]
     if len(entries) != 1:
@@ -48,11 +48,15 @@ def load_policy(name: str, options: dict) -> LoadBalancingPolicy:
         file=sys.stderr,
     )
     policy_class = entry.load()
-    if not isinstance(policy_class, type) or not issubclass(policy_class, LoadBalancingPolicy):
-        raise ValueError("Entry point must be a LoadBalancingPolicy subclass")
+    if not isinstance(policy_class, type) or not issubclass(policy_class, EndpointSelectionPolicy):
+        raise ValueError("Entry point must be an EndpointSelectionPolicy subclass")
     if policy_class.api_version != SUPPORTED_POLICY_API_VERSION:
         raise ValueError("Incompatible scheduling policy API version")
-    if policy_class.rank is LoadBalancingPolicy.rank or inspect.iscoroutinefunction(policy_class.rank):
+    if (
+        inspect.isabstract(policy_class)
+        or not callable(policy_class.rank)
+        or inspect.iscoroutinefunction(policy_class.rank)
+    ):
         raise ValueError("Policy must override synchronous rank()")
     return policy_class(options=options)
 

@@ -234,7 +234,7 @@ set `query_encoding: "json"` explicitly for JSON-only conductor binaries.
 
 **Built-in factory registration** (`factory.py`): `SchedulingPolicyFactory` maps built-in policy name → class.
 
-**External endpoint policies** use `LoadBalancingPolicy.rank(SelectionInput)` in `policy/api.py`,
+**External endpoint policies** use `EndpointSelectionPolicy.rank(SelectionInput)` in `policy/api.py`,
 registered as an Entry Point in `mindie_motor.scheduling_policies` (API v2).
 `scheduler_config.policy_plugin` is a list of items with a required non-empty `role` array,
 name/options and timeout/cooldown budgets. `normalize_policy_plugins()` in `motor/config/coordinator.py`
@@ -560,7 +560,7 @@ adds Coordinator pool membership (`available` / `unavailable` / `paused`; `unkno
 
 ## Development Rules
 
-- **New built-in scheduling policies**: subclass `BaseSchedulingPolicy`, implement `select_instance()`, register in `factory.py`. External customer policies instead implement the versioned `LoadBalancingPolicy.rank()` API and register an Entry Point; they do not change the core factory.
+- **New built-in scheduling policies**: subclass `BaseSchedulingPolicy`, implement `select_instance()`, register in `factory.py`. External customer policies instead implement the versioned `EndpointSelectionPolicy.rank()` API and register an Entry Point; they do not change the core factory.
 - **New router strategies**: subclass `BaseRouter`, implement `prepare_resource`/`forward_request`/`release_all`, place in `router/strategies/`, and wire the class into `select_router_class()` in `dispatch.py` (there is no static router map).
 - **New ZMQ request types**: add to `SchedulerRequestType` enum in `zmq_protocol.py`; add handler method in `scheduler_server.py`; add client method in `scheduler_client.py`.
 - **New process types**: subclass `BaseProcessManager`, implement `start()`/`stop()`/`health_check()`; add key to `PROCESS_KEY_*` constants; add to start/stop order in `process/constants.py`.

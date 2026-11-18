@@ -44,7 +44,8 @@ flowchart TD
 
 ### 插件接口
 
-插件继承 `LoadBalancingPolicy`，声明 `api_version = 2`，并实现同步方法 `rank(selection)`。构造参数 `options` 来自配置。
+插件继承抽象基类 `EndpointSelectionPolicy`，声明 `api_version = 2`，并实现同步方法 `rank(selection)`。基类定义候选排序契约，具体算法由插件提供。构造参数 `options` 来自配置。
+API v2 草案中的 `LoadBalancingPolicy` 仍可作为兼容别名导入。
 
 | 输入或输出 | 主要内容 |
 |------------|----------|
@@ -146,13 +147,13 @@ Worker metaserver 的 `GET /metrics` 按 `{policy,role}` 暴露指标：
 
 ### 示例插件
 
-仓库的 [示例插件](../../../examples/scheduler_plugin/README.md) 注册了 `acme.weighted_load`，按以下公式从小到大排列候选：
+[快速接入指南](../user_guide/features/inference_scheduling/scheduler_policy_plugin.md)中的示例注册了 `mycompany.least_load`，按以下公式从小到大排列候选：
 
 ```text
 endpoint 负载 + instance_weight × 实例负载
 ```
 
-可选参数 `preferred_node` 在存在匹配的 endpoint IP 时优先使用匹配候选。该示例用于说明插件接口，并非内置负载均衡策略的等价实现。
+同分时按实例 ID 和 endpoint ID 排序。
 
 ### 配置示例
 
@@ -163,7 +164,7 @@ endpoint 负载 + instance_weight × 实例负载
   "policy_plugin": [
     {
       "role": ["prefill", "decode"],
-      "name": "acme.weighted_load",
+      "name": "mycompany.least_load",
       "options": {"instance_weight": 0.05},
       "timeout_ms": 50
     }
@@ -182,7 +183,7 @@ endpoint 负载 + instance_weight × 实例负载
 ```json
 {
   "policy_plugin": [
-    {"role": ["prefill", "union"], "name": "acme.weighted_load", "options": {"instance_weight": 0.05}}
+    {"role": ["prefill", "union"], "name": "mycompany.least_load", "options": {"instance_weight": 0.05}}
   ]
 }
 ```

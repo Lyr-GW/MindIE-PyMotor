@@ -37,9 +37,9 @@ def plugin_distribution(tmp_path, monkeypatch):
         '''
 import os
 import time
-from motor.coordinator.scheduler.policy.api import LoadBalancingPolicy, RankedCandidate
+from motor.coordinator.scheduler.policy.api import EndpointSelectionPolicy, RankedCandidate
 
-class Policy(LoadBalancingPolicy):
+class Policy(EndpointSelectionPolicy):
     def __init__(self, options=None):
         super().__init__(options)
         print("constructor output is not protocol data")
@@ -587,10 +587,10 @@ def test_worker_metaserver_exposes_plugin_metrics(plugin_distribution):
 
 def test_loader_only_imports_selected_entry_point(monkeypatch):
     from types import SimpleNamespace
-    from motor.coordinator.scheduler.policy.api import LoadBalancingPolicy
+    from motor.coordinator.scheduler.policy.api import EndpointSelectionPolicy
     from motor.coordinator.scheduler.policy.plugin_worker import load_policy
 
-    class Policy(LoadBalancingPolicy):
+    class Policy(EndpointSelectionPolicy):
         def rank(self, selection):
             return []
 
@@ -606,6 +606,33 @@ def test_loader_only_imports_selected_entry_point(monkeypatch):
     Policy.api_version = 1
     with pytest.raises(ValueError, match="API version"):
         load_policy("chosen", {})
+
+
+def test_loader_requires_concrete_synchronous_rank_and_loads_legacy_plugins(monkeypatch):
+    from types import SimpleNamespace
+
+    from motor.coordinator.scheduler.policy.api import EndpointSelectionPolicy, LoadBalancingPolicy
+    from motor.coordinator.scheduler.policy.plugin_worker import load_policy
+
+    class MissingRank(EndpointSelectionPolicy):
+        pass
+
+    class AsyncRank(EndpointSelectionPolicy):
+        async def rank(self, selection):  # pylint: disable=invalid-overridden-method
+            return []
+
+    class LegacyPolicy(LoadBalancingPolicy):
+        def rank(self, selection):
+            return []
+
+    entry = SimpleNamespace(name="chosen", value="pkg:Policy", dist=None, load=Mock())
+    monkeypatch.setattr("motor.coordinator.scheduler.policy.plugin_worker.entry_points", lambda **kwargs: [entry])
+    for invalid in (MissingRank, AsyncRank):
+        entry.load.return_value = invalid
+        with pytest.raises(ValueError, match=r"must override synchronous rank"):
+            load_policy("chosen", {})
+    entry.load.return_value = LegacyPolicy
+    assert isinstance(load_policy("chosen", {}), EndpointSelectionPolicy)
 
 
 @pytest.mark.asyncio

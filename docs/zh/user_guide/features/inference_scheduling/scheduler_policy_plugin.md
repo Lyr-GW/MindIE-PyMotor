@@ -28,13 +28,13 @@ my_motor_policy/
 
 ```python
 from motor.coordinator.scheduler.policy.api import (
-    LoadBalancingPolicy,
+    EndpointSelectionPolicy,
     RankedCandidate,
     SelectionInput,
 )
 
 
-class LeastLoadPolicy(LoadBalancingPolicy):
+class LeastLoadPolicy(EndpointSelectionPolicy):
     api_version = 2
 
     def rank(self, selection: SelectionInput) -> list[RankedCandidate]:
@@ -54,7 +54,7 @@ class LeastLoadPolicy(LoadBalancingPolicy):
 
 接口要求：
 
-- 继承 `LoadBalancingPolicy`，声明 `api_version = 2`，实现**同步** `rank()`。
+- 继承抽象基类 `EndpointSelectionPolicy`，声明 `api_version = 2`，实现**同步** `rank()`。基类定义排序接口，插件决定采用哪种算法。
 - 返回按优先级排列的非空 `RankedCandidate` 列表；Motor 使用返回顺序，不会替插件重新排序。
 - 返回的 ID 必须来自本次候选，不能重复或属于 `selection.excluded`；分数必须是有限数值。
 - 不要修改 Motor 状态、执行长时间阻塞操作或依赖跨 Worker 共享的插件对象。每个启用插件的 Inference Worker 按角色拥有独立插件进程，同一配置项覆盖多个角色时也不会共享实例。

@@ -10,6 +10,7 @@
 
 """Public, serializable API for external endpoint selection policies."""
 
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -58,7 +59,7 @@ class RankedCandidate:
     score: float
 
 
-class LoadBalancingPolicy:
+class EndpointSelectionPolicy(ABC):
     """Return candidates in best-first order. Instances live in an isolated process."""
 
     api_version = SUPPORTED_POLICY_API_VERSION
@@ -66,6 +67,11 @@ class LoadBalancingPolicy:
     def __init__(self, options: Mapping[str, Any] | None = None) -> None:
         self.options = dict(options or {})
 
+    @abstractmethod
     def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
         """Return a nonempty subset in best-first order; lower scores are preferred."""
         raise NotImplementedError
+
+
+# Keep wheels built against the earlier API v2 name loadable.
+LoadBalancingPolicy = EndpointSelectionPolicy
