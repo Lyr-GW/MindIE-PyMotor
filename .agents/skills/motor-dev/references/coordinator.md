@@ -232,38 +232,7 @@ decoded by Content-Type (msgpack via `msgspec`, otherwise JSON — legacy
 JSON responses can still be decoded). Request encoding does not automatically downgrade:
 set `query_encoding: "json"` explicitly for JSON-only conductor binaries.
 
-**Built-in factory registration** (`factory.py`): `SchedulingPolicyFactory` maps built-in policy name → class.
-
-**External endpoint policies** use `EndpointSelectionPolicy.rank(SelectionInput)` in `policy/api.py`,
-registered as an Entry Point in `mindie_motor.scheduling_policies` (API v2).
-`scheduler_config.policy_plugin` is a list of items with a required non-empty `role` array,
-name/options and timeout/cooldown budgets. `normalize_policy_plugins()` in `motor/config/coordinator.py`
-validates the list, rejects unknown keys, old single-object/`roles` schema, duplicate roles within
-an item and overlapping roles across items. Missing config / `[]` creates no Runner or subprocess.
-Malformed JSON plugin config must raise explicitly rather than disappear in generic `from_json` fallback.
-
-`AsyncSchedulerClient` expands each item's role array into `dict[role, PolicyRunner]` using
-`PolicyRunner(item, role=role)`. The same name or item can cover P/D, but each actual role owns
-an independent process, lock, cooldown deadline, recovery task, policy state and metrics.
-There are at most four plugin children per inference Worker; Obs/Mgmt never load them.
-`connect()` concurrently preloads all configured roles; `disconnect()` concurrently closes them,
-interrupting in-flight rank calls and reaping every child. A P failure or busy call does not block D's Runner.
-
-`select_and_allocate()` handles valid core pins first, then uses only the current role's Runner.
-Unconfigured roles directly execute the existing built-in path. Busy, failed, unavailable or timed-out
-plugins fall back to that role's built-in strategy: `prefill_scheduler_type` for P/U/E,
-`decode_scheduler_type` for D. Union/Encode must be explicitly included and do not inherit Prefill plugins.
-CAS retries refresh the snapshot and re-invoke the same role's Runner (at most three plugin attempts),
-then re-enter the built-in path with `_use_plugin=False`. CAS expected load comes from the snapshot
-sent to the plugin, not mutable post-await objects. Plugin commits use the generic demand formula;
-release stays in the core. `SelectionInput.request.role` already carries the role; `rank()` remains API v2.
-
-Worker metaserver `GET /metrics` exports worker-local `motor_policy_*` counters and timing with
-`{policy,role}` labels. `policy_metrics_text()` groups Runner samples by family and emits each family's
-`# TYPE` once. Worker load/fault/fallback logs include both role and name. Scrape each Worker's metaserver;
-Obs does not aggregate these samples. See `docs/zh/design/scheduler_policy_plugin.md` for the
-implementation map, schema migration and acceptance matrix, and
-`tests/coordinator/scheduler/test_policy_plugin.py` for lifecycle, isolation, CAS and metrics tests.
+**Factory registration** (`factory.py`): `SchedulingPolicyFactory` maps policy name → class. New policies register here.
 
 The policy is selected per role by `SchedulerConfig.type_for_role()`: `prefill_scheduler_type` serves Prefill, Encode and Union; `decode_scheduler_type` serves Decode. Both default to `LOAD_BALANCE`; Decode supports load balance / round robin / dynamic bucket, while KV affinity applies only to P/U. Deprecated `scheduler_type` migrates only to role fields that are not explicitly configured. When a role uses `kv_cache_affinity`, a sub-mode is chosen by `kv_affinity.mode`:
 
@@ -377,7 +346,7 @@ SGLang stays on native bootstrap (`CoordinationMode.BOOTSTRAP`); that path is un
 
 - `RequestInfo` is process-local. Infer workers share `coordinator_api_infer_port` via `SO_REUSEPORT`, so Decode's metaserver callback cannot land on the infer socket.
 - `inference_workers_config.worker_metaserver_base_port` default **12000**. Worker `i` listens on `base+i`; set to `0` to disable.
-- Dedicated uvicorn app (`InferenceServer.create_metaserver_app()`) exposes `POST /v1/metaserver` and worker-local plugin `GET /metrics` — no API key, no infer TLS (`lifespan=off`). Default API-key / rate-limit skip sets include `/v1/metaserver`. Decode engine callbacks have no API key; do not require one on this socket. Infer is the primary uvicorn; metaserver is a sidecar. Bind/init/`serve()` failure logs ERROR, clears this process's `worker_metaserver_port`, and leaves the infer port running. Trigger requests then 503 via `_ensure_trigger_metaserver`. Infer exit sets `should_exit` and cancels the sidecar.
+- Dedicated uvicorn app (`InferenceServer.create_metaserver_app()`) exposes only `POST /v1/metaserver` — no API key, no infer TLS (`lifespan=off`). Default API-key / rate-limit skip sets include `/v1/metaserver`. Decode engine callbacks have no API key; do not require one on this socket. Infer is the primary uvicorn; metaserver is a sidecar. Bind/init/`serve()` failure logs ERROR, clears this process's `worker_metaserver_port`, and leaves the infer port running. Trigger requests then 503 via `_ensure_trigger_metaserver`. Infer exit sets `should_exit` and cancels the sidecar.
 - The metaserver listen host prefers `POD_IP` when set, otherwise `api_config.coordinator_api_host` (same fallback as the advertised callback URL). Do not bind loopback: Decode may run on another node. Infer uvicorn still listens on `coordinator_api_host`.
 - The callback URL advertises `POD_IP` when available, otherwise `api_config.coordinator_api_host`; IPv6 literals are RFC 3986 bracketed. `0.0.0.0`/`::` remain valid listen hosts at startup (including default `worker_metaserver_base_port=12000`). Trigger rejects them as advertised callback addresses when `POD_IP` is absent (HTTP 503 + error log), because wildcard listen addresses are not routable Decode callback destinations.
 - Callback `request_id` is trimmed (`chatcmpl-` / `cmpl-…-0`) then looked up in that Worker's `RequestManager`. Query `?attempt=` must match the bound attempt (404 unknown request, 409 stale attempt).
@@ -454,7 +423,7 @@ Hot-reload is driven by a process-local `ConfigWatcher` in the **Inference Worke
 | `motor/coordinator/api_client/` | | `ConductorApiClient` / `ControllerApiClient` / `NativeEngineApiClient` (HTTP clients to kv-conductor, controller, engine) |
 | `motor/coordinator/api_server/management_server.py` | | Mgmt: `/liveness`, `/readiness`, `GET /instances`（`status`/`pool`/`healthy` + 熔断快照）, `/instances/refresh`, `/precision/alarm_cleared` |
 | `motor/coordinator/api_server/observability_server.py` | | Obs: `/metrics`, `/health` (`/instance/metrics` deprecated → `GET /metrics?type=instance`) |
-| `motor/coordinator/api_server/inference_server.py` | | Infer: `/v1/completions`, `/v1/chat/completions`, `/v1/responses`, `/v1/models`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic); dedicated metaserver app `POST /v1/metaserver` and plugin `GET /metrics` |
+| `motor/coordinator/api_server/inference_server.py` | | Infer: `/v1/completions`, `/v1/chat/completions`, `/v1/responses`, `/v1/models`, `/v1/messages` + `/v1/messages/count_tokens` (Anthropic); dedicated metaserver app `POST /v1/metaserver` |
 | `motor/coordinator/domain/responses_input.py` | | Text-only scheduling view for native Responses input; maps `developer` to `system` without rewriting the engine request |
 | `motor/coordinator/scheduler/runtime/scheduler_connection_manager.py` | | Shared ZMQ DEALER to Mgmt control plane (used by Obs/Infer) |
 | `motor/coordinator/domain/circuit_breaker.py` | | Per-instance circuit breaker state (closed/open) |
@@ -560,7 +529,7 @@ adds Coordinator pool membership (`available` / `unavailable` / `paused`; `unkno
 
 ## Development Rules
 
-- **New built-in scheduling policies**: subclass `BaseSchedulingPolicy`, implement `select_instance()`, register in `factory.py`. External customer policies instead implement the versioned `EndpointSelectionPolicy.rank()` API and register an Entry Point; they do not change the core factory.
+- **New scheduling policies**: subclass `BaseSchedulingPolicy`, implement `select_instance()`, register in `factory.py`.
 - **New router strategies**: subclass `BaseRouter`, implement `prepare_resource`/`forward_request`/`release_all`, place in `router/strategies/`, and wire the class into `select_router_class()` in `dispatch.py` (there is no static router map).
 - **New ZMQ request types**: add to `SchedulerRequestType` enum in `zmq_protocol.py`; add handler method in `scheduler_server.py`; add client method in `scheduler_client.py`.
 - **New process types**: subclass `BaseProcessManager`, implement `start()`/`stop()`/`health_check()`; add key to `PROCESS_KEY_*` constants; add to start/stop order in `process/constants.py`.
