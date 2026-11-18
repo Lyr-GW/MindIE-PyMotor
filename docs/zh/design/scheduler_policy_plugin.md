@@ -77,6 +77,12 @@ API v2 草案中的 `LoadBalancingPolicy` 仍可作为兼容别名导入。
 
 内置和客户策略共用角色候选池上的引擎类型、dispatch 能力及优先级准入过滤。IPC 快照还会排除熔断实例、被阻塞或已失效的共享内存槽位和本轮排除项，核心在提交前再次验证候选。
 
+### 通信协议
+
+Worker 与客户插件子进程通过 stdin/stdout 传输 JSON 行协议（JSON Lines，每条消息为单行 JSON 对象），单条消息上限为 1 MiB（1048576 字节），且禁用 `NaN`/`Infinity` 等非标准 JSON 常量。
+
+为防止插件代码或第三方库打印内容污染协议流，启动子进程时会先保留协议管道句柄，再将插件进程 Python 的 `sys.stdout` 重定向至 `sys.stderr`。输入消息超限或无法序列化为合法 JSON 时在父进程侧直接回退（`invalid_input`），不中断插件进程；响应超限、格式非法或读取到不完整行时按插件故障处理并回收进程。
+
 ### 配置与加载
 
 在 `motor_coordinator_config.scheduler_config` 下使用 `policy_plugin` 列表配置插件。每项通过 Entry Point 名称匹配已安装的插件，并指定一个或多个角色。
@@ -90,7 +96,7 @@ API v2 草案中的 `LoadBalancingPolicy` 仍可作为兼容别名导入。
 | `startup_timeout_ms` | `5000` | 启动握手的等待预算，范围 1–60000 毫秒。 |
 | `cooldown_seconds` | `30` | 插件故障后的恢复冷却时间，至少 1 秒。 |
 
-未配置 `policy_plugin` 或设置为 `[]` 时，不加载插件，也不创建子进程。`null`、未知字段、重复角色或非法预算会导致配置校验报错。修改插件包或配置后，需重启相关 Worker。
+未配置 `policy_plugin` 或设置为 `[]` 时，不加载客户插件、不创建客户插件子进程，仍通过注册表执行内置策略。`null`、未知字段、重复角色或非法预算会导致配置校验报错。修改插件包或配置后，需重启相关 Worker。
 
 排序预算不包含所有进程创建、编解码和回收开销，也不是请求端到端耗时的硬时限。Union 和 Encode 必须显式配置，不继承 Prefill 插件。
 
@@ -143,7 +149,7 @@ CAS 使用插件决策时的负载快照，避免等待插件期间负载变化�
 | 插件返回 `None` 或父进程在发送前拒绝输入 | 本次回退，保留进程且不进入冷却。 |
 | 冷却到期 | 后续请求触发后台恢复，重新加载该角色插件。 |
 | 请求取消 | 取消继续向上传播。在途协议交换仍持有执行槽，读完后丢弃结果。交换超时按故障处理。 |
-| Worker 关闭 | 回收在途插件进程和恢复任务。 |
+| Worker 关闭 | 回收在途插件进程和恢复任务；关闭打断在途调用时按 `unavailable` 记录回退，不计作插件错误或超时；关闭引起的加载中断不计入加载失败。 |
 | 内置策略也无可用后端 | 沿用原调度失败路径。 |
 
 Prefill、Union 和 Encode 使用 `prefill_scheduler_type` 作为默认和回退策略；Decode 使用 `decode_scheduler_type`。删除插件配置并重启 Worker 可恢复内置路径。
@@ -163,7 +169,7 @@ Worker metaserver 的 `GET /metrics` 按 `{policy,role}` 暴露指标：
 | `motor_policy_calls_total` | 插件排序调用次数，包含 CAS 重选。 |
 | `motor_policy_errors_total` / `motor_policy_timeouts_total` | 排序错误 / 超时次数。 |
 | `motor_policy_fallbacks_total` | 插件路径回退次数，不等同于请求失败次数。 |
-| `motor_policy_fallbacks_by_reason_total` | 固定 `reason` 标签细分回退，例如 `busy`、`cooldown`、`declined`、`cas_retry_limit`。 |
+| `motor_policy_fallbacks_by_reason_total` | 按 `reason` 标签细分回退：预定义原因（如 `busy`、`unavailable`、`cooldown`、`declined`、`cas_retry_limit` 等）正常导出；未知原因也会导出，并记录 `Unknown scheduling plugin fallback reason` WARNING 日志。 |
 | `motor_policy_selection_seconds_sum/count` | 插件排序调用的累计耗时和次数。 |
 
 指标属于各 Worker，Obs 不自动汇总。默认抓取端口为 `worker_metaserver_base_port + worker_index`；设置基准端口为 `0` 时关闭该抓取口。调用次数可能包含重选，不能直接作为请求数。
@@ -243,6 +249,8 @@ bash tests/run_tests.sh --serial tests/coordinator/scheduler/test_policy_plugin.
 bash tests/run_tests.sh --serial tests/coordinator/scheduler/ tests/coordinator/core/test_config.py tests/config/
 ```
 
-原生用例需要可加载的 Rust SHM 库，使用 `/dev/shm` 的用例需要 Linux。集群验收应覆盖 P/D 独立配置、角色故障隔离、显式 Union、指标以及进程回收。
+上述单测与集成用例用于功能验证（插件契约、故障隔离、分配释放及指标计数）；原生用例需要可加载的 Rust SHM 库，使用 `/dev/shm` 的用例需要 Linux。
+
+针对内置策略重构的兼容性验证，设计上保留原有配置与算法语义，但当前插件化版本与插件化前基线的行为一致性需通过专门的基线对照验证确认；早于内置策略插件化提交的历史旧实现之间的 A/B 对比，不能替代本次插件化后的兼容性验证。集群验收应覆盖 P/D 独立配置、角色故障隔离、显式 Union、指标以及进程回收。
 
 相关设计：[Coordinator 调度热路径 Rust 重构](coordinator_scheduler_rust.md)、[KV Conductor](kv_conductor.md)、[熔断设计](circuit_breaker_design.md)。需求见 [Issue #844](https://gitcode.com/Ascend/MindIE-Motor/issues/844)。
