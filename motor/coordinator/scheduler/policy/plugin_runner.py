@@ -91,8 +91,9 @@ class PolicyRunner:
                 await self._stop()
                 raise
             except Exception as exc:
-                self._counts["load_errors"] += 1
-                await self._fail(exc)
+                if not self._closed:
+                    self._counts["load_errors"] += 1
+                    await self._fail(exc)
 
     async def rank(self, selection: SelectionInput) -> tuple[RankedCandidate, ...] | None:
         """Return None to request the existing built-in policy, never wait behind another call."""
@@ -133,11 +134,13 @@ class PolicyRunner:
             await self._stop()
             raise
         except Exception as exc:
+            if self._closed:
+                self.record_fallback("unavailable")
+                return None
             timed_out = isinstance(exc, asyncio.TimeoutError)
             self._counts["timeouts" if timed_out else "errors"] += 1
             self.record_fallback("timeout" if timed_out else "plugin_error")
-            if not self._closed:
-                await self._fail(exc)
+            await self._fail(exc)
             return None
         finally:
             self._seconds += time.monotonic() - started
@@ -167,8 +170,12 @@ class PolicyRunner:
             lines.extend(("# TYPE %s counter" % name, "%s%s %s" % (name, label, self._counts[event])))
         name = "motor_policy_fallbacks_by_reason_total"
         lines.append("# TYPE %s counter" % name)
-        for reason in _FALLBACK_REASONS:
-            lines.append('%s%s,reason="%s"} %s' % (name, label[:-1], reason, self._fallback_reasons[reason]))
+        extra_reasons = sorted(r for r in self._fallback_reasons if r not in _FALLBACK_REASONS)
+        for reason in (*_FALLBACK_REASONS, *extra_reasons):
+            lines.append(
+                "%s%s,reason=%s} %s"
+                % (name, label[:-1], json.dumps(reason, ensure_ascii=False), self._fallback_reasons[reason])
+            )
         lines.append("# TYPE motor_policy_selection_seconds summary")
         lines.append("motor_policy_selection_seconds_sum%s %s" % (label, self._seconds))
         lines.append("motor_policy_selection_seconds_count%s %s" % (label, self._counts["calls"]))
@@ -176,6 +183,13 @@ class PolicyRunner:
 
     def record_fallback(self, reason: str) -> None:
         """Count both runner and core fallback decisions under a bounded reason label."""
+        if reason not in _FALLBACK_REASONS:
+            logger.warning(
+                "Unknown scheduling plugin fallback reason name=%s role=%s reason=%s",
+                self.config.name,
+                self.role,
+                reason,
+            )
         self._counts["fallbacks"] += 1
         self._fallback_reasons[reason] += 1
         logger.debug("Scheduling plugin fallback name=%s role=%s reason=%s", self.config.name, self.role, reason)

@@ -10,11 +10,14 @@
 
 """Real entry-point/subprocess execution and scheduler allocation regression coverage."""
 
+import ast
 import asyncio
 import json
+import logging
 import os
 import time
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -603,12 +606,15 @@ async def test_plugin_uses_decision_snapshot_for_cas_expected(plugin_distributio
 
 
 @pytest.mark.asyncio
-async def test_snapshot_failure_and_retry_exhaustion_use_builtin(plugin_distribution):
+async def test_snapshot_failure_and_retry_exhaustion_use_builtin(plugin_distribution, caplog):
     client, native, request = await scheduler_with_pool(plugin_distribution)
     try:
         client._rank_external_policy = AsyncMock(side_effect=RuntimeError("snapshot failure"))
-        assert await client.select_and_allocate(PDRole.ROLE_P, request) is not None
+        with caplog.at_level(logging.WARNING):
+            assert await client.select_and_allocate(PDRole.ROLE_P, request) is not None
         assert client._policy_runners["prefill"]._counts["fallbacks"] == 1
+        assert "role=prefill" in caplog.text
+        assert "PDRole" not in caplog.text
     finally:
         await client.disconnect()
 
@@ -741,6 +747,10 @@ async def test_shutdown_interrupts_busy_plugin_and_cooldown_recovers(plugin_dist
             await asyncio.sleep(0)
         await asyncio.wait_for(runner.close(), timeout=2)
         assert await task is None
+        assert runner._counts["errors"] == 0
+        assert runner._counts["timeouts"] == 0
+        assert runner._fallback_reasons["plugin_error"] == 0
+        assert runner._fallback_reasons["unavailable"] == 1
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -829,3 +839,24 @@ async def test_real_plugin_with_native_shm_allocation_and_release(plugin_distrib
     finally:
         await client.disconnect()
         owner.release()
+
+
+def test_fallback_reasons_stay_in_sync_and_unknown_reason_is_exported(plugin_distribution, caplog):
+    from motor.coordinator.scheduler.policy.plugin_runner import _FALLBACK_REASONS
+
+    scheduler_root = Path(__file__).resolve().parents[3] / "motor" / "coordinator" / "scheduler"
+    for py_file in scheduler_root.rglob("*.py"):
+        tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not (isinstance(node.func, ast.Attribute) and node.func.attr == "record_fallback"):
+                continue
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                assert node.args[0].value in _FALLBACK_REASONS, f"{py_file}:{node.lineno} -> {node.args[0].value}"
+
+    runner = PolicyRunner(plugin_distribution)
+    with caplog.at_level(logging.WARNING):
+        runner.record_fallback("future_reason")
+    assert "Unknown scheduling plugin fallback reason" in caplog.text
+    assert 'reason="future_reason"} 1' in runner.metrics_text()

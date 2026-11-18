@@ -61,7 +61,7 @@ class LeastLoadPolicy(EndpointSelectionPolicy):
 - 返回的 ID 必须来自本次候选，不能重复或属于 `selection.excluded`；分数必须是有限数值。
 - 不要修改 Motor 状态、执行长时间阻塞操作或依赖跨 Worker 共享的插件对象。每个启用插件的 Inference Worker 按角色拥有独立插件进程，同一配置项覆盖多个角色时也不会共享实例。
 
-请求长度、模型、用户和会话字段等可用数据及其限制见[设计文档的“接口与上下文”章节](../../../design/scheduler_policy_plugin.md)。示例中的用户/会话元数据不是认证的租户身份。
+请求长度、模型、用户和会话字段等可用数据及其限制见[设计文档的“客户插件接口”章节](../../../design/scheduler_policy_plugin.md#客户插件接口)。示例中的用户/会话元数据不是认证的租户身份。
 
 ### 步骤 2：注册并安装插件
 

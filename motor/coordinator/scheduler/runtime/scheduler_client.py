@@ -1532,12 +1532,13 @@ class AsyncSchedulerClient:
                 attempt,
             )
         except Exception as exc:
-            runner = self._policy_runners.get(getattr(role, "value", None) or "union")
+            role_str = getattr(role, "value", role) if role is not None else getattr(PDRole.ROLE_U, "value", "union")
+            runner = self._policy_runners.get(role_str)
             if runner is not None:
                 runner.record_fallback("snapshot_error")
             logger.warning(
                 "Scheduling plugin candidate preparation failed role=%s req_id=%s error=%s",
-                role,
+                role_str,
                 req_info.req_id,
                 type(exc).__name__,
             )
