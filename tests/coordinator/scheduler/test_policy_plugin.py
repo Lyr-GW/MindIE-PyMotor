@@ -56,6 +56,11 @@ class Policy(EndpointSelectionPolicy):
             os._exit(3)
         if mode == "empty":
             return []
+        if selection.request.request_id == "decline":
+            return None
+        if selection.request.request_id == "slow":
+            time.sleep(0.1)
+            return [RankedCandidate(selection.candidates[0].id, 0)]
         if mode == "invalid":
             return [RankedCandidate(selection.candidates[0].id, float("nan"))]
         candidates = sorted(selection.candidates, key=lambda c: c.active_tokens, reverse=mode != "light")
@@ -137,25 +142,44 @@ async def test_missing_and_hung_loader_fall_back(plugin_distribution):
 
 
 @pytest.mark.asyncio
-async def test_busy_call_falls_back_and_cancellation_discards_late_reply(plugin_distribution):
-    runner = PolicyRunner(replace(plugin_distribution, options={"mode": "hang"}, timeout_ms=10000))
+async def test_busy_fallback_and_cancellation_keep_healthy_subprocess(plugin_distribution):
+    runner = PolicyRunner(replace(plugin_distribution, timeout_ms=2000))
     await runner.start()
     process = runner._process
-    task = asyncio.create_task(runner.rank(selection()))
+    slow = replace(selection(), request=replace(selection().request, request_id="slow"))
+    task = asyncio.create_task(runner.rank(slow))
     try:
         while not runner._lock.locked():
             await asyncio.sleep(0)
+        exchange = runner._rank_task
         assert await runner.rank(selection()) is None
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert process.returncode is not None
-        runner.config = plugin_distribution
-        await runner.start()
+        assert runner._process is process
+        assert (await exchange)[0].id.instance_id == 1
         assert (await runner.rank(selection()))[0].id.instance_id == 2
+        assert 'reason="busy"} 1' in runner.metrics_text()
     finally:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        await runner.close()
+
+
+@pytest.mark.asyncio
+async def test_decline_and_oversize_input_fall_back_without_cooldown(plugin_distribution):
+    runner = PolicyRunner(plugin_distribution)
+    try:
+        await runner.start()
+        process = runner._process
+        request = selection().request
+        assert await runner.rank(replace(selection(), request=replace(request, request_id="decline"))) is None
+        assert await runner.rank(replace(selection(), request=replace(request, user="x" * (1024 * 1024)))) is None
+        assert runner._process is process
+        assert (await runner.rank(selection()))[0].id.instance_id == 2
+        assert 'reason="declined"} 1' in runner.metrics_text()
+        assert 'reason="invalid_input"} 1' in runner.metrics_text()
+    finally:
         await runner.close()
 
 
@@ -163,6 +187,8 @@ async def test_busy_call_falls_back_and_cancellation_discards_late_reply(plugin_
     "raw",
     [
         [],
+        [42],
+        [{"id": {"instance_id": 1}, "score": 1}],
         [{"id": {"instance_id": 99, "endpoint_id": 0}, "score": 1}],
         [{"id": {"instance_id": 1, "endpoint_id": 0}, "score": float("inf")}],
         [{"id": {"instance_id": 1, "endpoint_id": 0}, "score": True}],
@@ -170,8 +196,39 @@ async def test_busy_call_falls_back_and_cancellation_discards_late_reply(plugin_
     ],
 )
 def test_invalid_plugin_ranking_is_rejected(raw):
-    with pytest.raises((TypeError, ValueError)):
+    with pytest.raises(ValueError):
         PolicyRunner._validate({"ranked": raw}, selection())
+
+
+def test_worker_stops_at_oversized_frame_without_reading_tail(monkeypatch):
+    import sys
+    from io import BytesIO, StringIO
+    from types import SimpleNamespace
+
+    from motor.coordinator.scheduler.policy import plugin_worker
+
+    handshake = b'{"name":"test","options":{}}\n'
+    limit = 96
+    stream = BytesIO(handshake + b"x" * 512 + b"\n")
+    output = StringIO()
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=stream))
+    monkeypatch.setattr(sys, "stdout", output)
+    monkeypatch.setattr(plugin_worker, "MAX_MESSAGE_BYTES", limit)
+    monkeypatch.setattr(plugin_worker, "load_policy", Mock())
+    plugin_worker.main(output)
+    ready, error = map(json.loads, output.getvalue().splitlines())
+    assert ready == {"ready": True}
+    assert "message limit" in error["error"]
+    assert stream.tell() == len(handshake) + limit + 1
+
+
+@pytest.mark.asyncio
+async def test_runner_rejects_nonstandard_json_on_response(plugin_distribution):
+    runner = PolicyRunner(plugin_distribution)
+    runner._process = Mock(stdout=Mock(readline=AsyncMock(return_value=b'{"ranked":NaN}\n')))
+    runner._process.stdin.drain = AsyncMock()
+    with pytest.raises(ValueError, match="Invalid JSON numeric constant"):
+        await runner._exchange({})
 
 
 @pytest.mark.parametrize(
@@ -275,7 +332,7 @@ def test_same_name_role_configs_get_independent_runners(plugin_distribution):
     assert 'policy="customer.test",role="prefill"' in metrics
     assert 'policy="customer.test",role="decode"' in metrics
     families = metrics.split("# TYPE ")[1:]
-    assert len(families) == 7
+    assert len(families) == 8
     for family in families:
         assert 'role="prefill"' in family
         assert 'role="decode"' in family
@@ -439,6 +496,32 @@ async def test_plugin_selection_commits_and_releases_through_core(plugin_distrib
             )
         )
         assert native.cas_sub_floor0.call_args.args[3] == result[2].active_tokens
+    finally:
+        await client.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_builtin_and_external_share_engine_and_dispatch_filters(plugin_distribution):
+    from motor.coordinator.scheduler.policy.api import RankedCandidate
+
+    client, _, request = await scheduler_with_pool(plugin_distribution)
+    eligible, wrong_engine = client._cache.get_instances(PDRole.ROLE_P)
+    eligible.dispatch_capabilities = ["decode_colocation"]
+    wrong_engine.engine_type = "sglang"
+    wrong_engine.dispatch_capabilities = ["decode_colocation"]
+    wrong_dispatch = eligible.model_copy(update={"id": 3, "dispatch_capabilities": []})
+    await client._cache.replace_all(PDRole.ROLE_P, [eligible, wrong_engine, wrong_dispatch])
+    try:
+        runner = client._policy_runners["prefill"]
+        runner.rank = AsyncMock(return_value=(RankedCandidate(CandidateId(eligible.id, 0), 0.0),))
+        result = await client._rank_external_policy(PDRole.ROLE_P, request, "vllm", "decode_colocation", set(), 0)
+        snapshot = runner.rank.call_args.args[0]
+        assert [candidate.id.instance_id for candidate in snapshot.candidates] == [eligible.id]
+        assert result[0].id == eligible.id
+        candidates, _ = await client._select_endpoint_candidates_with_policy(
+            request, PDRole.ROLE_P, required_engine_type="vllm", required_dispatch_capability="decode_colocation"
+        )
+        assert [instance.id for instance, *_ in candidates] == [eligible.id]
     finally:
         await client.disconnect()
 

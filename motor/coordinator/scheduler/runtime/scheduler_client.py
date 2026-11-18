@@ -1180,11 +1180,13 @@ class AsyncSchedulerClient:
     ) -> tuple[list[tuple[Instance, Endpoint, float]], str]:
         """Select endpoint candidates from cache or fresh instances."""
         cache_role = role if role is not None else PDRole.ROLE_U
-        cached_instances = self._filter_instances(
-            self._cache.get_instances(cache_role), required_engine_type, required_dispatch_capability
+        cached_instances = self._filter_selection_instances(
+            self._cache.get_instances(cache_role),
+            req_info,
+            cache_role,
+            required_engine_type,
+            required_dispatch_capability,
         )
-        if cached_instances:
-            cached_instances = self._apply_priority_load_gate(cached_instances, req_info, cache_role)
         if cached_instances:
             # Cache stores instances sorted by id (see replace_all call sites); use as-is for RR
             candidates, candidate_policy = self._select_endpoint_candidates_from_list_with_policy(
@@ -1203,10 +1205,13 @@ class AsyncSchedulerClient:
             return [], self._scheduler_type_for_role(cache_role)
 
         # get_available_instances already wrote sorted list to cache; build sorted list once for this path
-        instance_list = self._filter_instances(
-            sorted(instances.values(), key=lambda i: i.id), required_engine_type, required_dispatch_capability
+        instance_list = self._filter_selection_instances(
+            sorted(instances.values(), key=lambda i: i.id),
+            req_info,
+            cache_role,
+            required_engine_type,
+            required_dispatch_capability,
         )
-        instance_list = self._apply_priority_load_gate(instance_list, req_info, cache_role)
         if not instance_list:
             return [], self._scheduler_type_for_role(cache_role)
         candidates, candidate_policy = self._select_endpoint_candidates_from_list_with_policy(
@@ -1220,6 +1225,18 @@ class AsyncSchedulerClient:
                 self._scheduler_type_for_role(cache_role),
             )
         return candidates, candidate_policy
+
+    def _filter_selection_instances(
+        self,
+        instances: list[Instance],
+        req_info: RequestInfo,
+        role: PDRole,
+        required_engine_type: str | None,
+        required_dispatch_capability: str | None,
+    ) -> list[Instance]:
+        """Apply the same request admission constraints before either ranking path."""
+        eligible = self._filter_instances(instances, required_engine_type, required_dispatch_capability)
+        return self._apply_priority_load_gate(eligible, req_info, role) if eligible else eligible
 
     @staticmethod
     def _filter_instances(
@@ -1517,7 +1534,13 @@ class AsyncSchedulerClient:
         except Exception as exc:
             runner = self._policy_runners.get(getattr(role, "value", None) or "union")
             if runner is not None:
-                runner.record_fallback(type(exc).__name__)
+                runner.record_fallback("snapshot_error")
+            logger.warning(
+                "Scheduling plugin candidate preparation failed role=%s req_id=%s error=%s",
+                role,
+                req_info.req_id,
+                type(exc).__name__,
+            )
             return None
 
     async def _rank_external_policy(
@@ -1535,8 +1558,11 @@ class AsyncSchedulerClient:
         instances = self._cache.get_instances(role)
         if not instances:
             instances = list((await self.get_available_instances(role)).values())
-        instances = self._filter_instances(instances, required_engine_type, required_dispatch_capability)
-        instances = self._apply_priority_load_gate(instances, req_info, role)
+        instances = self._filter_selection_instances(
+            instances, req_info, role, required_engine_type, required_dispatch_capability
+        )
+        # IPC snapshots omit blocked/stale slots and retry exclusions. The
+        # native policies apply their own endpoint scoring and CAS revalidation.
         snapshots = []
         pairs = {}
         generations = {}
@@ -1869,7 +1895,7 @@ class AsyncSchedulerClient:
                 if plugin_choice is None:
                     if _attempt >= 3:
                         plugin_runner.record_fallback("cas_retry_limit")
-                    logger.warning(
+                    logger.debug(
                         "Scheduling plugin reselect failed name=%s role=%s; using built-in strategy req_id=%s",
                         plugin_runner.config.name,
                         role_str,
@@ -2004,7 +2030,7 @@ class AsyncSchedulerClient:
                 logger.info(
                     "scheduled role=%s req_id=%s input_tokens=%s instance=%s endpoint=%s policy=%s matched=%s "
                     "npu(hbm)=%s cpu(dram)=%s disk=%s load=%s committed=%s score=%s fast_path=%s repicked=%s "
-                    "proposed=%s-%s hit_rate=%s prio=%s aff=%s reason=%s sp=%s",
+                    "proposed=%s-%s hit_rate=%s prio=%s aff=%s reason=%s sp=%s plugin_attempt=%s",
                     role_str,
                     req_info.req_id,
                     int(isl),
@@ -2018,7 +2044,7 @@ class AsyncSchedulerClient:
                     matched_load[1] if matched_load else None,
                     committed.active_tokens,
                     selected_score,
-                    not use_authoritative,
+                    plugin_active or not use_authoritative,
                     pair != proposed,
                     proposed_instance.id,
                     proposed_endpoint.id,
@@ -2027,6 +2053,7 @@ class AsyncSchedulerClient:
                     affinity_outcome,
                     prio_reason,
                     getattr(getattr(hint_info, "strict_priority", None), "level", None),
+                    _attempt + 1 if plugin_active else None,
                 )
                 if self._session_affinity is not None and affinity_session_id:
                     self._session_affinity.record(

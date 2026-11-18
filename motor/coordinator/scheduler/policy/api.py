@@ -55,6 +55,8 @@ class SelectionInput:
 
 @dataclass(frozen=True, slots=True)
 class RankedCandidate:
+    """An endpoint in plugin priority order, with a finite score for observability."""
+
     id: CandidateId
     score: float
 
@@ -68,8 +70,8 @@ class EndpointSelectionPolicy(ABC):
         self.options = dict(options or {})
 
     @abstractmethod
-    def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate]:
-        """Return a nonempty subset in best-first order; lower scores are preferred."""
+    def rank(self, selection: SelectionInput) -> Sequence[RankedCandidate] | None:
+        """Return a nonempty subset in priority order, or None to use the built-in policy."""
         raise NotImplementedError
 
 

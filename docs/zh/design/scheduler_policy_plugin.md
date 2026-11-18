@@ -69,11 +69,13 @@ API v2 草案中的 `LoadBalancingPolicy` 仍可作为兼容别名导入。
 | `SelectionInput.request` | 请求 ID、角色、模型、token 数及可选 user/session 元数据。 |
 | `SelectionInput.candidates` | 候选 ID、endpoint 和实例负载、地址、引擎类型及可用的 KV 缓存使用率。 |
 | `SelectionInput.excluded` / `attempt` | 已排除的候选 ID，以及从 0 开始的本次选点次数。 |
-| `RankedCandidate` | 候选 ID 和有限数值分数；返回顺序即优先顺序。 |
+| `RankedCandidate` | 候选 ID 和用于日志观测的有限数值 `score`；列表顺序表达优先级。 |
 
-插件须返回非空候选列表。ID 必须来自本次候选，不能重复或属于排除集合；Motor 不会按分数重新排序。空结果、非法 ID 或非有限分数会触发回退。
+插件可返回 `None` 主动放弃本次请求，Worker 使用内置策略，插件进程继续服务。返回列表时须非空，ID 必须来自本次候选，不能重复或属于排除集合。Motor 尝试列表首项，CAS 冲突时刷新快照并重新评分，以免使用基于旧负载或旧成员状态的后续候选。非法列表或分数按插件错误处理。
 
 候选数据是快照，不提供可写 SHM 句柄；`node_address` 是 endpoint IP，不一定代表物理宿主机。user/session 是请求元数据，不是认证身份。插件私有状态不会跨 Worker、角色或进程重启共享。
+
+内置和客户策略共用角色候选池上的引擎类型、dispatch 能力及优先级准入过滤。IPC 快照还会排除熔断实例、被阻塞或已失效的共享内存槽位和本轮排除项，核心在提交前再次验证候选。
 
 ### 配置与加载
 
@@ -137,16 +139,21 @@ CAS 使用插件决策时的负载快照，避免等待插件期间负载变化�
 |------|----------|
 | 角色未配置插件 | 直接使用该角色的内置策略。 |
 | 加载失败、排序异常、输出非法或超时 | 回收插件进程，记录故障并进入冷却；当前角色使用内置策略。 |
-| 当前角色插件繁忙或处于冷却期 | 本次请求立即回退，不等待插件；其他角色不受影响。 |
+| 当前角色插件繁忙或处于冷却期 | 本次请求立即回退，不等待插件；其他角色不受影响。每个 Worker 的每个角色只有一个在途排序。 |
+| 插件返回 `None` 或父进程在发送前拒绝输入 | 本次回退，保留进程且不进入冷却。 |
 | 冷却到期 | 后续请求触发后台恢复，重新加载该角色插件。 |
-| 请求取消或 Worker 关闭 | 回收在途插件进程；请求取消继续向上传播。 |
+| 请求取消 | 取消继续向上传播。在途协议交换仍持有执行槽，读完后丢弃结果。交换超时按故障处理。 |
+| Worker 关闭 | 回收在途插件进程和恢复任务。 |
 | 内置策略也无可用后端 | 沿用原调度失败路径。 |
 
 Prefill、Union 和 Encode 使用 `prefill_scheduler_type` 作为默认和回退策略；Decode 使用 `decode_scheduler_type`。删除插件配置并重启 Worker 可恢复内置路径。
 
+客户插件成功选点时接管该角色的候选排序，内置 KV 亲和和动态分桶仅在回退时执行。客户插件路径不发出内置 Conductor 亲和查询，`scheduled` 的 `matched` 和 `hit_rate` 为 `None`。
+
 ### 4. 日志与指标
 
 Worker 日志记录插件加载、故障、回退和选点结果。插件选点成功时，`scheduled` 日志中的策略名为 `plugin:<name>`。
+客户插件请求的 `plugin_attempt` 表示成功分配前的排序轮次，从 1 开始。`proposed` 保留首次选点，用于比较最终选点是否改变；`fast_path` 仍是是否跳过内置实时负载重扫的布尔值。
 
 Worker metaserver 的 `GET /metrics` 按 `{policy,role}` 暴露指标：
 
@@ -156,6 +163,7 @@ Worker metaserver 的 `GET /metrics` 按 `{policy,role}` 暴露指标：
 | `motor_policy_calls_total` | 插件排序调用次数，包含 CAS 重选。 |
 | `motor_policy_errors_total` / `motor_policy_timeouts_total` | 排序错误 / 超时次数。 |
 | `motor_policy_fallbacks_total` | 插件路径回退次数，不等同于请求失败次数。 |
+| `motor_policy_fallbacks_by_reason_total` | 固定 `reason` 标签细分回退，例如 `busy`、`cooldown`、`declined`、`cas_retry_limit`。 |
 | `motor_policy_selection_seconds_sum/count` | 插件排序调用的累计耗时和次数。 |
 
 指标属于各 Worker，Obs 不自动汇总。默认抓取端口为 `worker_metaserver_base_port + worker_index`；设置基准端口为 `0` 时关闭该抓取口。调用次数可能包含重选，不能直接作为请求数。

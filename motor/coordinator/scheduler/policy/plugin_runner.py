@@ -24,9 +24,27 @@ from dataclasses import asdict
 from motor.common.logger import get_logger
 from motor.config.coordinator import PolicyPluginConfig
 from motor.coordinator.scheduler.policy.api import CandidateId, RankedCandidate, SelectionInput
-from motor.coordinator.scheduler.policy.plugin_worker import MAX_MESSAGE_BYTES
+from motor.coordinator.scheduler.policy.plugin_worker import MAX_MESSAGE_BYTES, reject_json_constant
 
 logger = get_logger(__name__)
+
+_FALLBACK_REASONS = (
+    "busy",
+    "unavailable",
+    "cooldown",
+    "declined",
+    "invalid_input",
+    "timeout",
+    "plugin_error",
+    "no_eligible_candidates",
+    "membership_changed",
+    "cas_retry_limit",
+    "snapshot_error",
+)
+
+
+class _PolicyInputError(ValueError):
+    """Request data rejected before any bytes were sent to the child."""
 
 
 class PolicyRunner:
@@ -38,9 +56,11 @@ class PolicyRunner:
         self._process: Process | None = None
         self._lock = asyncio.Lock()
         self._restart_task: asyncio.Task | None = None
+        self._rank_task: asyncio.Task | None = None
         self._retry_after = 0.0
         self._closed = False
         self._counts: Counter = Counter()
+        self._fallback_reasons: Counter = Counter()
         self._seconds = 0.0
 
     async def start(self) -> None:
@@ -76,33 +96,53 @@ class PolicyRunner:
 
     async def rank(self, selection: SelectionInput) -> tuple[RankedCandidate, ...] | None:
         """Return None to request the existing built-in policy, never wait behind another call."""
-        if self._closed or self._lock.locked():
-            self._counts["fallbacks"] += 1
+        if self._closed:
+            self.record_fallback("unavailable")
+            return None
+        if self._lock.locked():
+            self.record_fallback("busy")
             return None
         if self._process is None:
-            if time.monotonic() >= self._retry_after and self._restart_task is None:
+            cooling_down = time.monotonic() < self._retry_after
+            if not cooling_down and self._restart_task is None:
                 self._restart_task = asyncio.create_task(self._restart())
-            self._counts["fallbacks"] += 1
+            self.record_fallback("cooldown" if cooling_down else "unavailable")
             return None
-        async with self._lock:
-            started = time.monotonic()
-            self._counts["calls"] += 1
-            try:
-                payload = asdict(selection)
-                payload["excluded"] = [asdict(item) for item in selection.excluded]
-                response = await asyncio.wait_for(self._exchange(payload), timeout=self.config.timeout_ms / 1000)
-                return self._validate(response, selection)
-            except asyncio.CancelledError:
-                # A late response must not be consumed by the next request.
-                await self._stop()
-                raise
-            except Exception as exc:
-                self._counts["timeouts" if isinstance(exc, asyncio.TimeoutError) else "errors"] += 1
-                self._counts["fallbacks"] += 1
-                await self._fail(exc)
+
+        await self._lock.acquire()
+        # Keep the single-flight slot until the reply is consumed or the timeout
+        # expires. Caller cancellation does not cancel the protocol exchange.
+        self._rank_task = asyncio.create_task(self._rank_once(selection))
+        return await asyncio.shield(self._rank_task)
+
+    async def _rank_once(self, selection: SelectionInput) -> tuple[RankedCandidate, ...] | None:
+        started = time.monotonic()
+        self._counts["calls"] += 1
+        try:
+            payload = asdict(selection)
+            payload["excluded"] = [asdict(item) for item in selection.excluded]
+            response = await asyncio.wait_for(self._exchange(payload), timeout=self.config.timeout_ms / 1000)
+            if response == {"ranked": None}:
+                self.record_fallback("declined")
                 return None
-            finally:
-                self._seconds += time.monotonic() - started
+            return self._validate(response, selection)
+        except _PolicyInputError:
+            self.record_fallback("invalid_input")
+            return None
+        except asyncio.CancelledError:
+            await self._stop()
+            raise
+        except Exception as exc:
+            timed_out = isinstance(exc, asyncio.TimeoutError)
+            self._counts["timeouts" if timed_out else "errors"] += 1
+            self.record_fallback("timeout" if timed_out else "plugin_error")
+            if not self._closed:
+                await self._fail(exc)
+            return None
+        finally:
+            self._seconds += time.monotonic() - started
+            self._rank_task = None
+            self._lock.release()
 
     async def close(self) -> None:
         """Cancel recovery and reap the child during worker shutdown."""
@@ -125,29 +165,37 @@ class PolicyRunner:
         for event in ("loads", "load_errors", "calls", "errors", "timeouts", "fallbacks"):
             name = "motor_policy_%s_total" % event
             lines.extend(("# TYPE %s counter" % name, "%s%s %s" % (name, label, self._counts[event])))
+        name = "motor_policy_fallbacks_by_reason_total"
+        lines.append("# TYPE %s counter" % name)
+        for reason in _FALLBACK_REASONS:
+            lines.append('%s%s,reason="%s"} %s' % (name, label[:-1], reason, self._fallback_reasons[reason]))
         lines.append("# TYPE motor_policy_selection_seconds summary")
         lines.append("motor_policy_selection_seconds_sum%s %s" % (label, self._seconds))
         lines.append("motor_policy_selection_seconds_count%s %s" % (label, self._counts["calls"]))
         return "\n".join(lines) + "\n"
 
     def record_fallback(self, reason: str) -> None:
-        """Count core-side fallbacks that happen outside a plugin invocation."""
+        """Count both runner and core fallback decisions under a bounded reason label."""
         self._counts["fallbacks"] += 1
-        logger.warning("Scheduling plugin fallback name=%s role=%s reason=%s", self.config.name, self.role, reason)
+        self._fallback_reasons[reason] += 1
+        logger.debug("Scheduling plugin fallback name=%s role=%s reason=%s", self.config.name, self.role, reason)
 
     async def _exchange(self, payload: dict) -> dict:
-        encoded = json.dumps(payload, allow_nan=False).encode("utf-8") + b"\n"
+        try:
+            encoded = json.dumps(payload, allow_nan=False).encode("utf-8") + b"\n"
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise _PolicyInputError("Policy input is not JSON encodable") from exc
         if len(encoded) > MAX_MESSAGE_BYTES:
-            raise ValueError("Policy input exceeds message limit")
+            raise _PolicyInputError("Policy input exceeds message limit")
         process = self._process
         if process is None or process.stdin is None or process.stdout is None:
             raise RuntimeError("Policy process unavailable")
         process.stdin.write(encoded)
         await process.stdin.drain()
         line = await process.stdout.readline()
-        if not line or len(line) > MAX_MESSAGE_BYTES:
+        if not line.endswith(b"\n") or len(line) > MAX_MESSAGE_BYTES:
             raise ValueError("Policy process exited or exceeded message limit")
-        response = json.loads(line)
+        response = json.loads(line, parse_constant=reject_json_constant)
         if not isinstance(response, dict):
             raise ValueError("Policy response must be an object")
         return response
@@ -161,8 +209,11 @@ class PolicyRunner:
         seen = set()
         ranked = []
         for item in raw:
-            candidate = CandidateId(**item["id"])
-            score = item["score"]
+            try:
+                candidate = CandidateId(**item["id"])
+                score = item["score"]
+            except (KeyError, TypeError) as exc:
+                raise ValueError("Invalid policy ranking item") from exc
             if any(
                 isinstance(value, bool) or not isinstance(value, int)
                 for value in (candidate.instance_id, candidate.endpoint_id)

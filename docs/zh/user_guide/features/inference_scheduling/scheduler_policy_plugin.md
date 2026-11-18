@@ -57,7 +57,7 @@ class LeastLoadPolicy(EndpointSelectionPolicy):
 接口要求：
 
 - 继承抽象基类 `EndpointSelectionPolicy`，声明 `api_version = 2`，实现**同步** `rank()`。基类定义排序接口，插件决定采用哪种算法。
-- 返回按优先级排列的非空 `RankedCandidate` 列表；Motor 使用返回顺序，不会替插件重新排序。
+- 返回按优先级排列的非空 `RankedCandidate` 列表，或返回 `None` 放弃本次选点并使用内置策略。`score` 用于日志观测，Motor 取列表首项，CAS 冲突时使用刷新后的快照重新调用插件。
 - 返回的 ID 必须来自本次候选，不能重复或属于 `selection.excluded`；分数必须是有限数值。
 - 不要修改 Motor 状态、执行长时间阻塞操作或依赖跨 Worker 共享的插件对象。每个启用插件的 Inference Worker 按角色拥有独立插件进程，同一配置项覆盖多个角色时也不会共享实例。
 
@@ -194,6 +194,7 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
 保留已有内置策略：`prefill_scheduler_type` 是 P/U/E 的默认和回退策略，`decode_scheduler_type` 是 D 的默认和回退策略。
 角色未配置、插件繁忙、故障或超时时，使用该角色原配置的内置策略。删除 `policy_plugin` 或设为 `[]` 可禁用全部插件，不创建子进程。
+配置成功后，客户插件接管该角色的候选排序。成功走客户插件时不会运行内置 KV 亲和查询或动态分桶，日志中的 `matched` 和 `hit_rate` 为 `None`。这些内置策略会在对应角色回退时执行。
 每个 Worker 最多四个插件子进程。
 
 旧草案的单对象 `policy_plugin: {"name": ..., "roles": [...]}` 会明确报迁移错误。
@@ -216,6 +217,8 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
    默认端口为 `inference_workers_config.worker_metaserver_base_port + worker_index`，起始值为 `12000`。监听地址优先使用 `POD_IP`，否则使用 Coordinator 的监听地址；`127.0.0.1` 只是示例，不保证在容器网络中可访问。设置 `worker_metaserver_base_port=0` 会关闭该抓取口。
 
    `motor_policy_loads_total` 增加表示加载成功；`motor_policy_calls_total` 增加表示插件参与了排序。使用 `errors`、`timeouts` 和 `fallbacks` 检查故障或回退。
+
+   查询 `motor_policy_fallbacks_by_reason_total` 可查看具体回退原因，例如 `busy` 表示该 Worker 的同角色插件正在执行另一次排序。
 
    指标按 Worker 和角色分别统计，Obs 不自动汇总。单次请求不一定落到正在查看的 Worker，应检查所有相关 Worker；pin 路径和未启用的角色不会调用插件。
 
