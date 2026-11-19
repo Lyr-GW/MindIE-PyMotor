@@ -241,6 +241,8 @@ set `query_encoding: "json"` explicitly for JSON-only conductor binaries.
 
 **Factory registration** (`factory.py`): `SchedulingPolicyFactory` maps policy name → class. New policies register here.
 
+**Unified worker endpoint selection** (`builtin_endpoint_policy.py`, `policy/api.py`, `policy/plugin_runner.py`, `policy/plugin_worker.py`): Inference Workers resolve each role to a `BuiltinEndpointPolicy` (`_RoundRobin`, `_LoadBalance`, `_KvCacheAffinity`, `_DynamicBucket`), or wrap it in `ExternalEndpointPolicy` when `scheduler_config.policy_plugin` configures an Entry Point (`mindie_motor.scheduling_policies`) for that role. External plugins preload in a background thread (`startup_timeout_ms`) and run synchronously in-process (`rank_sync()`) on the exact same filtering and Rust SHM CAS path without a single-flight lock or IPC subprocess; errors, invalid rankings, slow calls exceeding `timeout_ms`, or explicit `None` declines fall back cleanly to the role's built-in policy (entering `cooldown_seconds` except on `None`).
+
 The policy is selected per role by `SchedulerConfig.type_for_role()`: `prefill_scheduler_type` serves Prefill, Encode and Union; `decode_scheduler_type` serves Decode. Both default to `LOAD_BALANCE`; Decode supports load balance / round robin / dynamic bucket, while KV affinity applies only to P/U. Deprecated `scheduler_type` migrates only to role fields that are not explicitly configured. When a role uses `kv_cache_affinity`, a sub-mode is chosen by `kv_affinity.mode`:
 
 - `unified` (default) — single score fusing affinity and live load; pick the minimum
@@ -414,6 +416,10 @@ Hot-reload is driven by a process-local `ConfigWatcher` in the **Inference Worke
 | `motor/coordinator/process/constants.py` | | Process keys, start/stop order |
 | `motor/coordinator/scheduler/scheduler.py` | | `Scheduler`: Mgmt precision sampling/alarm state (not SchedulingFacade) |
 | `motor/coordinator/scheduler/policy/factory.py` | | `SchedulingPolicyFactory` registry |
+| `motor/coordinator/scheduler/policy/api.py` | | External endpoint selection policy API v2 (`EndpointSelectionPolicy`, DTOs) |
+| `motor/coordinator/scheduler/policy/plugin_runner.py` | | In-process `PolicyRunner` (threaded preload, timeout/anomaly cooldown, metrics) |
+| `motor/coordinator/scheduler/policy/plugin_worker.py` | | Entry Point discovery & API contract validation (`load_policy`) |
+| `motor/coordinator/scheduler/runtime/builtin_endpoint_policy.py` | | Built-in `BuiltinEndpointPolicy` implementations & `ExternalEndpointPolicy` |
 | `motor/coordinator/scheduler/runtime/scheduler_server.py` | | `AsyncSchedulerServer`: Mgmt control plane (ROUTER+PUB, CB, precision, SHM owner) |
 | `motor/coordinator/scheduler/runtime/scheduler_client.py` | | `AsyncSchedulerClient`: control-plane DEALER + instance cache + SHM CAS |
 | `motor/coordinator/scheduler/runtime/dp_stats.py` | | Per-worker timer: per-DP request counts + shared SHM `active_tokens`; preserve nonzero windows, skip unchanged idle snapshots, flush on disconnect |

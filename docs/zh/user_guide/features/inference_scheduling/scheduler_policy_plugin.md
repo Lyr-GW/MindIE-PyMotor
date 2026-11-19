@@ -1,6 +1,6 @@
 # 自定义选点插件快速接入
 
-本文介绍如何编写、安装并启用一个自定义实例/endpoint 选点插件。示例按候选 endpoint 当前负载从小到大排序；Motor 核心继续负责候选过滤、最终分配和负载释放。
+本文介绍如何编写、安装并启用一个自定义实例/endpoint 选点插件。示例按候选 endpoint 当前负载从小到大排序；插件与内置策略共用同一条 Worker 进程内调度路径，Motor 核心继续负责候选过滤、最终分配和负载释放。
 
 ## 环境准备
 
@@ -59,7 +59,7 @@ class LeastLoadPolicy(EndpointSelectionPolicy):
 - 继承抽象基类 `EndpointSelectionPolicy`，声明 `api_version = 2`，实现**同步** `rank()`。基类定义排序接口，插件决定采用哪种算法。
 - 返回按优先级排列的非空 `RankedCandidate` 列表，或返回 `None` 放弃本次选点并使用内置策略。`score` 用于日志观测，Motor 取列表首项，CAS 冲突时使用刷新后的快照重新调用插件。
 - 返回的 ID 必须来自本次候选，不能重复或属于 `selection.excluded`；分数必须是有限数值。
-- 不要修改 Motor 状态、执行长时间阻塞操作或依赖跨 Worker 共享的插件对象。每个启用插件的 Inference Worker 按角色拥有独立插件进程，同一配置项覆盖多个角色时也不会共享实例。
+- `rank()` 在 Inference Worker 事件循环内同步执行，高并发下无锁串行开销；**切勿**在 `rank()` 内执行网络 I/O、耗时阻塞或死循环。每个启用插件的 Inference Worker 按角色拥有独立插件实例，同一配置项覆盖多个角色时也不会共享实例。
 
 请求长度、模型、用户和会话字段等可用数据及其限制见[设计文档的“客户插件接口”章节](../../../design/scheduler_policy_plugin.md#客户插件接口)。示例中的用户/会话元数据不是认证的租户身份。
 
@@ -175,9 +175,9 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 | `role` | 必填非空数组，可选 `prefill`、`decode`、`union`、`encode`；不接受字符串，项内重复或与其他项重叠均报错 |
 | `name` | 必填非空字符串，必须与 Entry Point 名称完全一致 |
 | `options` | 传给该项各角色插件的构造函数，默认 `{}` |
-| `timeout_ms` | 单次插件排序交换的等待预算，默认 50 毫秒，本例 P 为 100 毫秒 |
-| `startup_timeout_ms` | 插件启动握手等待预算，默认 5000 毫秒 |
-| `cooldown_seconds` | 该角色插件故障后后台恢复前的冷却时间，默认 30 秒 |
+| `timeout_ms` | 单次同步 `rank()` 执行的耗时预算，默认 50 毫秒；超出后告警并进入冷却 |
+| `startup_timeout_ms` | 插件后台预加载等待预算，默认 5000 毫秒 |
+| `cooldown_seconds` | 该角色插件故障或超时后后台恢复前的冷却时间，默认 30 秒 |
 
 上例 P/D 使用不同入口名、参数和预算。若使用同名插件且配置相同，可合并：
 
@@ -189,13 +189,12 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 }
 ```
 
-合并只复用配置；P/D 仍分别拥有插件实例、子进程、锁、冷却和指标。一方繁忙或失败不会占用另一方的插件执行通道。
+合并只复用配置；P/D 仍分别拥有独立插件实例、冷却和指标。一方故障或冷却不会影响另一方。
 也可以分两项使用相同 name 和不同 options。Union 不继承 Prefill 的插件配置：混部场景需显式加入 `"union"`；Encode 同理。
 
 保留已有内置策略：`prefill_scheduler_type` 是 P/U/E 的默认和回退策略，`decode_scheduler_type` 是 D 的默认和回退策略。
-角色未配置、插件繁忙、故障或超时时，使用该角色原配置的内置策略。删除 `policy_plugin` 或设为 `[]` 可禁用全部插件，不创建子进程。
+角色未配置、插件故障、超时或处于冷却期时，使用该角色原配置的内置策略。删除 `policy_plugin` 或设为 `[]` 可禁用全部插件。
 配置成功后，客户插件接管该角色的候选排序。成功走客户插件时不会运行内置 KV 亲和查询或动态分桶，日志中的 `matched` 和 `hit_rate` 为 `None`。这些内置策略会在对应角色回退时执行。
-每个 Worker 最多四个插件子进程。
 
 旧草案的单对象 `policy_plugin: {"name": ..., "roles": [...]}` 会明确报迁移错误。
 需改为外层列表，并把键 `roles` 改成 `role` 数组；旧 `["prefill", "union"]` 可以保留在新的一项中。
@@ -205,7 +204,7 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
 ### 步骤 4：验证插件
 
-1. **检查加载日志。** 查看每个 Inference Worker 的日志，确认 `Scheduling plugin loaded` 分别包含 `name=mycompany.prefill_load role=prefill` 和 `name=mycompany.decode_load role=decode`。子进程日志还会记录包名、版本和 Entry Point 来源。
+1. **检查加载日志。** 查看每个 Inference Worker 的日志，确认 `Scheduling plugin loaded` 分别包含 `name=mycompany.prefill_load role=prefill ... mode=in_process` 和 `name=mycompany.decode_load role=decode ... mode=in_process`。日志还会记录包名、版本和 Entry Point 来源。
 2. **检查选点结果。** 向推理服务发送一条经过已启用角色的正常请求。在处理请求的 Worker 日志中查找 `scheduled`，确认 `policy` 显示对应插件名，并核对所选 instance/endpoint 是否符合预期。
 3. **检查调用指标。** 将以下地址替换为可访问的 Worker metaserver 地址及端口，然后执行：
 
@@ -218,7 +217,7 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 
    `motor_policy_loads_total` 增加表示加载成功；`motor_policy_calls_total` 增加表示插件参与了排序。使用 `errors`、`timeouts` 和 `fallbacks` 检查故障或回退。
 
-   查询 `motor_policy_fallbacks_by_reason_total` 可查看具体回退原因，例如 `busy` 表示该 Worker 的同角色插件正在执行另一次排序。
+   查询 `motor_policy_fallbacks_by_reason_total` 可查看具体回退原因（如 `cooldown`、`timeout`、`plugin_error`、`declined`、`cas_retry_limit` 等）。
 
    指标按 Worker 和角色分别统计，Obs 不自动汇总。单次请求不一定落到正在查看的 Worker，应检查所有相关 Worker；pin 路径和未启用的角色不会调用插件。
 
@@ -228,8 +227,8 @@ RUN <motor-python> -m pip install --no-deps /tmp/my_motor_policy.whl
 |------|------------|
 | 提示未找到入口或匹配多个入口 | 在实际 Worker 使用的 Python 环境运行步骤 2 的 Entry Point 检查；核对插件名和安装包，移除重复注册的包。 |
 | 启动后只有内置策略 | 检查配置列表是否包含请求角色、`name` 是否注册、所有 Worker 是否安装了包，以及修改后是否已重启。显式 pin 和有效会话亲和会优先使用原路径。 |
-| 日志提示插件失败或 `fallbacks` 增长 | 按 role/name 查找 `Scheduling plugin failed` 或 `Scheduling plugin fallback`；检查构造参数、异常、候选 ID、重复 ID、空结果和非有限分数。 |
-| `timeouts` 增长 | 检查 `rank()` 是否阻塞、执行时间及 `timeout_ms`。Worker 在插件繁忙或冷却时也会回退；预算不是端到端请求的硬时限。 |
+| 日志提示插件失败或 `fallbacks` 增长 | 按 role/name 查找 `Scheduling plugin failed` 或 `Scheduling plugin fallback`；检查构造参数、异常（含 `SystemExit`/`RecursionError` 等极端异常 `ERROR` 日志）、候选 ID、重复 ID、空结果和非有限分数。 |
+| `timeouts` 增长 | 检查 `rank()` 是否存在耗时阻塞（I/O、大循环）或 `timeout_ms` 过小；超时会记录 `elapsed_ms` 告警并进入冷却，回退内置策略。 |
 | 指标无法访问或 `calls` 为 0 | 检查对应 Worker 的 metaserver 是否启用、地址和端口是否可达；确认请求命中该 Worker 和启用的角色，且未走 pin。 |
 
-插件在与 Worker 相同权限的子进程中执行，进程隔离用于故障回收，不是安全沙箱。接口、生命周期和完整回退语义见[候选选点插件设计](../../../design/scheduler_policy_plugin.md)。
+插件在 Inference Worker 进程内同步执行，Python 异常、非法输出与慢调用均会被隔离回退并打印对应日志；死循环或 C 扩展崩溃需依赖 Worker 进程级健康监控恢复，并非安全沙箱。接口、生命周期和完整回退语义见[候选选点插件设计](../../../design/scheduler_policy_plugin.md)。

@@ -62,7 +62,7 @@ class RankedCandidate:
 
 
 class EndpointSelectionPolicy(ABC):
-    """Return candidates in best-first order. Instances live in an isolated process."""
+    """Return candidates in best-first order. Instances execute synchronously in the Inference Worker process."""
 
     api_version = SUPPORTED_POLICY_API_VERSION
 

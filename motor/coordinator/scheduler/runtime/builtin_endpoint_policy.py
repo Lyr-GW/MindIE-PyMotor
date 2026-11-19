@@ -23,6 +23,7 @@ from motor.config.coordinator import KV_AFFINITY_MODE_UNIFIED
 from motor.coordinator.domain.workload_calculator import calculate_demand_workload
 from motor.coordinator.models.request import RequestInfo
 from motor.coordinator.scheduler.allocate_arbitration import log_load_balance_all_candidates
+from motor.coordinator.scheduler.policy.api import CandidateId, CandidateSnapshot, RequestContext, SelectionInput
 from motor.coordinator.scheduler.policy.dynamic_bucket import (
     DynamicBucketPolicy,
     get_request_token_length,
@@ -30,8 +31,10 @@ from motor.coordinator.scheduler.policy.dynamic_bucket import (
 )
 from motor.coordinator.scheduler.policy.kv_cache_affinity import KvCacheAffinityPolicy
 from motor.coordinator.scheduler.policy.load_balance import LoadBalancePolicy
+from motor.coordinator.scheduler.policy.plugin_runner import PolicyRunner
 from motor.coordinator.scheduler.policy.round_robin import RoundRobinPolicy
 from motor.coordinator.scheduler.runtime.kv_usage import get_endpoint_kv_cache_usage
+from motor.coordinator.scheduler.runtime.workload_shm.layout import FLAG_BLOCKED
 from motor.coordinator.scheduler.runtime.zmq_protocol import (
     CANDIDATE_POLICY_DYNAMIC_BUCKET,
     CANDIDATE_POLICY_KV_CACHE_AFFINITY,
@@ -307,6 +310,129 @@ class _DynamicBucket(BuiltinEndpointPolicy):
         if role == PDRole.ROLE_E:
             return calculate_demand_workload(role, req_info)
         return make_dynamic_bucket_allocation_workload(req_info)
+
+
+class ExternalEndpointPolicy(BuiltinEndpointPolicy):
+    """In-process external selection policy sharing the Worker's built-in scheduling path."""
+
+    def __init__(self, runner: PolicyRunner, fallback: BuiltinEndpointPolicy) -> None:
+        self._runner = runner
+        self._fallback = fallback
+        self.name = "plugin:" + runner.config.name
+
+    @staticmethod
+    def _build_snapshots(
+        client: AsyncSchedulerClient,
+        instances: list[Instance],
+        excluded: set[tuple[int, int]] | None,
+    ) -> tuple[list[CandidateSnapshot], dict[CandidateId, tuple[Instance, Endpoint]], dict[CandidateId, int]]:
+        snapshots: list[CandidateSnapshot] = []
+        pairs: dict[CandidateId, tuple[Instance, Endpoint]] = {}
+        generations: dict[CandidateId, int] = {}
+        reader = client._workload_reader
+        for instance in instances:
+            if client.is_instance_blocked(instance.id):
+                continue
+            for endpoint in instance.get_all_endpoints():
+                pair = (instance.id, endpoint.id)
+                if excluded and pair in excluded:
+                    continue
+                if reader is not None:
+                    meta = reader.entry_meta(*pair)
+                    if meta is None or int(meta.get("flags", 0)) & FLAG_BLOCKED:
+                        continue
+                else:
+                    meta = None
+                identity = CandidateId(*pair)
+                pairs[identity] = (instance, endpoint)
+                if meta is not None:
+                    generations[identity] = int(meta["generation"])
+                ep_tokens = float(endpoint.workload.active_tokens) if endpoint.workload is not None else 0.0
+                inst_tokens = (
+                    float(instance.gathered_workload.active_tokens) if instance.gathered_workload is not None else 0.0
+                )
+                snapshots.append(
+                    CandidateSnapshot(
+                        id=identity,
+                        active_tokens=ep_tokens,
+                        instance_active_tokens=inst_tokens,
+                        node_address=str(endpoint.ip),
+                        engine_type=str(instance.engine_type or ""),
+                        kv_cache_usage=get_endpoint_kv_cache_usage(instance, endpoint),
+                    )
+                )
+        return snapshots, pairs, generations
+
+    def rank(
+        self,
+        client: AsyncSchedulerClient,
+        instances: list[Instance],
+        role: PDRole,
+        req_info: RequestInfo,
+        top_k: int,
+        *,
+        excluded: set[tuple[int, int]] | None = None,
+        attempt: int = 0,
+    ) -> RankResult:
+        if not self._runner.is_available():
+            return self._fallback.rank(client, instances, role, req_info, top_k)
+
+        role_value = getattr(role, "value", None) or (str(role) if role is not None else "union")
+        try:
+            snapshots, pairs, generations = self._build_snapshots(client, instances, excluded)
+        except Exception as exc:
+            self._runner.record_fallback("snapshot_error")
+            logger.warning(
+                "Scheduling plugin candidate preparation failed name=%s role=%s req_id=%s error=%s",
+                self._runner.config.name,
+                role_value,
+                req_info.req_id,
+                type(exc).__name__,
+            )
+            return self._fallback.rank(client, instances, role, req_info, top_k)
+
+        if not snapshots:
+            self._runner.record_fallback("no_eligible_candidates")
+            return self._fallback.rank(client, instances, role, req_info, top_k)
+
+        data = req_info.req_data
+        token_ids = getattr(req_info, "token_ids", None)
+        selection = SelectionInput(
+            request=RequestContext(
+                request_id=req_info.req_id,
+                role=role_value,
+                model_name=str(data.get("model", "")),
+                prompt_tokens=len(token_ids) if isinstance(token_ids, list) else 0,
+                max_output_tokens=data.get("max_completion_tokens", data.get("max_tokens")),
+                user=data.get("user") if isinstance(data.get("user"), str) else None,
+                session_id=getattr(getattr(req_info, "agent_hint_info", None), "session_id", None),
+            ),
+            candidates=tuple(snapshots),
+            excluded=frozenset(CandidateId(*pair) for pair in (excluded or ())),
+            attempt=attempt,
+        )
+        ranked = self._runner.rank_sync(selection)
+        if not ranked:
+            return self._fallback.rank(client, instances, role, req_info, top_k)
+
+        if generations:
+            top_id = ranked[0].id
+            meta = client._workload_reader.entry_meta(top_id.instance_id, top_id.endpoint_id)
+            if meta is None or int(meta["generation"]) != generations[top_id]:
+                self._runner.record_fallback("membership_changed")
+                return self._fallback.rank(client, instances, role, req_info, top_k)
+
+        return [(pairs[item.id][0], pairs[item.id][1], item.score) for item in ranked], self.name
+
+    def candidate_count(self, client: AsyncSchedulerClient, role: PDRole) -> int:
+        return self._fallback.candidate_count(client, role)
+
+    def select_endpoint(self, client: AsyncSchedulerClient, instance: Instance) -> Endpoint | None:
+        return self._fallback.select_endpoint(client, instance)
+
+    @property
+    def runner(self) -> PolicyRunner:
+        return self._runner
 
 
 _ROUND_ROBIN = _RoundRobin()
